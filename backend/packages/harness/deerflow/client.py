@@ -33,16 +33,23 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import build_middlewares
+from deerflow.agents.lead_agent.agent import (
+    _available_skill_names,
+    _include_direct_mcp_tools,
+    _load_enabled_skills_for_tool_policy,
+    _resolve_agent_tool_groups,
+    build_middlewares,
+)
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import AGENT_NAME_PATTERN
+from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -218,40 +225,68 @@ class DeerFlowClient:
             recursion_limit=overrides.get("recursion_limit", 100),
         )
 
+    def _load_agent_config(self) -> AgentConfig | None:
+        if not self._agent_name:
+            return None
+        try:
+            return load_agent_config(self._agent_name)
+        except FileNotFoundError:
+            if self._available_skills is not None:
+                return None
+            raise
+
     def _ensure_agent(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = config.get("configurable", {})
+        agent_config = self._load_agent_config()
+        effective_available_skills = self._available_skills
+        if effective_available_skills is None:
+            effective_available_skills = _available_skill_names(agent_config, is_bootstrap=False)
+        tool_groups = _resolve_agent_tool_groups(self._agent_name, agent_config)
+        model_name = cfg.get("model_name")
+        if not model_name and agent_config and agent_config.model:
+            model_name = agent_config.model
         key = (
-            cfg.get("model_name"),
+            model_name,
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
             self._agent_name,
-            frozenset(self._available_skills) if self._available_skills is not None else None,
+            frozenset(effective_available_skills) if effective_available_skills is not None else None,
+            tuple(tool_groups) if tool_groups is not None else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
             return
 
         thinking_enabled = cfg.get("thinking_enabled", True)
-        model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
-        final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+        tools = self._get_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            groups=tool_groups,
+            include_mcp=_include_direct_mcp_tools(self._agent_name),
+        )
+        if tools:
+            skills_for_tool_policy = _load_enabled_skills_for_tool_policy(effective_available_skills, app_config=self._app_config)
+            filtered_tools = filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy)
+        else:
+            filtered_tools = []
+        final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=self._app_config.tool_search.enabled)
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
             # produces one trace with correct session_id / user_id propagation.
             # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=self._app_config, attach_tracing=False),
             "tools": final_tools,
             "middleware": build_middlewares(
                 config,
                 model_name=model_name,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=effective_available_skills,
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
@@ -260,7 +295,8 @@ class DeerFlowClient:
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=effective_available_skills,
+                app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
             ),
             "state_schema": ThreadState,
@@ -278,11 +314,22 @@ class DeerFlowClient:
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(
+        *,
+        model_name: str | None,
+        subagent_enabled: bool,
+        groups: list[str] | None = None,
+        include_mcp: bool = True,
+    ):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(
+            model_name=model_name,
+            groups=groups,
+            include_mcp=include_mcp,
+            subagent_enabled=subagent_enabled,
+        )
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -636,6 +683,7 @@ class DeerFlowClient:
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        latest_ai_text = ""
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
             """Add *usage* to cumulative totals if this id has not been counted.
@@ -741,6 +789,11 @@ class DeerFlowClient:
             messages = chunk.get("messages", [])
 
             for msg in messages:
+                if isinstance(msg, AIMessage):
+                    text = self._extract_text(msg.content)
+                    if text:
+                        latest_ai_text = text
+
                 msg_id = getattr(msg, "id", None)
                 if msg_id and msg_id in seen_ids:
                     continue
@@ -804,6 +857,32 @@ class DeerFlowClient:
                     "artifacts": chunk.get("artifacts", []),
                 },
             )
+
+        if self._agent_name == "command-room":
+            try:
+                from deerflow.command_room.round_record import record_command_room_round
+
+                round_record_path = record_command_room_round(
+                    thread_id=thread_id,
+                    agent_name=self._agent_name,
+                    user_id=get_effective_user_id(),
+                    final_text=latest_ai_text,
+                    user_message=message,
+                    usage=cumulative_usage,
+                    source="client",
+                )
+                if round_record_path is not None:
+                    from deerflow.command_room.round_record import latest_command_room_round
+
+                    latest_command_room_round(
+                        thread_id=thread_id,
+                        user_id=get_effective_user_id(),
+                    )
+                    # Keep Round signals in the audit ledger / model memory only.
+                    # They are internal Command Room working context and must not
+                    # be emitted as user-visible custom stream events.
+            except Exception:
+                logger.debug("Failed to record command-room RoundRecord", exc_info=True)
 
         yield StreamEvent(type="end", data={"usage": cumulative_usage})
 

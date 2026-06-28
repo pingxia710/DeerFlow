@@ -40,7 +40,7 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
@@ -50,6 +50,7 @@ from deerflow.tracing import build_tracing_callbacks
 logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
+_COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -74,6 +75,42 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     if requested_model_name and requested_model_name != default_model_name:
         logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
     return default_model_name
+
+
+def _is_coordinator_only_agent(agent_name: str | None) -> bool:
+    return agent_name in _COORDINATOR_ONLY_AGENT_NAMES
+
+
+def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
+    """Return config-tool groups for the lead agent.
+
+    Coordinator-only agents are command surfaces: they may dispatch and present
+    coordination state, but direct inspection/execution belongs in delegated sub-AIs.
+    """
+    if _is_coordinator_only_agent(agent_name):
+        return []
+    return agent_config.tool_groups if agent_config else None
+
+
+def _resolve_subagent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
+    """Return tool groups delegated sub-AIs should inherit."""
+    if _is_coordinator_only_agent(agent_name):
+        return None
+    return agent_config.tool_groups if agent_config else None
+
+
+def _include_direct_mcp_tools(agent_name: str | None) -> bool:
+    return not _is_coordinator_only_agent(agent_name)
+
+
+def _can_update_self(agent_name: str | None) -> bool:
+    return bool(agent_name) and not _is_coordinator_only_agent(agent_name)
+
+
+def _uses_todo_list(agent_name: str | None, is_plan_mode: bool) -> bool:
+    if _is_coordinator_only_agent(agent_name):
+        return False
+    return is_plan_mode
 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
@@ -129,7 +166,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
+    skills_container_path = resolved_app_config.skills.container_path or "/Users/pingxia/projects/deer-flow/skills"
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,
@@ -320,7 +357,7 @@ def build_middlewares(
     # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)
-    todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
+    todo_list_middleware = _create_todo_list_middleware(_uses_todo_list(agent_name, is_plan_mode))
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
@@ -354,6 +391,10 @@ def build_middlewares(
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     middlewares.append(SystemMessageCoalescingMiddleware())
+
+    from deerflow.agents.middlewares.round_context_middleware import CommandRoomRoundContextMiddleware
+
+    middlewares.append(CommandRoomRoundContextMiddleware(agent_name=agent_name))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -431,6 +472,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
+    reasoning_summary = cfg.get("reasoning_summary", None)
+    text_verbosity = cfg.get("text_verbosity", None)
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -440,6 +483,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    tool_groups = _resolve_agent_tool_groups(agent_name, agent_config)
+    subagent_tool_groups = _resolve_subagent_tool_groups(agent_name, agent_config)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -455,10 +500,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         thinking_enabled = False
 
     logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, reasoning_summary: %s, text_verbosity: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
         agent_name or "default",
         thinking_enabled,
         reasoning_effort,
+        reasoning_summary,
+        text_verbosity,
         model_name,
         is_plan_mode,
         subagent_enabled,
@@ -475,9 +522,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "model_name": model_name or "default",
             "thinking_enabled": thinking_enabled,
             "reasoning_effort": reasoning_effort,
+            "reasoning_summary": reasoning_summary,
+            "text_verbosity": text_verbosity,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
-            "tool_groups": agent_config.tool_groups if agent_config else None,
+            "tool_groups": tool_groups,
+            "subagent_tool_groups": subagent_tool_groups,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
         }
     )
@@ -526,13 +576,31 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
-    extra_tools = [update_agent] if agent_name else []
+    extra_tools = [update_agent] if _can_update_self(agent_name) else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    raw_tools = get_available_tools(
+        model_name=model_name,
+        groups=tool_groups,
+        include_mcp=_include_direct_mcp_tools(agent_name),
+        subagent_enabled=subagent_enabled,
+        app_config=resolved_app_config,
+    )
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    model_kwargs = {
+        "name": model_name,
+        "thinking_enabled": thinking_enabled,
+        "reasoning_effort": reasoning_effort,
+        "app_config": resolved_app_config,
+        "attach_tracing": False,
+    }
+    if reasoning_summary is not None:
+        model_kwargs["reasoning_summary"] = reasoning_summary
+    if text_verbosity is not None:
+        model_kwargs["text_verbosity"] = text_verbosity
+
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+        model=create_chat_model(**model_kwargs),
         tools=final_tools,
         middleware=build_middlewares(
             config,

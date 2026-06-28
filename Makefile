@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor detect-thread-boundaries detect-blocking-io command-room-contract-check command-room-opposition-probe command-room-ai-native-probe dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -25,6 +25,9 @@ help:
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
+	@echo "  make command-room-contract-check - Inspect internal command-room audit fixture"
+	@echo "  make command-room-opposition-probe - Run optional command-room opposition development probe"
+	@echo "  make command-room-ai-native-probe - Run optional command-room AI-native development probe"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
@@ -58,6 +61,15 @@ detect-thread-boundaries:
 
 detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
+
+command-room-contract-check:
+	@$(PYTHON) ./scripts/command-room-contract-check.py
+
+command-room-opposition-probe:
+	@$(RUN_WITH_GIT_BASH) ./scripts/command-room-opposition-probe.sh
+
+command-room-ai-native-probe:
+	@$(RUN_WITH_GIT_BASH) ./scripts/command-room-ai-native-probe.sh
 
 config:
 	@$(PYTHON) ./scripts/configure.py

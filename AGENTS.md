@@ -31,6 +31,11 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
+Local `scripts/serve.sh` keeps these defaults but accepts `DEER_FLOW_GATEWAY_PORT`,
+`DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. If frontend port `3000` is
+already held by a non-DeerFlow process and no override is set, it auto-selects a
+free `6001+` frontend port and renders the local nginx config to match.
+
 Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
 other `/api/*` go straight to the Gateway REST routers. See
@@ -71,6 +76,9 @@ make setup       # Interactive setup wizard (recommended for new users)
 make doctor      # Check configuration and system requirements
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
+make command-room-contract-check  # Inspect internal command-room audit fixture
+make command-room-opposition-probe  # Run optional command-room opposition development probe
+make command-room-ai-native-probe  # Run optional command-room AI-native development probe
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)

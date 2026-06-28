@@ -768,7 +768,8 @@ def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
 
 
-def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch):
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "high", "xhigh"])
+def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch, reasoning_effort):
     cfg = _make_app_config(
         [
             _make_model(
@@ -783,9 +784,39 @@ def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch):
     monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
 
     FakeChatModel.captured_kwargs = {}
-    factory_module.create_chat_model(name="codex", thinking_enabled=True, reasoning_effort="high")
+    factory_module.create_chat_model(
+        name="codex",
+        thinking_enabled=True,
+        reasoning_effort=reasoning_effort,
+    )
 
-    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "high"
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == reasoning_effort
+
+
+def test_codex_provider_preserves_response_controls(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(
+        name="codex",
+        thinking_enabled=True,
+        reasoning_summary="concise",
+        text_verbosity="high",
+    )
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_summary") == "concise"
+    assert FakeChatModel.captured_kwargs.get("text_verbosity") == "high"
 
 
 def test_codex_provider_defaults_reasoning_effort_to_medium(monkeypatch):

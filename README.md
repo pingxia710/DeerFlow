@@ -158,6 +158,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+   DeepSeek configs using `deerflow.models.patched_deepseek:PatchedChatDeepSeek` may set `api_keys` to a comma/newline separated credential pool. DeerFlow starts with the first key and rotates on rate-limit/auth/server errors. Set `subagents_inherit: false` on a lead-only model when delegated subagents should fall back to the default model instead of inheriting it.
+
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.

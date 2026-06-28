@@ -23,6 +23,10 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
+    subagents_inherit: bool = Field(
+        default=True,
+        description="Whether subagents using model='inherit' should inherit this model from the lead agent.",
+    )
     when_thinking_enabled: dict | None = Field(
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",

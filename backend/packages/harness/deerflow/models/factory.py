@@ -117,6 +117,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "description",
             "supports_thinking",
             "supports_reasoning_effort",
+            "subagents_inherit",
             "when_thinking_enabled",
             "when_thinking_disabled",
             "thinking",
@@ -159,6 +160,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
 
+    explicit_reasoning_summary = kwargs.pop("reasoning_summary", None)
+    explicit_text_verbosity = kwargs.pop("text_verbosity", None)
+
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_config.use, model_settings_from_config)
 
@@ -169,14 +173,21 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+        # Use explicit reasoning_effort from frontend if provided.
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
+        elif explicit_effort and explicit_effort in ("minimal", "low", "medium", "high", "xhigh"):
             model_settings_from_config["reasoning_effort"] = explicit_effort
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
+        if explicit_reasoning_summary in ("auto", "concise", "detailed"):
+            model_settings_from_config["reasoning_summary"] = explicit_reasoning_summary
+        if explicit_text_verbosity in ("low", "medium", "high"):
+            model_settings_from_config["text_verbosity"] = explicit_text_verbosity
+    else:
+        model_settings_from_config.pop("reasoning_summary", None)
+        model_settings_from_config.pop("text_verbosity", None)
 
     # For MindIE models: enforce conservative retry defaults.
     # Timeout normalization is handled inside MindIEChatModel itself.

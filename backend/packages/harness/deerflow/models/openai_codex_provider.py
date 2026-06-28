@@ -70,6 +70,8 @@ class CodexChatModel(BaseChatModel):
 
     model: str = "gpt-5.4"
     reasoning_effort: str = "medium"
+    reasoning_summary: str = "detailed"
+    text_verbosity: str = "medium"
     retry_max_attempts: int = MAX_RETRIES
     _access_token: str = ""
     _account_id: str = ""
@@ -105,6 +107,19 @@ class CodexChatModel(BaseChatModel):
     def _load_codex_auth(self) -> CodexCliCredential | None:
         """Load access_token and account_id from Codex CLI auth."""
         return load_codex_cli_credential()
+
+    def _refresh_codex_auth(self) -> None:
+        """Reload Codex CLI credentials so account switches take effect."""
+        cred = self._load_codex_auth()
+        if not cred:
+            raise ValueError("Codex CLI credential not found. Expected ~/.codex/auth.json or CODEX_AUTH_PATH.")
+
+        if cred.access_token == self._access_token and cred.account_id == self._account_id:
+            return
+
+        self._access_token = cred.access_token
+        self._account_id = cred.account_id
+        logger.info(f"Reloaded Codex CLI credential (account: {self._account_id[:8]}...)")
 
     @classmethod
     def _normalize_content(cls, content: Any) -> str:
@@ -204,6 +219,7 @@ class CodexChatModel(BaseChatModel):
 
     def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
         """Call the Codex Responses API and return the completed response."""
+        self._refresh_codex_auth()
         instructions, input_items = self._convert_messages(messages)
 
         payload = {
@@ -212,7 +228,8 @@ class CodexChatModel(BaseChatModel):
             "input": input_items,
             "store": False,
             "stream": True,
-            "reasoning": {"effort": self.reasoning_effort, "summary": "detailed"} if self.reasoning_effort != "none" else {"effort": "none"},
+            "reasoning": {"effort": self.reasoning_effort, "summary": self.reasoning_summary} if self.reasoning_effort != "none" else {"effort": "none"},
+            "text": {"verbosity": self.text_verbosity},
         }
 
         if tools:

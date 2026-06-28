@@ -211,6 +211,26 @@ def test_convert_messages_tool_message():
     assert items[0]["output"] == "result data"
 
 
+def test_call_codex_api_includes_response_controls(monkeypatch):
+    model = _make_model(reasoning_summary="concise", text_verbosity="high")
+    captured: dict = {}
+
+    def fake_stream_response(headers, payload):
+        captured["payload"] = payload
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_refresh_codex_auth", lambda: None)
+    monkeypatch.setattr(model, "_stream_response", fake_stream_response)
+
+    model._call_codex_api([HumanMessage(content="Hello")])
+
+    assert captured["payload"]["reasoning"] == {
+        "effort": "medium",
+        "summary": "concise",
+    }
+    assert captured["payload"]["text"] == {"verbosity": "high"}
+
+
 # ---------------------------------------------------------------------------
 # _parse_sse_data_line
 # ---------------------------------------------------------------------------

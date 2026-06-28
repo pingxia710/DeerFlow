@@ -23,6 +23,31 @@ def test_codex_provider_requires_credentials(monkeypatch):
         CodexChatModel()
 
 
+def test_codex_provider_refreshes_credentials_before_api_call(monkeypatch):
+    credentials = iter(
+        [
+            CodexCliCredential(access_token="old-token", account_id="old-account"),
+            CodexCliCredential(access_token="new-token", account_id="new-account"),
+        ]
+    )
+    monkeypatch.setattr(CodexChatModel, "_load_codex_auth", lambda self: next(credentials))
+
+    model = CodexChatModel()
+    captured = {}
+
+    def fake_stream_response(headers, payload):
+        captured["headers"] = headers
+        captured["payload"] = payload
+        return {"model": "gpt-5.4", "output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_stream_response", fake_stream_response)
+
+    model._call_codex_api([HumanMessage(content="Hello")])
+
+    assert captured["headers"]["Authorization"] == "Bearer new-token"
+    assert captured["headers"]["ChatGPT-Account-ID"] == "new-account"
+
+
 def test_codex_provider_concatenates_multiple_system_messages(monkeypatch):
     monkeypatch.setattr(
         CodexChatModel,

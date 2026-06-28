@@ -18,6 +18,7 @@ from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import Paths
 from deerflow.uploads.manager import PathTraversalError
 
@@ -269,10 +270,7 @@ class TestStream:
         ):
             events = list(client.stream("hi", thread_id="t-round-hidden"))
 
-        assert not any(
-            event.type == "custom" and event.data.get("type") == "round_context_signals"
-            for event in events
-        )
+        assert not any(event.type == "custom" and event.data.get("type") == "round_context_signals" for event in events)
 
         from deerflow.command_room.round_record import latest_command_room_round
 
@@ -957,6 +955,46 @@ class TestEnsureAgent:
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
+    def test_command_room_client_uses_agent_config_boundaries(self, client):
+        mock_agent = MagicMock()
+        client._agent_name = "command-room"
+        client._subagent_enabled = True
+        config = client._get_runnable_config("t1")
+
+        captured_model: dict[str, object] = {}
+
+        def fake_create_chat_model(**kwargs):
+            captured_model.update(kwargs)
+            return MagicMock()
+
+        with (
+            patch(
+                "deerflow.client.load_agent_config",
+                return_value=AgentConfig(
+                    name="command-room",
+                    model="safe-model",
+                    tool_groups=["sandbox", "bash"],
+                    skills=["naxus-round"],
+                ),
+            ),
+            patch("deerflow.client.create_chat_model", side_effect=fake_create_chat_model),
+            patch("deerflow.client.create_agent", return_value=mock_agent),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client._load_enabled_skills_for_tool_policy", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]) as mock_get_tools,
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
+        ):
+            client._ensure_agent(config)
+
+        assert client._agent is mock_agent
+        assert captured_model["name"] == "safe-model"
+        assert mock_get_tools.call_args.kwargs["groups"] == []
+        assert mock_get_tools.call_args.kwargs["include_mcp"] is False
+        assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
+        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"naxus-round"}
+        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"naxus-round"}
+
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()
@@ -1022,7 +1060,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None)
+        client._agent_config_key = (None, True, False, False, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -1758,7 +1796,7 @@ class TestScenarioToolChain:
             content="",
             id="ai-1",
             tool_calls=[
-                {"name": "bash", "args": {"cmd": "ls /mnt/user-data/workspace"}, "id": "tc-1"},
+                {"name": "bash", "args": {"cmd": "ls /Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/641f142d-ba0c-4cdd-b2c1-897e1eea6653/user-data/workspace"}, "id": "tc-1"},
             ],
         )
         bash_result = ToolMessage(content="README.md\nsrc/", id="tm-1", tool_call_id="tc-1", name="bash")
@@ -1766,7 +1804,14 @@ class TestScenarioToolChain:
             content="",
             id="ai-2",
             tool_calls=[
-                {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/listing.txt", "content": "README.md\nsrc/"}, "id": "tc-2"},
+                {
+                    "name": "write_file",
+                    "args": {
+                        "path": "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/641f142d-ba0c-4cdd-b2c1-897e1eea6653/user-data/outputs/listing.txt",
+                        "content": "README.md\nsrc/",
+                    },
+                    "id": "tc-2",
+                },
             ],
         )
         write_result = ToolMessage(content="File written successfully.", id="tm-2", tool_call_id="tc-2", name="write_file")
@@ -3065,7 +3110,7 @@ class TestArtifactHardening:
             (outputs / "file.txt").write_text("content")
 
             with patch("deerflow.client.get_paths", return_value=paths):
-                content, _mime = client.get_artifact("t1", "/mnt/user-data/outputs/file.txt")
+                content, _mime = client.get_artifact("t1", "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/641f142d-ba0c-4cdd-b2c1-897e1eea6653/user-data/outputs/file.txt")
 
             assert content == b"content"
 

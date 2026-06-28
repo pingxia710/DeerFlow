@@ -9,6 +9,7 @@ import pytest
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
@@ -284,8 +285,81 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, app_config=app_config)
+    get_available_tools.assert_called_once_with(
+        model_name="context-model",
+        groups=None,
+        include_mcp=True,
+        subagent_enabled=True,
+        app_config=app_config,
+    )
     assert result["model"] is not None
+
+
+def test_command_room_forces_coordination_only_tool_groups():
+    agent_config = AgentConfig(
+        name="command-room",
+        tool_groups=["sandbox", "bash"],
+    )
+
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == []
+    assert lead_agent_module._resolve_subagent_tool_groups("command-room", agent_config) is None
+    assert lead_agent_module._can_update_self("command-room") is False
+
+    ordinary_config = AgentConfig(
+        name="builder",
+        tool_groups=["sandbox"],
+    )
+    assert lead_agent_module._resolve_agent_tool_groups("builder", ordinary_config) == ["sandbox"]
+    assert lead_agent_module._resolve_subagent_tool_groups("builder", ordinary_config) == ["sandbox"]
+    assert lead_agent_module._can_update_self("builder") is True
+    assert lead_agent_module._uses_todo_list("command-room", True) is False
+    assert lead_agent_module._uses_todo_list("builder", True) is True
+
+
+def test_make_lead_agent_command_room_forces_empty_tool_groups(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    captured_tools_kwargs: dict[str, object] = {}
+
+    def _fake_get_available_tools(**kwargs):
+        captured_tools_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda name: AgentConfig(
+            name="command-room",
+            model="safe-model",
+            tool_groups=["sandbox", "bash"],
+            skills=[],
+        ),
+    )
+    monkeypatch.setattr(tools_module, "get_available_tools", _fake_get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config: dict = {
+        "configurable": {
+            "agent_name": "command-room",
+            "model_name": "safe-model",
+            "subagent_enabled": True,
+        }
+    }
+
+    result = lead_agent_module._make_lead_agent(config, app_config=app_config)
+
+    assert captured_tools_kwargs["groups"] == []
+    assert captured_tools_kwargs["include_mcp"] is False
+    assert config["metadata"]["tool_groups"] == []
+    assert config["metadata"]["subagent_tool_groups"] is None
+    assert result["tools"] == []
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):

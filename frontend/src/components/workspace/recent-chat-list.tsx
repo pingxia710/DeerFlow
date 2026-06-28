@@ -4,6 +4,7 @@ import {
   Download,
   FileJson,
   FileText,
+  LoaderCircleIcon,
   MoreHorizontal,
   Pencil,
   Share2,
@@ -51,9 +52,11 @@ import {
   exportThreadAsMarkdown,
 } from "@/core/threads/export";
 import {
+  clearThreadFinishedActivity,
   useDeleteThread,
   useInfiniteThreads,
   useRenameThread,
+  useThreadActivity,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import {
@@ -85,6 +88,14 @@ export function RecentChatList() {
     () => infiniteThreads?.pages.flat() ?? [],
     [infiniteThreads],
   );
+  const threadActivity = useThreadActivity();
+
+  useEffect(() => {
+    if (!threadIdFromPath || threadIdFromPath === "new") {
+      return;
+    }
+    clearThreadFinishedActivity(threadIdFromPath);
+  }, [threadIdFromPath]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -235,6 +246,11 @@ export function RecentChatList() {
               {threads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 const channelSource = channelSourceOfThread(thread);
+                const isRunning =
+                  thread.status === "busy" ||
+                  threadActivity.running.has(thread.thread_id);
+                const isFinished =
+                  !isRunning && threadActivity.finished.has(thread.thread_id);
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -249,14 +265,30 @@ export function RecentChatList() {
                         <span className="min-w-0 truncate">
                           {titleOfThread(thread)}
                         </span>
-                        {channelSource && (
-                          <span
-                            className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
-                            title={`${channelSource.label} channel`}
-                          >
-                            <span className="truncate">
-                              {channelSource.label}
-                            </span>
+                        {(isRunning || isFinished || channelSource) && (
+                          <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+                            {isRunning && (
+                              <LoaderCircleIcon
+                                aria-hidden="true"
+                                className="text-muted-foreground size-3.5 animate-spin"
+                              />
+                            )}
+                            {isFinished && (
+                              <span
+                                aria-hidden="true"
+                                className="size-2 rounded-full bg-blue-500"
+                              />
+                            )}
+                            {channelSource && (
+                              <span
+                                className="bg-muted text-muted-foreground inline-flex h-5 max-w-14 items-center rounded-md px-1.5 text-[10px] font-medium"
+                                title={`${channelSource.label} channel`}
+                              >
+                                <span className="truncate">
+                                  {channelSource.label}
+                                </span>
+                              </span>
+                            )}
                           </span>
                         )}
                       </Link>

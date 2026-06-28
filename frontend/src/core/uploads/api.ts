@@ -17,6 +17,10 @@ export interface UploadedFileInfo {
   markdown_path?: string;
   markdown_virtual_path?: string;
   markdown_artifact_url?: string;
+  ocr_file?: string;
+  ocr_path?: string;
+  ocr_virtual_path?: string;
+  ocr_artifact_url?: string;
 }
 
 export interface UploadResponse {

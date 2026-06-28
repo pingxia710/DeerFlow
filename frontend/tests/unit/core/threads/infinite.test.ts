@@ -4,9 +4,16 @@ import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 import {
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
+  getManualThreadTitleLock,
+  getThreadActivitySnapshot,
   INFINITE_THREADS_PAGE_SIZE,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
   mapInfiniteThreadsCache,
+  markThreadBusyInCaches,
+  markThreadFinished,
+  clearThreadActivity,
+  clearThreadFinishedActivity,
+  setManualThreadTitleLock,
   upsertThreadInInfiniteCache,
 } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
@@ -173,6 +180,73 @@ describe("filterInfiniteThreadsCache", () => {
     // useDeleteThread invalidates the query in onSettled, so pages are
     // refetched from offset 0 rather than relying on this number.
     expect(recomputed).toBe(99);
+  });
+});
+
+describe("markThreadBusyInCaches", () => {
+  test("marks the matching thread busy in search and infinite caches", () => {
+    const client = new QueryClient();
+    client.setQueryData(
+      ["threads", "search"],
+      [makeThread("a"), makeThread("b")],
+    );
+    client.setQueryData(
+      [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
+      makeInfiniteData([[makeThread("a")], [makeThread("b")]]),
+    );
+
+    markThreadBusyInCaches(client, "b");
+
+    const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    const infinite = client.getQueryData<InfiniteData<AgentThread[]>>([
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      {},
+    ]);
+
+    expect(search?.[0]?.status).toBe("idle");
+    expect(search?.[1]?.status).toBe("busy");
+    expect(infinite?.pages[0]?.[0]?.status).toBe("idle");
+    expect(infinite?.pages[1]?.[0]?.status).toBe("busy");
+  });
+
+  test("tracks local running and finished activity", () => {
+    markThreadBusyInCaches(new QueryClient(), "activity-thread");
+    expect(getThreadActivitySnapshot().running.has("activity-thread")).toBe(
+      true,
+    );
+    expect(getThreadActivitySnapshot().finished.has("activity-thread")).toBe(
+      false,
+    );
+
+    markThreadFinished("activity-thread");
+    expect(getThreadActivitySnapshot().running.has("activity-thread")).toBe(
+      false,
+    );
+    expect(getThreadActivitySnapshot().finished.has("activity-thread")).toBe(
+      true,
+    );
+
+    clearThreadFinishedActivity("activity-thread");
+    expect(getThreadActivitySnapshot().finished.has("activity-thread")).toBe(
+      false,
+    );
+
+    markThreadBusyInCaches(new QueryClient(), "activity-thread");
+    markThreadFinished("activity-thread");
+    clearThreadActivity("activity-thread");
+    expect(getThreadActivitySnapshot().finished.has("activity-thread")).toBe(
+      false,
+    );
+  });
+});
+
+describe("manual thread title lock", () => {
+  test("stores the user's manual title for stream-title guards", () => {
+    setManualThreadTitleLock("manual-title-thread", "Pinned Title");
+
+    expect(getManualThreadTitleLock("manual-title-thread")).toBe(
+      "Pinned Title",
+    );
   });
 });
 

@@ -1,7 +1,12 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
-import { accumulateUsage, selectHeaderTokenUsage } from "@/core/messages/usage";
+import {
+  accumulateUsage,
+  formatContextCount,
+  formatTokenCount,
+  selectHeaderTokenUsage,
+} from "@/core/messages/usage";
 import {
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -161,4 +166,16 @@ test("falls back to visible messages when backend usage is unavailable or zero",
     outputTokens: 5,
     totalTokens: 15,
   });
+});
+
+test("formats large token counts without decimal places", () => {
+  expect(formatTokenCount(1234)).toBe("1234");
+  expect(formatTokenCount(12_345)).toBe("1万");
+  expect(formatTokenCount(1_234_567)).toBe("123万");
+});
+
+test("formats context counts with one decimal place", () => {
+  expect(formatContextCount(1234)).toBe("1234");
+  expect(formatContextCount(12_345)).toBe("1.2万");
+  expect(formatContextCount(24_999)).toBe("2.5万");
 });

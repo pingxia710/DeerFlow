@@ -9,12 +9,19 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
-import { getAPIClient } from "../api";
+import { clearReconnectRun, getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
@@ -25,17 +32,22 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
+import { fetchThreadContextUsage, fetchThreadTokenUsage } from "./api";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
   type ThreadSearchParams,
 } from "./thread-search-query";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import {
+  threadContextUsageQueryKey,
+  threadTokenUsageQueryKey,
+} from "./token-usage";
 import type {
   AgentThread,
+  AgentThreadContext,
   AgentThreadState,
   RunMessage,
+  ThreadContextUsageResponse,
   ThreadTokenUsageResponse,
 } from "./types";
 
@@ -58,6 +70,134 @@ export type ThreadStreamOptions = {
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
+
+type ThreadActivitySnapshot = {
+  running: ReadonlySet<string>;
+  finished: ReadonlySet<string>;
+};
+
+const threadActivityListeners = new Set<() => void>();
+let threadActivitySnapshot: ThreadActivitySnapshot = {
+  running: new Set(),
+  finished: new Set(),
+};
+const manualThreadTitleLocks = new Map<string, string>();
+
+function emitThreadActivity() {
+  for (const listener of threadActivityListeners) {
+    listener();
+  }
+}
+
+export function getThreadActivitySnapshot() {
+  return threadActivitySnapshot;
+}
+
+export function useThreadActivity() {
+  return useSyncExternalStore(
+    (listener) => {
+      threadActivityListeners.add(listener);
+      return () => threadActivityListeners.delete(listener);
+    },
+    getThreadActivitySnapshot,
+    getThreadActivitySnapshot,
+  );
+}
+
+export function markThreadFinished(threadId: string) {
+  threadActivitySnapshot = {
+    running: new Set(
+      [...threadActivitySnapshot.running].filter((id) => id !== threadId),
+    ),
+    finished: new Set([...threadActivitySnapshot.finished, threadId]),
+  };
+  emitThreadActivity();
+}
+
+export function clearThreadActivity(threadId: string) {
+  threadActivitySnapshot = {
+    running: new Set(
+      [...threadActivitySnapshot.running].filter((id) => id !== threadId),
+    ),
+    finished: new Set(
+      [...threadActivitySnapshot.finished].filter((id) => id !== threadId),
+    ),
+  };
+  emitThreadActivity();
+}
+
+export function clearThreadFinishedActivity(threadId: string) {
+  if (!threadActivitySnapshot.finished.has(threadId)) {
+    return;
+  }
+  threadActivitySnapshot = {
+    running: threadActivitySnapshot.running,
+    finished: new Set(
+      [...threadActivitySnapshot.finished].filter((id) => id !== threadId),
+    ),
+  };
+  emitThreadActivity();
+}
+
+export function setManualThreadTitleLock(threadId: string, title: string) {
+  manualThreadTitleLocks.set(threadId, title);
+}
+
+export function getManualThreadTitleLock(threadId: string) {
+  return manualThreadTitleLocks.get(threadId);
+}
+
+function shouldAcceptStreamTitle(threadId: string | null, title: string) {
+  if (!threadId) {
+    return false;
+  }
+  const manualTitle = manualThreadTitleLocks.get(threadId);
+  return !manualTitle || manualTitle === title;
+}
+
+export function resolveAssistantId(agentName: unknown): string {
+  return typeof agentName === "string" && agentName.length > 0
+    ? agentName
+    : "lead_agent";
+}
+
+export function buildThreadRunContext(
+  baseContext: LocalSettings["context"],
+  threadId: string,
+  extraContext?: Record<string, unknown>,
+): AgentThreadContext {
+  const mergedContext = {
+    ...extraContext,
+    ...baseContext,
+  };
+  const isCommandRoom = mergedContext.agent_name === "command-room";
+  const mode = isCommandRoom ? "ultra" : mergedContext.mode;
+  const requestedReasoningEffort =
+    mergedContext.reasoning_effort === "minimal" ||
+    mergedContext.reasoning_effort === "low"
+      ? "xhigh"
+      : mergedContext.reasoning_effort;
+
+  return {
+    ...mergedContext,
+    model_name: mergedContext.model_name,
+    mode,
+    thinking_enabled: mode !== "flash",
+    is_plan_mode: mode === "pro" || mode === "ultra",
+    subagent_enabled: mode === "ultra",
+    reasoning_effort: isCommandRoom
+      ? (requestedReasoningEffort ?? "xhigh")
+      : (requestedReasoningEffort ??
+        (mode === "ultra"
+          ? "xhigh"
+          : mode === "pro" || mode === "thinking"
+            ? "xhigh"
+            : undefined)),
+    reasoning_summary: mergedContext.reasoning_summary,
+    text_verbosity: mergedContext.text_verbosity,
+    thread_id: threadId,
+  };
+}
 
 type RegeneratePrepareResponse = {
   input: Partial<AgentThreadState>;
@@ -375,6 +515,37 @@ function getMessagesAfterBaseline(
   });
 }
 
+function isOptimisticUploadStatusMessage(message: Message): boolean {
+  const additionalKwargs = message.additional_kwargs as
+    | Record<string, unknown>
+    | undefined;
+  return (
+    message.type === "ai" &&
+    additionalKwargs?.element === "task" &&
+    additionalKwargs?.upload_status === "uploading"
+  );
+}
+
+export function completeOptimisticUploadMessages(
+  optimisticMessages: Message[],
+  uploadedFiles: FileInMessage[],
+): Message[] {
+  return optimisticMessages
+    .map((message) => {
+      if (message.type !== "human") {
+        return message;
+      }
+      return {
+        ...message,
+        additional_kwargs: {
+          ...(message.additional_kwargs ?? {}),
+          files: uploadedFiles,
+        },
+      } as Message;
+    })
+    .filter((message) => !isOptimisticUploadStatusMessage(message));
+}
+
 export function getVisibleOptimisticMessages(
   optimisticMessages: Message[],
   previousHumanMessageCount: number,
@@ -505,6 +676,39 @@ export function upsertThreadInInfiniteCache(
   );
 }
 
+export function markThreadBusyInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+) {
+  threadActivitySnapshot = {
+    running: new Set([...threadActivitySnapshot.running, threadId]),
+    finished: new Set(
+      [...threadActivitySnapshot.finished].filter((id) => id !== threadId),
+    ),
+  };
+  emitThreadActivity();
+  queryClient.setQueriesData(
+    {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) =>
+      oldData?.map((t) =>
+        t.thread_id === threadId ? { ...t, status: "busy" } : t,
+      ),
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+      mapInfiniteThreadsCache(oldData, (t) =>
+        t.thread_id === threadId ? { ...t, status: "busy" } : t,
+      ),
+  );
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -601,9 +805,11 @@ export function useThreadStream({
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
-  // Ref to track current thread ID across async callbacks without causing re-renders,
-  // and to allow access to the current thread id in onUpdateEvent
-  const threadIdRef = useRef<string | null>(threadId ?? null);
+  // Ref to track the stream target across async callbacks without causing re-renders.
+  // Do not use the visible route id here; users can switch away while a run
+  // continues in the background.
+  const streamThreadIdRef = useRef<string | null>(threadId ?? null);
+  const streamRunIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
@@ -638,11 +844,12 @@ export function useThreadStream({
     } else {
       setOnStreamThreadId(normalizedThreadId);
     }
-    threadIdRef.current = normalizedThreadId;
+    streamThreadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
+    streamThreadIdRef.current = _threadId;
+    streamRunIdRef.current = _runId;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
       if (
@@ -674,15 +881,19 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const assistantId = resolveAssistantId(context.agent_name);
+  const reconnectOnMount =
+    !onStreamThreadId || !threadActivitySnapshot.finished.has(onStreamThreadId);
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
-    assistantId: "lead_agent",
+    assistantId,
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
+      markThreadBusyInCaches(queryClient, meta.thread_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
         thread_id: meta.thread_id,
@@ -761,6 +972,10 @@ export function useThreadStream({
       );
       for (const update of updates) {
         if (update && "title" in update && update.title) {
+          const streamThreadId = streamThreadIdRef.current;
+          if (!shouldAcceptStreamTitle(streamThreadId, update.title)) {
+            continue;
+          }
           void queryClient.setQueriesData(
             {
               queryKey: ["threads", "search"],
@@ -768,7 +983,7 @@ export function useThreadStream({
             },
             (oldData: Array<AgentThread> | undefined) => {
               return oldData?.map((t) => {
-                if (t.thread_id === threadIdRef.current) {
+                if (t.thread_id === streamThreadId) {
                   return {
                     ...t,
                     values: {
@@ -791,7 +1006,7 @@ export function useThreadStream({
               mapInfiniteThreadsCache(
                 oldData,
                 (t): AgentThread =>
-                  t.thread_id === threadIdRef.current
+                  t.thread_id === streamThreadId
                     ? {
                         ...t,
                         values: {
@@ -835,6 +1050,14 @@ export function useThreadStream({
       }
     },
     onError(error) {
+      const streamThreadId = streamThreadIdRef.current;
+      const streamRunId = streamRunIdRef.current;
+      if (streamRunId) {
+        clearReconnectRun(streamThreadId, streamRunId);
+      }
+      if (streamThreadId) {
+        clearThreadActivity(streamThreadId);
+      }
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -846,13 +1069,24 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      if (threadIdRef.current && !isMock) {
+      if (streamThreadId && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+          queryKey: threadTokenUsageQueryKey(streamThreadId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: threadContextUsageQueryKey(streamThreadId),
         });
       }
     },
     onFinish(state) {
+      const streamThreadId = streamThreadIdRef.current;
+      const streamRunId = streamRunIdRef.current;
+      if (streamRunId) {
+        clearReconnectRun(streamThreadId, streamRunId);
+      }
+      if (streamThreadId) {
+        markThreadFinished(streamThreadId);
+      }
       listeners.current.onFinish?.(state.values);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -863,16 +1097,27 @@ export function useThreadStream({
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
-      if (threadIdRef.current && !isMock) {
+      if (streamThreadId && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: ["thread", threadIdRef.current],
+          queryKey: ["thread", streamThreadId],
         });
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+          queryKey: threadTokenUsageQueryKey(streamThreadId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: threadContextUsageQueryKey(streamThreadId),
         });
       }
     },
   });
+
+  useEffect(() => {
+    const streamThreadId = streamThreadIdRef.current;
+    if (!thread.isLoading || !streamThreadId) {
+      return;
+    }
+    markThreadBusyInCaches(queryClient, streamThreadId);
+  }, [queryClient, thread.isLoading]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -910,6 +1155,7 @@ export function useThreadStream({
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
+    streamRunIdRef.current = null;
     sendInFlightRef.current = false;
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
@@ -1018,12 +1264,16 @@ export function useThreadStream({
           type: "ai",
           id: `opt-ai-${Date.now()}`,
           content: t.uploads.uploadingFiles,
-          additional_kwargs: { element: "task" },
+          additional_kwargs: {
+            element: "task",
+            upload_status: "uploading",
+          },
         });
       }
       setOptimisticThreadId(threadId);
       setLiveMessagesThreadId(threadId);
       setOptimisticMessages(newOptimistic);
+      markThreadBusyInCaches(queryClient, threadId);
 
       listeners.current.onSend?.(threadId);
 
@@ -1068,17 +1318,10 @@ export function useThreadStream({
                 }),
               );
               setOptimisticMessages((messages) => {
-                if (messages.length > 1 && messages[0]) {
-                  const humanMessage: Message = messages[0];
-                  return [
-                    {
-                      ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
-                    },
-                    ...messages.slice(1),
-                  ];
-                }
-                return messages;
+                return completeOptimisticUploadMessages(
+                  messages,
+                  uploadedFiles,
+                );
               });
             }
           } catch (error) {
@@ -1130,26 +1373,11 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
+            onDisconnect: "continue",
             config: {
               recursion_limit: 1000,
             },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            context: buildThreadRunContext(context, threadId, extraContext),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -1161,6 +1389,7 @@ export function useThreadStream({
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
+        clearThreadActivity(threadId);
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -1193,6 +1422,7 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       setLiveMessagesThreadId(threadId);
+      markThreadBusyInCaches(queryClient, threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
       let preparedSupersededMessageIds: string[] = [];
@@ -1236,25 +1466,11 @@ export function useThreadStream({
           metadata: prepared.metadata,
           streamSubgraphs: true,
           streamResumable: true,
+          onDisconnect: "continue",
           config: {
             recursion_limit: 1000,
           },
-          context: {
-            ...context,
-            thinking_enabled: context.mode !== "flash",
-            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
-            reasoning_effort:
-              context.reasoning_effort ??
-              (context.mode === "ultra"
-                ? "high"
-                : context.mode === "pro"
-                  ? "medium"
-                  : context.mode === "thinking"
-                    ? "low"
-                    : undefined),
-            thread_id: threadId,
-          },
+          context: buildThreadRunContext(context, threadId),
         });
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -1264,8 +1480,12 @@ export function useThreadStream({
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadId),
         });
+        void queryClient.invalidateQueries({
+          queryKey: threadContextUsageQueryKey(threadId),
+        });
       } catch (error) {
         setLiveMessagesThreadId(null);
+        clearThreadActivity(threadId);
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
           setPendingSupersededRunIds((current) =>
@@ -1687,6 +1907,24 @@ export function useThreadTokenUsage(
   });
 }
 
+export function useThreadContextUsage(
+  threadId?: string | null,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery<ThreadContextUsageResponse | null>({
+    queryKey: threadContextUsageQueryKey(threadId),
+    queryFn: async () => {
+      if (!threadId) {
+        return null;
+      }
+      return fetchThreadContextUsage(threadId);
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useRunDetail(threadId: string, runId: string) {
   const apiClient = getAPIClient();
   return useQuery<Run>({
@@ -1770,6 +2008,7 @@ export function useRenameThread() {
       threadId: string;
       title: string;
     }) => {
+      setManualThreadTitleLock(threadId, title);
       await apiClient.threads.updateState(threadId, {
         values: { title },
       });

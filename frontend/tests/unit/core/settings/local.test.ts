@@ -8,3 +8,7 @@ test("defaults token usage to header total plus per-turn breakdown", () => {
     inlineMode: "per_turn",
   });
 });
+
+test("defaults new chat mode to ultra", () => {
+  expect(DEFAULT_LOCAL_SETTINGS.context.mode).toBe("ultra");
+});

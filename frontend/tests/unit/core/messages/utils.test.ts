@@ -176,6 +176,22 @@ describe("inline <think> tag splitting", () => {
 });
 
 describe("human message internal context stripping", () => {
+  test("strips backend user-input boundaries from display content", () => {
+    expect(
+      stripUploadedFilesTag(
+        "--- BEGIN USER INPUT ---\n好的，下一步\n--- END USER INPUT ---",
+      ),
+    ).toBe("好的，下一步");
+  });
+
+  test("strips uploaded-file context inside backend user-input boundaries", () => {
+    expect(
+      stripUploadedFilesTag(
+        "--- BEGIN USER INPUT ---\n<uploaded_files>\nsecret path\n</uploaded_files>\n\n好的，下一步\n--- END USER INPUT ---",
+      ),
+    ).toBe("好的，下一步");
+  });
+
   test("strips slash skill activation context from display content", () => {
     const content =
       "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";
@@ -239,6 +255,20 @@ test("hides internal todo reminder messages from message groups", () => {
   expect(
     groups.flatMap((group) => group.messages).map((message) => message.id),
   ).toEqual(["human-1", "ai-1"]);
+});
+
+test("ignores orphan tool messages without creating a visible group", () => {
+  const messages = [
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "todo_write",
+      tool_call_id: "tool-1",
+      content: "{}",
+    },
+  ] as Message[];
+
+  expect(getMessageGroups(messages)).toEqual([]);
 });
 
 test("hides assistant copy data while that turn is streaming", () => {

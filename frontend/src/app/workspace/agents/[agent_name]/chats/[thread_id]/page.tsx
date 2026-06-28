@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -27,14 +27,18 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
+  useThreadContextUsage,
   useThreadMetadata,
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import { textOfMessage } from "@/core/threads/utils";
+import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+const COMMAND_ROOM_AGENT = "command-room";
+const COMMAND_ROOM_DEFAULT_MODEL = "deepseek-command-room";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
@@ -45,6 +49,7 @@ export default function AgentChatPage() {
   }>();
 
   const { agent } = useAgent(agent_name);
+  const isCommandRoom = agent_name === COMMAND_ROOM_AGENT;
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -59,6 +64,10 @@ export default function AgentChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadContextUsage = useThreadContextUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: !isMock },
+  );
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
@@ -71,6 +80,22 @@ export default function AgentChatPage() {
     setIsWelcomeMode(isNewThread);
   }, [isNewThread]);
 
+  const threadContext = useMemo(
+    () => ({
+      ...settings.context,
+      agent_name: agent_name,
+      ...(isCommandRoom
+        ? {
+            mode: "ultra" as const,
+            model_name:
+              settings.context.model_name ?? COMMAND_ROOM_DEFAULT_MODEL,
+            reasoning_effort: settings.context.reasoning_effort ?? "xhigh",
+          }
+        : {}),
+    }),
+    [agent_name, isCommandRoom, settings.context],
+  );
+
   const {
     thread,
     pendingUsageMessages,
@@ -82,7 +107,7 @@ export default function AgentChatPage() {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
-    context: { ...settings.context, agent_name: agent_name },
+    context: threadContext,
     isMock,
     onSend: () => {
       setIsWelcomeMode(false);
@@ -118,6 +143,21 @@ export default function AgentChatPage() {
   const hasThreadMessages = thread.messages.length > 0;
 
   useEffect(() => {
+    const metadataAgentName = threadMetadata.data?.metadata?.agent_name;
+    if (
+      isNewThread ||
+      isMock ||
+      typeof metadataAgentName !== "string" ||
+      metadataAgentName.length === 0 ||
+      metadataAgentName === agent_name
+    ) {
+      return;
+    }
+
+    router.replace(pathOfThread(threadId, { agent_name: metadataAgentName }));
+  }, [agent_name, isMock, isNewThread, router, threadId, threadMetadata.data]);
+
+  useEffect(() => {
     if (
       !isNewThread &&
       !isMock &&
@@ -145,13 +185,13 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      const sendPromise = sendMessage(threadId, message, { agent_name });
+      const sendPromise = sendMessage(threadId, message);
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId, agent_name],
+    [sendMessage, threadId],
   );
 
   const handleStop = useCallback(async () => {
@@ -162,7 +202,6 @@ export default function AgentChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-
   return (
     <ThreadContext.Provider value={{ thread }}>
       <ChatBox threadId={threadId}>
@@ -185,7 +224,11 @@ export default function AgentChatPage() {
             </div>
 
             <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-              <ThreadTitle threadId={threadId} thread={thread} />
+              <ThreadTitle
+                threadId={threadId}
+                thread={thread}
+                isNewThread={isNewThread}
+              />
             </div>
             <div className="flex shrink-0 items-center sm:mr-4">
               <Tooltip content={t.agents.newChat}>
@@ -204,7 +247,9 @@ export default function AgentChatPage() {
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
-                enabled={tokenUsageEnabled}
+                callerUsage={threadTokenUsage.data?.by_caller}
+                contextUsage={threadContextUsage.data}
+                enabled={tokenUsageEnabled || Boolean(threadContextUsage.data)}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}
                 preferences={localSettings.tokenUsage}
@@ -223,6 +268,11 @@ export default function AgentChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                contextSnapshot={
+                  threadContextUsage.data?.latest_lead ??
+                  threadContextUsage.data?.latest ??
+                  null
+                }
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}
@@ -284,7 +334,7 @@ export default function AgentChatPage() {
                         ? "streaming"
                         : "ready"
                   }
-                  context={settings.context}
+                  context={threadContext}
                   extraHeader={
                     isWelcomeMode && (
                       <AgentWelcome agent={agent} agentName={agent_name} />

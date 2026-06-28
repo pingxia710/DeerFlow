@@ -2,6 +2,12 @@ import type { Message, Thread } from "@langchain/langgraph-sdk";
 
 import type { Todo } from "../todos";
 
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export type ReasoningSummary = "auto" | "concise" | "detailed";
+
+export type TextVerbosity = "low" | "medium" | "high";
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
@@ -15,7 +21,9 @@ export interface AgentThreadContext extends Record<string, unknown> {
   thinking_enabled: boolean;
   is_plan_mode: boolean;
   subagent_enabled: boolean;
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  reasoning_effort?: ReasoningEffort;
+  reasoning_summary?: ReasoningSummary;
+  text_verbosity?: TextVerbosity;
   agent_name?: string;
 }
 
@@ -46,4 +54,25 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+}
+
+export interface ThreadContextUsageSnapshot {
+  run_id: string;
+  caller: string;
+  llm_call_index: number;
+  message_count: number;
+  tool_schema_count: number;
+  char_count: number;
+  estimated_tokens: number;
+  role_counts: Record<string, number>;
+  seq: number;
+  created_at: string;
+}
+
+export interface ThreadContextUsageResponse {
+  thread_id: string;
+  latest: ThreadContextUsageSnapshot | null;
+  latest_lead: ThreadContextUsageSnapshot | null;
+  by_caller: Record<string, ThreadContextUsageSnapshot>;
+  recent: ThreadContextUsageSnapshot[];
 }

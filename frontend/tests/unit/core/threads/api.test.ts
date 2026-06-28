@@ -53,3 +53,40 @@ test("fetchThreadTokenUsage returns null for unavailable token usage", async () 
 
   await expect(fetchThreadTokenUsage("thread-1")).resolves.toBeNull();
 });
+
+test("fetchThreadContextUsage uses shared auth fetch", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      thread_id: "thread-1",
+      latest: {
+        run_id: "run-1",
+        caller: "lead_agent",
+        llm_call_index: 1,
+        message_count: 4,
+        char_count: 200,
+        estimated_tokens: 50,
+        role_counts: { human: 2, ai: 2 },
+        seq: 3,
+        created_at: "2026-06-28T10:00:00+00:00",
+      },
+      latest_lead: null,
+      by_caller: {},
+      recent: [],
+    }),
+  });
+
+  const { fetchThreadContextUsage } = await import("@/core/threads/api");
+
+  await expect(fetchThreadContextUsage("thread-1")).resolves.toMatchObject({
+    thread_id: "thread-1",
+    latest: { estimated_tokens: 50 },
+  });
+
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads/thread-1/context-usage"),
+    {
+      method: "GET",
+    },
+  );
+});

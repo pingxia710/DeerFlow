@@ -125,6 +125,7 @@ export function MessageListItem({
   threadId,
   showCopyButton = true,
   turnStartTime,
+  hideThinkingUi = false,
 }: {
   className?: string;
   message: Message;
@@ -134,6 +135,7 @@ export function MessageListItem({
   runId?: string;
   showCopyButton?: boolean;
   turnStartTime?: number | null;
+  hideThinkingUi?: boolean;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -147,6 +149,7 @@ export function MessageListItem({
         isLoading={isLoading}
         threadId={threadId}
         turnStartTime={turnStartTime}
+        hideThinkingUi={hideThinkingUi}
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -217,12 +220,14 @@ function MessageContent_({
   isLoading = false,
   threadId,
   turnStartTime,
+  hideThinkingUi = false,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
   turnStartTime?: number | null;
+  hideThinkingUi?: boolean;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
@@ -243,7 +248,7 @@ function MessageContent_({
       clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
       setCachedDuration(rawTurnDuration);
     }
-  }, [rawTurnDuration, message.id]);
+  }, [rawTurnDuration, message.id, threadId]);
 
   const handleDurationChange = useCallback(
     (d: number | undefined) => {
@@ -252,7 +257,7 @@ function MessageContent_({
         setCachedDuration(d);
       }
     },
-    [message.id],
+    [message.id, threadId],
   );
 
   useEffect(() => {
@@ -337,6 +342,10 @@ function MessageContent_({
 
   // Reasoning-only AI message (no main response content yet)
   if (!isHuman && reasoningContent && !rawContent) {
+    if (hideThinkingUi) {
+      return null;
+    }
+
     return (
       <AIElementMessageContent className={className}>
         <Reasoning
@@ -380,6 +389,7 @@ function MessageContent_({
     <AIElementMessageContent className={className}>
       {filesList}
       {!isHuman &&
+        !hideThinkingUi &&
         (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
           <Reasoning
             isStreaming={isLoading}

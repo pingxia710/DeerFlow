@@ -84,8 +84,28 @@ export interface Translations {
     reasoningEffortLowDescription: string;
     reasoningEffortMedium: string;
     reasoningEffortMediumDescription: string;
+    reasoningEffortMediumShort: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
+    reasoningEffortHighShort: string;
+    reasoningEffortPro: string;
+    reasoningEffortProDescription: string;
+    reasoningEffortProShort: string;
+    reasoningSummary: string;
+    reasoningSummaryAuto: string;
+    reasoningSummaryAutoDescription: string;
+    reasoningSummaryConcise: string;
+    reasoningSummaryConciseDescription: string;
+    reasoningSummaryDetailed: string;
+    reasoningSummaryDetailedDescription: string;
+    textVerbosity: string;
+    textVerbosityLow: string;
+    textVerbosityLowDescription: string;
+    textVerbosityMedium: string;
+    textVerbosityMediumDescription: string;
+    textVerbosityHigh: string;
+    textVerbosityHighDescription: string;
+    model: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
@@ -94,6 +114,7 @@ export interface Translations {
     followupConfirmDescription: string;
     followupConfirmAppend: string;
     followupConfirmReplace: string;
+    waitForCurrentResponse: string;
     suggestionPlaceholderRequired: string;
     suggestions: {
       suggestion: string;
@@ -269,6 +290,11 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+    callerBreakdown: string;
+    callerLeadAgentShort: string;
+    callerLeadAgent: string;
+    callerSubagent: string;
+    callerMiddleware: string;
     view: string;
     unavailable: string;
     unavailableShort: string;
@@ -293,6 +319,17 @@ export interface Translations {
     completeTodo: (content: string) => string;
     updateTodo: (content: string) => string;
     removeTodo: (content: string) => string;
+  };
+
+  contextUsage: {
+    title: string;
+    label: string;
+    estimated: string;
+    messages: string;
+    tools: string;
+    chars: string;
+    byCaller: string;
+    unavailable: string;
   };
 
   // Shortcuts

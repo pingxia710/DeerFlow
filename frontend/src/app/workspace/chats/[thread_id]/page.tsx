@@ -27,12 +27,13 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
+  useThreadContextUsage,
   useThreadMetadata,
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import { textOfMessage } from "@/core/threads/utils";
+import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -54,12 +55,17 @@ export default function ChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadContextUsage = useThreadContextUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: !isMock },
+  );
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
+  const defaultedModeThreadIdRef = useRef<string | null>(null);
   useSpecificChatMode();
 
   useEffect(() => {
@@ -73,6 +79,20 @@ export default function ChatPage() {
   useEffect(() => {
     setIsWelcomeMode(isNewThread);
   }, [isNewThread]);
+
+  useEffect(() => {
+    if (!isNewThread) {
+      defaultedModeThreadIdRef.current = null;
+      return;
+    }
+    if (defaultedModeThreadIdRef.current === threadId) {
+      return;
+    }
+    defaultedModeThreadIdRef.current = threadId;
+    if (settings.context.mode !== "ultra") {
+      setSettings("context", { mode: "ultra" });
+    }
+  }, [isNewThread, setSettings, settings.context.mode, threadId]);
 
   const { showNotification } = useNotification();
 
@@ -121,6 +141,23 @@ export default function ChatPage() {
   });
 
   const hasThreadMessages = thread.messages.length > 0;
+
+  useEffect(() => {
+    const agentName = threadMetadata.data?.metadata?.agent_name;
+    if (
+      isNewThread ||
+      isMock ||
+      typeof agentName !== "string" ||
+      agentName.length === 0
+    ) {
+      return;
+    }
+
+    const agentPath = pathOfThread(threadId, { agent_name: agentName });
+    if (window.location.pathname !== agentPath) {
+      router.replace(agentPath);
+    }
+  }, [isMock, isNewThread, router, threadId, threadMetadata.data]);
 
   useEffect(() => {
     if (
@@ -185,13 +222,19 @@ export default function ChatPage() {
           >
             <SidebarTrigger className="md:hidden" />
             <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-              <ThreadTitle threadId={threadId} thread={thread} />
+              <ThreadTitle
+                threadId={threadId}
+                thread={thread}
+                isNewThread={isNewThread}
+              />
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
-                enabled={tokenUsageEnabled}
+                callerUsage={threadTokenUsage.data?.by_caller}
+                contextUsage={threadContextUsage.data}
+                enabled={tokenUsageEnabled || Boolean(threadContextUsage.data)}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}
                 preferences={localSettings.tokenUsage}
@@ -209,6 +252,11 @@ export default function ChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                contextSnapshot={
+                  threadContextUsage.data?.latest_lead ??
+                  threadContextUsage.data?.latest ??
+                  null
+                }
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}

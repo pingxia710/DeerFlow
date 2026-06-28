@@ -46,12 +46,14 @@ export function MessageGroup({
   className,
   messages,
   isLoading = false,
+  hideThinkingUi = false,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  hideThinkingUi?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
@@ -62,7 +64,12 @@ export function MessageGroup({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const steps = useMemo(() => {
+    const allSteps = convertToSteps(messages);
+    return hideThinkingUi
+      ? allSteps.filter((step) => step.type !== "reasoning")
+      : allSteps;
+  }, [hideThinkingUi, messages]);
   const debugStepByMessageId = useMemo(
     () =>
       new Map(
@@ -224,6 +231,10 @@ export function MessageGroup({
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
+
+  if (steps.length === 0) {
+    return null;
+  }
 
   return (
     <ChainOfThought

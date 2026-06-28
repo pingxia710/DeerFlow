@@ -99,12 +99,16 @@ export function selectHeaderTokenUsage({
   return accumulateUsage(messages);
 }
 
-/**
- * Format a token count for display: 1234 -> "1,234", 12345 -> "12.3K"
- */
 export function formatTokenCount(count: number): string {
   if (count < 10_000) {
-    return count.toLocaleString();
+    return String(count);
   }
-  return `${(count / 1000).toFixed(1)}K`;
+  return `${Math.round(count / 10_000)}万`;
+}
+
+export function formatContextCount(count: number): string {
+  if (count < 10_000) {
+    return String(count);
+  }
+  return `${(Math.round(count / 1000) / 10).toFixed(1)}万`;
 }

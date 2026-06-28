@@ -20,7 +20,7 @@ const stoppedSubtaskMessages = [
   {
     type: "ai",
     id: "msg-ai-stopped-subtask",
-    content: "",
+    content: "I'll start that subtask and keep you posted.",
     additional_kwargs: {},
     response_metadata: {},
     tool_calls: [
@@ -57,6 +57,9 @@ test.describe("Subtask card", () => {
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
     await page.reload();
 
+    await expect(
+      page.getByText("I'll start that subtask and keep you posted."),
+    ).toBeVisible();
     await expect(page.getByText(STOPPED_TASK_DESCRIPTION)).toBeVisible({
       timeout: 15_000,
     });

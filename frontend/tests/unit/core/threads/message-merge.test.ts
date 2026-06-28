@@ -4,6 +4,7 @@ import { expect, test } from "@rstest/core";
 import {
   buildRunMessagesUrl,
   buildVisibleHistoryMessages,
+  completeOptimisticUploadMessages,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
@@ -261,6 +262,56 @@ test("getVisibleOptimisticMessages hides the upload optimistic pair after server
       1,
     ),
   ).toEqual([]);
+});
+
+test("completeOptimisticUploadMessages removes uploading placeholder after upload succeeds", () => {
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "upload this",
+    additional_kwargs: {
+      files: [{ filename: "doc.md", size: 0, status: "uploading" }],
+      hide_from_ui: false,
+    },
+  } as Message;
+  const optimisticUploadingAi = {
+    id: "opt-ai-uploading",
+    type: "ai",
+    content: "文件上传中，请稍候...",
+    additional_kwargs: {
+      element: "task",
+      upload_status: "uploading",
+    },
+  } as Message;
+
+  expect(
+    completeOptimisticUploadMessages(
+      [optimisticHuman, optimisticUploadingAi],
+      [
+        {
+          filename: "doc.md",
+          size: 5400,
+          path: "/mnt/user-data/uploads/doc.md",
+          status: "uploaded",
+        },
+      ],
+    ),
+  ).toEqual([
+    {
+      ...optimisticHuman,
+      additional_kwargs: {
+        files: [
+          {
+            filename: "doc.md",
+            size: 5400,
+            path: "/mnt/user-data/uploads/doc.md",
+            status: "uploaded",
+          },
+        ],
+        hide_from_ui: false,
+      },
+    },
+  ]);
 });
 
 test("getVisibleOptimisticMessages hides optimistic user input after later server turns", () => {

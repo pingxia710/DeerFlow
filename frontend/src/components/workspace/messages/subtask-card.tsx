@@ -5,7 +5,8 @@ import {
   Loader2Icon,
   XCircleIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 
 import {
   ChainOfThought,
@@ -21,6 +22,7 @@ import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
+import { formatElapsedMinutesSeconds } from "@/core/tasks/elapsed";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -28,6 +30,38 @@ import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
+
+const MS_IN_SECOND = 1000;
+
+function restoreAnchorTop(
+  anchor: HTMLElement,
+  initialTop: number,
+  scrollElement: HTMLElement | null,
+) {
+  let frames = 0;
+
+  const keepAnchorStable = () => {
+    if (!anchor.isConnected) {
+      return;
+    }
+
+    const delta = anchor.getBoundingClientRect().top - initialTop;
+    if (Math.abs(delta) >= 1) {
+      if (scrollElement) {
+        scrollElement.scrollTop += delta;
+      } else {
+        window.scrollBy(0, delta);
+      }
+    }
+
+    frames += 1;
+    if (frames < 3) {
+      requestAnimationFrame(keepAnchorStable);
+    }
+  };
+
+  requestAnimationFrame(keepAnchorStable);
+}
 
 export function SubtaskCard({
   className,
@@ -39,9 +73,27 @@ export function SubtaskCard({
   isLoading: boolean;
 }) {
   const { t } = useI18n();
-  const [collapsed, setCollapsed] = useState(true);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const { scrollRef, stopScroll } = useStickToBottomContext();
   const task = useSubtask(taskId)!;
+  const resultPreview = useMemo(
+    () => task.result?.replace(/\s+/g, " ").trim() ?? "",
+    [task.result],
+  );
+  const hasCompletedResult =
+    task.status === "completed" && resultPreview.length > 0;
+  const [collapsed, setCollapsed] = useState(true);
+  const startedAtRef = useRef<number | null>(
+    task.status === "in_progress" ? Date.now() : null,
+  );
+  const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(
+    task.status === "in_progress" ? 0 : null,
+  );
+  const isOpen = !collapsed;
+  const elapsedText =
+    elapsedSeconds === null
+      ? null
+      : formatElapsedMinutesSeconds(elapsedSeconds);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -51,10 +103,45 @@ export function SubtaskCard({
       return <Loader2Icon className="size-3 animate-spin" />;
     }
   }, [task.status]);
+
+  useEffect(() => {
+    if (task.status !== "in_progress") {
+      if (startedAtRef.current !== null) {
+        setElapsedSeconds(
+          Math.floor((Date.now() - startedAtRef.current) / MS_IN_SECOND),
+        );
+        startedAtRef.current = null;
+      }
+      return;
+    }
+
+    startedAtRef.current ??= Date.now();
+
+    const startedAt = startedAtRef.current;
+    const updateElapsed = () => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / MS_IN_SECOND));
+    };
+
+    updateElapsed();
+    const interval = window.setInterval(updateElapsed, MS_IN_SECOND);
+
+    return () => window.clearInterval(interval);
+  }, [task.status]);
+
+  const handleHeaderToggle = (event: MouseEvent<HTMLButtonElement>) => {
+    const anchor = event.currentTarget;
+    const initialTop = anchor.getBoundingClientRect().top;
+    const scrollElement = scrollRef.current;
+
+    stopScroll();
+    setCollapsed((current) => !current);
+    restoreAnchorTop(anchor, initialTop, scrollElement);
+  };
+
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
-      open={!collapsed}
+      open={isOpen}
     >
       <div
         className={cn(
@@ -73,26 +160,38 @@ export function SubtaskCard({
       <div className="bg-background/95 flex w-full flex-col rounded-lg">
         <div className="flex w-full items-center justify-between p-0.5">
           <Button
-            className="w-full items-start justify-start text-left"
+            className="h-auto min-h-9 w-full items-start justify-start text-left"
             variant="ghost"
-            onClick={() => setCollapsed(!collapsed)}
+            onClick={handleHeaderToggle}
           >
             <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="font-normal"
-                label={
-                  task.status === "in_progress" ? (
-                    <Shimmer duration={3} spread={3}>
-                      {task.description}
-                    </Shimmer>
-                  ) : (
-                    task.description
-                  )
-                }
-                icon={<ClipboardListIcon />}
-              ></ChainOfThoughtStep>
+              <div className="min-w-0 flex-1">
+                <ChainOfThoughtStep
+                  className="font-normal"
+                  label={
+                    task.status === "in_progress" ? (
+                      <Shimmer duration={3} spread={3}>
+                        {task.description}
+                      </Shimmer>
+                    ) : (
+                      task.description
+                    )
+                  }
+                  icon={<ClipboardListIcon />}
+                ></ChainOfThoughtStep>
+                {!isOpen && hasCompletedResult && (
+                  <p className="text-muted-foreground line-clamp-2 px-6 pb-1 text-xs leading-5 whitespace-normal">
+                    {resultPreview}
+                  </p>
+                )}
+              </div>
               <div className="flex items-center gap-1">
-                {collapsed && (
+                {elapsedText && (
+                  <span className="text-muted-foreground/80 min-w-[4ch] text-right font-mono text-xs leading-none tabular-nums">
+                    {elapsedText}
+                  </span>
+                )}
+                {!isOpen && (
                   <div
                     className={cn(
                       "text-muted-foreground flex items-center gap-1 text-xs font-normal",
@@ -115,7 +214,7 @@ export function SubtaskCard({
                 <ChevronUp
                   className={cn(
                     "text-muted-foreground size-4",
-                    !collapsed ? "" : "rotate-180",
+                    isOpen ? "" : "rotate-180",
                   )}
                 />
               </div>
@@ -170,6 +269,19 @@ export function SubtaskCard({
               icon={<XCircleIcon className="size-4 text-red-500" />}
             ></ChainOfThoughtStep>
           )}
+          <div className="flex justify-end pt-1">
+            <Button
+              aria-label={t.toolCalls.lessSteps}
+              className="h-8 gap-1 text-xs"
+              onClick={() => setCollapsed(true)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <ChevronUp className="size-3" />
+              {t.toolCalls.lessSteps}
+            </Button>
+          </div>
         </ChainOfThoughtContent>
       </div>
     </ChainOfThought>

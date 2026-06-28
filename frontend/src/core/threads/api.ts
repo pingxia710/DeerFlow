@@ -1,7 +1,10 @@
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { ThreadTokenUsageResponse } from "./types";
+import type {
+  ThreadContextUsageResponse,
+  ThreadTokenUsageResponse,
+} from "./types";
 
 export async function fetchThreadTokenUsage(
   threadId: string,
@@ -21,4 +24,24 @@ export async function fetchThreadTokenUsage(
   }
 
   return (await response.json()) as ThreadTokenUsageResponse;
+}
+
+export async function fetchThreadContextUsage(
+  threadId: string,
+): Promise<ThreadContextUsageResponse | null> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/context-usage`,
+    {
+      method: "GET",
+    },
+  );
+
+  if (!response.ok) {
+    if (response.status === 403 || response.status === 404) {
+      return null;
+    }
+    throw new Error("Failed to load thread context usage.");
+  }
+
+  return (await response.json()) as ThreadContextUsageResponse;
 }

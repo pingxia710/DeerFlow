@@ -101,12 +101,33 @@ export const enUS: Translations = {
     reasoningEffortMinimalDescription: "Retrieval + Direct Output",
     reasoningEffortLow: "Low",
     reasoningEffortLowDescription: "Simple Logic Check + Shallow Deduction",
-    reasoningEffortMedium: "Medium",
+    reasoningEffortMedium: "Medium (medium)",
     reasoningEffortMediumDescription:
       "Multi-layer Logic Analysis + Basic Verification",
-    reasoningEffortHigh: "High",
+    reasoningEffortMediumShort: "Medium",
+    reasoningEffortHigh: "High (high)",
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
+    reasoningEffortHighShort: "High",
+    reasoningEffortPro: "Pro (xhigh)",
+    reasoningEffortProDescription:
+      "Maximum Reasoning Budget + Stronger Verification",
+    reasoningEffortProShort: "Pro",
+    reasoningSummary: "Thinking Summary",
+    reasoningSummaryAuto: "Auto",
+    reasoningSummaryAutoDescription: "Let the model decide the summary detail",
+    reasoningSummaryConcise: "Concise",
+    reasoningSummaryConciseDescription: "Keep only the key reasoning points",
+    reasoningSummaryDetailed: "Detailed",
+    reasoningSummaryDetailedDescription: "Show more reasoning summary",
+    textVerbosity: "Answer Detail",
+    textVerbosityLow: "Brief",
+    textVerbosityLowDescription: "Shorter and more direct",
+    textVerbosityMedium: "Standard",
+    textVerbosityMediumDescription: "Default answer length",
+    textVerbosityHigh: "Detailed",
+    textVerbosityHighDescription: "More explanation and expansion",
+    model: "Model",
     searchModels: "Search models...",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
@@ -116,6 +137,8 @@ export const enUS: Translations = {
       "You already have text in the input. Choose how to send it.",
     followupConfirmAppend: "Append & send",
     followupConfirmReplace: "Replace & send",
+    waitForCurrentResponse:
+      "The current response is still running. Send this after it finishes.",
     suggestionPlaceholderRequired:
       "Replace the suggestion placeholder before sending.",
     suggestions: [
@@ -349,6 +372,11 @@ export const enUS: Translations = {
     input: "Input",
     output: "Output",
     total: "Total",
+    callerBreakdown: "Source",
+    callerLeadAgentShort: "Lead",
+    callerLeadAgent: "Command room / lead",
+    callerSubagent: "Subtasks",
+    callerMiddleware: "Middleware",
     view: "Display",
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
@@ -375,6 +403,18 @@ export const enUS: Translations = {
     completeTodo: (content: string) => `Complete To-do: ${content}`,
     updateTodo: (content: string) => `Update To-do: ${content}`,
     removeTodo: (content: string) => `Remove To-do: ${content}`,
+  },
+
+  contextUsage: {
+    title: "Context",
+    label: "Context",
+    estimated: "Estimate",
+    messages: "Messages",
+    tools: "Tools",
+    chars: "Chars",
+    byCaller: "Source",
+    unavailable:
+      "No context snapshot yet. It appears when the next model call starts.",
   },
 
   // Shortcuts

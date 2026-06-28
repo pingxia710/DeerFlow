@@ -1,7 +1,7 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { ChevronDownIcon, CoinsIcon } from "lucide-react";
+import { BrainCircuitIcon, ChevronDownIcon, CoinsIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  formatContextCount,
   formatTokenCount,
   selectHeaderTokenUsage,
   type TokenUsage,
@@ -26,6 +27,14 @@ import {
   type TokenUsagePreferences,
   type TokenUsageViewPreset,
 } from "@/core/messages/usage-model";
+import {
+  getCallerTokenUsageRows,
+  getLeadAgentTokenUsage,
+} from "@/core/threads/token-usage";
+import type {
+  ThreadContextUsageResponse,
+  ThreadTokenUsageResponse,
+} from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
 interface TokenUsageIndicatorProps {
@@ -33,6 +42,8 @@ interface TokenUsageIndicatorProps {
   messages: Message[];
   pendingMessages?: Message[];
   backendUsage?: TokenUsage | null;
+  callerUsage?: ThreadTokenUsageResponse["by_caller"] | null;
+  contextUsage?: ThreadContextUsageResponse | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -44,6 +55,8 @@ export function TokenUsageIndicator({
   messages,
   pendingMessages,
   backendUsage,
+  callerUsage,
+  contextUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -61,8 +74,17 @@ export function TokenUsageIndicator({
     [backendUsage, messages, pendingMessages, threadId],
   );
   const preset = getTokenUsageViewPreset(preferences);
+  const callerRows = getCallerTokenUsageRows(callerUsage);
+  const leadAgentTokens = getLeadAgentTokenUsage(callerUsage);
+  const contextSnapshot = contextUsage?.latest_lead ?? contextUsage?.latest;
+  const contextCallerRows = getContextCallerRows(contextUsage);
+  const callerLabels = {
+    lead_agent: t.tokenUsage.callerLeadAgent,
+    subagent: t.tokenUsage.callerSubagent,
+    middleware: t.tokenUsage.callerMiddleware,
+  };
 
-  if (!enabled) {
+  if (!enabled || (!usage && !contextSnapshot)) {
     return null;
   }
 
@@ -77,19 +99,104 @@ export function TokenUsageIndicator({
             className,
           )}
         >
-          <CoinsIcon size={14} />
-          <span>{t.tokenUsage.label}</span>
-          <span className="font-mono">
-            {preferences.headerTotal
-              ? usage
-                ? formatTokenCount(usage.totalTokens)
-                : "-"
-              : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
-          </span>
+          {contextSnapshot ? (
+            <>
+              <BrainCircuitIcon size={14} />
+              <span>{t.contextUsage.label}</span>
+              <span className="font-mono">
+                {formatContextCount(contextSnapshot.estimated_tokens)}
+              </span>
+            </>
+          ) : (
+            <>
+              <CoinsIcon size={14} />
+              <span>{t.tokenUsage.label}</span>
+            </>
+          )}
+          {preferences.headerTotal ? (
+            contextSnapshot ? (
+              <>
+                <span className="text-muted-foreground/70">/</span>
+                <span>{t.tokenUsage.total}</span>
+                <span className="font-mono">
+                  {usage ? formatTokenCount(usage.totalTokens) : "-"}
+                </span>
+              </>
+            ) : leadAgentTokens !== null ? (
+              <>
+                <span>{t.tokenUsage.callerLeadAgentShort}</span>
+                <span className="font-mono">
+                  {formatTokenCount(leadAgentTokens)}
+                </span>
+                {usage && usage.totalTokens !== leadAgentTokens && (
+                  <span className="text-muted-foreground/70 hidden items-center gap-1 lg:inline-flex">
+                    <span>/</span>
+                    <span>{t.tokenUsage.total}</span>
+                    <span className="font-mono">
+                      {formatTokenCount(usage.totalTokens)}
+                    </span>
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                {contextSnapshot && <span>{t.tokenUsage.total}</span>}
+                <span className="font-mono">
+                  {usage ? formatTokenCount(usage.totalTokens) : "-"}
+                </span>
+              </>
+            )
+          ) : (
+            <span className="font-mono">
+              {t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
+            </span>
+          )}
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="bottom" align="end" className="w-80">
+        <DropdownMenuLabel>{t.contextUsage.title}</DropdownMenuLabel>
+        <div className="px-2 py-1 text-xs">
+          {contextSnapshot ? (
+            <div className="space-y-1">
+              <ContextUsageRow
+                label={t.contextUsage.estimated}
+                value={formatTokenCount(contextSnapshot.estimated_tokens)}
+              />
+              <ContextUsageRow
+                label={t.contextUsage.messages}
+                value={String(contextSnapshot.message_count)}
+              />
+              <ContextUsageRow
+                label={t.contextUsage.tools}
+                value={String(contextSnapshot.tool_schema_count)}
+              />
+              <ContextUsageRow
+                label={t.contextUsage.chars}
+                value={formatTokenCount(contextSnapshot.char_count)}
+              />
+              {contextCallerRows.length > 0 && (
+                <div className="border-t pt-1">
+                  <div className="text-muted-foreground pb-0.5">
+                    {t.contextUsage.byCaller}
+                  </div>
+                  {contextCallerRows.map((row) => (
+                    <ContextUsageRow
+                      key={row.caller}
+                      label={formatContextCaller(row.caller, t)}
+                      value={formatTokenCount(row.snapshot.estimated_tokens)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-muted-foreground">
+              {t.contextUsage.unavailable}
+            </div>
+          )}
+        </div>
+        <DropdownMenuSeparator />
         <DropdownMenuLabel>{t.tokenUsage.title}</DropdownMenuLabel>
         <div className="px-2 py-1 text-xs">
           {usage ? (
@@ -114,6 +221,21 @@ export function TokenUsageIndicator({
                   </span>
                 </div>
               </div>
+              {callerRows.length > 0 && (
+                <div className="border-t pt-1">
+                  <div className="text-muted-foreground pb-0.5">
+                    {t.tokenUsage.callerBreakdown}
+                  </div>
+                  {callerRows.map((row) => (
+                    <div key={row.key} className="flex justify-between gap-4">
+                      <span>{callerLabels[row.key]}</span>
+                      <span className="font-mono">
+                        {formatTokenCount(row.tokens)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <div className="text-muted-foreground">
@@ -154,6 +276,39 @@ export function TokenUsageIndicator({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function ContextUsageRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <span>{label}</span>
+      <span className="font-mono">{value}</span>
+    </div>
+  );
+}
+
+function getContextCallerRows(
+  usage: ThreadContextUsageResponse | null | undefined,
+) {
+  return Object.entries(usage?.by_caller ?? {})
+    .map(([caller, snapshot]) => ({ caller, snapshot }))
+    .sort((a, b) => b.snapshot.estimated_tokens - a.snapshot.estimated_tokens);
+}
+
+function formatContextCaller(
+  caller: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  if (caller === "lead_agent") {
+    return t.tokenUsage.callerLeadAgent;
+  }
+  if (caller.startsWith("subagent:")) {
+    return t.tokenUsage.callerSubagent;
+  }
+  if (caller.startsWith("middleware:")) {
+    return t.tokenUsage.callerMiddleware;
+  }
+  return caller;
 }
 
 function presetKeyToTranslationKey(preset: TokenUsageViewPreset) {

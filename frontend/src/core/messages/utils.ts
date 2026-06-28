@@ -79,11 +79,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         const open = lastOpenGroup();
         if (open) {
           open.messages.push(message);
-        } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
         }
       }
       continue;
@@ -508,6 +503,8 @@ export interface FileInMessage {
 export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(/<(uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
+    .replace(/^--- BEGIN USER INPUT ---\n?/, "")
+    .replace(/\n?--- END USER INPUT ---$/, "")
     .trim();
 }
 

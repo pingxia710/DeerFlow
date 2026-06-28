@@ -1,7 +1,19 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
-import { ChevronUpIcon, Loader2Icon, RefreshCcwIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  BrainCircuitIcon,
+  ChevronUpIcon,
+  Loader2Icon,
+  RefreshCcwIcon,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 
 import {
   Conversation,
@@ -13,6 +25,7 @@ import {
 } from "@/components/ai-elements/reasoning";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { formatContextCount } from "@/core/messages/usage";
 import {
   buildTokenDebugSteps,
   type TokenUsageInlineMode,
@@ -38,11 +51,11 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
-import { StreamingIndicator } from "../streaming-indicator";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
@@ -170,6 +183,9 @@ export function MessageList({
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
   tokenUsageInlineMode = "off",
+  hideProtocolUi = false,
+  hideThinkingUi = false,
+  contextSnapshot,
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
@@ -181,6 +197,9 @@ export function MessageList({
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
   tokenUsageInlineMode?: TokenUsageInlineMode;
+  hideProtocolUi?: boolean;
+  hideThinkingUi?: boolean;
+  contextSnapshot?: ThreadContextUsageSnapshot | null;
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
@@ -250,11 +269,22 @@ export function MessageList({
     return null;
   }, [groupedMessages, thread.isLoading]);
 
+  const handleReviewTurnClick = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      const turnElement = event.currentTarget.closest("[data-assistant-turn]");
+      if (turnElement instanceof HTMLElement) {
+        turnElement.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    },
+    [],
+  );
+
   const renderAssistantActions = useCallback(
     (
       messages: Message[],
       isStreaming: boolean,
       enableRegenerateForTurn: boolean,
+      contextSnapshotForTurn?: ThreadContextUsageSnapshot | null,
     ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
       const regenerateTarget = [...messages]
@@ -264,57 +294,86 @@ export function MessageList({
         .filter((message) => message.type === "ai" && message.id)
         .map((message) => message.id)
         .filter((id): id is string => typeof id === "string");
-
-      if (!clipboardData && !regenerateTarget) {
-        return null;
-      }
+      const hasRegenerateAction =
+        enableRegenerateForTurn &&
+        !!regenerateTarget?.id &&
+        !!onRegenerateMessage;
+      const hasHoverActions = !!clipboardData || hasRegenerateAction;
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
-          {clipboardData && <CopyButton clipboardData={clipboardData} />}
-          {enableRegenerateForTurn &&
-            regenerateTarget?.id &&
-            onRegenerateMessage && (
-              <Tooltip content={t.common.regenerate}>
-                <Button
-                  aria-label={t.common.regenerate}
-                  size="icon-sm"
-                  type="button"
-                  variant="ghost"
-                  disabled={
-                    !canRegenerate ||
-                    regeneratingMessageId === regenerateTarget.id
-                  }
-                  onClick={() => {
-                    const targetId = regenerateTarget.id;
-                    if (!targetId) {
-                      return;
+        <div className="mt-2 flex items-center justify-end gap-1">
+          {hasHoverActions && (
+            <div className="flex gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+              {clipboardData && <CopyButton clipboardData={clipboardData} />}
+              {hasRegenerateAction && (
+                <Tooltip content={t.common.regenerate}>
+                  <Button
+                    aria-label={t.common.regenerate}
+                    size="icon-sm"
+                    type="button"
+                    variant="ghost"
+                    disabled={
+                      !canRegenerate ||
+                      regeneratingMessageId === regenerateTarget.id
                     }
-                    setRegeneratingMessageId(targetId);
-                    void Promise.resolve(
-                      onRegenerateMessage?.(targetId, supersededMessageIds),
-                    ).finally(() => {
-                      setRegeneratingMessageId(null);
-                    });
-                  }}
-                >
-                  <RefreshCcwIcon
-                    className={cn(
-                      "size-3",
-                      regeneratingMessageId === regenerateTarget.id &&
-                        "animate-spin",
-                    )}
-                  />
-                </Button>
-              </Tooltip>
-            )}
+                    onClick={() => {
+                      const targetId = regenerateTarget.id;
+                      if (!targetId) {
+                        return;
+                      }
+                      setRegeneratingMessageId(targetId);
+                      void Promise.resolve(
+                        onRegenerateMessage?.(targetId, supersededMessageIds),
+                      ).finally(() => {
+                        setRegeneratingMessageId(null);
+                      });
+                    }}
+                  >
+                    <RefreshCcwIcon
+                      className={cn(
+                        "size-3",
+                        regeneratingMessageId === regenerateTarget.id &&
+                          "animate-spin",
+                      )}
+                    />
+                  </Button>
+                </Tooltip>
+              )}
+            </div>
+          )}
+          {contextSnapshotForTurn && (
+            <div
+              className="text-muted-foreground bg-background/70 flex h-8 items-center gap-1.5 rounded-full border px-2 text-xs"
+              title={`${t.contextUsage.label} ${formatContextCount(
+                contextSnapshotForTurn.estimated_tokens,
+              )}`}
+            >
+              <BrainCircuitIcon className="size-3.5" />
+              <span className="hidden sm:inline">{t.contextUsage.label}</span>
+              <span className="font-mono">
+                {formatContextCount(contextSnapshotForTurn.estimated_tokens)}
+              </span>
+            </div>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-foreground rounded-full px-3"
+            onClick={handleReviewTurnClick}
+          >
+            <ChevronUpIcon className="mr-1 size-3.5" />
+            看一下
+          </Button>
         </div>
       );
     },
     [
       canRegenerate,
+      handleReviewTurnClick,
       onRegenerateMessage,
       regeneratingMessageId,
+      t.contextUsage.label,
       t.common.regenerate,
     ],
   );
@@ -331,6 +390,10 @@ export function MessageList({
       inlineDebug?: boolean;
       debugMessageIds?: string[];
     }) => {
+      if (hideProtocolUi) {
+        return null;
+      }
+
       if (tokenUsageInlineMode === "per_turn") {
         return (
           <MessageTokenUsageList
@@ -353,8 +416,14 @@ export function MessageList({
           <MessageTokenUsageDebugList
             enabled={true}
             isLoading={thread.isLoading}
-            steps={tokenDebugSteps.filter((step) =>
-              messageIds.has(step.messageId),
+            steps={tokenDebugSteps.filter(
+              (step) =>
+                messageIds.has(step.messageId) &&
+                !(
+                  hideThinkingUi &&
+                  step.label === t.common.thinking &&
+                  step.secondaryLabels.length === 0
+                ),
             )}
           />
         );
@@ -362,7 +431,14 @@ export function MessageList({
 
       return null;
     },
-    [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
+    [
+      hideProtocolUi,
+      hideThinkingUi,
+      t.common.thinking,
+      thread.isLoading,
+      tokenDebugSteps,
+      tokenUsageInlineMode,
+    ],
   );
 
   if (thread.isThreadLoading && messages.length === 0) {
@@ -372,6 +448,7 @@ export function MessageList({
   return (
     <Conversation
       className={cn("flex size-full flex-col justify-center", className)}
+      resize={thread.isLoading ? "smooth" : undefined}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
         <LoadMoreHistoryIndicator
@@ -388,6 +465,9 @@ export function MessageList({
             return (
               <div
                 key={group.id}
+                data-assistant-turn={
+                  group.type === "assistant" ? true : undefined
+                }
                 className={cn(
                   "w-full",
                   group.type === "assistant" && "group/assistant-turn",
@@ -404,6 +484,7 @@ export function MessageList({
                       }
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
+                      hideThinkingUi={hideThinkingUi}
                       turnStartTime={
                         groupIndex === groupedMessages.length - 1
                           ? turnStartTime
@@ -424,6 +505,9 @@ export function MessageList({
                       streamingMessages,
                     ),
                     group.id === latestAssistantGroupId,
+                    group.id === latestAssistantGroupId
+                      ? contextSnapshot
+                      : null,
                   )}
               </div>
             );
@@ -513,7 +597,7 @@ export function MessageList({
 
             const results: React.ReactNode[] = [];
             const subagentDebugMessageIds: string[] = [];
-            if (tasks.size > 0) {
+            if (!hideProtocolUi && tasks.size > 0) {
               results.push(
                 <div
                   key="subtask-count"
@@ -526,7 +610,7 @@ export function MessageList({
             for (const message of group.messages.filter(
               (message) => message.type === "ai",
             )) {
-              if (hasReasoning(message)) {
+              if (!hideProtocolUi && !hideThinkingUi && hasReasoning(message)) {
                 results.push(
                   <MessageGroup
                     key={"thinking-group-" + message.id}
@@ -555,6 +639,21 @@ export function MessageList({
                   />,
                 );
               }
+              if (hasContent(message)) {
+                results.push(
+                  <MessageListItem
+                    key={`subagent-final-${message.id}`}
+                    message={message}
+                    isLoading={groupIsLoading}
+                    threadId={threadId}
+                    showCopyButton={false}
+                    hideThinkingUi={hideThinkingUi}
+                    turnStartTime={
+                      groupIndex === lastGroupIndex ? turnStartTime : null
+                    }
+                  />,
+                );
+              }
             }
             return (
               <div
@@ -575,6 +674,7 @@ export function MessageList({
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}
+                hideThinkingUi={hideThinkingUi}
                 tokenDebugSteps={tokenDebugSteps.filter((step) =>
                   group.messages.some(
                     (message) => message.id === step.messageId,
@@ -590,13 +690,16 @@ export function MessageList({
             </div>
           );
         })}
-        {thread.isLoading && !hasActiveAssistantText && (
-          <div className="w-full">
-            <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
-              <ReasoningTrigger hasContent={false} />
-            </Reasoning>
-          </div>
-        )}
+        {thread.isLoading &&
+          !hideProtocolUi &&
+          !hideThinkingUi &&
+          !hasActiveAssistantText && (
+            <div className="w-full">
+              <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
+                <ReasoningTrigger hasContent={false} />
+              </Reasoning>
+            </div>
+          )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>

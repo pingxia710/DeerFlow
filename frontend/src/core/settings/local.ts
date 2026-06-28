@@ -1,5 +1,10 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
-import type { AgentThreadContext } from "../threads";
+import type {
+  AgentThreadContext,
+  ReasoningEffort,
+  ReasoningSummary,
+  TextVerbosity,
+} from "../threads";
 
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
@@ -11,8 +16,10 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
-    mode: undefined,
+    mode: "ultra",
     reasoning_effort: undefined,
+    reasoning_summary: undefined,
+    text_verbosity: undefined,
   },
 };
 
@@ -39,10 +46,14 @@ export interface LocalSettings {
     | "subagent_enabled"
     | "model_name"
     | "reasoning_effort"
+    | "reasoning_summary"
+    | "text_verbosity"
   > & {
     model_name?: string | undefined;
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-    reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    reasoning_effort?: ReasoningEffort;
+    reasoning_summary?: ReasoningSummary;
+    text_verbosity?: TextVerbosity;
   };
 }
 

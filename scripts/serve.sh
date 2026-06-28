@@ -29,6 +29,9 @@ set -e
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
+NGINX_TEMPLATE_CONFIG="$REPO_ROOT/docker/nginx/nginx.local.conf"
+NGINX_RUNTIME_CONFIG="$REPO_ROOT/logs/nginx.local.generated.conf"
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -71,12 +74,36 @@ for arg in "$@"; do
     esac
 done
 
+GATEWAY_PORT="${DEER_FLOW_GATEWAY_PORT:-8001}"
+FRONTEND_PORT="${DEER_FLOW_FRONTEND_PORT:-3000}"
+NGINX_PORT="${DEER_FLOW_NGINX_PORT:-2026}"
+
+_validate_port_value() {
+    local name=$1 value=$2
+
+    case "$value" in
+        ''|*[!0-9]*)
+            echo "✗ $name must be a numeric TCP port: $value"
+            exit 1
+            ;;
+    esac
+
+    if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "✗ $name must be between 1 and 65535: $value"
+        exit 1
+    fi
+}
+
+_validate_port_value DEER_FLOW_GATEWAY_PORT "$GATEWAY_PORT"
+_validate_port_value DEER_FLOW_FRONTEND_PORT "$FRONTEND_PORT"
+_validate_port_value DEER_FLOW_NGINX_PORT "$NGINX_PORT"
+
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
-# Every deer-flow worktree (the main checkout + each linked worktree) hardcodes
-# the same dev ports (8001/3000/2026), so a service started from ANY of them
-# must be reclaimable from here — otherwise `make stop`/`make dev` in this
-# worktree can neither kill nor take over a port held by a sibling worktree.
+# Every deer-flow worktree (the main checkout + each linked worktree) defaults
+# to the same dev ports, so a service started from ANY of them must be
+# reclaimable from here — otherwise `make stop`/`make dev` in this worktree can
+# neither kill nor take over a port held by a sibling worktree.
 # DEERFLOW_ROOTS is that set of roots; processes living outside all of them
 # (e.g. an unrelated project on port 3000) are still never touched.
 # Sorted most-specific-first (longest path first): a linked worktree lives
@@ -119,7 +146,7 @@ _is_deerflow_pid() {
 # (or starting, which stops first) isn't silently killing someone else's run.
 _report_reclaimed_ports() {
     local port pid files root owner
-    for port in 8001 3000 2026; do
+    for port in "$GATEWAY_PORT" "$FRONTEND_PORT" "$NGINX_PORT"; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
             _is_deerflow_pid "$pid" || continue
             files=$(lsof -b -w -p "$pid" 2>/dev/null)
@@ -197,6 +224,49 @@ _is_port_listening() {
     return 1
 }
 
+_pick_available_port() {
+    local port=$1
+
+    while [ "$port" -le 65535 ]; do
+        if ! _is_port_listening "$port"; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+
+    return 1
+}
+
+_resolve_frontend_port() {
+    local requested_port="$FRONTEND_PORT"
+
+    if [ -n "${DEER_FLOW_FRONTEND_PORT:-}" ]; then
+        return 0
+    fi
+
+    if ! _is_port_listening "$requested_port"; then
+        return 0
+    fi
+
+    FRONTEND_PORT="$(_pick_available_port 6001)" || {
+        echo "✗ Frontend port $requested_port is busy and no free fallback port was found."
+        exit 1
+    }
+
+    echo "  • Frontend port $requested_port is busy outside this run; using localhost:$FRONTEND_PORT."
+}
+
+render_nginx_config() {
+    mkdir -p logs
+    sed \
+        -e "s/127\.0\.0\.1:8001/127.0.0.1:${GATEWAY_PORT}/g" \
+        -e "s/127\.0\.0\.1:3000/127.0.0.1:${FRONTEND_PORT}/g" \
+        -e "s/listen 2026;/listen ${NGINX_PORT};/g" \
+        -e "s/listen \[::\]:2026;/listen [::]:${NGINX_PORT};/g" \
+        "$NGINX_TEMPLATE_CONFIG" > "$NGINX_RUNTIME_CONFIG"
+}
+
 _is_repo_nginx_pid() {
     local pid=$1
     local command
@@ -252,16 +322,19 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    if [ -f "$NGINX_RUNTIME_CONFIG" ]; then
+        nginx -c "$NGINX_RUNTIME_CONFIG" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    fi
+    nginx -c "$NGINX_TEMPLATE_CONFIG" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     _kill_repo_nginx
-    # Force-kill any survivors still holding the service ports. 2026 is included
-    # so a lingering nginx (or any deer-flow process) that _kill_repo_nginx did
-    # not match by name still gets reclaimed — otherwise `make dev` fails its
-    # nginx port preflight.
-    _kill_repo_port 8001
-    _kill_repo_port 3000
-    _kill_repo_port 2026
+    # Force-kill any survivors still holding the service ports. The nginx port
+    # is included so a lingering nginx (or any deer-flow process) that
+    # _kill_repo_nginx did not match by name still gets reclaimed — otherwise
+    # `make dev` fails its nginx port preflight.
+    _kill_repo_port "$GATEWAY_PORT"
+    _kill_repo_port "$FRONTEND_PORT"
+    _kill_repo_port "$NGINX_PORT"
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -289,17 +362,6 @@ fi
 
 if $DAEMON_MODE; then
     MODE_LABEL="$MODE_LABEL [daemon]"
-fi
-
-# Frontend command
-if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
-else
-    if ! PYTHON_BIN="$(_pick_python)"; then
-        echo "Python is required to generate BETTER_AUTH_SECRET."
-        exit 1
-    fi
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -336,6 +398,19 @@ fi
 if ! $ALREADY_STOPPED; then
     stop_all
     sleep 1
+fi
+
+_resolve_frontend_port
+
+# Frontend command. Next.js honors PORT for both `next dev` and `next start`.
+if $DEV_MODE; then
+    FRONTEND_CMD="env PORT=$FRONTEND_PORT pnpm run dev"
+else
+    if ! PYTHON_BIN="$(_pick_python)"; then
+        echo "Python is required to generate BETTER_AUTH_SECRET."
+        exit 1
+    fi
+    FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
 # ── Config check ─────────────────────────────────────────────────────────────
@@ -400,9 +475,9 @@ echo ""
 echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
-echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
-echo "    Frontend    → localhost:3000  (Next.js)"
-echo "    Nginx       → localhost:2026  (reverse proxy)"
+echo "    Gateway     → localhost:$GATEWAY_PORT  (REST API + agent runtime)"
+echo "    Frontend    → localhost:$FRONTEND_PORT  (Next.js)"
+echo "    Nginx       → localhost:$NGINX_PORT  (reverse proxy)"
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
@@ -454,21 +529,22 @@ run_service() {
 
 mkdir -p logs
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
+render_nginx_config
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
-    8001 30
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "$GATEWAY_PORT" 30
 
 # 2. Frontend
 run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
-    3000 120
+    "$FRONTEND_PORT" 120
 
 # 3. Nginx
 run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
+    "nginx -g 'daemon off;' -c '$NGINX_RUNTIME_CONFIG' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "$NGINX_PORT" 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
@@ -477,11 +553,11 @@ echo "=========================================="
 echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
-echo "  🌐 http://localhost:2026"
+echo "  🌐 http://localhost:$NGINX_PORT"
 echo ""
 echo "  Routing: Frontend → Nginx → Gateway"
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
-echo "           /api/*              →  Gateway REST API (8001)"
+echo "           /api/*              →  Gateway REST API ($GATEWAY_PORT)"
 echo ""
 echo "  📋 Logs: logs/{gateway,frontend,nginx}.log"
 echo ""

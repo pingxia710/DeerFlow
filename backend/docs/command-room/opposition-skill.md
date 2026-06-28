@@ -9,7 +9,7 @@ last_verified: 2026-06-28
 
 ## Trigger
 
-Use this optional subtask when a prior round's plan, claim, or evidence has high ambiguity, hidden trade-offs, known disagreement, safety/boundary risk, or a costly failure mode.
+Use this optional subtask when a prior round's plan, claim, or evidence has high ambiguity, hidden trade-offs, known disagreement, safety/boundary risk, or a costly failure mode inside the current user-authorized round.
 
 Do not use it as an always-on reviewer pipeline, default review step, program-level quality裁决, or automatic rework trigger.
 
@@ -43,4 +43,4 @@ Evidence requirements:
 - Use source paths, diffs, command output/exit code, logs, artifacts, hashes, state transitions, or documented constraints.
 - Invalid alone: broad “be careful” advice, worker/reviewer self-report, `tests passed`, `output_ref`, unlinked summaries.
 
-Opposition validates and stress-tests a previous round's claim/evidence. It does not make the final verdict and does not force rework.
+Opposition validates and stress-tests a previous round's claim/evidence. It does not make the final verdict, does not force rework, and does not decide round boundaries or continuation.

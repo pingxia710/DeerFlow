@@ -416,6 +416,10 @@ def test_system_prompt_template_contains_command_room_ai_first_exception():
     assert "AI-FIRST" in template
     assert "Missing project location" in template
     assert "Round is the basic unit of autonomous progress" in template
+    assert "user controls the round goal, boundaries" in template
+    assert "ordinary technical execution" in template
+    assert "Handle ordinary technical execution autonomously inside the round" in template
+    assert "redlines or boundary changes" in template
     assert "If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now" in template
     assert "overrides the generic clarification-first rule for discoverable facts" in template
     assert "delegated AI discovery has failed" in template
@@ -465,10 +469,13 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
     assert "A Round is the command-room execution cadence" in prompt
     assert "Round Model" in prompt
     assert "Classify unknowns yourself" in prompt
-    assert "discoverable now -> dispatch sub-AI" in prompt
+    assert "discoverable or executable now -> dispatch sub-AI" in prompt
     assert "blocked by cap/context -> concrete Next Round" in prompt
-    assert "user-only/risky -> ask or stop" in prompt
-    assert "If progress needs facts you can discover with tools or sub-AIs inside the current round, dispatch `task` in this same response" in prompt
+    assert "user-only/redline/boundary-changing -> ask or stop" in prompt
+    assert "If progress needs facts or ordinary technical execution you can handle with tools or sub-AIs inside the current round, dispatch `task` in this same response" in prompt
+    assert "user controls the round goal, boundaries" in prompt
+    assert "Do not stop for routine implementation choices" in prompt
+    assert "user-only/redline/boundary-changing -> ask or stop" in prompt
     assert "Use Next Round only as a concrete continuation state" in prompt
     assert "full subagent LLM" in prompt
     assert "Direct inspection and execution belong in delegated sub-AIs" in prompt
@@ -479,6 +486,7 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
     assert "PRIORITY CHECK: If anything is unclear" not in prompt
     assert "Do not require formal report formats" in prompt
     assert "required Evidence Signal fields" not in prompt
+    assert "default reviewers, gates, dashboards" in prompt
     assert "Single task = No value from subagents = Execute directly" not in prompt
     assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
 

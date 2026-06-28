@@ -124,6 +124,9 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Documentation update policy** — keep docs in sync with code: update `README.md` for
   user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
   the same change set.
+- **Command Room round principle** — users set direction, current-round boundaries, and
+  whether to continue; Command Room owns execution and evidence within the authorized round.
+  Do not turn this into fixed gates, dashboards, default reviewers, or process theater.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.

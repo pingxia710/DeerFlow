@@ -9,7 +9,7 @@ last_verified: 2026-06-28
 
 ## Trigger
 
-Use this optional subtask when a previous round made a claim whose evidence is ambiguous, weak, contradictory, or important enough to verify before the lead AI decides the next step.
+Use this optional subtask when a previous round made a claim whose evidence is ambiguous, weak, contradictory, or important enough to verify before the lead AI decides the next step within the user-authorized round boundary.
 
 Do not use it as an always-on reviewer, a default CI gate, an automatic PASS/FAIL judge, or an auto-rework trigger.
 
@@ -43,4 +43,4 @@ Evidence requirements:
 - Prefer command plus output/exit code, log/artifact/hash/diff/source path/state transition.
 - Invalid alone: `tests passed`, `output_ref`, worker self-report, reviewer self-report, unlinked summary.
 
-The checker validates prior claim/evidence for the lead AI. It never replaces the lead AI's verdict.
+The checker validates prior claim/evidence for the lead AI. It never replaces the lead AI's verdict, never acts as a default reviewer or gate, and never decides whether a new round is authorized.

@@ -1,13 +1,13 @@
 # Command Room Subtask Interfaces
 
-Purpose: make stable Command Room delegation patterns discoverable without turning them into automatic runtime gates. The lead AI chooses whether to use any subtask and keeps final judgment.
+Purpose: make stable Command Room delegation patterns discoverable without turning them into automatic runtime gates. The user sets the current round goal, boundaries, and whether to continue; the lead AI chooses execution, evidence gathering, and whether any subtask helps within that confirmed round.
 
 ## Common boundary
 
-- Invoke subtasks only when they add tool access, independent inspection, critique, or synthesis value.
-- Pass a narrow goal, required inputs, forbidden changes, expected outputs, and evidence requirements.
+- Invoke subtasks only when they add tool access, independent inspection, critique, or synthesis value. Subtasks are execution means, not fixed process steps.
+- Pass a narrow goal, current round boundary, required inputs, forbidden changes, executable actions, expected outputs, and evidence requirements; write prompts for the actual understanding limits of the receiving sub-AI.
 - These are prompt/interface hints, not a fixed output-format dependency: a sub-AI may answer naturally. Runtime/adapters should normalize terminal task events, metadata, tool-observed outputs, commands, files, logs, and artifacts into `action_result`/Round signals; `action_result` is not a sub-AI self-filled form.
-- Treat subtask output as evidence or perspective, not as an automatic verdict. If the only observable result is a natural-language summary or worker self-claim, keep it summary-only / weak and do not promote it to evidence.
+- Treat subtask output as evidence or perspective, not as an automatic verdict, default reviewer, PASS/FAIL gate, or rework trigger. If the only observable result is a natural-language summary or worker self-claim, keep it summary-only / weak and do not promote it to evidence.
 - Do not use these interfaces to auto-dispatch reviewers, auto-trigger rework, create gates/dashboards/forms/automatic review loops, or change `task()` public returns. Users should see natural development results; internals keep only minimal facts, memory, and boundaries.
 
 ## Stable types

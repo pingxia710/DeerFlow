@@ -66,6 +66,17 @@ deer-flow/
 
 ## Important Development Guidelines
 
+### Command Room AI collaboration readiness signals
+
+- Command Room is the main development AI, not a workflow system. The lead AI is the brain; sub-AIs are hands and eyes. Users should see natural development results, while internals keep only minimal facts, memory, and boundaries.
+- A Round is the lead AI's working memory for project quality, not Jira, a user-visible dashboard, fixed gate, form set, or automatic PASS/FAIL engine.
+- Stable subtask/skill interfaces should narrow collaboration to goal, inputs, outputs, failure conditions, and evidence requirements. Do not translate AI judgment into fixed roles, gates, dashboards, forms, or automatic review loops.
+- Use evidence instead of trust: `tests passed` / `测试通过` alone is not evidence. Bind each claim to reproducible command output, exit code, log, artifact/path, hash, diff, or source reference.
+- `action_result` is runtime/adapter observation from terminal events, tool outputs, commands, files, logs, and artifacts. It is not a sub-AI self-filled format. `output_ref` alone, summary-only output, or worker self-claim is weak evidence until backed by hard refs.
+- Use evidence-checker or opposition only when risk, ambiguity, contradiction, or stale/weak evidence warrants a small check. Opposition is not a second command room: it does not decide, accept, schedule, or keep long-term accounts.
+- Command Room stable subtask discovery lives in `docs/command-room/subtask-interfaces.md` (executor, fact-finder, evidence-checker, opposition, synthesis-checker) and links to the candidate signal docs.
+- Program helpers may expose mechanical hard gaps/boundary signals only; do not make them judge project quality, change `task()` public returns, auto-trigger rework, dispatch default reviewers/opposition, or modify production/secret config.
+
 ### Documentation Update Policy
 **CRITICAL: Always update README.md and AGENTS.md after every code change**
 

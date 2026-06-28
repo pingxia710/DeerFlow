@@ -93,6 +93,10 @@ The `SubagentLimitMiddleware` controls how many subagents the Lead Agent can inv
 
 If the agent tries to call more subagents than the limit allows, the middleware trims the excess calls.
 
+## Handoff audit
+
+Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps status, usage, hashes, character counts, and extracted Evidence Signal fields, while omitting raw prompts, worker output, and error text.
+
 ## ACP agents (external agents)
 
 In addition to the built-in subagents, DeerFlow supports delegating to external agents through the **Agent Connect Protocol (ACP)**. ACP allows DeerFlow to invoke agents running as separate processes (including third-party CLI tools wrapped with an ACP adapter).

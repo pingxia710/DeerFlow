@@ -645,6 +645,10 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
 
+For `command-room` runs, DeerFlow can keep compact internal audit records under the thread audit directory without exposing them in the chat UI.
+The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output.
+User-facing command-room replies stay natural by default; internal audit is not a visible product surface.
+
 ### Sandbox & File System
 
 DeerFlow doesn't just *talk* about doing things. It has its own computer.

@@ -92,6 +92,10 @@ subagents:
 
 如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。
 
+## Handoff audit
+
+每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留状态、用量、哈希、字符数和提取出的 Evidence Signal 字段，不写入原始 prompt、worker 输出或错误正文。
+
 ## ACP Agent（外部 Agent）
 
 除内置子 Agent 外，DeerFlow 还通过 **Agent Connect Protocol (ACP)** 支持委派给外部 Agent。ACP 允许 DeerFlow 调用作为独立进程运行的 Agent（包括用 ACP 适配器包装的第三方 CLI 工具）。

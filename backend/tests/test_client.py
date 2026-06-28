@@ -278,6 +278,32 @@ class TestStream:
         assert record is not None
         assert record["roundContextSignals"] == {"evidence_signals": ["internal"]}
         assert record["hide_from_ui"] is True
+
+    def test_command_room_round_record_receives_stream_run_id(self, client, tmp_path, monkeypatch):
+        """Client stream propagates one run_id to graph context and RoundRecord."""
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+        ai = AIMessage(content="Done", id="ai-1")
+        agent = _make_agent_mock([{"messages": [HumanMessage(content="hi", id="h-1"), ai]}])
+        client._agent_name = "command-room"
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+            patch("deerflow.client.get_effective_user_id", return_value="user-1"),
+        ):
+            list(client.stream("hi", thread_id="t-run", run_id="new"))
+
+        call_kwargs = agent.stream.call_args.kwargs
+        assert call_kwargs["config"]["configurable"]["run_id"] == "new"
+        assert call_kwargs["context"]["run_id"] == "new"
+
+        from deerflow.command_room.round_record import latest_command_room_round
+
+        record = latest_command_room_round(thread_id="t-run", user_id="user-1")
+        assert record is not None
+        assert record["runId"] == "new"
         assert record["visibility"] == "internal_audit"
 
     def test_context_propagation(self, client):

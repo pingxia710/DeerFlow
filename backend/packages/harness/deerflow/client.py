@@ -657,6 +657,9 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         configurable = config.get("configurable") or {}
+        run_id = configurable.get("run_id") or kwargs.get("run_id") or str(uuid.uuid4())
+        configurable["run_id"] = run_id
+        config["configurable"] = configurable
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
@@ -669,7 +672,7 @@ class DeerFlowClient:
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
-        context = {"thread_id": thread_id}
+        context = {"thread_id": thread_id, "run_id": run_id}
         if self._agent_name:
             context["agent_name"] = self._agent_name
 
@@ -868,6 +871,7 @@ class DeerFlowClient:
                     user_id=get_effective_user_id(),
                     final_text=latest_ai_text,
                     user_message=message,
+                    run_id=run_id,
                     usage=cumulative_usage,
                     source="client",
                 )

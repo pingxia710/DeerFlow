@@ -182,3 +182,54 @@ def test_command_room_no_task_path_does_not_force_round(tmp_path):
     assert record["roundRequired"] is False
     assert record["roundContextSignals"] is None
     assert record["verdict"]["gated"] is False
+
+
+def test_record_command_room_round_filters_handoffs_by_run_id(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="implement",
+        final_text="Verdict: NEEDS_MORE",
+        run_id="new",
+        audit_records=[
+            {
+                "run_id": "old",
+                "status": "completed",
+                "task_id": "old-task",
+                "subagent_type": "general-purpose",
+                "description": "old task",
+                "action_result": {
+                    "action_id": "old-task",
+                    "status": "completed",
+                    "summary": "old summary",
+                    "evidence_refs": ["old evidence"],
+                    "risks": ["old risk"],
+                },
+            },
+            {
+                "run_id": "new",
+                "status": "completed",
+                "task_id": "new-task",
+                "subagent_type": "general-purpose",
+                "description": "new task",
+                "action_result": {
+                    "action_id": "new-task",
+                    "status": "completed",
+                    "summary": "new summary",
+                    "evidence_refs": ["command: pytest; exit code: 0"],
+                    "risks": ["new risk"],
+                },
+            },
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["runId"] == "new"
+    assert [item["laneId"] for item in record["dispatchPlan"]] == ["new-task"]
+    assert record["roundContextSignals"]["action_count"] == 1
+    assert "new risk" in record["roundContextSignals"]["risks"]
+    assert "old risk" not in record["roundContextSignals"]["risks"]
+    assert "old evidence" not in json.dumps(record["roundContextSignals"])
+    assert "old-task" not in json.dumps(record["signals"])

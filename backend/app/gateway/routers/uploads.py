@@ -28,6 +28,7 @@ from deerflow.uploads.manager import (
     upload_virtual_path,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.utils.image_ocr import extract_image_text, ocr_sidecar_path
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,10 @@ class UploadedFileInfo(BaseModel):
     markdown_path: str | None = None
     markdown_virtual_path: str | None = None
     markdown_artifact_url: str | None = None
+    ocr_file: str | None = None
+    ocr_path: str | None = None
+    ocr_virtual_path: str | None = None
+    ocr_artifact_url: str | None = None
 
 
 class UploadResponse(BaseModel):
@@ -292,6 +297,21 @@ async def upload_files(
             logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
             file_ext = file_path.suffix.lower()
+            ocr_text = extract_image_text(file_path)
+            if ocr_text:
+                ocr_path = ocr_sidecar_path(file_path)
+                ocr_path.write_text(ocr_text, encoding="utf-8")
+                written_paths.append(ocr_path)
+                ocr_virtual_path = upload_virtual_path(ocr_path.name)
+
+                if sync_to_sandbox:
+                    sandbox_sync_targets.append((ocr_path, ocr_virtual_path))
+
+                file_info["ocr_file"] = ocr_path.name
+                file_info["ocr_path"] = str(sandbox_uploads / ocr_path.name)
+                file_info["ocr_virtual_path"] = ocr_virtual_path
+                file_info["ocr_artifact_url"] = upload_artifact_url(thread_id, ocr_path.name)
+
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
                 md_path = await convert_file_to_markdown(file_path)
                 if md_path:

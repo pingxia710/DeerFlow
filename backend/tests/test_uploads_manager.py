@@ -187,6 +187,13 @@ class TestListFilesInDir:
         assert result["count"] == 1
         assert result["files"][0]["filename"] == "file.txt"
 
+    def test_hides_ocr_sidecars(self, tmp_path):
+        (tmp_path / "image.png").write_text("image")
+        (tmp_path / "image.png.ocr.txt").write_text("ocr")
+        result = list_files_in_dir(tmp_path)
+        assert result["count"] == 1
+        assert result["files"][0]["filename"] == "image.png"
+
 
 # ---------------------------------------------------------------------------
 # delete_file_safe
@@ -200,6 +207,15 @@ class TestDeleteFileSafe:
         result = delete_file_safe(tmp_path, "test.txt")
         assert result["success"] is True
         assert not f.exists()
+
+    def test_delete_removes_ocr_sidecar(self, tmp_path):
+        f = tmp_path / "image.png"
+        sidecar = tmp_path / "image.png.ocr.txt"
+        f.write_text("data")
+        sidecar.write_text("ocr")
+        delete_file_safe(tmp_path, "image.png")
+        assert not f.exists()
+        assert not sidecar.exists()
 
     def test_delete_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):

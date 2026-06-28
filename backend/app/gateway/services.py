@@ -131,6 +131,8 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "mode",
         "thinking_enabled",
         "reasoning_effort",
+        "reasoning_summary",
+        "text_verbosity",
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",

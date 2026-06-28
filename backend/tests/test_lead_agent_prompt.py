@@ -33,6 +33,10 @@ def test_build_self_update_section_present_for_custom_agent():
     assert '"null"' in section
 
 
+def test_build_self_update_section_empty_for_command_room():
+    assert prompt_module._build_self_update_section("command-room") == ""
+
+
 def test_build_custom_mounts_section_returns_empty_when_no_mounts(monkeypatch):
     config = SimpleNamespace(sandbox=SimpleNamespace(mounts=[]))
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
@@ -405,6 +409,80 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     assert "append=True" in template
 
 
+def test_system_prompt_template_contains_command_room_ai_first_exception():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+
+    assert "AI-FIRST EXCEPTION FOR THIS AGENT" in template
+    assert "AI-FIRST" in template
+    assert "Missing project location" in template
+    assert "Round is the basic unit of autonomous progress" in template
+    assert "If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now" in template
+    assert "overrides the generic clarification-first rule for discoverable facts" in template
+    assert "delegated AI discovery has failed" in template
+    assert "Use Next Round for concrete carryover" in template
+    assert '"if we continue", "I suggest digging into"' in template
+    assert "not a human software-team pipeline" in template
+    assert "fixed delegation counts" in template
+    assert "user-listed work items as goals and information sources" in template
+    assert "fixed report formats" in template
+    assert "visible status labels" in template
+    assert "Answer naturally and directly" in template
+    assert "Keep internal protocol, labels, and fixed forms out of user-facing replies" in template
+    assert 'Do not send a bare "review the given materials" task without the materials' in template
+    assert "explicit `Verdict: PASS|NEEDS_MORE|BLOCKED|STOP_CONFIRM` line" not in template
+    assert "Round Cards" not in template
+    assert "Evidence Signal forms" not in template
+    assert "literal `Verdict:`" not in template
+
+
+def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(custom_agents={}),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=2,
+        agent_name="command-room",
+        app_config=explicit_config,
+    )
+
+    assert "AI DISPATCH MODE" in prompt
+    assert "You may dispatch a single sub-AI" in prompt
+    assert "A Round is the command-room execution cadence" in prompt
+    assert "Round Model" in prompt
+    assert "Classify unknowns yourself" in prompt
+    assert "discoverable now -> dispatch sub-AI" in prompt
+    assert "blocked by cap/context -> concrete Next Round" in prompt
+    assert "user-only/risky -> ask or stop" in prompt
+    assert "If progress needs facts you can discover with tools or sub-AIs inside the current round, dispatch `task` in this same response" in prompt
+    assert "Use Next Round only as a concrete continuation state" in prompt
+    assert "full subagent LLM" in prompt
+    assert "Direct inspection and execution belong in delegated sub-AIs" in prompt
+    assert "a single delegation is allowed" in prompt
+    assert "maximum 2 `task` calls per response" in prompt
+    assert "AI-FIRST CHECK" in prompt
+    assert "dispatch `task` first" in prompt
+    assert "PRIORITY CHECK: If anything is unclear" not in prompt
+    assert "Do not require formal report formats" in prompt
+    assert "required Evidence Signal fields" not in prompt
+    assert "Single task = No value from subagents = Execute directly" not in prompt
+    assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
+
+
 def test_system_prompt_template_preserves_placeholders():
     """Ensure the chunking-rule edit didn't drop any f-string placeholder
     consumed by apply_prompt_template(). A missing placeholder would
@@ -415,6 +493,7 @@ def test_system_prompt_template_preserves_placeholders():
         "{agent_name}",
         "{soul}",
         "{self_update_section}",
+        "{clarification_priority}",
         "{subagent_thinking}",
         "{skills_section}",
         "{deferred_tools_section}",

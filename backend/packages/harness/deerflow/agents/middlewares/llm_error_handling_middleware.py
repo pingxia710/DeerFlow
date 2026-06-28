@@ -61,6 +61,10 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
+_TRANSIENT_CONNECTION_PATTERNS = (
+    "unexpected_eof_while_reading",
+    "eof occurred in violation of protocol",
+)
 
 # Per-exception retry budget overrides.
 #
@@ -192,6 +196,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
+        if _matches_any(lowered, _TRANSIENT_CONNECTION_PATTERNS):
+            return True, "transient"
 
         exc_name = exc.__class__.__name__
         if exc_name in {

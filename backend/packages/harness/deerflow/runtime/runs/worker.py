@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, cast
 
-from langgraph.checkpoint.base import empty_checkpoint
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
@@ -148,6 +149,7 @@ async def run_agent(
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
+    latest_command_room_ai_text = ""
 
     journal = None
 
@@ -216,6 +218,11 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        configurable = config.get("configurable")
+        if isinstance(configurable, dict) and isinstance(configurable.get("agent_name"), str) and configurable.get("agent_name", "").strip():
+            runtime_ctx.setdefault("agent_name", configurable["agent_name"])
+        if not runtime_ctx.get("agent_name"):
+            runtime_ctx["agent_name"] = record.assistant_id
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -246,7 +253,7 @@ async def run_agent(
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
-        config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
+        config["run_name"] = resolve_root_run_name(config, record.assistant_id)
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
@@ -311,6 +318,7 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and single_mode == "values" else latest_command_room_ai_text
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -330,6 +338,7 @@ async def run_agent(
                     continue
 
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and mode == "values" else latest_command_room_ai_text
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -359,6 +368,14 @@ async def run_agent(
             error_msg = error_msg or "LLM provider failed after retries"
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
+            if record.assistant_id == "command-room":
+                await _record_command_room_round_from_worker(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    user_message=_extract_first_human_text(graph_input),
+                    final_text=latest_command_room_ai_text,
+                    model_name=record.model_name,
+                )
             await run_manager.set_status(run_id, RunStatus.success)
 
     except asyncio.CancelledError:
@@ -412,13 +429,7 @@ async def run_agent(
         # Sync title from checkpoint to threads_meta.display_name
         if checkpointer is not None and thread_store is not None:
             try:
-                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
-                if ckpt_tuple is not None:
-                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
-                    if title:
-                        await thread_store.update_display_name(thread_id, title)
+                await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
@@ -437,6 +448,29 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str) -> None:
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+    if ckpt_tuple is None:
+        return
+    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+    channel_values = ckpt.get("channel_values", {})
+    title = channel_values.get("title")
+    if not title:
+        return
+    record = await thread_store.get(thread_id)
+    display_name = record.get("display_name") if record else None
+    if display_name:
+        if display_name != title:
+            checkpoint = dict(ckpt)
+            checkpoint["channel_values"] = {**channel_values, "title": display_name}
+            checkpoint["id"] = str(uuid6())
+            metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
+            await checkpointer.aput(ckpt_config, checkpoint, metadata, {})
+        return
+    await thread_store.update_display_name(thread_id, title)
 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -546,6 +580,77 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
+
+
+def _extract_latest_ai_text_from_values(value: Any, current: str) -> str:
+    if not isinstance(value, dict):
+        return current
+    messages = value.get("messages")
+    if not isinstance(messages, (list, tuple)):
+        return current
+
+    latest = current
+    for msg in messages:
+        text = ""
+        if isinstance(msg, AIMessage):
+            from deerflow.command_room.round_record import extract_text
+
+            text = extract_text(msg.content)
+        elif isinstance(msg, dict) and msg.get("type") == "ai":
+            from deerflow.command_room.round_record import extract_text
+
+            text = extract_text(msg.get("content"))
+        if text:
+            latest = text
+    return latest
+
+
+def _extract_first_human_text(graph_input: dict) -> str | None:
+    messages = graph_input.get("messages") if isinstance(graph_input, dict) else None
+    if not isinstance(messages, (list, tuple)):
+        return None
+
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            from deerflow.command_room.round_record import extract_text
+
+            return extract_text(msg.content)
+        if isinstance(msg, dict) and msg.get("type") in {"human", "user"}:
+            from deerflow.command_room.round_record import extract_text
+
+            return extract_text(msg.get("content"))
+    return None
+
+
+async def _record_command_room_round_from_worker(
+    *,
+    thread_id: str,
+    run_id: str,
+    user_message: str | None,
+    final_text: str | None,
+    model_name: str | None,
+) -> None:
+    try:
+        from deerflow.command_room.round_record import record_command_room_round
+
+        await asyncio.to_thread(
+            record_command_room_round,
+            thread_id=thread_id,
+            agent_name="command-room",
+            user_id=get_effective_user_id(),
+            final_text=final_text,
+            user_message=user_message,
+            run_id=run_id,
+            usage=None,
+            source="gateway",
+        )
+    except Exception:
+        logger.debug(
+            "Failed to record command-room RoundRecord for run %s model=%s",
+            run_id,
+            model_name,
+            exc_info=True,
+        )
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:

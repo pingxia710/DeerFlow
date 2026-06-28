@@ -10,10 +10,12 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
+from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.audit import record_subagent_handoff
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -173,6 +175,20 @@ def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     return None
 
 
+def _resolve_inheritable_parent_model(parent_model: str | None, app_config: "AppConfig | None") -> str | None:
+    if parent_model is None or app_config is None:
+        return parent_model
+
+    get_model_config = getattr(app_config, "get_model_config", None)
+    if not callable(get_model_config):
+        return parent_model
+
+    model_config = get_model_config(parent_model)
+    if model_config is not None and not model_config.subagents_inherit:
+        return None
+    return parent_model
+
+
 def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
     """Return the effective subagent skill allowlist under the parent policy."""
     if parent is None:
@@ -299,12 +315,16 @@ async def task_tool(
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
 
-    # Inherit parent agent's tool_groups so subagents respect the same restrictions
-    parent_tool_groups = metadata.get("tool_groups")
+    # Inherit delegated tool_groups when provided. Coordinator-only agents can
+    # restrict their own direct tools while still releasing sub-AIs to the
+    # normal configured tools.
+    parent_tool_groups = metadata.get("subagent_tool_groups") if "subagent_tool_groups" in metadata else metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
-    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
+    inheritable_parent_model = _resolve_inheritable_parent_model(parent_model, resolved_app_config)
+    if config.model == "inherit" and inheritable_parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
-    effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+        inheritable_parent_model = _resolve_inheritable_parent_model(parent_model, resolved_app_config)
+    effective_model = resolve_subagent_model_name(config, inheritable_parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
     available_tools_kwargs = {
@@ -320,7 +340,7 @@ async def task_tool(
     executor_kwargs = {
         "config": config,
         "tools": tools,
-        "parent_model": parent_model,
+        "parent_model": inheritable_parent_model,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "thread_id": thread_id,
@@ -338,6 +358,17 @@ async def task_tool(
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
     task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    record_subagent_handoff(
+        thread_id=thread_id,
+        run_id=run_id,
+        task_id=task_id,
+        trace_id=trace_id,
+        user_id=user_id,
+        subagent_type=subagent_type,
+        description=description,
+        prompt=prompt,
+        status="started",
+    )
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -391,28 +422,88 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage})
+                action_result = task_action_result_from_terminal_event(task_id=task_id, status="completed", description=description, result=result.result)
+                record_subagent_handoff(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status="completed",
+                    result=result.result,
+                    usage=usage,
+                    action_result=task_action_result_event(action_result)["action_result"],
+                )
+                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 return f"Task Succeeded. Result: {result.result}"
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage})
+                action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error)
+                record_subagent_handoff(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status="failed",
+                    error=result.error,
+                    usage=usage,
+                    action_result=task_action_result_event(action_result)["action_result"],
+                )
+                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage})
+                action_result = task_action_result_from_terminal_event(task_id=task_id, status="blocked", description=description, error=result.error)
+                record_subagent_handoff(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status="cancelled",
+                    error=result.error,
+                    usage=usage,
+                    action_result=task_action_result_event(action_result)["action_result"],
+                )
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage})
+                action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error)
+                record_subagent_handoff(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status="timed_out",
+                    error=result.error,
+                    usage=usage,
+                    action_result=task_action_result_event(action_result)["action_result"],
+                )
+                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task timed out. Error: {result.error}"
@@ -430,6 +521,19 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                record_subagent_handoff(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    user_id=user_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status="polling_timed_out",
+                    error=f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}",
+                    usage=usage,
+                )
                 writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from

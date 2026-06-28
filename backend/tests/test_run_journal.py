@@ -4,10 +4,12 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import json
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
@@ -151,6 +153,30 @@ class TestLlmCallbacks:
         j, store = journal_setup
         j.on_llm_end(_make_llm_response("No usage", usage=None), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         await j.flush()
+
+    @pytest.mark.anyio
+    async def test_chat_model_start_records_context_size_without_raw_content(self, journal_setup):
+        j, store = journal_setup
+        j.on_chat_model_start(
+            {},
+            [[SystemMessage(content="system text"), HumanMessage(content="user secret text")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+            invocation_params={"tools": [{"type": "function", "function": {"name": "read_file"}}]},
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["llm.context"])
+
+        assert len(events) == 1
+        snapshot = events[0]["content"]
+        assert snapshot["caller"] == "lead_agent"
+        assert snapshot["message_count"] == 2
+        assert snapshot["tool_schema_count"] == 1
+        assert snapshot["char_count"] > 0
+        assert snapshot["estimated_tokens"] > 0
+        assert snapshot["role_counts"] == {"system": 1, "human": 1}
+        assert "user secret text" not in json.dumps(snapshot)
 
     @pytest.mark.anyio
     async def test_latency_tracking(self, journal_setup):

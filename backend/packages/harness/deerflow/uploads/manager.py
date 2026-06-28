@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.image_ocr import is_ocr_sidecar, ocr_sidecar_path
 
 
 class PathTraversalError(ValueError):
@@ -236,6 +237,8 @@ def list_files_in_dir(directory: Path) -> dict:
         for entry in sorted(entries, key=lambda e: e.name):
             if not entry.is_file(follow_symlinks=False):
                 continue
+            if is_ocr_sidecar(Path(entry.name)):
+                continue
             st = entry.stat(follow_symlinks=False)
             files.append(
                 {
@@ -279,6 +282,7 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     # Clean up companion markdown generated during upload conversion.
     if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
         file_path.with_suffix(".md").unlink(missing_ok=True)
+    ocr_sidecar_path(file_path).unlink(missing_ok=True)
 
     return {"success": True, "message": f"Deleted {filename}"}
 

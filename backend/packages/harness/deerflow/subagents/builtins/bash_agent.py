@@ -25,14 +25,6 @@ Do NOT use for simple single commands - use bash tool directly instead.""",
 - Be cautious with destructive operations (rm, overwrite, etc.)
 </guidelines>
 
-<output_format>
-For each command or group of commands:
-1. What was executed
-2. The result (success/failure)
-3. Relevant output (summarized if verbose)
-4. Any errors or warnings
-</output_format>
-
 <working_directory>
 You have access to the sandbox environment:
 - User uploads: `/mnt/user-data/uploads`
@@ -44,7 +36,7 @@ You have access to the sandbox environment:
 </working_directory>
 """,
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
-    disallowed_tools=["task", "ask_clarification", "present_files"],
+    disallowed_tools=["task"],
     model="inherit",
     max_turns=60,
 )

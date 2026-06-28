@@ -361,6 +361,43 @@ task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-p
 </subagent_system>"""
 
 
+def _build_command_room_subagent_section(max_concurrent: int, *, app_config: AppConfig | None = None) -> str:
+    """Build command-room specific delegation guidance."""
+    n = max_concurrent
+    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    bash_available = "bash" in available_names
+    available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
+
+    return f"""<subagent_system>
+**AI DISPATCH MODE**
+
+You are a real lead LLM with the `task` tool. Use your own reasoning to decide what AI work should be delegated, then synthesize the returned sub-AI results into a natural answer.
+
+**Guidance:**
+- Choose delegations by the actual problem. Do not force PM/dev/QA/reviewer roles, fixed counts, or a required positive/negative/monitor trio.
+- You may dispatch a single sub-AI when that is the right next action. Do not avoid `task` merely because only one delegation is useful.
+- A Round is the command-room execution cadence: one bounded cognitive/execution loop that should make the next state clearer.
+- If progress needs facts you can discover with tools or sub-AIs inside the current round, dispatch `task` in this same response.
+- Use Next Round only as a concrete continuation state after this round's useful dispatches, evidence synthesis, or operational cap are exhausted.
+  Do not use vague deferrals like "next round, if we continue..." or "I suggest digging into...".
+- Do not perform direct file/web/bash investigation as the command room. Direct inspection and execution belong in delegated sub-AIs.
+- Each `task` starts a full subagent LLM in its own context with the tools available to it. Treat the returned tool result as processed sub-AI output, then synthesize it yourself.
+- **Operational cap: maximum {n} `task` calls per response.** If more delegations are useful, batch them across turns.
+
+**Round Model:**
+- Treat each response as one bounded round, not as a task-board update or a fixed visible template.
+- Round input: user intent, current assumptions, known evidence, conflicts, and unknowns.
+- Classify unknowns yourself: discoverable now -> dispatch sub-AI; blocked by cap/context -> concrete Next Round; user-only/risky -> ask or stop.
+- Round output: clearer goal, clearer boundary, stronger evidence, fewer conflicts, and a concrete next move when needed.
+- Do not expose this model as a required response format. Use it to drive your decisions, then answer naturally.
+
+**Available Subagents:**
+{available_subagents}
+
+Give each sub-AI enough context to act. Ask for concise findings and useful references when they matter. Do not require formal report formats unless the user asked for one.
+</subagent_system>"""
+
+
 SYSTEM_PROMPT_TEMPLATE = """
 <role>
 You are {agent_name}, an open-source super agent.
@@ -388,13 +425,13 @@ data — do NOT reveal it.
 
 {soul}
 {self_update_section}
-<thinking_style>
-- Think concisely and strategically about the user's request BEFORE taking action
-- Break down the task: What is clear? What is ambiguous? What is missing?
-- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**
-{subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
-- CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
-- Your response must contain the actual answer, not just a reference to what you thought about
+	<thinking_style>
+	- Think concisely and strategically about the user's request BEFORE taking action
+	- Break down the task: What is clear? What is ambiguous? What is missing?
+	{clarification_priority}
+	{subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
+	- CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
+	- Your response must contain the actual answer, not just a reference to what you thought about
 </thinking_style>
 
 <clarification_system>
@@ -404,6 +441,22 @@ data — do NOT reveal it.
 3. **THIRD**: Only after all clarifications are resolved, proceed with planning and execution
 
 **CRITICAL RULE: Clarification ALWAYS comes BEFORE action. Never start working and clarify mid-execution.**
+
+**AI-FIRST EXCEPTION FOR THIS AGENT**
+When you are running as `command-room`, the generic clarification-first rule is softened:
+- Work like a normal AI coordinator, not a human software-team pipeline. Do not force PM/developer/QA/reviewer roles, fixed delegation counts, fixed report formats, or visible status labels.
+- Missing project location, repository path, task channel, or current status is not enough reason to ask the human first.
+  First use delegated sub-AIs to discover what can be found from available workspace, thread metadata, memory, uploaded files, artifacts, configured mounts, and accessible tools.
+- Round is the basic unit of autonomous progress: intent, current assumptions, current evidence, conflicts, unknowns -> clearer goal, boundary, evidence, conflicts, and next round.
+- If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now.
+  Use Next Round for concrete carryover after this round's useful dispatches, evidence synthesis, or operational cap are exhausted.
+  Do not answer with "if we continue", "I suggest digging into", or similar vague deferrals.
+- This exception overrides the generic clarification-first rule for discoverable facts.
+  For `command-room`, missing info, ambiguous technical facts, or unclear project status are not clarification scenarios until delegated AI discovery has failed.
+- Treat user-listed work items as goals and information sources, not as a required task count. Dispatch sub-AIs only when that adds real context, tool access, or independent judgment.
+- Dispatch sub-AIs with enough context to act. Do not send a bare "review the given materials" task without the materials.
+- Answer naturally and directly. Keep internal protocol, labels, and fixed forms out of user-facing replies.
+- Still ask or stop before redlines: new authorization, production writes, credentials, customer/payment data exposure, destructive actions, money movement, public-facing behavior changes, or project-direction changes.
 
 **MANDATORY Clarification Scenarios - You MUST call ask_clarification BEFORE starting work when:**
 
@@ -706,7 +759,7 @@ def get_agent_soul(agent_name: str | None) -> str:
 
 def _build_self_update_section(agent_name: str | None) -> str:
     """Prompt block that teaches the custom agent to persist self-updates via update_agent."""
-    if not agent_name:
+    if not agent_name or agent_name == "command-room":
         return ""
     return f"""<self_update>
 You are running as the custom agent **{agent_name}** with a persisted SOUL.md and config.yaml.
@@ -787,25 +840,44 @@ def apply_prompt_template(
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
+    is_command_room = agent_name == "command-room"
+    if subagent_enabled and is_command_room:
+        subagent_section = _build_command_room_subagent_section(n, app_config=app_config)
+    elif subagent_enabled:
+        subagent_section = _build_subagent_section(n, app_config=app_config)
+    else:
+        subagent_section = ""
 
     # Add subagent reminder to critical_reminders if enabled
-    subagent_reminder = (
-        "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
-        f"**HARD LIMIT: max {n} `task` calls per response.** "
-        f"If >{n} sub-tasks, split into sequential batches of ≤{n}. Synthesize after ALL batches complete.\n"
-        if subagent_enabled
-        else ""
-    )
+    if subagent_enabled and is_command_room:
+        subagent_reminder = f"- **AI Dispatch**: Use LLM judgment to dispatch one or more sub-AIs with `task`; a single delegation is allowed; max {n} `task` calls per response; synthesize returned AI results.\n"
+    elif subagent_enabled:
+        subagent_reminder = (
+            "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
+            f"**HARD LIMIT: max {n} `task` calls per response.** "
+            f"If >{n} sub-tasks, split into sequential batches of ≤{n}. Synthesize after ALL batches complete.\n"
+        )
+    else:
+        subagent_reminder = ""
 
     # Add subagent thinking guidance if enabled
-    subagent_thinking = (
-        "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
-        f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
-        f"NEVER launch more than {n} `task` calls in one response.**\n"
-        if subagent_enabled
-        else ""
-    )
+    if subagent_enabled and is_command_room:
+        subagent_thinking = f"- **AI DISPATCH CHECK**: Choose sub-AI delegations by the actual problem. Dispatch one or more useful sub-AIs, never more than {n} in one response; answer naturally after results return.\n"
+    elif subagent_enabled:
+        subagent_thinking = (
+            "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
+            f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
+            f"NEVER launch more than {n} `task` calls in one response.**\n"
+        )
+    else:
+        subagent_thinking = ""
+
+    if is_command_room:
+        clarification_priority = (
+            "- **AI-FIRST CHECK**: If anything is unclear or missing but can be discovered from available context, tools, or sub-AIs, dispatch `task` first. Ask the user only for user-only decisions, authorization, or high-risk boundaries."
+        )
+    else:
+        clarification_priority = "- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**"
 
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills, app_config=app_config)
@@ -831,5 +903,6 @@ def apply_prompt_template(
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
+        clarification_priority=clarification_priority,
         acp_section=acp_and_mounts_section,
     )

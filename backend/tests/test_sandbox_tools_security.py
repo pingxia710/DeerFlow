@@ -18,6 +18,7 @@ from deerflow.sandbox.tools import (
     _reject_path_traversal,
     _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
+    _resolve_local_read_path,
     _resolve_skills_path,
     bash_tool,
     mask_local_paths_in_output,
@@ -897,6 +898,12 @@ def test_validate_local_tool_path_allows_custom_mount_read() -> None:
     with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
         validate_local_tool_path("/mnt/code-read/src/main.py", _THREAD_DATA, read_only=True)
         validate_local_tool_path("/mnt/data/file.txt", _THREAD_DATA, read_only=True)
+
+
+def test_resolve_local_read_path_leaves_custom_mount_for_sandbox_resolution() -> None:
+    """glob / grep share this helper and must not remap custom mounts as user-data."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        assert _resolve_local_read_path("/mnt/code-read/src", _THREAD_DATA) == "/mnt/code-read/src"
 
 
 def test_validate_local_tool_path_blocks_read_only_mount_write() -> None:

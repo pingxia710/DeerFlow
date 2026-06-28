@@ -394,6 +394,8 @@ def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
         return _resolve_skills_path(path)
     if _is_acp_workspace_path(path):
         return _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+    if _is_custom_mount_path(path):
+        return path
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 

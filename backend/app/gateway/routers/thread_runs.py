@@ -133,6 +133,27 @@ class ThreadTokenUsageResponse(BaseModel):
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
 
 
+class ThreadContextUsageSnapshot(BaseModel):
+    run_id: str
+    caller: str = "lead_agent"
+    llm_call_index: int = 0
+    message_count: int = 0
+    tool_schema_count: int = 0
+    char_count: int = 0
+    estimated_tokens: int = 0
+    role_counts: dict[str, int] = Field(default_factory=dict)
+    seq: int = 0
+    created_at: str = ""
+
+
+class ThreadContextUsageResponse(BaseModel):
+    thread_id: str
+    latest: ThreadContextUsageSnapshot | None = None
+    latest_lead: ThreadContextUsageSnapshot | None = None
+    by_caller: dict[str, ThreadContextUsageSnapshot] = Field(default_factory=dict)
+    recent: list[ThreadContextUsageSnapshot] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -218,6 +239,33 @@ def _is_visible_human_message(message: Any) -> bool:
 
 def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
+
+
+def _context_usage_snapshot_from_event(event: dict[str, Any]) -> ThreadContextUsageSnapshot | None:
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+
+    role_counts = content.get("role_counts")
+    if not isinstance(role_counts, dict):
+        role_counts = {}
+
+    def _int_value(key: str) -> int:
+        value = content.get(key)
+        return value if isinstance(value, int) else 0
+
+    return ThreadContextUsageSnapshot(
+        run_id=str(event.get("run_id") or content.get("run_id") or ""),
+        caller=str(content.get("caller") or event.get("metadata", {}).get("caller") or "lead_agent"),
+        llm_call_index=_int_value("llm_call_index"),
+        message_count=_int_value("message_count"),
+        tool_schema_count=_int_value("tool_schema_count"),
+        char_count=_int_value("char_count"),
+        estimated_tokens=_int_value("estimated_tokens"),
+        role_counts={str(k): int(v) for k, v in role_counts.items() if isinstance(v, int)},
+        seq=event.get("seq") if isinstance(event.get("seq"), int) else 0,
+        created_at=str(event.get("created_at") or ""),
+    )
 
 
 def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -750,3 +798,42 @@ async def thread_token_usage(
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, **agg)
+
+
+@router.get("/{thread_id}/context-usage", response_model=ThreadContextUsageResponse)
+@require_permission("threads", "read", owner_check=True)
+async def thread_context_usage(
+    thread_id: str,
+    request: Request,
+    run_limit: int = Query(default=20, ge=1, le=50, description="Recent runs to scan for context snapshots"),
+    limit: int = Query(default=20, ge=1, le=50, description="Recent context snapshots to return"),
+) -> ThreadContextUsageResponse:
+    """Latest model-input context estimates for a thread."""
+    run_store = get_run_store(request)
+    event_store = get_run_event_store(request)
+    runs = await run_store.list_by_thread(thread_id, limit=run_limit)
+
+    snapshots: list[ThreadContextUsageSnapshot] = []
+    for run in runs:
+        run_id = run.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        events = await event_store.list_events(thread_id, run_id, event_types=["llm.context"], limit=200)
+        for event in events:
+            snapshot = _context_usage_snapshot_from_event(event)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+
+    snapshots.sort(key=lambda item: (item.created_at, item.seq), reverse=True)
+    recent = snapshots[:limit]
+    by_caller: dict[str, ThreadContextUsageSnapshot] = {}
+    for snapshot in snapshots:
+        by_caller.setdefault(snapshot.caller, snapshot)
+
+    return ThreadContextUsageResponse(
+        thread_id=thread_id,
+        latest=recent[0] if recent else None,
+        latest_lead=by_caller.get("lead_agent"),
+        by_caller=by_caller,
+        recent=recent,
+    )

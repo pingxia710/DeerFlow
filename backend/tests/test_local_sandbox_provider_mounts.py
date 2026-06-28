@@ -540,6 +540,18 @@ class TestMultipleMounts:
         assert "/mnt/data/file.txt" in masked
         assert str(mount_dir) not in masked
 
+    def test_reverse_resolve_paths_in_output_skips_root_mount(self):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/host", local_path="/"),
+            ],
+        )
+
+        output = "Use /mnt/global/Documents/Obsidian Vault instead"
+
+        assert sandbox._reverse_resolve_paths_in_output(output) == output
+
 
 class TestLocalSandboxProviderMounts:
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):

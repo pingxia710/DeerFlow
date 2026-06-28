@@ -16,6 +16,7 @@ from deerflow.runtime.runs.worker import (
     _extract_llm_error_fallback_message,
     _install_runtime_context,
     _rollback_to_pre_run_checkpoint,
+    _sync_checkpoint_title_to_thread_store,
     _try_extract_from_message,
     run_agent,
 )
@@ -62,6 +63,47 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["thread_id"] == "caller-thread"
     assert config["context"]["run_id"] == "run-1"
     assert config["context"]["app_config"] is app_config
+
+
+@pytest.mark.anyio
+async def test_sync_checkpoint_title_fills_empty_display_name():
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={"channel_values": {"title": "Auto Title"}})),
+        aput=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(
+        get=AsyncMock(return_value={"thread_id": "thread-1", "display_name": None}),
+        update_display_name=AsyncMock(),
+    )
+
+    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1")
+
+    thread_store.update_display_name.assert_awaited_once_with("thread-1", "Auto Title")
+    checkpointer.aput.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_sync_checkpoint_title_does_not_overwrite_existing_display_name():
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(
+            return_value=SimpleNamespace(
+                checkpoint={"channel_values": {"title": "Auto Title"}},
+                metadata={"created_at": "now"},
+            )
+        ),
+        aput=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(
+        get=AsyncMock(return_value={"thread_id": "thread-1", "display_name": "Manual Title"}),
+        update_display_name=AsyncMock(),
+    )
+
+    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1")
+
+    thread_store.update_display_name.assert_not_awaited()
+    checkpointer.aput.assert_awaited_once()
+    written_checkpoint = checkpointer.aput.await_args.args[1]
+    assert written_checkpoint["channel_values"]["title"] == "Manual Title"
 
 
 @pytest.mark.anyio

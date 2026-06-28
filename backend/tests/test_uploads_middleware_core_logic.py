@@ -245,6 +245,21 @@ class TestBeforeAgent:
         assert "report.pdf" in updated_msg.content
         assert "please analyse" in updated_msg.content
 
+    def test_injects_ocr_sidecar_text_for_uploaded_image(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "screenshot.png").write_bytes(b"png")
+        (uploads_dir / "screenshot.png.ocr.txt").write_text("一轮没有完成\n37 passed", encoding="utf-8")
+
+        msg = _human("check image", files=[{"filename": "screenshot.png", "size": 3, "path": "/mnt/user-data/uploads/screenshot.png"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "OCR text:" in content
+        assert "一轮没有完成" in content
+        assert "screenshot.png.ocr.txt" not in content
+
     def test_injects_uploaded_files_tag_into_list_content(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)

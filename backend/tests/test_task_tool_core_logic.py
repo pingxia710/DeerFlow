@@ -290,6 +290,58 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False)
 
 
+def test_task_tool_prefers_subagent_tool_groups_metadata(monkeypatch):
+    """Coordinator-only agents can restrict direct tools without starving worker lanes."""
+    config = _make_subagent_config()
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {"workspace_path": "/tmp/workspace"},
+        },
+        context={"thread_id": "thread-1"},
+        config={
+            "metadata": {
+                "model_name": "ark-model",
+                "trace_id": "trace-1",
+                "tool_groups": [],
+                "subagent_tool_groups": None,
+            }
+        },
+    )
+    events = []
+    get_available_tools = MagicMock(return_value=["tool-a"])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行任务",
+        prompt="worker needs full tools",
+        subagent_type="fact-finder",
+        tool_call_id="tc-subagent-groups",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
+
+
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
     """Subagent model overrides should drive model-gated tool loading."""
     config = SubagentConfig(
@@ -337,6 +389,58 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
         model_name="vision-subagent-model",
         groups=None,
         subagent_enabled=False,
+    )
+
+
+def test_task_tool_does_not_inherit_lead_only_parent_model(monkeypatch):
+    """Lead-only models should not leak into subagents that inherit the parent."""
+    config = _make_subagent_config()
+    app_config = SimpleNamespace(
+        models=[SimpleNamespace(name="default-model")],
+        get_model_config=lambda name: SimpleNamespace(subagents_inherit=name != "deepseek-command-room"),
+        token_usage=SimpleNamespace(enabled=False),
+    )
+    runtime = _make_runtime(app_config=app_config)
+    runtime.config["metadata"]["model_name"] = "deepseek-command-room"
+    events = []
+    captured = {}
+    get_available_tools = MagicMock(return_value=[])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["parent_model"] = kwargs["parent_model"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="check something",
+        prompt="do the work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-lead-only-model",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["parent_model"] is None
+    get_available_tools.assert_called_once_with(
+        model_name="default-model",
+        groups=None,
+        subagent_enabled=False,
+        app_config=app_config,
     )
 
 

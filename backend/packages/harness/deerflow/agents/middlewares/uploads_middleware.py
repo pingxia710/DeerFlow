@@ -13,12 +13,14 @@ from langgraph.runtime import Runtime
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_conversion import extract_outline
+from deerflow.utils.image_ocr import is_ocr_sidecar, ocr_sidecar_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
 
 
 _OUTLINE_PREVIEW_LINES = 5
+_OCR_PREVIEW_CHARS = 12000
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -59,6 +61,18 @@ def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     return [], preview
 
 
+def _extract_ocr_text_for_file(file_path: Path) -> str | None:
+    sidecar = ocr_sidecar_path(file_path)
+    if not sidecar.is_file():
+        return None
+    try:
+        text = sidecar.read_text(encoding="utf-8").strip()
+    except Exception:
+        logger.debug("Failed to read OCR sidecar for %s", file_path.name, exc_info=True)
+        return None
+    return text[:_OCR_PREVIEW_CHARS].strip() or None
+
+
 class UploadsMiddlewareState(AgentState):
     """State schema for uploads middleware."""
 
@@ -90,6 +104,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {file['filename']} ({size_str})")
         lines.append(f"  Path: {file['path']}")
+        ocr_text = file.get("ocr_text")
+        if ocr_text:
+            lines.append("  OCR text:")
+            for line in str(ocr_text).splitlines():
+                lines.append(f"    > {line}")
         outline = file.get("outline") or []
         if outline:
             truncated = outline[-1].get("truncated", False)
@@ -176,14 +195,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
-            files.append(
-                {
-                    "filename": filename,
-                    "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                }
-            )
+            entry = {
+                "filename": filename,
+                "size": int(f.get("size") or 0),
+                "path": f"/mnt/user-data/uploads/{filename}",
+                "extension": Path(filename).suffix,
+            }
+            phys_path = uploads_dir / filename if uploads_dir is not None else None
+            ocr_text = _extract_ocr_text_for_file(phys_path) if phys_path is not None else None
+            if ocr_text:
+                entry["ocr_text"] = ocr_text
+            files.append(entry)
         return files if files else None
 
     @override
@@ -235,18 +257,22 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if uploads_dir and uploads_dir.exists():
             for file_path in sorted(uploads_dir.iterdir()):
                 if file_path.is_file() and file_path.name not in new_filenames:
+                    if is_ocr_sidecar(file_path):
+                        continue
                     stat = file_path.stat()
                     outline, preview = _extract_outline_for_file(file_path)
-                    historical_files.append(
-                        {
-                            "filename": file_path.name,
-                            "size": stat.st_size,
-                            "path": f"/mnt/user-data/uploads/{file_path.name}",
-                            "extension": file_path.suffix,
-                            "outline": outline,
-                            "outline_preview": preview,
-                        }
-                    )
+                    file_info = {
+                        "filename": file_path.name,
+                        "size": stat.st_size,
+                        "path": f"/mnt/user-data/uploads/{file_path.name}",
+                        "extension": file_path.suffix,
+                        "outline": outline,
+                        "outline_preview": preview,
+                    }
+                    ocr_text = _extract_ocr_text_for_file(file_path)
+                    if ocr_text:
+                        file_info["ocr_text"] = ocr_text
+                    historical_files.append(file_info)
 
         # Attach outlines to new files as well
         if uploads_dir:
@@ -255,6 +281,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 outline, preview = _extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview
+                ocr_text = _extract_ocr_text_for_file(phys_path)
+                if ocr_text:
+                    file["ocr_text"] = ocr_text
 
         if not new_files and not historical_files:
             return None

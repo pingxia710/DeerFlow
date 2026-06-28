@@ -18,6 +18,7 @@ Key design decisions:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -108,6 +109,71 @@ class RunJournal(BaseCallbackHandler):
         """Extract displayable text from a message's mixed content shape."""
         return message_to_text(message, text_attribute_fallback=True)
 
+    @staticmethod
+    def _char_based_token_estimate(text: str) -> int:
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u30ff" or "\uac00" <= ch <= "\ud7a3")
+        return (len(text) - cjk) // 4 + cjk // 2
+
+    @staticmethod
+    def _message_role(message: BaseMessage) -> str:
+        role = getattr(message, "type", None)
+        return str(role or type(message).__name__)
+
+    def _message_context_payload(self, message: BaseMessage) -> str:
+        """Compact, non-persisted payload used only for context-size estimates."""
+        payload: dict[str, Any] = {
+            "type": self._message_role(message),
+            "content": getattr(message, "content", ""),
+        }
+        name = getattr(message, "name", None)
+        if name:
+            payload["name"] = name
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            payload["tool_calls"] = tool_calls
+        return json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _tool_schema_payload(kwargs: dict[str, Any]) -> str:
+        invocation_params = kwargs.get("invocation_params")
+        if not isinstance(invocation_params, Mapping):
+            return ""
+        tools = invocation_params.get("tools")
+        if not tools:
+            return ""
+        return json.dumps({"tools": tools}, default=str, ensure_ascii=False, separators=(",", ":"))
+
+    def _context_snapshot(
+        self,
+        batch: list[BaseMessage],
+        *,
+        caller: str,
+        llm_run_id: str,
+        tool_schema_payload: str = "",
+    ) -> dict[str, Any]:
+        role_counts: dict[str, int] = {}
+        char_count = 0
+        estimated_tokens = 0
+        for message in batch:
+            role = self._message_role(message)
+            role_counts[role] = role_counts.get(role, 0) + 1
+            payload = self._message_context_payload(message)
+            char_count += len(payload)
+            estimated_tokens += self._char_based_token_estimate(payload)
+        if tool_schema_payload:
+            char_count += len(tool_schema_payload)
+            estimated_tokens += self._char_based_token_estimate(tool_schema_payload)
+        return {
+            "caller": caller,
+            "llm_call_index": self._llm_call_index,
+            "llm_run_id": llm_run_id,
+            "message_count": len(batch),
+            "tool_schema_count": 1 if tool_schema_payload else 0,
+            "char_count": char_count,
+            "estimated_tokens": estimated_tokens,
+            "role_counts": role_counts,
+        }
+
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
         self._msg_count += 1
@@ -197,12 +263,26 @@ class RunJournal(BaseCallbackHandler):
             [len(batch) for batch in messages],
         )
 
+        caller = self._identify_caller(tags)
+        tool_schema_payload = self._tool_schema_payload(kwargs)
+        for batch in messages:
+            self._put(
+                event_type="llm.context",
+                category="trace",
+                content=self._context_snapshot(
+                    batch,
+                    caller=caller,
+                    llm_run_id=rid,
+                    tool_schema_payload=tool_schema_payload,
+                ),
+                metadata={"caller": caller, "llm_call_index": self._llm_call_index},
+            )
+
         # Capture the first human message sent to any LLM in this run.
         if not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
-                        caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",
@@ -214,6 +294,7 @@ class RunJournal(BaseCallbackHandler):
                         break
                 if self._first_human_msg:
                     break
+        self._flush_sync()
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
         # Fallback: on_chat_model_start is preferred. This just tracks latency.

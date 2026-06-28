@@ -63,6 +63,26 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     sandbox.update_file.assert_not_called()
 
 
+def test_upload_files_writes_ocr_sidecar_for_images(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "extract_image_text", return_value="图片文字"),
+    ):
+        file = UploadFile(filename="screenshot.png", file=BytesIO(b"png"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    assert result.files[0].ocr_file == "screenshot.png.ocr.txt"
+    assert (thread_uploads_dir / "screenshot.png.ocr.txt").read_text(encoding="utf-8") == "图片文字"
+
+
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

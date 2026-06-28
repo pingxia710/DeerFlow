@@ -19,7 +19,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 | Command          | Purpose                                           |
 | ---------------- | ------------------------------------------------- |
-| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
+| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000 by default; root `make dev` may set `PORT` when 3000 is busy) |
 | `pnpm build`     | Production build                                  |
 | `pnpm check`     | Lint + type check (run before committing)         |
 | `pnpm lint`      | ESLint only                                       |
@@ -98,6 +98,11 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
+
+Root local startup supports `DEER_FLOW_FRONTEND_PORT` when port `3000` is not
+available. If it is unset and `3000` is occupied by a non-DeerFlow process,
+`scripts/serve.sh` chooses a free `6001+` port and renders the local nginx
+proxy config to the same port.
 
 ## Resources
 

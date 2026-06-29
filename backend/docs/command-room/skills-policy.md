@@ -1,6 +1,6 @@
 # Command Room Skills Policy
 
-Purpose: keep DeerFlow/Command Room skills small, failure-driven, and measurable. WorkOS principle: fewer skills, promoted only when repeated failures prove the need; eval/probe results decide keep/change/delete.
+Purpose: keep DeerFlow/Command Room skills few, narrow, failure-driven, trigger-routed, evidence-aware, probe-backed, and deletable. WorkOS principle: fewer skills, promoted only when repeated failures prove the need; eval/probe results decide keep/change/delete. Skillopt-style probes are behavior-regression evals, not runtime, task ledgers, adjudicators, or gates.
 
 ## Readiness/evidence/risk signal ownership
 
@@ -19,7 +19,7 @@ Purpose: keep DeerFlow/Command Room skills small, failure-driven, and measurable
 
 Accept a skill only when it is:
 
-- A repeated operational pattern that has failed or regressed at least twice.
+- A repeated operational pattern that has failed or regressed at least twice; without repeated failure samples, do not promote it to an active skill.
 - Narrow enough to be invoked by a clear trigger.
 - Backed by observable outputs, state transitions, or evidence links.
 - Testable by probes/evals without relying on agent self-proof.
@@ -33,7 +33,9 @@ Do not accept:
 - Hidden policy, credentials, production config, or environment-specific secrets.
 - Claims that only the worker can self-certify.
 - Automatic quality gates that make the Round/program layer judge success, trigger rework, or require subagents/review subagents to prove completion.
-- Content that belongs in architecture docs, runbooks, or product decisions.
+- Content that belongs in architecture docs, runbooks, API references, README material, or project encyclopedias.
+- A mechanical conversion of docs into skills without a narrow trigger, repeated failure evidence, and probes.
+- Fixed roles, SOPs, dashboards, reviewers, or gates; a skill is a pitfall-avoidance card, not a workflow system.
 
 ## Minimal structure
 
@@ -47,11 +49,12 @@ Each skill must contain:
 - `evidence`: required proof source; prefer logs, tests, state machine events, commits.
 - `probes`: eval cases that must pass.
 - `owner`: human reviewer or owning team.
-- `status`: `candidate`, `active`, `deprecated`, or `merged`.
+- `status`: `candidate`, `draft`, `active`, `deprecated`, or `merged`.
+- `review_after` or `expiry`: when the skill must be rechecked, renewed, merged, or deleted.
 
 ## Lifecycle rules
 
-- Candidate skills may be drafted automatically, but promotion to formal skill requires human confirmation.
+- Candidate/draft is the default state. Promotion to active skill requires human confirmation plus passing probe/eval evidence.
 - Architecture decisions embedded in a skill require human confirmation before use as policy.
 - Delete/merge/deprecate decisions require human confirmation.
 - Keep the catalog small: merge overlapping skills before adding new ones.
@@ -67,6 +70,17 @@ Each skill must contain:
 - State machine transitions and evidence chains are preferred over natural-language assertions.
 - A failed probe opens one of three actions: fix skill, merge/delete skill, or mark product/runtime gap.
 - New probes should be minimal and deterministic enough to run in CI or local review.
+
+## SkillOpt probe checklist
+
+Use SkillOpt-style probes as minimal behavior-drift evals for skill policy. They are not runtime, task ledgers, adjudicators, or gates. At minimum, active-skill probes should catch regressions where:
+
+- Worker self-claim is treated as evidence.
+- A bare "tests passed" summary is treated as hard evidence.
+- Opposition or evidence-checker appears by default instead of on demand.
+- A skill becomes a fixed process, role, reviewer, dashboard, or gate.
+- Obsidian/progress memory is used as the runtime task ledger.
+- Production, credentials/secrets, customer data, or scope expansion proceeds without stopping to ask.
 
 ## Evidence standard
 

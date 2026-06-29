@@ -1673,6 +1673,9 @@ export function useThreadStream({
     ) {
       return;
     }
+    if (!next) {
+      return;
+    }
     queuedMessagesRef.current = queuedMessagesRef.current.slice(1);
     void sendMessage(
       next.threadId,

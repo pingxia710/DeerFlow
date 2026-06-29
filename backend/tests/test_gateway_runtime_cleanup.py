@@ -58,6 +58,14 @@ def test_local_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
     assert "--reload-exclude='.deer-flow/'" not in serve_sh
 
 
+def test_local_dev_gateway_reload_has_bounded_graceful_shutdown():
+    serve_sh = _read("scripts/serve.sh")
+    backend_makefile = _read("backend/Makefile")
+
+    assert "--reload --timeout-graceful-shutdown 5" in serve_sh
+    assert "--reload --timeout-graceful-shutdown 5" in backend_makefile
+
+
 def test_backend_container_only_exposes_gateway_port():
     dockerfile = _read("backend/Dockerfile")
 

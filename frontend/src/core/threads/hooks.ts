@@ -22,7 +22,10 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { clearReconnectRun, getAPIClient } from "../api";
-import { fetch } from "../api/fetcher";
+import {
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  fetch,
+} from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
@@ -81,6 +84,14 @@ type QueuedThreadMessage = {
 type ThreadActivitySnapshot = {
   running: ReadonlySet<string>;
   finished: ReadonlySet<string>;
+};
+
+type QueuedMessageReleaseState = {
+  isLoading: boolean;
+  streamFinished: boolean;
+  sendInFlight: boolean;
+  queuedThreadId?: string | null;
+  currentViewThreadId?: string | null;
 };
 
 const threadActivityListeners = new Set<() => void>();
@@ -144,6 +155,22 @@ export function clearThreadFinishedActivity(threadId: string) {
     ),
   };
   emitThreadActivity();
+}
+
+export function shouldReleaseQueuedThreadMessage({
+  isLoading,
+  streamFinished,
+  sendInFlight,
+  queuedThreadId,
+  currentViewThreadId,
+}: QueuedMessageReleaseState) {
+  return (
+    !isLoading &&
+    streamFinished &&
+    !sendInFlight &&
+    Boolean(queuedThreadId) &&
+    queuedThreadId === currentViewThreadId
+  );
 }
 
 export function setManualThreadTitleLock(threadId: string, title: string) {
@@ -402,12 +429,22 @@ export function shouldShowThreadHistory(
 }
 
 export function resolveVisibleTaskRunningThreadId({
+  eventThreadId,
+  streamThreadId,
   viewThreadId,
   liveMessagesThreadId,
 }: {
+  eventThreadId?: string | null;
+  streamThreadId?: string | null;
   viewThreadId: string | null;
   liveMessagesThreadId: string | null;
 }) {
+  if (eventThreadId) {
+    return eventThreadId;
+  }
+  if (streamThreadId) {
+    return streamThreadId;
+  }
   if (!viewThreadId || !liveMessagesThreadId) {
     return null;
   }
@@ -1166,9 +1203,13 @@ export function useThreadStream({
         const e = event as {
           type: "task_running";
           task_id: string;
+          thread_id?: string;
+          run_id?: string;
           message: AIMessage;
         };
         const taskThreadId = resolveVisibleTaskRunningThreadId({
+          eventThreadId: e.thread_id ?? null,
+          streamThreadId: streamThreadIdRef.current,
           viewThreadId: currentViewThreadIdRef.current,
           liveMessagesThreadId: liveMessagesThreadIdRef.current,
         });
@@ -1196,15 +1237,16 @@ export function useThreadStream({
         toast(e.message);
       }
     },
-    onError(error) {
-      const streamThreadId = streamThreadIdRef.current;
-      const streamRunId = streamRunIdRef.current;
+    onError(error, run) {
+      const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
+      const streamRunId = run?.run_id ?? streamRunIdRef.current;
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
       }
       if (streamThreadId) {
         clearThreadActivity(streamThreadId);
       }
+      streamFinishedRef.current = true;
       setOptimisticMessages([]);
       setOptimisticThreadTarget(null);
       setLiveMessagesThreadTarget(null);
@@ -1225,15 +1267,16 @@ export function useThreadStream({
         });
       }
     },
-    onFinish(state) {
-      const streamThreadId = streamThreadIdRef.current;
-      const streamRunId = streamRunIdRef.current;
+    onFinish(state, run) {
+      const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
+      const streamRunId = run?.run_id ?? streamRunIdRef.current;
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
       }
       if (streamThreadId) {
         markThreadFinished(streamThreadId);
       }
+      streamFinishedRef.current = true;
       listeners.current.onFinish?.(state.values);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -1293,6 +1336,7 @@ export function useThreadStream({
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
+  const streamFinishedRef = useRef(true);
   const queuedMessagesRef = useRef<QueuedThreadMessage[]>([]);
   const messagesRef = useRef<Message[]>([]);
   const summarizedRef = useRef<Set<string>>(null);
@@ -1311,6 +1355,7 @@ export function useThreadStream({
     startedRef.current = false;
     streamRunIdRef.current = null;
     sendInFlightRef.current = false;
+    streamFinishedRef.current = true;
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
@@ -1479,6 +1524,7 @@ export function useThreadStream({
       setOptimisticThreadTarget(threadId);
       setLiveMessagesThreadTarget(threadId);
       setOptimisticMessages(newOptimistic);
+      streamFinishedRef.current = false;
       markThreadBusyInCaches(queryClient, threadId);
 
       listeners.current.onSend?.(threadId);
@@ -1615,11 +1661,16 @@ export function useThreadStream({
   );
 
   useEffect(() => {
-    if (thread.isLoading || sendInFlightRef.current) {
-      return;
-    }
     const next = queuedMessagesRef.current[0];
-    if (next?.threadId !== currentViewThreadId) {
+    if (
+      !shouldReleaseQueuedThreadMessage({
+        isLoading: thread.isLoading,
+        streamFinished: streamFinishedRef.current,
+        sendInFlight: sendInFlightRef.current,
+        queuedThreadId: next?.threadId,
+        currentViewThreadId,
+      })
+    ) {
       return;
     }
     queuedMessagesRef.current = queuedMessagesRef.current.slice(1);
@@ -1870,6 +1921,7 @@ export function useThreadHistory(
             "Content-Type": "application/json",
           },
           credentials: "include",
+          timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
         }).then(readRunMessagesPageResponse);
         if (
           loadGenerationRef.current !== loadGeneration ||
@@ -2086,6 +2138,7 @@ export function useThreadRuns(
       return response;
     },
     enabled: enabled && Boolean(threadId),
+    retry: false,
     refetchOnWindowFocus: false,
   });
 }

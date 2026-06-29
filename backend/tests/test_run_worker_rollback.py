@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -145,6 +145,52 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_command_room_round_record_is_written_before_stream_end():
+    """Next-round wakeups should observe persisted RoundRecord after SSE end."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="command-room")
+    events: list[str] = []
+
+    class Bridge:
+        async def publish(self, run_id, event, data):
+            events.append(f"publish:{event}")
+
+        async def publish_end(self, run_id):
+            events.append("publish_end")
+
+        async def cleanup(self, run_id, delay=60):
+            events.append("cleanup")
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="final command room answer")]}
+
+    def factory(*, config):
+        return DummyAgent()
+
+    def fake_record_command_room_round(**kwargs):
+        events.append("record_round")
+        assert kwargs["thread_id"] == "thread-1"
+        assert kwargs["run_id"] == record.run_id
+
+    with patch("deerflow.command_room.round_record.record_command_room_round", side_effect=fake_record_command_room_round):
+        await run_agent(
+            Bridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=factory,
+            graph_input={"messages": []},
+            config={},
+        )
+
+    assert events.index("record_round") < events.index("publish_end")
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
 
 
 @pytest.mark.anyio

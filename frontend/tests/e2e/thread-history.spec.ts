@@ -295,6 +295,90 @@ test.describe("Thread history", () => {
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });
 
+  test("switching chats ignores a delayed stream from the previous chat", async ({
+    page,
+  }) => {
+    const delayedMarker = "LEAK-DELAYED-STREAM-SHOULD-STAY-OUT";
+    let resolveStream!: () => void;
+    const streamDone = new Promise<void>((resolve) => {
+      resolveStream = resolve;
+    });
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Destination conversation",
+          updated_at: "2025-06-04T12:00:00Z",
+        },
+      ],
+    });
+
+    const delayedPreviousStream = async (route: Route) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: "00000000-0000-0000-0000-000000000779",
+            thread_id: MOCK_THREAD_ID,
+          },
+        },
+        {
+          event: "values",
+          data: {
+            messages: [
+              {
+                type: "human",
+                id: "msg-human-delayed-stream",
+                content: [{ type: "text", text: delayedMarker }],
+              },
+              {
+                type: "ai",
+                id: "msg-ai-delayed-stream",
+                content: `Delayed answer containing ${delayedMarker}`,
+              },
+            ],
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+      resolveStream();
+    };
+
+    await page.route("**/api/langgraph/runs/stream", delayedPreviousStream);
+    await page.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      delayedPreviousStream,
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(delayedMarker);
+    await textarea.press("Enter");
+    await expect(page.getByText(delayedMarker)).toBeVisible();
+
+    await page.getByText("Destination conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+
+    await streamDone;
+
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID_2));
+    await expect(page.getByText(delayedMarker)).toHaveCount(0);
+    await expect(
+      page.getByText("Response in thread Destination conversation"),
+    ).toBeVisible();
+  });
+
   test("new chat resets immediately after a history-only thread URL update", async ({
     page,
   }) => {

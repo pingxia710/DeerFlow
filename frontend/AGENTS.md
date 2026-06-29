@@ -79,6 +79,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- Thread hooks must only render live stream state/history when the source thread
+  id matches the visible thread id; switching chats must not display stale
+  messages from the previous stream target.
 
 ## Code Style
 

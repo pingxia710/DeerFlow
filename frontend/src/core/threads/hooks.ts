@@ -346,6 +346,26 @@ export function removeSetItems<T>(
   return next;
 }
 
+export function shouldShowLiveThreadState(
+  viewThreadId: string | null,
+  streamThreadId: string | null,
+  liveMessagesThreadId: string | null,
+) {
+  if (!viewThreadId) {
+    return false;
+  }
+  return (
+    streamThreadId === viewThreadId || liveMessagesThreadId === viewThreadId
+  );
+}
+
+export function shouldShowThreadHistory(
+  viewThreadId: string | null,
+  historyThreadId: string | null,
+) {
+  return Boolean(viewThreadId) && historyThreadId === viewThreadId;
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
@@ -1119,8 +1139,11 @@ export function useThreadStream({
     markThreadBusyInCaches(queryClient, streamThreadId);
   }, [queryClient, thread.isLoading]);
 
-  const hasVisibleStreamState =
-    Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
+  const hasVisibleStreamState = shouldShowLiveThreadState(
+    currentViewThreadId,
+    onStreamThreadId ?? null,
+    liveMessagesThreadId,
+  );
   const persistedMessages = useMemo(
     () =>
       hasVisibleStreamState
@@ -1132,8 +1155,11 @@ export function useThreadStream({
     [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
   );
   const visibleHistory = useMemo(
-    () => (threadId ? history : []),
-    [history, threadId],
+    () =>
+      shouldShowThreadHistory(currentViewThreadId, onStreamThreadId ?? null)
+        ? history
+        : [],
+    [currentViewThreadId, history, onStreamThreadId],
   );
   const humanMessageCount = persistedMessages.filter(
     (m) => m.type === "human",

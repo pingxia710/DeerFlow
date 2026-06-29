@@ -79,3 +79,18 @@ test("buildThreadRunContext normalizes retired low reasoning effort to xhigh", a
     reasoning_effort: "xhigh",
   });
 });
+
+test("shouldShowLiveThreadState hides a stream from another visible thread", async () => {
+  const { shouldShowLiveThreadState } = await import("@/core/threads/hooks");
+
+  expect(shouldShowLiveThreadState("thread-b", "thread-a", null)).toBe(false);
+  expect(shouldShowLiveThreadState("thread-b", "thread-b", null)).toBe(true);
+  expect(shouldShowLiveThreadState("thread-b", null, "thread-b")).toBe(true);
+});
+
+test("shouldShowThreadHistory hides history from another visible thread", async () => {
+  const { shouldShowThreadHistory } = await import("@/core/threads/hooks");
+
+  expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
+  expect(shouldShowThreadHistory("thread-b", "thread-b")).toBe(true);
+});

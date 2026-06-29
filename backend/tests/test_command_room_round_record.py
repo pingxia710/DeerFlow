@@ -270,8 +270,11 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
                 "prompt_chars": 123,
                 "handoff_packet": {
                     "goal": "audit task",
+                    "context": "known frontend dirty files exist",
+                    "requiredInputs": "backend audit files only",
                     "boundary": "do not touch production",
                     "expectedEvidence": "file refs and test output",
+                    "expectedOutput": "updated tests",
                     "stopConditions": "stop on unrelated dirty files",
                     "releasedCapabilities": "read backend; pytest targeted",
                     "present": ["goal", "boundary"],
@@ -294,8 +297,11 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
 
     record = json.loads(path.read_text(encoding="utf-8"))
     packet = record["dispatchPlan"][0]["handoffPacket"]
+    assert packet["context"] == "known frontend dirty files exist"
+    assert packet["requiredInputs"] == "backend audit files only"
     assert packet["boundary"] == "do not touch production"
     assert packet["expectedEvidence"] == "file refs and test output"
+    assert packet["expectedOutput"] == "updated tests"
     signal = record["signals"][0]
     assert signal["evidenceState"] == "STALE"
     assert signal["selfAttestationOnly"] is True

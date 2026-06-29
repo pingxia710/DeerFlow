@@ -213,10 +213,15 @@ RecommendedDecision:
 
 def test_record_subagent_handoff_records_compact_handoff_packet(tmp_path):
     raw_prompt = """Goal: inspect the audit path
+Inherited Context: backend-only task with known frontend dirty files
+Required Inputs: audit.py and round_record.py
 Boundary: do not modify scripts/serve.sh or production data
+Expected Output: compact audit assertions
 Expected Evidence: cite files and tests only
-Stop Conditions: stop if unrelated dirty files appear
-Capabilities: read backend tests; run targeted pytest
+Failure Conditions: stop if unrelated dirty files appear
+Tools: read_file, str_replace
+Model: inherit
+Skill: command-room audit
 
 SECRET_PROMPT_DETAIL_SHOULD_NOT_APPEAR
 """
@@ -239,10 +244,36 @@ SECRET_PROMPT_DETAIL_SHOULD_NOT_APPEAR
     record = json.loads(text)
     packet = record["handoff_packet"]
     assert packet["goal"] == "audit packet; inspect the audit path"
+    assert "known frontend dirty files" in packet["context"]
+    assert "audit.py and round_record.py" in packet["requiredInputs"]
     assert "scripts/serve.sh" in packet["boundary"]
+    assert "compact audit assertions" in packet["expectedOutput"]
     assert "files and tests" in packet["expectedEvidence"]
     assert "unrelated dirty files" in packet["stopConditions"]
-    assert "targeted pytest" in packet["releasedCapabilities"]
+    assert "read_file" in packet["releasedCapabilities"]
+    assert "inherit" in packet["releasedCapabilities"]
+    assert "command-room audit" in packet["releasedCapabilities"]
+    assert "context" in packet["present"]
+    assert "requiredInputs" in packet["present"]
+    assert "expectedOutput" in packet["present"]
+
+
+def test_extract_handoff_packet_supports_context_input_and_stop_aliases():
+    packet = extract_handoff_packet(
+        """Current Context: prior analysis complete
+  with continuation detail
+Inputs: config.yaml
+- backend/tests/test_x.py
+Escalation: ask before production access
+""",
+        description="alias task",
+        subagent_type="fact-finder",
+    )
+
+    assert packet["context"] == "prior analysis complete; with continuation detail"
+    assert packet["requiredInputs"] == "config.yaml; backend/tests/test_x.py"
+    assert packet["stopConditions"] == "ask before production access"
+    assert packet["present"] == ["goal", "context", "requiredInputs", "stopConditions", "releasedCapabilities"]
 
 
 def test_extract_handoff_packet_falls_back_to_description_without_raw_prompt():

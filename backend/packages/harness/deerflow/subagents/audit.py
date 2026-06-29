@@ -72,13 +72,18 @@ _BLOCKING_DECISION_RE = re.compile(
 
 _HANDOFF_PACKET_FIELD_RE = re.compile(
     r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*)?"
-    r"(Goal|Task|Boundary|Forbidden|Expected(?: Evidence| Output)?|Evidence|Stop(?: Conditions?)?|Escalation|Capabilities|Tools|Model|Skill)"
+    r"(Goal|Task|Context|Inherited Context|Current Context|Required Inputs|Inputs|Boundary|Forbidden|Expected(?: Evidence| Output)?|Evidence|Stop(?: Conditions?)?|Failure Conditions|Escalation|Capabilities|Tools|Model|Skill)"
     r"(?:\*\*)?\s*[:：]\s*(.*)$",
     re.IGNORECASE,
 )
 _HANDOFF_PACKET_KEYS = {
     "goal": "goal",
     "task": "goal",
+    "context": "context",
+    "inherited context": "context",
+    "current context": "context",
+    "required inputs": "requiredInputs",
+    "inputs": "requiredInputs",
     "boundary": "boundary",
     "forbidden": "boundary",
     "expected": "expectedEvidence",
@@ -88,6 +93,7 @@ _HANDOFF_PACKET_KEYS = {
     "stop": "stopConditions",
     "stop conditions": "stopConditions",
     "stop condition": "stopConditions",
+    "failure conditions": "stopConditions",
     "escalation": "stopConditions",
     "capabilities": "releasedCapabilities",
     "tools": "releasedCapabilities",
@@ -292,6 +298,8 @@ def extract_handoff_packet(prompt: str | None, *, description: str = "", subagen
     """
     packet: dict[str, Any] = {
         "goal": _truncate(description.strip() or _first_meaningful_line(prompt), _HANDOFF_PACKET_LIMIT),
+        "context": "",
+        "requiredInputs": "",
         "boundary": "",
         "expectedEvidence": "",
         "expectedOutput": "",

@@ -85,7 +85,7 @@ export function SubtaskCard({
     task.status === "completed" && resultPreview.length > 0;
   const [collapsed, setCollapsed] = useState(true);
   const startedAtRef = useRef<number | null>(
-    task.status === "in_progress" ? Date.now() : null,
+    task.status === "in_progress" ? (task.startedAt ?? Date.now()) : null,
   );
   const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(
     task.status === "in_progress" ? 0 : null,
@@ -117,6 +117,12 @@ export function SubtaskCard({
       return;
     }
 
+    if (
+      task.startedAt !== undefined &&
+      (startedAtRef.current === null || task.startedAt < startedAtRef.current)
+    ) {
+      startedAtRef.current = task.startedAt;
+    }
     startedAtRef.current ??= Date.now();
 
     const startedAt = startedAtRef.current;
@@ -128,7 +134,7 @@ export function SubtaskCard({
     const interval = window.setInterval(updateElapsed, MS_IN_SECOND);
 
     return () => window.clearInterval(interval);
-  }, [task.status]);
+  }, [task.startedAt, task.status]);
 
   const handleHeaderToggle = (event: MouseEvent<HTMLButtonElement>) => {
     const anchor = event.currentTarget;

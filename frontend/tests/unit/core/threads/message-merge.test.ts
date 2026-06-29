@@ -11,6 +11,7 @@ import {
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
+  HISTORY_CREATED_AT_KEY,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   readRunMessagesPageResponse,
@@ -525,9 +526,43 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   ];
 
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]), [])).toEqual([
-    newHuman,
-    newAi,
+    {
+      ...newHuman,
+      additional_kwargs: {
+        [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:02Z",
+      },
+    },
+    {
+      ...newAi,
+      additional_kwargs: {
+        [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:03Z",
+      },
+    },
   ]);
+});
+
+test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {
+  const messages = buildVisibleHistoryMessages([runMessage(1)], new Set(), []);
+
+  expect(messages[0]?.additional_kwargs?.[HISTORY_CREATED_AT_KEY]).toBe(
+    "2026-05-22T00:00:00Z",
+  );
+});
+
+test("mergeMessages preserves history created_at when live message replaces history", () => {
+  const history = {
+    id: "same",
+    type: "ai",
+    content: "history",
+    additional_kwargs: {
+      [HISTORY_CREATED_AT_KEY]: "2026-05-22T00:00:00Z",
+    },
+  } as Message;
+  const live = { id: "same", type: "ai", content: "live" } as Message;
+
+  expect(mergeMessages([history], [live], [])[0]?.additional_kwargs).toEqual({
+    [HISTORY_CREATED_AT_KEY]: "2026-05-22T00:00:00Z",
+  });
 });
 
 test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {

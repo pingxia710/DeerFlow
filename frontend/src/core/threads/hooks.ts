@@ -216,6 +216,7 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   artifacts: [],
   todos: [],
 };
+export const HISTORY_CREATED_AT_KEY = "history_created_at";
 
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
@@ -250,6 +251,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // independent tracing/task semantics should use a distinct id or a custom
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
+  const preservedHistoryCreatedAt = new Map<string, unknown>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
@@ -261,6 +263,12 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
         preservedTurnDurations.set(
           identity,
           message.additional_kwargs.turn_duration as number,
+        );
+      }
+      if (message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] !== undefined) {
+        preservedHistoryCreatedAt.set(
+          identity,
+          message.additional_kwargs[HISTORY_CREATED_AT_KEY],
         );
       }
     }
@@ -290,6 +298,26 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
           additional_kwargs: {
             ...message.additional_kwargs,
             turn_duration: preservedTurnDurations.get(identity),
+            ...(message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] ===
+              undefined && preservedHistoryCreatedAt.has(identity)
+              ? {
+                  [HISTORY_CREATED_AT_KEY]:
+                    preservedHistoryCreatedAt.get(identity),
+                }
+              : {}),
+          },
+        } as Message;
+      }
+      if (
+        identity &&
+        preservedHistoryCreatedAt.has(identity) &&
+        message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] === undefined
+      ) {
+        return {
+          ...message,
+          additional_kwargs: {
+            ...message.additional_kwargs,
+            [HISTORY_CREATED_AT_KEY]: preservedHistoryCreatedAt.get(identity),
           },
         } as Message;
       }
@@ -388,7 +416,13 @@ export function buildVisibleHistoryMessages(
     (message) => !supersededRunIds.has(message.run_id),
   );
   return dedupeMessagesByIdentity([
-    ...visibleRows.map((message) => message.content),
+    ...visibleRows.map((message) => ({
+      ...message.content,
+      additional_kwargs: {
+        ...message.content.additional_kwargs,
+        [HISTORY_CREATED_AT_KEY]: message.created_at,
+      },
+    })),
     ...appendedMessages,
   ]);
 }
@@ -493,12 +527,22 @@ export function mergeMessages(
   // separate state channel instead of participating in this overlap heuristic.
 
   const savedTurnDurations = new Map<string, number>();
+  const savedHistoryCreatedAt = new Map<string, unknown>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
         identity,
         msg.additional_kwargs.turn_duration as number,
+      );
+    }
+    if (
+      identity &&
+      msg.additional_kwargs?.[HISTORY_CREATED_AT_KEY] !== undefined
+    ) {
+      savedHistoryCreatedAt.set(
+        identity,
+        msg.additional_kwargs[HISTORY_CREATED_AT_KEY],
       );
     }
   }
@@ -535,16 +579,27 @@ export function mergeMessages(
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (
+    const missingTurnDuration =
       identity &&
       savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined
-    ) {
+      message.additional_kwargs?.turn_duration === undefined;
+    const missingHistoryCreatedAt =
+      identity &&
+      savedHistoryCreatedAt.has(identity) &&
+      message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] === undefined;
+    if (identity && (missingTurnDuration || missingHistoryCreatedAt)) {
       return {
         ...message,
         additional_kwargs: {
           ...message.additional_kwargs,
-          turn_duration: savedTurnDurations.get(identity),
+          ...(missingTurnDuration
+            ? { turn_duration: savedTurnDurations.get(identity) }
+            : {}),
+          ...(missingHistoryCreatedAt
+            ? {
+                [HISTORY_CREATED_AT_KEY]: savedHistoryCreatedAt.get(identity),
+              }
+            : {}),
         },
       } as Message;
     }

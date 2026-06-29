@@ -51,6 +51,7 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import { HISTORY_CREATED_AT_KEY } from "@/core/threads/hooks";
 import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +72,26 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+function getMessageHistoryTime(message: Message) {
+  const value = message.additional_kwargs?.[HISTORY_CREATED_AT_KEY];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
+}
+
+function getMessagesHistoryStartTime(messages: Message[]) {
+  let startTime: number | undefined;
+  for (const message of messages) {
+    const time = getMessageHistoryTime(message);
+    if (time !== undefined) {
+      startTime = startTime === undefined ? time : Math.min(startTime, time);
+    }
+  }
+  return startTime;
+}
 
 function LoadMoreHistoryIndicator({
   isLoading,
@@ -240,6 +261,13 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  const activeTurnStartTime = useMemo(() => {
+    return (
+      getMessagesHistoryStartTime(
+        groupedMessages[lastGroupIndex]?.messages ?? [],
+      ) ?? turnStartTime
+    );
+  }, [groupedMessages, lastGroupIndex, turnStartTime]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
@@ -487,7 +515,7 @@ export function MessageList({
                       hideThinkingUi={hideThinkingUi}
                       turnStartTime={
                         groupIndex === groupedMessages.length - 1
-                          ? turnStartTime
+                          ? activeTurnStartTime
                           : null
                       }
                     />
@@ -569,6 +597,7 @@ export function MessageList({
                       group.messages,
                       groupIsLoading,
                     );
+                    const startedAt = getMessageHistoryTime(message);
                     const task: Subtask = {
                       id: taskId,
                       threadId,
@@ -576,6 +605,7 @@ export function MessageList({
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
                       status,
+                      ...(startedAt !== undefined ? { startedAt } : {}),
                       ...(status === "failed"
                         ? { error: t.subtasks.failed }
                         : {}),
@@ -651,7 +681,7 @@ export function MessageList({
                     showCopyButton={false}
                     hideThinkingUi={hideThinkingUi}
                     turnStartTime={
-                      groupIndex === lastGroupIndex ? turnStartTime : null
+                      groupIndex === lastGroupIndex ? activeTurnStartTime : null
                     }
                   />,
                 );
@@ -697,7 +727,7 @@ export function MessageList({
           !hideThinkingUi &&
           !hasActiveAssistantText && (
             <div className="w-full">
-              <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
+              <Reasoning isStreaming={true} startTimeProp={activeTurnStartTime}>
                 <ReasoningTrigger hasContent={false} />
               </Reasoning>
             </div>

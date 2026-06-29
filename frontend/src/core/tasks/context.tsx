@@ -86,6 +86,9 @@ export function useUpdateSubtask() {
         ...previous,
         ...taskPatch,
         ...(threadId ? { threadId } : {}),
+        ...(task.status === "in_progress" && previous?.startedAt === undefined
+          ? { startedAt: task.startedAt ?? Date.now() }
+          : {}),
         ...(task.status === "in_progress" &&
         isTerminalSubtaskStatus(previousStatus)
           ? { status: previousStatus }

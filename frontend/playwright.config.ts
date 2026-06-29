@@ -32,6 +32,9 @@ export default defineConfig({
     env: {
       SKIP_ENV_VALIDATION: "1",
       DEER_FLOW_AUTH_DISABLED: "1",
+      DEER_FLOW_ENV: "test",
+      ENVIRONMENT: "test",
+      BETTER_AUTH_SECRET: "local-dev-secret",
       PORT: E2E_PORT,
     },
   },

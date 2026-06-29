@@ -158,6 +158,21 @@ test.describe("Thread history", () => {
     await expect(textarea).toHaveValue("draft should not be overwritten");
   });
 
+  test("switching chats clears the input draft", async ({ page }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+
+    const textarea = page.locator("textarea[name='message']");
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("draft must not leak to the next chat");
+
+    await page.getByText("Second conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+
+    await expect(textarea).toHaveValue("");
+  });
+
   test("deleting an inactive chat keeps the current chat open", async ({
     page,
   }) => {

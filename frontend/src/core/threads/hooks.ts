@@ -827,10 +827,12 @@ export function useThreadStream({
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
     null,
   );
+  const optimisticThreadIdRef = useRef(optimisticThreadId);
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
   const liveMessagesThreadIdRef = useRef(liveMessagesThreadId);
+  optimisticThreadIdRef.current = optimisticThreadId;
   liveMessagesThreadIdRef.current = liveMessagesThreadId;
   const [pendingSupersededRunIds, setPendingSupersededRunIds] = useState<
     ReadonlySet<string>
@@ -870,6 +872,22 @@ export function useThreadStream({
     listeners.current = { onSend, onStart, onFinish, onToolEnd };
   }, [onSend, onStart, onFinish, onToolEnd]);
 
+  const setOptimisticThreadTarget = useCallback(
+    (nextThreadId: string | null) => {
+      optimisticThreadIdRef.current = nextThreadId;
+      setOptimisticThreadId(nextThreadId);
+    },
+    [],
+  );
+
+  const setLiveMessagesThreadTarget = useCallback(
+    (nextThreadId: string | null) => {
+      liveMessagesThreadIdRef.current = nextThreadId;
+      setLiveMessagesThreadId(nextThreadId);
+    },
+    [],
+  );
+
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
@@ -885,29 +903,36 @@ export function useThreadStream({
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     streamThreadIdRef.current = _threadId;
     streamRunIdRef.current = _runId;
+    const currentView = currentViewThreadIdRef.current;
+    const streamStillOwnsVisibleChat =
+      currentView === _threadId ||
+      optimisticThreadIdRef.current === currentView ||
+      liveMessagesThreadIdRef.current === currentView;
     setOptimisticThreadId((currentOptimisticThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
       if (
         currentOptimisticThreadId &&
         (currentOptimisticThreadId === currentView ||
           currentOptimisticThreadId === _threadId)
       ) {
+        optimisticThreadIdRef.current = _threadId;
         return _threadId;
       }
+      optimisticThreadIdRef.current = currentOptimisticThreadId;
       return currentOptimisticThreadId;
     });
     setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
       if (
         currentLiveMessagesThreadId &&
         (currentLiveMessagesThreadId === currentView ||
           currentLiveMessagesThreadId === _threadId)
       ) {
+        liveMessagesThreadIdRef.current = _threadId;
         return _threadId;
       }
+      liveMessagesThreadIdRef.current = currentLiveMessagesThreadId;
       return currentLiveMessagesThreadId;
     });
-    if (!startedRef.current) {
+    if (!startedRef.current && streamStillOwnsVisibleChat) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
     }
@@ -1105,8 +1130,8 @@ export function useThreadStream({
         clearThreadActivity(streamThreadId);
       }
       setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-      setLiveMessagesThreadId(null);
+      setOptimisticThreadTarget(null);
+      setLiveMessagesThreadTarget(null);
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
       toast.error(getStreamErrorMessage(error));
@@ -1221,12 +1246,18 @@ export function useThreadStream({
   useEffect(() => {
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
       setOptimisticMessages([]);
-      setOptimisticThreadId(null);
+      setOptimisticThreadTarget(null);
     }
     if (liveMessagesThreadId && liveMessagesThreadId !== currentViewThreadId) {
-      setLiveMessagesThreadId(null);
+      setLiveMessagesThreadTarget(null);
     }
-  }, [currentViewThreadId, liveMessagesThreadId, optimisticThreadId]);
+  }, [
+    currentViewThreadId,
+    liveMessagesThreadId,
+    optimisticThreadId,
+    setLiveMessagesThreadTarget,
+    setOptimisticThreadTarget,
+  ]);
 
   // When streaming starts without a baseline (e.g. reconnection, run started
   // from another client, or page reload mid-stream), snapshot the current
@@ -1258,9 +1289,14 @@ export function useThreadStream({
 
     if (!hasHumanOptimistic || newHumanMsgArrived) {
       setOptimisticMessages([]);
-      setOptimisticThreadId(null);
+      setOptimisticThreadTarget(null);
     }
-  }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
+  }, [
+    hasHumanOptimistic,
+    humanMessageCount,
+    optimisticMessageCount,
+    setOptimisticThreadTarget,
+  ]);
 
   const sendMessage = useCallback(
     async (
@@ -1322,8 +1358,8 @@ export function useThreadStream({
           },
         });
       }
-      setOptimisticThreadId(threadId);
-      setLiveMessagesThreadId(threadId);
+      setOptimisticThreadTarget(threadId);
+      setLiveMessagesThreadTarget(threadId);
       setOptimisticMessages(newOptimistic);
       markThreadBusyInCaches(queryClient, threadId);
 
@@ -1383,8 +1419,8 @@ export function useThreadStream({
                 : "Failed to upload files.";
             toast.error(errorMessage);
             setOptimisticMessages([]);
-            setOptimisticThreadId(null);
-            setLiveMessagesThreadId(null);
+            setOptimisticThreadTarget(null);
+            setLiveMessagesThreadTarget(null);
             throw error;
           } finally {
             setIsUploading(false);
@@ -1438,8 +1474,8 @@ export function useThreadStream({
         });
       } catch (error) {
         setOptimisticMessages([]);
-        setOptimisticThreadId(null);
-        setLiveMessagesThreadId(null);
+        setOptimisticThreadTarget(null);
+        setLiveMessagesThreadTarget(null);
         setIsUploading(false);
         clearThreadActivity(threadId);
         throw error;
@@ -1454,6 +1490,8 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      setLiveMessagesThreadTarget,
+      setOptimisticThreadTarget,
     ],
   );
 
@@ -1473,7 +1511,7 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      setLiveMessagesThreadId(threadId);
+      setLiveMessagesThreadTarget(threadId);
       markThreadBusyInCaches(queryClient, threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
@@ -1536,7 +1574,7 @@ export function useThreadStream({
           queryKey: threadContextUsageQueryKey(threadId),
         });
       } catch (error) {
-        setLiveMessagesThreadId(null);
+        setLiveMessagesThreadTarget(null);
         clearThreadActivity(threadId);
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
@@ -1552,7 +1590,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      queryClient,
+      setLiveMessagesThreadTarget,
+      thread,
+    ],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,

@@ -32,7 +32,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; it starts its own frontend on port `6100` by default (`PLAYWRIGHT_PORT` overrides) and does not reuse an existing server unless `PLAYWRIGHT_REUSE_EXISTING_SERVER=1`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; it starts its own frontend on port `6100` by default (`PLAYWRIGHT_PORT` overrides), forces auth-disabled test mode for SSR workspace routes, and does not reuse an existing server unless `PLAYWRIGHT_REUSE_EXISTING_SERVER=1`.
 
 ## Architecture
 
@@ -84,6 +84,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   messages from the previous stream target.
 - Subtask UI state must be scoped by thread id when read or written. Do not
   treat backend task/tool-call ids as globally unique across chat sessions.
+- Prompt input draft and attachment state must be cleared on chat-thread
+  switches unless a per-thread draft store is implemented.
 
 ## Code Style
 

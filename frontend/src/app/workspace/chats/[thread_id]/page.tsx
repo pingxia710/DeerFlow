@@ -66,7 +66,11 @@ export default function ChatPage() {
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
   const defaultedModeThreadIdRef = useRef<string | null>(null);
+  const visibleThreadIdRef = useRef(threadId);
+  const pendingStartThreadIdRef = useRef<string | null>(null);
   useSpecificChatMode();
+
+  visibleThreadIdRef.current = threadId;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -113,10 +117,23 @@ export default function ChatPage() {
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
     // LangGraph SDK eagerly fetches /history the moment it receives a
     // thread id and assumes the thread exists on the backend (issue #2746).
-    onSend: () => {
+    onSend: (sentThreadId) => {
+      pendingStartThreadIdRef.current = sentThreadId;
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
+      const pendingThreadId = pendingStartThreadIdRef.current;
+      const visibleThreadId = visibleThreadIdRef.current;
+      const currentPathname = window.location.pathname;
+      const streamStillOwnsVisibleChat =
+        visibleThreadId === createdThreadId ||
+        (pendingThreadId !== null &&
+          visibleThreadId === pendingThreadId &&
+          currentPathname.endsWith("/new"));
+      if (!streamStillOwnsVisibleChat) {
+        return;
+      }
+      pendingStartThreadIdRef.current = null;
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
       setThreadId(createdThreadId);

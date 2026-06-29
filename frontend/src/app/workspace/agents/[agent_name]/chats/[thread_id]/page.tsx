@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -73,6 +73,10 @@ export default function AgentChatPage() {
     isMock,
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
+  const visibleThreadIdRef = useRef(threadId);
+  const pendingStartThreadIdRef = useRef<string | null>(null);
+
+  visibleThreadIdRef.current = threadId;
 
   const { showNotification } = useNotification();
 
@@ -109,10 +113,23 @@ export default function AgentChatPage() {
     displayThreadId: threadId,
     context: threadContext,
     isMock,
-    onSend: () => {
+    onSend: (sentThreadId) => {
+      pendingStartThreadIdRef.current = sentThreadId;
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
+      const pendingThreadId = pendingStartThreadIdRef.current;
+      const visibleThreadId = visibleThreadIdRef.current;
+      const currentPathname = window.location.pathname;
+      const streamStillOwnsVisibleChat =
+        visibleThreadId === createdThreadId ||
+        (pendingThreadId !== null &&
+          visibleThreadId === pendingThreadId &&
+          currentPathname.endsWith("/new"));
+      if (!streamStillOwnsVisibleChat) {
+        return;
+      }
+      pendingStartThreadIdRef.current = null;
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,

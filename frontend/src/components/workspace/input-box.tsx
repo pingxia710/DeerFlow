@@ -86,6 +86,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { shouldClearPromptInputForThreadChange } from "./input-box-state";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
@@ -235,9 +236,13 @@ export function InputBox({
   const { models } = useModels();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
+  const attachments = usePromptInputAttachments();
+  const clearPromptInput = textInput.clear;
+  const clearAttachments = attachments.clear;
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const previousThreadIdRef = useRef(threadId);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -338,7 +343,21 @@ export function InputBox({
   useEffect(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
-  }, [threadId]);
+    setFollowups([]);
+    setFollowupsHidden(false);
+    setFollowupsLoading(false);
+    setPendingSuggestion(null);
+    if (
+      shouldClearPromptInputForThreadChange(
+        previousThreadIdRef.current,
+        threadId,
+      )
+    ) {
+      previousThreadIdRef.current = threadId;
+      clearPromptInput();
+      clearAttachments();
+    }
+  }, [clearAttachments, clearPromptInput, threadId]);
 
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;

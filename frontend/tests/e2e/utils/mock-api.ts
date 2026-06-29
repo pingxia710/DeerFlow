@@ -51,11 +51,32 @@ export type MockSkill = {
   enabled?: boolean;
 };
 
+export type MockModel = {
+  id: string;
+  name: string;
+  model: string;
+  display_name: string;
+  supports_thinking?: boolean;
+  supports_reasoning_effort?: boolean;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  models?: MockModel[];
 };
+
+const DEFAULT_MODELS: MockModel[] = [
+  {
+    id: "mock-model",
+    name: "mock-model",
+    model: "mock-model",
+    display_name: "Mock Model",
+    supports_thinking: true,
+    supports_reasoning_effort: true,
+  },
+];
 
 const DEFAULT_SKILLS: MockSkill[] = [
   {
@@ -106,6 +127,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
+  const models = options?.models ?? DEFAULT_MODELS;
 
   const upsertThread = (thread: MockThread) => {
     threads = [
@@ -283,6 +305,52 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route(/\/api\/threads\/([^/]+)\/token-usage$/, (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          total_tokens: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_runs: 0,
+          by_model: {},
+          by_caller: {
+            lead_agent: 0,
+            subagent: 0,
+            middleware: 0,
+          },
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/([^/]+)\/context-usage$/, (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          latest: null,
+          latest_lead: null,
+          by_caller: {},
+          recent: [],
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();
@@ -446,7 +514,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          models: [],
+          models,
           token_usage: { enabled: false },
         }),
       });
@@ -461,6 +529,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ skills }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Suggestion config — input box feature flag loaded on workspace pages
+  void page.route("**/api/suggestions/config", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
       });
     }
     return route.fallback();

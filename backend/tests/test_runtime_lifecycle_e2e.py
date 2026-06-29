@@ -629,6 +629,36 @@ async def test_sse_consumer_disconnect_cancels_inflight_run():
                 await record.task
 
 
+@pytest.mark.anyio
+async def test_sse_consumer_terminal_run_returns_end_without_bridge_subscription():
+    """Late reconnects to a terminal run must not hang after the stream buffer is gone."""
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, RunManager, RunStatus
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-terminal", on_disconnect=DisconnectMode.continue_)
+    await run_manager.set_status(record.run_id, RunStatus.success)
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal runs should not subscribe to a cleaned stream")
+            yield
+
+    class _ConnectedRequest:
+        headers: dict[str, str] = {}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    frames = []
+    async for frame in sse_consumer(_CleanedBridge(), record, _ConnectedRequest(), run_manager):
+        frames.append(frame)
+
+    assert len(frames) == 1
+    assert frames[0].startswith("event: end\n")
+    assert "data: null" in frames[0]
+
+
 def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
     """HTTP cancel?action=rollback should restore the checkpoint captured before run start."""
     from starlette.testclient import TestClient

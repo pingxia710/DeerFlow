@@ -516,6 +516,10 @@ async def sse_consumer(
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
     """
+    if record.status not in (RunStatus.pending, RunStatus.running):
+        yield format_sse("end", None)
+        return
+
     last_event_id = request.headers.get("Last-Event-ID")
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):

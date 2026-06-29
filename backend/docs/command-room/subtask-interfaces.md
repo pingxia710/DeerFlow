@@ -1,6 +1,6 @@
 # Command Room Subtask Interfaces
 
-Purpose: make stable Command Room delegation patterns discoverable without turning them into automatic runtime gates. The user sets the current round goal, boundaries, and whether to continue; the lead AI chooses execution, evidence gathering, and whether any subtask helps within that confirmed round.
+Purpose: make stable Command Room delegation patterns discoverable without turning them into automatic runtime gates. The user sets the current round goal, boundaries, and whether to continue; the lead AI chooses execution, evidence gathering, and whether any subtask helps within that confirmed round. See `core-invariants.md` for the architectural anchors behind these boundaries.
 
 ## Common boundary
 

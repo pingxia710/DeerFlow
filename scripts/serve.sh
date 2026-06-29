@@ -207,6 +207,7 @@ _is_port_listening() {
         if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
         fi
+        return 1
     fi
 
     if command -v ss >/dev/null 2>&1; then
@@ -216,7 +217,9 @@ _is_port_listening() {
     fi
 
     if command -v netstat >/dev/null 2>&1; then
-        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+        # macOS netstat can include non-listening TCP states even with -ltn.
+        # Only treat explicit LISTEN rows as occupied.
+        if netstat -ltn 2>/dev/null | awk -v port="$port" '$NF == "LISTEN" && $4 ~ "(^|[.:])" port "$" { found=1 } END { exit(found ? 0 : 1) }'; then
             return 0
         fi
     fi

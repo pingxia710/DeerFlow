@@ -13,6 +13,7 @@ import {
   getVisibleOptimisticMessages,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
+  readRunMessagesPageResponse,
   removeSetItems,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
@@ -381,6 +382,28 @@ test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", ()
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
   );
+});
+
+test("readRunMessagesPageResponse rejects html without surfacing a JSON SyntaxError", async () => {
+  await expect(
+    readRunMessagesPageResponse(
+      new Response("<html></html>", {
+        headers: { "Content-Type": "text/html" },
+      }),
+    ),
+  ).rejects.toThrow("Failed to load thread history.");
+});
+
+test("readRunMessagesPageResponse uses backend JSON error detail", async () => {
+  await expect(
+    readRunMessagesPageResponse(
+      new Response(JSON.stringify({ detail: "Thread missing" }), {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  ).rejects.toThrow("Thread missing");
 });
 
 test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {

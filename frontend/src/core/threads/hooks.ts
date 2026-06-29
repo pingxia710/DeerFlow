@@ -468,6 +468,20 @@ export function buildRunMessagesUrl(
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
+export async function readRunMessagesPageResponse(
+  response: Response,
+): Promise<RunMessagesPageResponse> {
+  const fallback = "Failed to load thread history.";
+  if (!response.ok) {
+    throw new Error(await readResponseErrorMessage(response, fallback));
+  }
+  try {
+    return (await response.json()) as RunMessagesPageResponse;
+  } catch {
+    throw new Error(response.statusText || fallback);
+  }
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -1734,9 +1748,7 @@ export function useThreadHistory(
             "Content-Type": "application/json",
           },
           credentials: "include",
-        }).then((res) => {
-          return res.json();
-        });
+        }).then(readRunMessagesPageResponse);
         if (
           loadGenerationRef.current !== loadGeneration ||
           threadIdRef.current !== requestThreadId
@@ -1778,7 +1790,7 @@ export function useThreadHistory(
         );
       } while (pendingLoadRef.current);
     } catch (err) {
-      console.error(err);
+      console.warn("Failed to load thread history.", err);
     } finally {
       if (loadGenerationRef.current === loadGeneration) {
         loadingRef.current = false;

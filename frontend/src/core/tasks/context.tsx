@@ -18,6 +18,18 @@ export interface SubtaskContextValue {
   setTasks: (tasks: Record<string, Subtask>) => void;
 }
 
+export type SubtaskUpdate = Partial<Subtask> & {
+  id: string;
+  threadId?: string | null;
+};
+
+export function getSubtaskStorageKey(id: string, threadId?: string | null) {
+  if (!threadId) {
+    return id;
+  }
+  return JSON.stringify([threadId, id]);
+}
+
 export const SubtaskContext = createContext<SubtaskContextValue>({
   tasks: {},
   setTasks: () => {
@@ -44,9 +56,9 @@ export function useSubtaskContext() {
   return context;
 }
 
-export function useSubtask(id: string) {
+export function useSubtask(id: string, threadId?: string | null) {
   const { tasks } = useSubtaskContext();
-  return tasks[id];
+  return tasks[getSubtaskStorageKey(id, threadId)];
 }
 
 export function useUpdateSubtask() {
@@ -62,15 +74,18 @@ export function useUpdateSubtask() {
   });
 
   const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
-      const previous = tasks[task.id];
+    (task: SubtaskUpdate) => {
+      const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+      const previous = tasks[storageKey];
       const previousStatus = previous?.status;
+      const { threadId, ...taskPatch } = task;
       // MessageList writes the pending task tool-call state before parsing the
       // matching ToolMessage in the same render. Keep terminal results stable
       // across the next render so the refresh notification does not loop.
       const next = {
         ...previous,
-        ...task,
+        ...taskPatch,
+        ...(threadId ? { threadId } : {}),
         ...(task.status === "in_progress" &&
         isTerminalSubtaskStatus(previousStatus)
           ? { status: previousStatus }
@@ -80,7 +95,7 @@ export function useUpdateSubtask() {
       const becameTerminal =
         isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
 
-      tasks[task.id] = next;
+      tasks[storageKey] = next;
 
       if (task.latestMessage) {
         setTasks({ ...tasks });

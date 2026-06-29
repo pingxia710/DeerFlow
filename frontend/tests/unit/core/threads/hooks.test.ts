@@ -94,3 +94,21 @@ test("shouldShowThreadHistory hides history from another visible thread", async 
   expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
   expect(shouldShowThreadHistory("thread-b", "thread-b")).toBe(true);
 });
+
+test("resolveVisibleTaskRunningThreadId only accepts the current live thread", async () => {
+  const { resolveVisibleTaskRunningThreadId } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    resolveVisibleTaskRunningThreadId({
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-a",
+    }),
+  ).toBeNull();
+  expect(
+    resolveVisibleTaskRunningThreadId({
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe("thread-b");
+});

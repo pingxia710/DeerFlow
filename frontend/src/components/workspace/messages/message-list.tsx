@@ -571,6 +571,7 @@ export function MessageList({
                     );
                     const task: Subtask = {
                       id: taskId,
+                      threadId,
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
@@ -590,7 +591,7 @@ export function MessageList({
                     extractTextFromMessage(message),
                     message.additional_kwargs,
                   );
-                  updateSubtask({ id: taskId, ...parsed });
+                  updateSubtask({ id: taskId, threadId, ...parsed });
                 }
               }
             }
@@ -635,6 +636,7 @@ export function MessageList({
                   <SubtaskCard
                     key={"task-group-" + taskId}
                     taskId={taskId}
+                    threadId={threadId}
                     isLoading={groupIsLoading}
                   />,
                 );

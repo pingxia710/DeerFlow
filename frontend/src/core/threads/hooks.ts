@@ -366,6 +366,19 @@ export function shouldShowThreadHistory(
   return Boolean(viewThreadId) && historyThreadId === viewThreadId;
 }
 
+export function resolveVisibleTaskRunningThreadId({
+  viewThreadId,
+  liveMessagesThreadId,
+}: {
+  viewThreadId: string | null;
+  liveMessagesThreadId: string | null;
+}) {
+  if (!viewThreadId || !liveMessagesThreadId) {
+    return null;
+  }
+  return liveMessagesThreadId === viewThreadId ? viewThreadId : null;
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
@@ -817,6 +830,8 @@ export function useThreadStream({
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
+  const liveMessagesThreadIdRef = useRef(liveMessagesThreadId);
+  liveMessagesThreadIdRef.current = liveMessagesThreadId;
   const [pendingSupersededRunIds, setPendingSupersededRunIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -1052,7 +1067,18 @@ export function useThreadStream({
           task_id: string;
           message: AIMessage;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        const taskThreadId = resolveVisibleTaskRunningThreadId({
+          viewThreadId: currentViewThreadIdRef.current,
+          liveMessagesThreadId: liveMessagesThreadIdRef.current,
+        });
+        if (!taskThreadId) {
+          return;
+        }
+        updateSubtask({
+          id: e.task_id,
+          threadId: taskThreadId,
+          latestMessage: e.message,
+        });
         return;
       }
 

@@ -82,6 +82,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread hooks must only render live stream state/history when the source thread
   id matches the visible thread id; switching chats must not display stale
   messages from the previous stream target.
+- Subtask UI state must be scoped by thread id when read or written. Do not
+  treat backend task/tool-call ids as globally unique across chat sessions.
 
 ## Code Style
 

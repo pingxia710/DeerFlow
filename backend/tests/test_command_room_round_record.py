@@ -397,3 +397,69 @@ Next: collect additional concrete refs
     assert record["roundBrief"]
     assert record["dispatchPlan"][0]["handoffPacket"]["goal"] == "inspect generated record"
     assert checker.validate_round(record, contract) == []
+
+
+def test_action_result_summary_self_claims_stay_brief_only_not_evidence(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="verify summary boundary",
+        final_text="Verdict: NEEDS_MORE",
+        audit_records=[
+            {
+                "status": "completed",
+                "task_id": "task-summary-only",
+                "subagent_type": "general-purpose",
+                "description": "worker self claim",
+                "action_result": {
+                    "action_id": "task-summary-only",
+                    "status": "completed",
+                    "summary": "tests passed; evidence verified; all files checked",
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    round_signals = record["roundContextSignals"]
+    brief = record["roundBrief"]
+
+    assert "evidence verified" in brief["handoff_signals"][0]
+    assert round_signals["evidence_signals"]["signals"] == []
+    assert round_signals["evidence_signals"]["has_strong_signal"] is False
+    assert "trusted observable evidence" not in brief["evidence_status"]
+
+
+def test_action_result_evidence_requires_runtime_observable_ref(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="verify evidence boundary",
+        final_text="Verdict: NEEDS_MORE",
+        audit_records=[
+            {
+                "status": "completed",
+                "task_id": "task-runtime-evidence",
+                "subagent_type": "general-purpose",
+                "description": "runtime observation",
+                "action_result": {
+                    "action_id": "task-runtime-evidence",
+                    "status": "completed",
+                    "summary": "worker says verified and tests passed",
+                    "evidence_refs": ["command: cd backend && pytest tests/test_command_room_round_record.py -q; exit code: 0; log: logs/pytest.log"],
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    signal = record["roundContextSignals"]["evidence_signals"]["signals"][0]
+
+    assert signal["trusted_source"] is True
+    assert signal["strong"] is True
+    assert "command-output-or-exit-code" in signal["strong_reasons"]
+    assert "trusted observable evidence" in record["roundBrief"]["evidence_status"]

@@ -12,6 +12,10 @@
     "evidenceStandard",
     "dispatchPlan",
     "signals",
+    "decisionSignals",
+    "roundBrief",
+    "roundContextAvailable",
+    "compatibilityAliases",
     "verdict",
     "nextRoundContract"
   ],
@@ -22,7 +26,8 @@
     "input",
     "allowedTools",
     "evidenceExpected",
-    "redlineScope"
+    "redlineScope",
+    "handoffPacket"
   ],
   "required_signal_fields": [
     "laneId",
@@ -38,9 +43,11 @@
   "required_next_round_fields": [
     "nextGoal",
     "inheritedBoundary",
+    "evidenceSignals",
     "requiredEvidence",
     "allowedDispatch",
     "stopBefore",
+    "needsUserConfirmation",
     "userConfirmationNeeded"
   ],
   "required_opposition_exemption_fields": [
@@ -93,7 +100,14 @@
             },
             "allowedTools": [],
             "evidenceExpected": ["Evidence Signal with blocking RecommendedDecision if PASS is unsupported."],
-            "redlineScope": ["permission expansion", "real execution"]
+            "redlineScope": ["permission expansion", "real execution"],
+            "handoffPacket": {
+              "goal": "Attack Draft PASS, worker self-proof, summary-as-evidence, and permission smuggling.",
+              "boundary": "read-only; no real execution",
+              "expectedEvidence": "Evidence Signal with blocking RecommendedDecision if PASS is unsupported.",
+              "stopConditions": "stop before permission expansion",
+              "releasedCapabilities": "opposition"
+            }
           },
           {
             "laneId": "lane-facts-1",
@@ -104,7 +118,14 @@
             },
             "allowedTools": [],
             "evidenceExpected": ["Evidence Signal listing missing refs."],
-            "redlineScope": []
+            "redlineScope": [],
+            "handoffPacket": {
+              "goal": "Check whether supplied worker claims include concrete evidence.",
+              "boundary": "read-only",
+              "expectedEvidence": "Evidence Signal listing missing refs.",
+              "stopConditions": "stop on production or credential access",
+              "releasedCapabilities": "fact-finder"
+            }
           }
         ],
         "signals": [
@@ -135,17 +156,38 @@
             "nextAction": "Request concrete refs."
           }
         ],
+        "decisionSignals": {
+          "decision": "STOP_CONFIRM",
+          "reason": "Opposition found permission smuggling and missing decisive evidence.",
+          "evidenceRefs": ["lane-opposition-1", "lane-facts-1"],
+          "gated": false
+        },
+        "roundBrief": {
+          "goal": "Collect concrete evidence for each integration claim.",
+          "evidence_status": "weak evidence signal(s); treat worker self-claims as untrusted",
+          "next_safe_action": "Collect concrete EvidenceRefs inside the read-only boundary.",
+          "summary": "Evidence weak; next safe action is read-only evidence collection."
+        },
+        "roundContextAvailable": true,
+        "compatibilityAliases": {
+          "verdict": "decisionSignals",
+          "roundRequired": "roundContextAvailable",
+          "requiredEvidence": "nextRoundContract.evidenceSignals"
+        },
         "verdict": {
           "decision": "STOP_CONFIRM",
           "reason": "Opposition found permission smuggling and missing decisive evidence.",
-          "evidenceRefs": ["lane-opposition-1", "lane-facts-1"]
+          "evidenceRefs": ["lane-opposition-1", "lane-facts-1"],
+          "gated": false
         },
         "nextRoundContract": {
           "nextGoal": "Collect concrete evidence for each integration claim.",
           "inheritedBoundary": "read-only; no real execution; no production writes",
+          "evidenceSignals": ["OAuth file/config refs", "test command output", "subagent run record", "opposition outputRef"],
           "requiredEvidence": ["OAuth file/config refs", "test command output", "subagent run record", "opposition outputRef"],
           "allowedDispatch": ["fact-finder", "project-librarian", "executor-checker"],
           "stopBefore": ["real execution", "production write", "new permission"],
+          "needsUserConfirmation": true,
           "userConfirmationNeeded": true
         }
       }
@@ -181,7 +223,14 @@
             },
             "allowedTools": ["read-only workspace inspection", "thread metadata", "memory", "uploads", "artifacts"],
             "evidenceExpected": ["Evidence Signal with candidate targets, failed probes, and remaining blockers."],
-            "redlineScope": ["credential access", "production writes"]
+            "redlineScope": ["credential access", "production writes"],
+            "handoffPacket": {
+              "goal": "Locate likely Naxus project roots and available execution channels.",
+              "boundary": "read-only discovery",
+              "expectedEvidence": "candidate targets, failed probes, and remaining blockers",
+              "stopConditions": "stop before credential access or production writes",
+              "releasedCapabilities": "workspace-discovery"
+            }
           },
           {
             "laneId": "lane-opposition-1",
@@ -192,7 +241,14 @@
             },
             "allowedTools": [],
             "evidenceExpected": ["Evidence Signal identifying target ambiguity or permission expansion."],
-            "redlineScope": ["wrong-target mutation", "permission expansion"]
+            "redlineScope": ["wrong-target mutation", "permission expansion"],
+            "handoffPacket": {
+              "goal": "Challenge whether any discovered candidate is enough to proceed.",
+              "boundary": "read-only; no permission expansion",
+              "expectedEvidence": "Evidence Signal identifying ambiguity or permission expansion",
+              "stopConditions": "stop before wrong-target mutation",
+              "releasedCapabilities": "target-opposition"
+            }
           },
           {
             "laneId": "lane-monitor-1",
@@ -203,7 +259,14 @@
             },
             "allowedTools": [],
             "evidenceExpected": ["Evidence Signal describing dispatch health, first-action order, and missing lane risks."],
-            "redlineScope": ["human-as-router regression", "lane compression"]
+            "redlineScope": ["human-as-router regression", "lane compression"],
+            "handoffPacket": {
+              "goal": "Check protocol health and lane preservation.",
+              "boundary": "read-only monitor",
+              "expectedEvidence": "dispatch health and first-action order",
+              "stopConditions": "stop on lane compression regression",
+              "releasedCapabilities": "dispatch-monitor"
+            }
           }
         ],
         "signals": [
@@ -247,17 +310,38 @@
             "nextAction": "Keep monitoring lane in the first round and verify results after worker signals arrive."
           }
         ],
+        "decisionSignals": {
+          "decision": "NEEDS_MORE",
+          "reason": "Target is unresolved, but the next step is AI discovery rather than immediate human clarification.",
+          "evidenceRefs": ["lane-discovery-1", "lane-opposition-1"],
+          "gated": false
+        },
+        "roundBrief": {
+          "goal": "Run read-only AI discovery to identify the project target and execution channel.",
+          "evidence_status": "weak evidence signal(s); target still unresolved",
+          "next_safe_action": "Continue read-only discovery before human clarification.",
+          "summary": "Target unresolved; continue bounded AI discovery."
+        },
+        "roundContextAvailable": true,
+        "compatibilityAliases": {
+          "verdict": "decisionSignals",
+          "roundRequired": "roundContextAvailable",
+          "requiredEvidence": "nextRoundContract.evidenceSignals"
+        },
         "verdict": {
           "decision": "NEEDS_MORE",
           "reason": "Target is unresolved, but the next step is AI discovery rather than immediate human clarification.",
-          "evidenceRefs": ["lane-discovery-1", "lane-opposition-1"]
+          "evidenceRefs": ["lane-discovery-1", "lane-opposition-1"],
+          "gated": false
         },
         "nextRoundContract": {
           "nextGoal": "Run read-only AI discovery to identify the project target and execution channel.",
           "inheritedBoundary": "read-only; no project modification; no credential or production access",
+          "evidenceSignals": ["candidate project refs", "failed discovery probes", "execution channel refs or blocker"],
           "requiredEvidence": ["candidate project refs", "failed discovery probes", "execution channel refs or blocker"],
           "allowedDispatch": ["AI-authored discovery lane", "AI-authored opposition lane", "AI-authored monitor/evidence-checker lane"],
           "stopBefore": ["file writes", "production access", "credential access", "wrong-target mutation"],
+          "needsUserConfirmation": false,
           "userConfirmationNeeded": false
         }
       }
@@ -281,7 +365,24 @@
         "evidenceStandard": {
           "minimum": "PASS requires concrete refs."
         },
-        "dispatchPlan": [],
+        "dispatchPlan": [
+          {
+            "laneId": "lane-worker-1",
+            "role": "fact-finder",
+            "task": "Confirm completion claim.",
+            "input": {},
+            "allowedTools": [],
+            "evidenceExpected": ["Concrete refs, not worker self-claims."],
+            "redlineScope": [],
+            "handoffPacket": {
+              "goal": "Confirm completion claim.",
+              "boundary": "read-only",
+              "expectedEvidence": "Concrete refs, not worker self-claims.",
+              "stopConditions": "stop before real execution",
+              "releasedCapabilities": "fact-finder"
+            }
+          }
+        ],
         "signals": [
           {
             "laneId": "lane-worker-1",
@@ -295,17 +396,38 @@
             "nextAction": "Proceed."
           }
         ],
+        "decisionSignals": {
+          "decision": "PASS",
+          "reason": "Worker says done.",
+          "evidenceRefs": [],
+          "gated": false
+        },
+        "roundBrief": {
+          "goal": "Confirm completion.",
+          "evidence_status": "weak evidence signal(s); treat worker self-claims as untrusted",
+          "next_safe_action": "Collect concrete refs before execution.",
+          "summary": "Weak evidence only."
+        },
+        "roundContextAvailable": false,
+        "compatibilityAliases": {
+          "verdict": "decisionSignals",
+          "roundRequired": "roundContextAvailable",
+          "requiredEvidence": "nextRoundContract.evidenceSignals"
+        },
         "verdict": {
           "decision": "PASS",
           "reason": "Worker says done.",
-          "evidenceRefs": []
+          "evidenceRefs": [],
+          "gated": false
         },
         "nextRoundContract": {
           "nextGoal": "Real execution.",
           "inheritedBoundary": "read-only",
+          "evidenceSignals": [],
           "requiredEvidence": [],
           "allowedDispatch": [],
           "stopBefore": [],
+          "needsUserConfirmation": false,
           "userConfirmationNeeded": false
         }
       }

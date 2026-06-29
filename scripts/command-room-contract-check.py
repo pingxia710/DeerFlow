@@ -95,6 +95,13 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
             lane_ids.add(lane_id)
         if not isinstance(lane.get("allowedTools"), list):
             errors.append(f"dispatchPlan[{index}].allowedTools must be a list")
+        packet = lane.get("handoffPacket")
+        if not isinstance(packet, dict):
+            errors.append(f"dispatchPlan[{index}].handoffPacket must be an object")
+        else:
+            for field in ("goal", "boundary", "expectedEvidence", "stopConditions", "releasedCapabilities"):
+                if field not in packet:
+                    errors.append(f"dispatchPlan[{index}].handoffPacket missing field: {field}")
 
     signals = _as_list(round_record["signals"])
     has_opposition_signal = False
@@ -124,6 +131,11 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
             errors.append(f"signals[{index}].evidenceState is invalid: {signal.get('evidenceState')!r}")
         if not isinstance(signal.get("selfAttestationOnly"), bool):
             errors.append(f"signals[{index}].selfAttestationOnly must be boolean")
+        if _self_attestation_only(signal):
+            if signal.get("trusted_source") is True or signal.get("trustedSource") is True:
+                errors.append(f"signals[{index}] self-claimed evidence must not be a trusted source")
+            if evidence_state == "SUPPORTED":
+                errors.append(f"signals[{index}] self-claimed evidence must not be SUPPORTED")
         pass_concrete_evidence = pass_concrete_evidence or (
             evidence_state == "SUPPORTED"
             and not _self_attestation_only(signal)
@@ -137,12 +149,50 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
             if _decision(signal.get("recommendedDecision")) in blocking_decisions:
                 blocking_opposition = True
 
+    aliases = round_record.get("compatibilityAliases")
+    if not isinstance(aliases, dict):
+        errors.append("compatibilityAliases must be an object")
+    else:
+        expected_aliases = {
+            "verdict": "decisionSignals",
+            "roundRequired": "roundContextAvailable",
+            "requiredEvidence": "nextRoundContract.evidenceSignals",
+        }
+        for key, expected in expected_aliases.items():
+            if aliases.get(key) != expected:
+                errors.append(f"compatibilityAliases.{key} must point to {expected}")
+
+    decision_signals = round_record.get("decisionSignals")
+    if not isinstance(decision_signals, dict):
+        errors.append("decisionSignals must be an object")
+        return errors
+    if decision_signals.get("gated") is not False:
+        errors.append("decisionSignals.gated must remain false/advisory")
+
     verdict = round_record["verdict"]
     if not isinstance(verdict, dict):
         errors.append("verdict must be an object")
         return errors
+    if verdict != decision_signals:
+        errors.append("verdict must remain only a compatibility alias for decisionSignals")
 
-    verdict_decision = _decision(verdict.get("decision"))
+    round_brief = round_record.get("roundBrief")
+    if not isinstance(round_brief, dict):
+        errors.append("roundBrief must be an object")
+    else:
+        for field in ("goal", "evidence_status", "next_safe_action", "summary"):
+            if not _has_required_value(round_brief, field):
+                errors.append(f"roundBrief missing field: {field}")
+        brief_text = json.dumps(round_brief, ensure_ascii=False).lower()
+        if any(term in brief_text for term in ("gate", "verdict", "pass", "fail")):
+            errors.append("roundBrief must stay neutral/advisory and avoid gate/verdict/pass/fail terms")
+
+    if not isinstance(round_record.get("roundContextAvailable"), bool):
+        errors.append("roundContextAvailable must be boolean")
+    if "roundRequired" in round_record and round_record.get("roundRequired") != round_record.get("roundContextAvailable"):
+        errors.append("roundRequired may exist only as alias of roundContextAvailable")
+
+    verdict_decision = _decision(decision_signals.get("decision"))
     if verdict_decision not in allowed_verdicts:
         errors.append(f"invalid verdict decision: {verdict.get('decision')!r}")
 
@@ -177,6 +227,12 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
             errors.append(f"nextRoundContract missing fields: {', '.join(missing)}")
         if not isinstance(next_round.get("userConfirmationNeeded"), bool):
             errors.append("nextRoundContract.userConfirmationNeeded must be boolean")
+        if not isinstance(next_round.get("needsUserConfirmation"), bool):
+            errors.append("nextRoundContract.needsUserConfirmation must be boolean")
+        if next_round.get("requiredEvidence") != next_round.get("evidenceSignals"):
+            errors.append("nextRoundContract.requiredEvidence must remain only an alias of evidenceSignals")
+        if next_round.get("userConfirmationNeeded") != next_round.get("needsUserConfirmation"):
+            errors.append("nextRoundContract.userConfirmationNeeded must remain only an alias of needsUserConfirmation")
 
     return errors
 

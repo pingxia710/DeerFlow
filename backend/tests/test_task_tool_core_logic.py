@@ -26,7 +26,7 @@ class FakeSubagentStatus(Enum):
 
 def _make_runtime(*, app_config=None) -> SimpleNamespace:
     # Minimal ToolRuntime-like object; task_tool only reads these three attributes.
-    context = {"thread_id": "thread-1"}
+    context = {"thread_id": "thread-1", "run_id": "run-1"}
     if app_config is not None:
         context["app_config"] = app_config
     return SimpleNamespace(
@@ -240,6 +240,8 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert all(e["thread_id"] == "thread-1" for e in events)
+    assert all(e["run_id"] == "run-1" for e in events)
     assert events[-1]["result"] == "all done"
 
 

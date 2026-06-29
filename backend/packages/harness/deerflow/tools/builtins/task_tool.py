@@ -49,6 +49,15 @@ def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, enabled: boo
         _subagent_usage_cache[tool_call_id] = usage
 
 
+def _task_event_base(event_type: str, task_id: str, *, thread_id: Any, run_id: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": event_type, "task_id": task_id}
+    if isinstance(thread_id, str) and thread_id:
+        event["thread_id"] = thread_id
+    if isinstance(run_id, str) and run_id:
+        event["run_id"] = run_id
+    return event
+
+
 def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
     return _subagent_usage_cache.pop(tool_call_id, None)
 
@@ -381,7 +390,7 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({"type": "task_started", "task_id": task_id, "description": description})
+    writer({**_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id), "description": description})
 
     try:
         while True:
@@ -389,7 +398,7 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                writer({**_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id), "error": "Task disappeared from background tasks"})
                 cleanup_background_task(task_id)
                 return f"Error: Task {task_id} disappeared from background tasks"
 
@@ -407,8 +416,7 @@ async def task_tool(
                     message = ai_messages[i]
                     writer(
                         {
-                            "type": "task_running",
-                            "task_id": task_id,
+                            **_task_event_base("task_running", task_id, thread_id=thread_id, run_id=run_id),
                             "message": message,
                             "message_index": i + 1,  # 1-based index for display
                             "total_messages": current_message_count,
@@ -437,7 +445,7 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                writer({**_task_event_base("task_completed", task_id, thread_id=thread_id, run_id=run_id), "result": result.result, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 return f"Task Succeeded. Result: {result.result}"
@@ -459,7 +467,7 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                writer({**_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
@@ -481,7 +489,7 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                writer({**_task_event_base("task_cancelled", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
@@ -503,7 +511,7 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                writer({**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task timed out. Error: {result.error}"
@@ -534,7 +542,7 @@ async def task_tool(
                     error=f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}",
                     usage=usage,
                 )
-                writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
+                writer({**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "usage": usage})
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.

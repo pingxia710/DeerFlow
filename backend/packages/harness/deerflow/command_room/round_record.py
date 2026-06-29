@@ -321,6 +321,16 @@ def round_context_signals_from_handoffs(goal: str | None, records: list[dict[str
     return _json_safe(round_context_signals(round_).as_dict())
 
 
+def _round_brief_from_context_signals(round_signals: dict[str, object] | None) -> dict[str, Any] | None:
+    if not isinstance(round_signals, dict):
+        return None
+    evidence = round_signals.get("evidence_signals")
+    if not isinstance(evidence, dict):
+        return None
+    brief = evidence.get("round_brief")
+    return brief if isinstance(brief, dict) else None
+
+
 def _independent_challenge_rationale_recorded(text: str | None) -> bool:
     sections = _extract_round_card_sections(text)
     haystack = sections.get("opposition") or text or ""
@@ -444,6 +454,7 @@ def record_command_room_round(
     sections = _extract_round_card_sections(final_text)
     signals = signals_from_handoffs(audit_records)
     round_signals = round_context_signals_from_handoffs(sections.get("goal") or user_message, audit_records)
+    round_brief = _round_brief_from_context_signals(round_signals)
     decision_signals = evaluate_decision_signals(final_text, signals)
     path = _round_file(thread_id, user_id, base_dir=base_dir)
     record = {
@@ -469,6 +480,7 @@ def record_command_room_round(
         "decisionSignals": decision_signals,
         "readinessSignals": decision_signals,
         "roundContextSignals": round_signals,
+        "roundBrief": round_brief,
         "roundContextAvailable": bool(round_signals),
         "roundContextReason": "command-room task action_result observed" if round_signals else "ordinary/no-task path; no round context signals observed",
         "roundRequired": bool(round_signals),  # deprecated/internal alias: not an auto-return or hard requirement

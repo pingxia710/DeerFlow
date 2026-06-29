@@ -155,8 +155,14 @@ def test_command_room_action_result_becomes_round_context_signals(tmp_path):
 
     record = json.loads(path.read_text(encoding="utf-8"))
     round_signals = record["roundContextSignals"]
+    brief = record["roundBrief"]
     assert record["roundRequired"] is True
     assert round_signals["action_count"] == 1
+    assert brief["goal"] == "implement and test feature"
+    assert "trusted observable evidence" in brief["evidence_status"]
+    assert "migration not reviewed" in brief["open_risks_or_questions"]
+    assert all(term not in json.dumps(brief).lower() for term in ["gate", "verdict", "pass", "fail"])
+    assert round_signals["evidence_signals"]["round_brief"] == brief
     json.dumps(round_signals)
     assert round_signals["evidence_signals"]["has_strong_signal"] is True
     evidence_signal = round_signals["evidence_signals"]["signals"][0]

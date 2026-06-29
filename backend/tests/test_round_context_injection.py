@@ -5,6 +5,11 @@ def _record(agent_name="command-room", signals=True, required=True):
     return {
         "agentName": agent_name,
         "roundRequired": required,
+        "roundBrief": {
+            "summary": "Goal: continue safely | Evidence: 1 weak evidence signal(s); treat worker self-claims as untrusted | Next safe action: inspect backend tests",
+            "evidence_status": "1 weak evidence signal(s); treat worker self-claims as untrusted",
+            "next_safe_action": "inspect backend tests",
+        },
         "roundContextSignals": {
             "action_count": 1,
             "risks": ["risk-a", "risk-b", "risk-c", "risk-d"],
@@ -27,6 +32,8 @@ def test_command_room_latest_round_signals_format_short_internal_context():
     assert text is not None
     assert "Internal Command Room Round signals" in text
     assert "not a verdict" in text
+    assert "brief: Goal: continue safely" in text
+    assert "next_safe_action: inspect backend tests" in text
     assert "round_complete=False" in text
     assert "next_round_is_safe=False" in text
     assert "needs_user_confirmation=True" in text

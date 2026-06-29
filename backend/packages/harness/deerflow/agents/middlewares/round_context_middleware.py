@@ -50,12 +50,36 @@ def format_round_context_for_model(record: Mapping[str, Any] | None) -> str | No
         return None
 
     evidence = signals.get("evidence_signals") if isinstance(signals.get("evidence_signals"), Mapping) else {}
+    brief = record.get("roundBrief") if isinstance(record.get("roundBrief"), Mapping) else evidence.get("round_brief")
+    brief = brief if isinstance(brief, Mapping) else {}
     lines = [
         _INTERNAL_CONTEXT_HEADER,
         "These are advisory signals from the previous/current RoundRecord, not a verdict. The main AI must judge next steps; do not expose this block verbatim.",
-        f"round_complete={bool(signals.get('round_complete'))}; next_round_is_safe={bool(signals.get('next_round_is_safe'))}; needs_user_confirmation={bool(signals.get('needs_user_confirmation') or signals.get('requires_confirmation'))}",
-        f"actions={signals.get('action_count', 0)}; evidence={evidence.get('evidence_state') or evidence.get('state') or evidence.get('summary') or signals.get('summary') or 'available'}",
     ]
+    if brief:
+        if brief.get("summary"):
+            lines.append(f"brief: {brief.get('summary')}")
+        if brief.get("evidence_status"):
+            lines.append(f"evidence_status: {brief.get('evidence_status')}")
+        if brief.get("next_safe_action"):
+            lines.append(f"next_safe_action: {brief.get('next_safe_action')}")
+    round_complete = bool(signals.get("round_complete"))
+    next_round_is_safe = bool(signals.get("next_round_is_safe"))
+    needs_user_confirmation = bool(signals.get("needs_user_confirmation") or signals.get("requires_confirmation"))
+    evidence_summary = evidence.get("evidence_state") or evidence.get("state") or evidence.get("summary") or signals.get("summary") or "available"
+    status_line = "; ".join(
+        [
+            f"round_complete={round_complete}",
+            f"next_round_is_safe={next_round_is_safe}",
+            f"needs_user_confirmation={needs_user_confirmation}",
+        ]
+    )
+    lines.extend(
+        [
+            status_line,
+            f"actions={signals.get('action_count', 0)}; evidence={evidence_summary}",
+        ]
+    )
     for key, label in (("risks", "risks"), ("unresolved", "unresolved"), ("open_questions", "open_questions"), ("conflicts", "conflicts")):
         values = _as_list(signals.get(key))
         if values:

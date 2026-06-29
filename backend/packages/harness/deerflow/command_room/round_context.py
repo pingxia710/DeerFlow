@@ -15,6 +15,8 @@ from typing import Any
 from .action_result_adapter import action_result_from_value
 from .round import Round, summarize_round
 
+_FORBIDDEN_BRIEF_TERMS = ("gate", "verdict", "pass", "fail")
+
 
 @dataclass(frozen=True)
 class RoundContextSignals:
@@ -50,6 +52,106 @@ class RoundContextSignals:
             "quality_verdict": None,
             "auto_rework": False,
         }
+
+
+@dataclass(frozen=True)
+class RoundBrief:
+    """Short internal working-memory brief for the main AI.
+
+    This is advisory context only. It is intentionally not a workflow decision,
+    quality judgement, or automatic rework trigger.
+    """
+
+    goal: str
+    boundaries: list[str]
+    handoff_signals: list[str]
+    evidence_status: str
+    open_risks_or_questions: list[str]
+    next_safe_action: str
+    summary: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "goal": self.goal,
+            "boundaries": list(self.boundaries),
+            "handoff_signals": list(self.handoff_signals),
+            "evidence_status": self.evidence_status,
+            "open_risks_or_questions": list(self.open_risks_or_questions),
+            "next_safe_action": self.next_safe_action,
+            "summary": self.summary,
+        }
+
+
+def _brief_text(value: str, *, limit: int = 180) -> str:
+    text = " ".join(str(value or "").split())
+    lowered = text.lower()
+    for term in _FORBIDDEN_BRIEF_TERMS:
+        lowered = lowered.replace(term, "")
+    text = lowered.strip(" :-;,.，。") if lowered != text.lower() else text
+    return text[:limit].rstrip() if len(text) > limit else text
+
+
+def create_round_brief(round_: Round) -> RoundBrief:
+    """Create compact high-signal working memory from a Round.
+
+    The brief is derived from existing Round/action/evidence signals and keeps
+    only useful next-step context. It deliberately avoids gate/verdict/pass/fail
+    semantics so the lead AI remains responsible for judgement.
+    """
+
+    evidence = round_.evidence_signals()
+    strong = int(evidence.get("strong_count") or 0)
+    weak = int(evidence.get("weak_count") or 0)
+    if strong:
+        evidence_status = f"{strong} trusted observable evidence signal(s)"
+    elif weak:
+        evidence_status = f"{weak} weak evidence signal(s); treat worker self-claims as untrusted"
+    else:
+        evidence_status = "no observable evidence signal yet"
+
+    handoff_signals = []
+    for result in round_.action_results[:3]:
+        label = _brief_text(result.description or result.action_id, limit=80)
+        summary = _brief_text(result.summary, limit=140)
+        if label and summary:
+            handoff_signals.append(f"{label}: {summary}")
+        elif label:
+            handoff_signals.append(label)
+        elif summary:
+            handoff_signals.append(summary)
+
+    open_items = []
+    for item in [*round_.risks, *round_.conflicts, *round_.open_questions, *round_.unresolved]:
+        text = _brief_text(item)
+        if text:
+            open_items.append(text)
+        if len(open_items) >= 5:
+            break
+
+    next_safe_action = _brief_text(round_.next_step, limit=180)
+    if not next_safe_action and round_.next_round is not None and round_.next_round.within_current_boundary and not round_.next_round.needs_user_confirmation:
+        next_safe_action = _brief_text(round_.next_round.proposal, limit=180)
+    if not next_safe_action:
+        next_safe_action = "continue only inside stated boundaries; ask user before new authorization or redline changes"
+
+    summary_parts = [
+        part
+        for part in [
+            f"Goal: {_brief_text(round_.goal, limit=160)}" if round_.goal.strip() else "",
+            f"Evidence: {evidence_status}",
+            f"Next safe action: {next_safe_action}",
+        ]
+        if part
+    ]
+    return RoundBrief(
+        goal=_brief_text(round_.goal, limit=160),
+        boundaries=[_brief_text(item) for item in round_.boundaries[:4] if _brief_text(item)],
+        handoff_signals=handoff_signals,
+        evidence_status=evidence_status,
+        open_risks_or_questions=open_items,
+        next_safe_action=next_safe_action,
+        summary=" | ".join(summary_parts),
+    )
 
 
 def create_round_context(
@@ -123,6 +225,11 @@ def round_context_signals(round_: Round) -> RoundContextSignals:
         "quality_verdict": None,
         "auto_rework": False,
     }
+    brief = create_round_brief(round_).as_dict()
+    evidence_signals = {
+        **evidence_signals,
+        "round_brief": brief,
+    }
     return RoundContextSignals(
         action_count=len(round_.action_results),
         risks=list(round_.risks),
@@ -139,7 +246,9 @@ def round_context_signals(round_: Round) -> RoundContextSignals:
 
 
 __all__ = [
+    "RoundBrief",
     "RoundContextSignals",
+    "create_round_brief",
     "create_round_context",
     "extract_action_result",
     "record_action_result_from_event",

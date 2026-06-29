@@ -71,6 +71,13 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+type QueuedThreadMessage = {
+  threadId: string;
+  message: PromptInputMessage;
+  extraContext?: Record<string, unknown>;
+  options?: SendMessageOptions;
+};
+
 type ThreadActivitySnapshot = {
   running: ReadonlySet<string>;
   finished: ReadonlySet<string>;
@@ -1286,6 +1293,7 @@ export function useThreadStream({
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
+  const queuedMessagesRef = useRef<QueuedThreadMessage[]>([]);
   const messagesRef = useRef<Message[]>([]);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
@@ -1380,6 +1388,47 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      if (thread.isLoading) {
+        if (message.files.length > 0) {
+          sendInFlightRef.current = false;
+          toast(t.inputBox.waitForCurrentResponse);
+          return Promise.reject(
+            new Error("Current response is still streaming."),
+          );
+        }
+        prevHumanMsgCountRef.current = humanMessageCount;
+        queuedMessagesRef.current = [
+          ...queuedMessagesRef.current,
+          {
+            threadId,
+            message: { ...message, text, files: [] },
+            extraContext,
+            options,
+          },
+        ];
+        const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+        if (!hideFromUI) {
+          const optimisticAdditionalKwargs = {
+            ...options?.additionalKwargs,
+            pending_while_streaming: true,
+          };
+          setOptimisticMessages((messages) => [
+            ...messages,
+            {
+              type: "human",
+              id: `opt-queued-human-${Date.now()}-${queuedMessagesRef.current.length}`,
+              content: text ? [{ type: "text", text }] : "",
+              additional_kwargs: optimisticAdditionalKwargs,
+            },
+          ]);
+        }
+        setOptimisticThreadTarget(threadId);
+        setLiveMessagesThreadTarget(threadId);
+        markThreadBusyInCaches(queryClient, threadId);
+        listeners.current.onSend?.(threadId);
+        sendInFlightRef.current = false;
+        return;
+      }
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -1554,6 +1603,7 @@ export function useThreadStream({
     },
     [
       thread,
+      t.inputBox.waitForCurrentResponse,
       t.uploads.uploadingFiles,
       context,
       queryClient,
@@ -1563,6 +1613,23 @@ export function useThreadStream({
       setOptimisticThreadTarget,
     ],
   );
+
+  useEffect(() => {
+    if (thread.isLoading || sendInFlightRef.current) {
+      return;
+    }
+    const next = queuedMessagesRef.current[0];
+    if (next?.threadId !== currentViewThreadId) {
+      return;
+    }
+    queuedMessagesRef.current = queuedMessagesRef.current.slice(1);
+    void sendMessage(
+      next.threadId,
+      next.message,
+      next.extraContext,
+      next.options,
+    );
+  }, [currentViewThreadId, sendMessage, thread.isLoading]);
 
   const regenerateMessage = useCallback(
     async (

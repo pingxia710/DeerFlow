@@ -512,13 +512,9 @@ export function InputBox({
           onStop?.();
           return;
         }
-        if (hasDraft) {
-          toast(t.inputBox.waitForCurrentResponse);
-          return Promise.reject(
-            new Error("Current response is still streaming."),
-          );
+        if (!hasDraft) {
+          return;
         }
-        return;
       }
       if (!message.text.trim() && message.files.length === 0) {
         return;
@@ -572,7 +568,6 @@ export function InputBox({
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
-      t.inputBox.waitForCurrentResponse,
       t.inputBox.suggestionPlaceholderRequired,
     ],
   );

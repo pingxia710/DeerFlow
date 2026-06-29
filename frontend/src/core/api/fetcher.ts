@@ -7,6 +7,16 @@ export const STATE_CHANGING_METHODS: ReadonlySet<StateChangingMethod> = new Set(
   ["POST", "PUT", "DELETE", "PATCH"],
 );
 
+export const DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS = 15_000;
+
+type FetchInit = RequestInit & {
+  /**
+   * Bound ordinary request latency without touching streaming calls. Pass
+   * ``null`` to opt out when a call is intentionally long-lived.
+   */
+  timeoutMs?: number | null;
+};
+
 /** Mirror of the gateway's ``should_check_csrf`` decision. */
 export function isStateChangingMethod(method: string): boolean {
   return (STATE_CHANGING_METHODS as ReadonlySet<string>).has(
@@ -36,6 +46,29 @@ export function readCsrfCookie(): string | null {
   return null;
 }
 
+function mergeAbortSignals(
+  first: AbortSignal | null | undefined,
+  second: AbortSignal | null | undefined,
+): AbortSignal | undefined {
+  const signals = [first, second].filter((signal): signal is AbortSignal =>
+    Boolean(signal),
+  );
+  if (signals.length === 0) return undefined;
+  if (signals.length === 1) return signals[0];
+
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), {
+      once: true,
+    });
+  }
+  return controller.signal;
+}
+
 /**
  * Fetch with credentials and automatic CSRF protection.
  *
@@ -55,14 +88,15 @@ export function readCsrfCookie(): string | null {
  */
 export async function fetch(
   input: RequestInfo | string,
-  init?: RequestInit,
+  init?: FetchInit,
 ): Promise<Response> {
   const url = typeof input === "string" ? input : input.url;
+  const { timeoutMs, ...requestInit } = init ?? {};
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
-  if (isStateChangingMethod(init?.method ?? "GET")) {
+  let headers = requestInit.headers;
+  if (isStateChangingMethod(requestInit.method ?? "GET")) {
     const token = readCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
@@ -74,9 +108,17 @@ export async function fetch(
     }
   }
 
+  const timeoutSignal =
+    typeof timeoutMs === "number" ? AbortSignal.timeout(timeoutMs) : null;
+  const signal =
+    timeoutMs === null
+      ? requestInit.signal
+      : mergeAbortSignals(timeoutSignal, requestInit.signal);
+
   const res = await globalThis.fetch(url, {
-    ...init,
+    ...requestInit,
     headers,
+    signal,
     credentials: "include",
   });
 

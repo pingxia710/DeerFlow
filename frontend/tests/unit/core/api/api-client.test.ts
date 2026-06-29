@@ -62,6 +62,31 @@ test("keeps newer reconnect metadata", () => {
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
 });
 
+test("adds an abort signal to non-streaming SDK requests", async () => {
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      return new Response(
+        JSON.stringify({
+          thread_id: "thread-1",
+          values: {},
+          metadata: {},
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  );
+  rs.stubGlobal("fetch", fetchMock);
+
+  await getAPIClient(true).threads.get("thread-1");
+
+  const init = fetchMock.mock.calls[0]?.[1];
+  expect(init?.signal).toBeInstanceOf(AbortSignal);
+});
+
 test("ignores reconnect metadata storage access failures", () => {
   rs.stubGlobal("window", {
     get sessionStorage() {

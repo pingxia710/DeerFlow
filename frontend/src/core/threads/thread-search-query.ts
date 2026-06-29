@@ -82,5 +82,6 @@ export function buildThreadsSearchQueryOptions(
     refetchInterval: THREAD_SEARCH_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
+    retry: false,
   };
 }

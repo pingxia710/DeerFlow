@@ -3,6 +3,7 @@ import { beforeEach, expect, test, rs } from "@rstest/core";
 const fetchWithAuth = rs.fn();
 
 rs.mock("@/core/api/fetcher", () => ({
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS: 15_000,
   fetch: fetchWithAuth,
 }));
 
@@ -39,6 +40,7 @@ test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", as
     expect.stringContaining("/api/threads/thread-1/token-usage"),
     {
       method: "GET",
+      timeoutMs: 15_000,
     },
   );
 });
@@ -87,6 +89,7 @@ test("fetchThreadContextUsage uses shared auth fetch", async () => {
     expect.stringContaining("/api/threads/thread-1/context-usage"),
     {
       method: "GET",
+      timeoutMs: 15_000,
     },
   );
 });

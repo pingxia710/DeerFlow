@@ -7,6 +7,7 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     queryKey: ["models"],
     queryFn: () => loadModels(),
     enabled,
+    retry: false,
     refetchOnWindowFocus: false,
   });
   return {

@@ -11,7 +11,11 @@ import {
 } from "../threads/static-demo";
 import type { AgentThreadState } from "../threads/types";
 
-import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
+import {
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  isStateChangingMethod,
+  readCsrfCookie,
+} from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
 
 /**
@@ -89,6 +93,10 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   const client = new LangGraphClient({
     apiUrl,
     onRequest: injectCsrfHeader,
+    timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    // Non-streaming UI boot calls should fail promptly when the local gateway
+    // is wedged. Streaming paths explicitly pass timeoutMs: null inside the SDK.
+    callerOptions: { maxRetries: 0, maxConcurrency: 4 },
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);

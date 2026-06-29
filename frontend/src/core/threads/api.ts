@@ -1,4 +1,7 @@
-import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  fetch as fetchWithAuth,
+} from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type {
@@ -13,6 +16,7 @@ export async function fetchThreadTokenUsage(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
     {
       method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
     },
   );
 
@@ -33,6 +37,7 @@ export async function fetchThreadContextUsage(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/context-usage`,
     {
       method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
     },
   );
 

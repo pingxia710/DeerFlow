@@ -30,7 +30,7 @@ help:
 	@echo "  make command-room-ai-native-probe - Run optional command-room AI-native development probe"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
-	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
+	@echo "  make dev             - Start all services in development mode (stable Gateway, frontend hot-reload)"
 	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
@@ -104,7 +104,7 @@ install:
 setup-sandbox:
 	@$(RUN_WITH_GIT_BASH) ./scripts/setup-sandbox.sh
 
-# Start all services in development mode (with hot-reloading)
+# Start all services in development mode (stable Gateway, frontend hot-reload)
 dev:
 	@$(PYTHON) ./scripts/check.py
 	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev

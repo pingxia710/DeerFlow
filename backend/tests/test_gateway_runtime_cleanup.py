@@ -58,12 +58,30 @@ def test_local_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
     assert "--reload-exclude='.deer-flow/'" not in serve_sh
 
 
-def test_local_dev_gateway_reload_has_bounded_graceful_shutdown():
+def test_local_dev_gateway_defaults_to_stable_runtime():
     serve_sh = _read("scripts/serve.sh")
     backend_makefile = _read("backend/Makefile")
 
+    assert "GATEWAY_RELOAD=false" in serve_sh
+    assert "if $DEV_MODE && $GATEWAY_RELOAD && ! $DAEMON_MODE; then" in serve_sh
+    assert re.search(
+        r"^dev:\n\tPYTHONPATH=.*uv run uvicorn app\.gateway\.app:app --host 0\.0\.0\.0 --port 8001$",
+        backend_makefile,
+        re.M,
+    )
+
+
+def test_gateway_reload_is_opt_in_and_bounded():
+    serve_sh = _read("scripts/serve.sh")
+    backend_makefile = _read("backend/Makefile")
+
+    assert "--gateway-reload" in serve_sh
     assert "--reload --timeout-graceful-shutdown 5" in serve_sh
-    assert "--reload --timeout-graceful-shutdown 5" in backend_makefile
+    assert re.search(
+        r"^dev-reload:\n\tPYTHONPATH=.*--reload --timeout-graceful-shutdown 5$",
+        backend_makefile,
+        re.M,
+    )
 
 
 def test_backend_container_only_exposes_gateway_port():

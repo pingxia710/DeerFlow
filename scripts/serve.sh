@@ -3,11 +3,13 @@
 # serve.sh — Unified DeerFlow service launcher
 #
 # Usage:
-#   ./scripts/serve.sh [--dev|--prod] [--daemon] [--stop|--restart]
+#   ./scripts/serve.sh [--dev|--prod] [--gateway-reload] [--daemon] [--stop|--restart]
 #
 # Modes:
-#   --dev       Development mode with hot-reload (default)
+#   --dev       Development mode with stable Gateway and frontend hot-reload (default)
 #   --prod      Production mode, pre-built frontend, no hot-reload
+#   --gateway-reload  Enable Gateway hot-reload in dev mode (off by default so
+#               command-room/subagent runs are not killed when backend files change)
 #   --daemon    Run all services in background (nohup), exit after startup
 #
 # Actions:
@@ -16,7 +18,8 @@
 #   --restart   Stop all services, then start with the given mode flags
 #
 # Examples:
-#   ./scripts/serve.sh --dev                 # Gateway dev, hot reload
+#   ./scripts/serve.sh --dev                 # Stable Gateway dev, frontend hot reload
+#   ./scripts/serve.sh --dev --gateway-reload # Gateway dev with backend hot reload
 #   ./scripts/serve.sh --prod                # Gateway prod
 #   ./scripts/serve.sh --dev --daemon        # Gateway dev, background
 #   ./scripts/serve.sh --stop                # Stop all services
@@ -54,6 +57,7 @@ _pick_python() {
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 DEV_MODE=true
+GATEWAY_RELOAD=false
 DAEMON_MODE=false
 SKIP_INSTALL=false
 ACTION="start"   # start | stop | restart
@@ -62,13 +66,14 @@ for arg in "$@"; do
     case "$arg" in
         --dev)     DEV_MODE=true ;;
         --prod)    DEV_MODE=false ;;
+        --gateway-reload) GATEWAY_RELOAD=true ;;
         --daemon)  DAEMON_MODE=true ;;
         --skip-install) SKIP_INSTALL=true ;;
         --stop)    ACTION="stop" ;;
         --restart) ACTION="restart" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--stop|--restart]"
+            echo "Usage: $0 [--dev|--prod] [--gateway-reload] [--daemon] [--skip-install] [--stop|--restart]"
             exit 1
             ;;
     esac
@@ -358,7 +363,11 @@ fi
 
 # Mode label for banner
 if $DEV_MODE; then
-    MODE_LABEL="DEV (Gateway runtime, hot-reload enabled)"
+    if $GATEWAY_RELOAD; then
+        MODE_LABEL="DEV (Gateway runtime, backend hot-reload enabled)"
+    else
+        MODE_LABEL="DEV (Gateway runtime, stable backend; frontend hot-reload enabled)"
+    fi
 else
     MODE_LABEL="PROD (Gateway runtime, optimized)"
 fi
@@ -389,8 +398,10 @@ DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
 BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
 export DEER_FLOW_HOME
 
-# Extra flags for uvicorn
-if $DEV_MODE && ! $DAEMON_MODE; then
+# Extra flags for uvicorn. Gateway reload is opt-in because Command Room can
+# edit backend files while it is running; auto-reload would cancel the parent
+# run and every active subtask.
+if $DEV_MODE && $GATEWAY_RELOAD && ! $DAEMON_MODE; then
     GATEWAY_EXTRA_FLAGS="--reload --timeout-graceful-shutdown 5 --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
     GATEWAY_EXTRA_FLAGS=""

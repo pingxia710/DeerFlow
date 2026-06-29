@@ -6,6 +6,8 @@ Purpose: translate the current AI-AI collaboration principles into the next safe
 
 Command Room treats the lead AI as the continuous brain for the conversation and project round. Sub-AIs, specialized agents, and skill-backed workers are disposable one-shot selves: they receive a bounded handoff, act in their own context, and return evidence or perspective for the lead AI to synthesize. They do not own continuity, acceptance, scheduling, or final judgment.
 
+Running sub-AIs do not freeze the lead AI conversation. While a subtask is executing, the lead AI may keep discussing strategy, constraints, trade-offs, and next steps with the user. That discussion becomes new intent, constraints, or next-round planning by default; it changes an already-running subtask only when the user explicitly asks to cancel, redirect, expand, or replace that execution.
+
 A subtask result and the handoff that produced it must be read as one object. When a result is weak, stale, overbroad, or misaligned, the diagnosis should look back through the whole packet: prompt, context, boundary, allowed tools, model/skill choice, expected evidence, plan, and runtime observations. Do not reduce failures to “the sub-AI was bad.” Bad handoffs create bad sub-AI behavior.
 
 A Round is the lead AI's high-signal working memory: goal, boundary, context, capabilities released, evidence seen, unresolved risk, and feedback for the next step. It is not a process table. Runtime/action-result records provide reality evidence from commands, files, logs, terminal/tool events, artifacts, statuses, and hashes. They do not rely on AI self-claims and do not adjudicate for the lead AI.
@@ -68,6 +70,16 @@ The code still contains compatibility names such as `verdict`, `evaluate_verdict
 
 Add prompt/documentation guidance that the lead AI owns continuity across rounds while sub-AIs expire after one task. The next-round contract should carry only useful memory: unresolved evidence, inherited boundary, safe next actions, and explicit redlines. It should not replay full transcripts or create a second command room.
 
+### 7. Live discussion during running subtasks
+
+Make clear in prompt and docs that subtask execution is not a UI-level or cognitive freeze. The lead AI can continue natural user discussion while workers run, but must classify discussion as advisory context unless the user explicitly requests an intervention. Intervention verbs include cancel, stop, redirect, replace, add a new subtask, or change the authorized boundary.
+
+When a worker finishes, the lead AI should merge the returned output, action_result/Round signals, and any live user discussion that happened during execution. If the combined state reveals a new executable issue inside the same authorization boundary, redispatch as a fresh handoff. If it changes goal, boundary, or redlines, ask first.
+
+Current implementation status: this rule is now codified in the Command Room lead prompt and project docs. The existing runtime still treats a thread run as the unit of execution: `task()` starts a background subagent but the lead run polls for the terminal result, and same-thread concurrent runs are rejected by default to protect checkpoint, message, and Round isolation. Do not enable generic same-thread concurrency to satisfy this feature.
+
+Future runtime direction, if live discussion becomes a product feature: add a discussion-only side channel or advisory run type that can answer strategy questions without mutating the active execution run. Any explicit intervention should become a separate, auditable command against the active task/run, preserving run_id and Round boundaries.
+
 ## Suggested next code steps
 
 1. Add a small handoff packet dataclass/parser around existing subagent audit extraction, keeping raw prompt/result out of audit.
@@ -75,6 +87,8 @@ Add prompt/documentation guidance that the lead AI owns continuity across rounds
 3. Add tests/probes that weak worker self-claims remain weak even when the result text is confident.
 4. Rename new docs and internal comments away from gate/verdict language while preserving compatibility aliases.
 5. Add one focused contract test for `action_result` evidence classification from terminal events.
+6. Keep prompt guidance and tests explicit that live discussion does not imply implicit intervention in running subtasks.
+7. For true live UX, design a discussion-only side channel instead of enabling generic same-thread multitask concurrency.
 
 ## Non-goals
 

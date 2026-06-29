@@ -180,6 +180,24 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     assert "**bash**" not in prompt
 
 
+def test_command_room_prompt_allows_live_discussion_without_implicit_intervention():
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+        ),
+        subagents=SubagentsAppConfig(),
+    )
+
+    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+
+    assert "While sub-AIs are running, your conversation with the user remains live" in section
+    assert "do not cancel" in section
+    assert "unless the user explicitly asks for that intervention" in section
+    assert "dispatch a fresh `task` with a new handoff" in section
+    assert "not a silent mutation of an already-running worker" in section
+
+
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(acp_agents={"codex": object()})
 

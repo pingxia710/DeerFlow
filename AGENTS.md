@@ -126,7 +126,9 @@ These apply repo-wide; module guides own the module-specific detail.
   the same change set.
 - **Command Room round principle** — users set direction, current-round boundaries, and
   whether to continue; Command Room owns execution and evidence within the authorized round.
-  Do not turn this into fixed gates, dashboards, default reviewers, or process theater.
+  Running sub-AIs do not freeze the lead AI's conversation with the user; live discussion is
+  advisory context or next-round planning unless the user explicitly asks to intervene in
+  execution. Do not turn this into fixed gates, dashboards, default reviewers, or process theater.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.

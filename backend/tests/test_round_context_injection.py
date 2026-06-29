@@ -1,4 +1,9 @@
-from deerflow.agents.middlewares.round_context_middleware import format_round_context_for_model
+from deerflow.agents.middlewares.round_context_middleware import (
+    format_round_context_for_model,
+    latest_round_context_for_thread,
+)
+from deerflow.command_room.round_record import record_command_room_round
+from deerflow.subagents.audit import record_subagent_handoff
 
 
 def _record(agent_name="command-room", signals=True, required=True):
@@ -47,3 +52,83 @@ def test_no_round_signals_or_not_required_does_not_inject():
     assert format_round_context_for_model({"roundRequired": True}) is None
     assert format_round_context_for_model(_record(required=False)) is None
     assert format_round_context_for_model(None) is None
+
+
+def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):
+    thread_id = "thread-1"
+    user_id = "user-1"
+    run_id = "run-1"
+    fake_thread_dir = tmp_path / "thread"
+
+    class Paths:
+        def thread_dir(self, thread_id, user_id=None):
+            return fake_thread_dir
+
+    monkeypatch.setattr("deerflow.subagents.audit.get_paths", lambda: Paths())
+    monkeypatch.setattr("deerflow.command_room.round_record.get_paths", lambda: Paths())
+
+    record_subagent_handoff(
+        thread_id=thread_id,
+        run_id=run_id,
+        task_id="task-1",
+        trace_id="trace-1",
+        user_id=user_id,
+        subagent_type="fact-finder",
+        description="inspect recovery path",
+        prompt="""Goal: inspect recovery path
+Boundary: read-only
+Expected Evidence: command refs
+Stop Conditions: stop before credentials
+Capabilities: read files
+RAW_PROMPT_SECRET
+""",
+        status="completed",
+        result="""Role: fact-finder
+Claim: Recovery path produced observable evidence.
+EvidenceRefs: command: pytest tests/test_round_context_injection.py -q; exit code: 0
+EvidenceState: SUPPORTED
+SelfAttestationOnly: false
+Unknown/Stale: none
+Conflicts: none
+RedlineTouched: false
+RecommendedDecision: NEEDS_MORE
+NextAction: continue bounded review
+RAW_RESULT_SECRET
+""",
+        action_result={
+            "action_id": "task-1",
+            "status": "completed",
+            "summary": "handoff recovery action summary",
+            "evidence_refs": ["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
+            "next_step": "continue bounded review",
+        },
+    )
+
+    path = record_command_room_round(
+        thread_id=thread_id,
+        agent_name="command-room",
+        user_id=user_id,
+        run_id=run_id,
+        user_message="recover next round context",
+        final_text="""Round Card
+Goal: recover next round context
+Boundary: read-only; no production or credentials
+Evidence: command refs collected
+Verdict: NEEDS_MORE
+Next: continue bounded review
+""",
+    )
+
+    assert path == fake_thread_dir / "audit" / "command_room_rounds.jsonl"
+    text = latest_round_context_for_thread(thread_id, user_id)
+    assert text is not None
+    assert "brief: Goal: recover next round context" in text
+    assert "trusted observable evidence" in text
+    assert "动作“task-1”已完成" in text
+    assert "actions=1" in text
+    lowered = text.lower()
+    assert "gate" not in lowered
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+    assert "raw_prompt_secret" not in lowered
+    assert "raw_result_secret" not in lowered

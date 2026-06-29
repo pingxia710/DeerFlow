@@ -170,11 +170,11 @@ describe("derivePendingSubtaskStatus", () => {
     );
   });
 
-  it("does not revive an earlier unfinished task during a later turn", () => {
+  it("keeps a task pending when the parent turn is no longer loading", () => {
     const messages = [{ type: "ai" }] as Message[];
 
     expect(derivePendingSubtaskStatus("call_task_1", messages, false)).toBe(
-      "failed",
+      "in_progress",
     );
   });
 

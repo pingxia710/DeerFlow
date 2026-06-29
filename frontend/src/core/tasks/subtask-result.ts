@@ -139,14 +139,15 @@ export function hasSubtaskToolResult(
 }
 
 export function derivePendingSubtaskStatus(
-  toolCallId: string | undefined,
-  messages: Message[],
-  isCurrentTurnLoading: boolean,
+  _toolCallId: string | undefined,
+  _messages: Message[],
+  _isCurrentTurnLoading: boolean,
 ): SubtaskStatus {
-  if (isCurrentTurnLoading || hasSubtaskToolResult(toolCallId, messages)) {
-    return "in_progress";
-  }
-  return "failed";
+  // A task tool call without its own ToolMessage is not evidence of failure.
+  // Command-room subtasks can keep running after the visible parent turn
+  // pauses, reconnects, or switches away, so terminal status must come from
+  // parseSubtaskResult's explicit backend result path.
+  return "in_progress";
 }
 
 function parseFromText(trimmed: string): SubtaskResultUpdate {

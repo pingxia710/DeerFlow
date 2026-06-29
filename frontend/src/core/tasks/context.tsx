@@ -61,6 +61,33 @@ export function useSubtask(id: string, threadId?: string | null) {
   return tasks[getSubtaskStorageKey(id, threadId)];
 }
 
+export function mergeSubtaskUpdate(
+  previous: Subtask | undefined,
+  task: SubtaskUpdate,
+  now = Date.now(),
+) {
+  const previousStatus = previous?.status;
+  const { threadId, ...taskPatch } = task;
+  // Completed is definitive. A failed status can be explicit, but older UI
+  // code also inferred it from the parent turn ending; allow later running
+  // signals to recover that stale local state. Explicit ToolMessage failures
+  // are applied again after the pending AI tool call is scanned.
+  return {
+    ...previous,
+    ...taskPatch,
+    ...(threadId ? { threadId } : {}),
+    ...(task.status === "in_progress" && previousStatus !== "completed"
+      ? { error: undefined, result: undefined }
+      : {}),
+    ...(task.status === "in_progress" && previous?.startedAt === undefined
+      ? { startedAt: task.startedAt ?? now }
+      : {}),
+    ...(task.status === "in_progress" && previousStatus === "completed"
+      ? { status: previousStatus }
+      : {}),
+  } as Subtask;
+}
+
 export function useUpdateSubtask() {
   const { tasks, setTasks } = useSubtaskContext();
   const shouldNotifyAfterRenderRef = useRef(false);
@@ -78,22 +105,7 @@ export function useUpdateSubtask() {
       const storageKey = getSubtaskStorageKey(task.id, task.threadId);
       const previous = tasks[storageKey];
       const previousStatus = previous?.status;
-      const { threadId, ...taskPatch } = task;
-      // MessageList writes the pending task tool-call state before parsing the
-      // matching ToolMessage in the same render. Keep terminal results stable
-      // across the next render so the refresh notification does not loop.
-      const next = {
-        ...previous,
-        ...taskPatch,
-        ...(threadId ? { threadId } : {}),
-        ...(task.status === "in_progress" && previous?.startedAt === undefined
-          ? { startedAt: task.startedAt ?? Date.now() }
-          : {}),
-        ...(task.status === "in_progress" &&
-        isTerminalSubtaskStatus(previousStatus)
-          ? { status: previousStatus }
-          : {}),
-      } as Subtask;
+      const next = mergeSubtaskUpdate(previous, task);
 
       const becameTerminal =
         isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;

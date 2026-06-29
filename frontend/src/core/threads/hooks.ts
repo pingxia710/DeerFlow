@@ -1219,6 +1219,7 @@ export function useThreadStream({
         updateSubtask({
           id: e.task_id,
           threadId: taskThreadId,
+          status: "in_progress",
           latestMessage: e.message,
         });
         return;

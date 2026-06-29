@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 from deerflow.command_room.evidence import analyze_evidence_ref
 from deerflow.command_room.round_record import (
@@ -322,3 +323,77 @@ def test_runtime_observable_evidence_ref_is_trusted_source():
     assert signal.strong is True
     assert signal.trusted_source is True
     assert "command-output-or-exit-code" in signal.strong_reasons
+
+
+def test_generated_command_room_round_record_satisfies_contract_checker(tmp_path):
+    import importlib.util
+
+    contract_path = Path(__file__).resolve().parents[2] / "contracts" / "command_room_round_contract.json"
+    checker_path = Path(__file__).resolve().parents[2] / "scripts" / "command-room-contract-check.py"
+    spec = importlib.util.spec_from_file_location("command_room_contract_check", checker_path)
+    checker = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(checker)
+
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="verify generated round record contract",
+        final_text="""Round Card
+Goal: verify generated round record contract
+Boundary: read-only; no production or credentials
+Evidence: command: pytest backend/tests/test_command_room_round_record.py -q; exit code: 0
+Verdict: NEEDS_MORE
+Next: collect additional concrete refs
+""",
+        run_id="run-1",
+        audit_records=[
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "task_id": "task-1",
+                "subagent_type": "fact-finder",
+                "description": "inspect generated record",
+                "prompt_sha256": "prompt-hash",
+                "prompt_chars": 123,
+                "handoff_packet": {
+                    "goal": "inspect generated record",
+                    "boundary": "read-only",
+                    "expectedEvidence": "file refs and test output",
+                    "stopConditions": "stop before production or credentials",
+                    "releasedCapabilities": "read files; run targeted pytest",
+                },
+                "result_sha256": "result-hash",
+                "result_chars": 456,
+                "signal": {
+                    "valid": True,
+                    "missing": [],
+                    "fields": {
+                        "Role": "fact-finder",
+                        "Claim": "Generated record has concrete test refs but needs review.",
+                        "EvidenceRefs": "command: pytest tests/test_command_room_round_record.py -q; exit code: 0",
+                        "EvidenceState": "SUPPORTED",
+                        "SelfAttestationOnly": "false",
+                        "RedlineTouched": "false",
+                        "RecommendedDecision": "NEEDS_MORE",
+                        "NextAction": "Review generated record shape against contract.",
+                    },
+                },
+                "action_result": {
+                    "action_id": "task-1",
+                    "status": "completed",
+                    "summary": "generated record includes action summary and handoff packet",
+                    "evidence_refs": ["command: pytest tests/test_command_room_round_record.py -q; exit code: 0"],
+                    "next_step": "review generated record shape against contract",
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert record["decisionSignals"]["decision"] == "NEEDS_MORE"
+    assert record["roundBrief"]
+    assert record["dispatchPlan"][0]["handoffPacket"]["goal"] == "inspect generated record"
+    assert checker.validate_round(record, contract) == []

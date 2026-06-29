@@ -231,7 +231,7 @@ def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
         if bash_available
-        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
+        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace/README.md")  # Direct execution, not task()'
     )
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
@@ -375,7 +375,11 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
 
 **Guidance:**
 - Choose delegations by the actual problem. Do not force PM/dev/QA/reviewer roles, fixed counts, default reviewers, gates, dashboards, or a required positive/negative/monitor trio.
-- You may dispatch a single sub-AI when that is the right next action. Do not avoid `task` merely because only one delegation is useful.
+- When several work items are independent, clear-bounded, and inside the same authorization boundary, dispatch them in parallel in the same response/round
+  up to the operational cap. Do not serialize independent work out of habit.
+- Serialize only for real dependencies, shared write surfaces likely to conflict, risk/boundary confirmation, user choices, or work beyond the cap;
+  when write conflicts are possible, prefer parallel read-only checks first and a single landing path after synthesis.
+- You may dispatch a single sub-AI when only one lane is genuinely useful. Do not invent extra lanes just to parallelize.
 - A Round is the command-room execution cadence: one user-authorized, bounded cognitive/execution loop that should make the next state clearer.
   The user controls the round goal, boundaries, and whether to enter another round; you control execution and evidence inside the confirmed round.
 - While sub-AIs are running, your conversation with the user remains live. You may discuss strategy, constraints, trade-offs, and next steps, but do not cancel,
@@ -460,6 +464,10 @@ When you are running as `command-room`, the generic clarification-first rule is 
 - Round is the basic unit of autonomous progress: the user controls the round goal, boundaries, and whether to enter the next round.
   Within that authorization, use intent, assumptions, evidence, conflicts, and unknowns -> clearer goal, boundary, evidence, conflicts, and next round.
   Handle ordinary technical execution autonomously inside the round.
+- If multiple concrete unknowns or work items are independent, clear-bounded, and inside the same authorization boundary, dispatch them concurrently
+  in this same response/round up to the operational cap. Do not process independent items one by one merely from habit.
+  Serialize only for true dependencies, likely shared-write conflicts, risk/boundary confirmation, user choices, or cap overflow;
+  for possible write conflicts, use parallel read-only discovery first and one synthesized landing action.
 - If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now.
   Use Next Round for concrete carryover after this round's useful dispatches, evidence synthesis, or operational cap are exhausted.
   Do not answer with "if we continue", "I suggest digging into", or similar vague deferrals.
@@ -539,19 +547,19 @@ You: "Deploying to staging..." [proceed]
 {subagent_section}
 
 <working_directory existed="true">
-- User uploads: `/mnt/user-data/uploads` - Files uploaded by the user (automatically listed in context)
-- User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
-- Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
+- User uploads: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/uploads` - Files uploaded by the user (automatically listed in context)
+- User workspace: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` - Working directory for temporary files
+- Output files: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs` - Final deliverables must be saved here
 
 **File Management:**
 - Uploaded files are automatically listed in the <uploaded_files> section before each request
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
-- All temporary work happens in `/mnt/user-data/workspace`
-- Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
+- All temporary work happens in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace`
+- Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
-- Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
+- Avoid hardcoding `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/...` inside generated scripts when a relative path from the workspace is enough
+- Final deliverables must be copied to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs` and presented using `present_files` tool
 {acp_section}
 </working_directory>
 
@@ -628,7 +636,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
-- Output Files: Final deliverables must be in `/mnt/user-data/outputs`
+- Output Files: Final deliverables must be in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs`
 - File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -741,7 +749,7 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
             container_base_path = config.skills.container_path
             skill_evolution_enabled = config.skill_evolution.enabled
         except Exception:
-            container_base_path = "/mnt/skills"
+            container_base_path = "/Users/pingxia/projects/deer-flow/skills"
             skill_evolution_enabled = False
     else:
         config = app_config
@@ -808,10 +816,10 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
 
     return (
         "\n**ACP Agent Tasks (invoke_acp_agent):**\n"
-        "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`\n"
-        "- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths\n"
-        "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
-        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_files`"
+        "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/`/n"
+        "- When writing prompts for ACP agents, describe the task only — do NOT reference `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data` paths\n"
+        "- ACP agent results are accessible at `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
+        "- To deliver ACP output to the user: copy from `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace<file>` to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs<file>`, then use `present_files`"
     )
 
 
@@ -839,7 +847,7 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
         lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
 
     mounts_list = "\n".join(lines)
-    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
+    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
 def apply_prompt_template(
@@ -863,7 +871,12 @@ def apply_prompt_template(
 
     # Add subagent reminder to critical_reminders if enabled
     if subagent_enabled and is_command_room:
-        subagent_reminder = f"- **AI Dispatch**: Use LLM judgment to dispatch one or more sub-AIs with `task`; a single delegation is allowed; max {n} `task` calls per response; synthesize returned AI results.\n"
+        subagent_reminder = (
+            "- **AI Dispatch**: Use LLM judgment to dispatch useful sub-AIs with `task`; "
+            "run independent clear-bounded lanes in parallel up to "
+            f"max {n} `task` calls per response; a single delegation is allowed when only one lane has value; "
+            "synthesize returned AI results.\n"
+        )
     elif subagent_enabled:
         subagent_reminder = (
             "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
@@ -875,7 +888,12 @@ def apply_prompt_template(
 
     # Add subagent thinking guidance if enabled
     if subagent_enabled and is_command_room:
-        subagent_thinking = f"- **AI DISPATCH CHECK**: Choose sub-AI delegations by the actual problem. Dispatch one or more useful sub-AIs, never more than {n} in one response; answer naturally after results return.\n"
+        subagent_thinking = (
+            "- **AI DISPATCH CHECK**: Choose sub-AI delegations by the actual problem. "
+            f"Dispatch independent clear-bounded lanes concurrently in the same response/round up to {n}; "
+            "serialize only for real dependency, conflict/risk/boundary/user-choice needs, or cap overflow; "
+            "a single useful lane is fine.\n"
+        )
     elif subagent_enabled:
         subagent_thinking = (
             "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "

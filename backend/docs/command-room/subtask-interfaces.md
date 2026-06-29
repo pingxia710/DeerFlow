@@ -5,6 +5,8 @@ Purpose: make stable Command Room delegation patterns discoverable without turni
 ## Common boundary
 
 - Invoke subtasks only when they add tool access, independent inspection, critique, or synthesis value. Subtasks are execution means, not fixed process steps.
+- When several subtasks are independent, clear-bounded, and within the same authorization boundary, dispatch them in parallel in the same response/round up to the operational cap. Do not serialize independent work out of habit.
+- Serialize only for true dependencies, likely shared-write conflicts, risk/boundary confirmation, user choices, or cap overflow. For possible write conflicts, prefer parallel read-only discovery first and one synthesized landing action. A single sub-AI is still correct when only one lane has value.
 - Treat the handoff packet as the core AI-AI governance unit. Pass a narrow goal, current round boundary, inherited context, required inputs, forbidden changes, released capabilities/tools, expected outputs, evidence requirements, and stop conditions; write prompts for the actual understanding limits of the receiving one-shot sub-AI.
 - Running subtasks do not freeze lead-AI conversation. While a worker runs, the lead AI may discuss strategy, constraints, trade-offs, and next steps with the user; treat that discussion as advisory context or next-round planning unless the user explicitly requests cancellation, redirection, replacement, expansion, or another intervention.
 - After a worker finishes, the lead AI may combine the returned result, action_result/Round signals, and live user discussion into a fresh handoff. Redispatch is fine when it is a new bounded task inside the current authorization; boundary-changing redispatch needs user confirmation.

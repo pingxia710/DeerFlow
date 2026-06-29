@@ -80,7 +80,7 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=mounts),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
@@ -98,7 +98,7 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
 def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
@@ -109,7 +109,7 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     prompt = prompt_module.apply_prompt_template()
 
-    assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
+    assert "Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
@@ -156,7 +156,7 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
                 )
             }
         ),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
@@ -209,7 +209,7 @@ def test_build_acp_section_uses_explicit_app_config_without_global_config(monkey
     section = prompt_module._build_acp_section(app_config=explicit_config)
 
     assert "ACP Agent Tasks" in section
-    assert "/mnt/acp-workspace/" in section
+    assert "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace" in section
 
 
 def test_get_memory_context_uses_explicit_app_config_without_global_config(monkeypatch):
@@ -306,7 +306,7 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
         cast(
             object,
             SimpleNamespace(
-                skills=SimpleNamespace(container_path="/mnt/skills"),
+                skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
                 skill_evolution=SimpleNamespace(enabled=False),
             ),
         ),
@@ -438,6 +438,12 @@ def test_system_prompt_template_contains_command_room_ai_first_exception():
     assert "ordinary technical execution" in template
     assert "Handle ordinary technical execution autonomously inside the round" in template
     assert "redlines or boundary changes" in template
+    assert "If multiple concrete unknowns or work items are independent" in template
+    assert "dispatch them concurrently" in template
+    assert "in this same response/round up to the operational cap" in template
+    assert "Do not process independent items one by one merely from habit" in template
+    assert "Serialize only for true dependencies" in template
+    assert "parallel read-only discovery first and one synthesized landing action" in template
     assert "If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now" in template
     assert "overrides the generic clarification-first rule for discoverable facts" in template
     assert "delegated AI discovery has failed" in template
@@ -465,7 +471,7 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
             mounts=[],
         ),
         subagents=SubagentsAppConfig(custom_agents={}),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
@@ -484,6 +490,11 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
 
     assert "AI DISPATCH MODE" in prompt
     assert "You may dispatch a single sub-AI" in prompt
+    assert "dispatch them in parallel in the same response/round" in prompt
+    assert "up to the operational cap" in prompt
+    assert "Do not serialize independent work out of habit" in prompt
+    assert "Serialize only for real dependencies" in prompt
+    assert "parallel read-only checks first and a single landing path" in prompt
     assert "A Round is the command-room execution cadence" in prompt
     assert "Round Model" in prompt
     assert "Classify unknowns yourself" in prompt

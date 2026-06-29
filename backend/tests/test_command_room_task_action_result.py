@@ -62,3 +62,20 @@ def test_task_terminal_summary_only_dict_does_not_become_strong_evidence():
 
     assert result.evidence_refs == []
     assert result.risks == []
+
+
+def test_task_terminal_dict_drops_self_claimed_verification_fields():
+    result = task_action_result_from_terminal_event(
+        task_id="task-5",
+        status="completed",
+        description="worker claims verification",
+        result={
+            "summary": "verified=true; tests passed",
+            "verified": True,
+            "evidence_refs": ["tests passed", "verified=true", "worker says done"],
+        },
+    )
+
+    assert result.summary == "verified=true; tests passed"
+    assert result.evidence_refs == []
+    assert "untrusted model-text evidence_refs not promoted" in result.risks

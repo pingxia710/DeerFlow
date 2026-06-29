@@ -1,7 +1,9 @@
 """Tests for Command Room RoundRecord persistence and readiness signals."""
 
 import json
+from dataclasses import asdict
 
+from deerflow.command_room.evidence import analyze_evidence_ref
 from deerflow.command_room.round_record import (
     evaluate_verdict_gate,
     record_command_room_round,
@@ -284,3 +286,22 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
     assert signal["evidenceState"] == "STALE"
     assert signal["selfAttestationOnly"] is True
     assert any("self-claims" in reason.lower() for reason in record["decisionSignals"]["reasons"])
+
+
+def test_self_claimed_evidence_refs_are_not_trusted_sources():
+    weak_refs = ["tests passed", "verified=true", "worker says done"]
+
+    signals = [analyze_evidence_ref(ref) for ref in weak_refs]
+
+    assert [signal.strong for signal in signals] == [False, False, False]
+    assert [signal.trusted_source for signal in signals] == [False, False, False]
+    assert "tests-passed-alone" in signals[0].weak_reasons
+    assert all(asdict(signal)["trusted_source"] is False for signal in signals)
+
+
+def test_runtime_observable_evidence_ref_is_trusted_source():
+    signal = analyze_evidence_ref("command: python -m pytest backend/tests/test_x.py; exit code: 0; stdout: passed")
+
+    assert signal.strong is True
+    assert signal.trusted_source is True
+    assert "command-output-or-exit-code" in signal.strong_reasons

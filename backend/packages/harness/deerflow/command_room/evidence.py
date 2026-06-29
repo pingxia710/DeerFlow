@@ -38,12 +38,19 @@ _SUMMARY_ONLY_RE = re.compile(r"^\s*(?:summary|总结)\s*[:：].*$", re.I | re.S
 
 @dataclass(frozen=True)
 class EvidenceSignal:
-    """Mechanical signal extracted from one evidence reference."""
+    """Mechanical signal extracted from one evidence reference.
+
+    ``trusted_source`` is intentionally narrow: only observable runtime/adapter
+    provenance (commands, tool output, logs, files, artifacts, hashes, diffs,
+    etc.) can make a strong evidence signal. Bare model/worker text such as
+    ``tests passed`` or self-claimed ``verified=true`` stays summary-level.
+    """
 
     ref: str
     strong: bool
     weak_reasons: tuple[str, ...]
     strong_reasons: tuple[str, ...]
+    trusted_source: bool = False
 
 
 def analyze_evidence_ref(ref: str | None) -> EvidenceSignal:
@@ -79,7 +86,8 @@ def analyze_evidence_ref(ref: str | None) -> EvidenceSignal:
 
     strong_unique = tuple(dict.fromkeys(strong))
     weak_unique = tuple(dict.fromkeys(weak))
-    return EvidenceSignal(ref=text, strong=bool(strong_unique) and "tests-passed-alone" not in weak_unique, weak_reasons=weak_unique, strong_reasons=strong_unique)
+    trusted_source = bool(strong_unique) and "tests-passed-alone" not in weak_unique
+    return EvidenceSignal(ref=text, strong=trusted_source, weak_reasons=weak_unique, strong_reasons=strong_unique, trusted_source=trusted_source)
 
 
 def summarize_evidence_refs(refs: Iterable[str | None]) -> dict[str, object]:

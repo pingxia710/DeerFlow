@@ -20,6 +20,7 @@ AI-native process design should frame goals, boundaries, context, capabilities, 
 - `command_room/round_record.py` reads subagent handoff audit and task `action_result` metadata into internal `command_room_rounds.jsonl` records.
 - `command_room/round_context.py`, `task_action_result.py`, and `action_result_adapter.py` are the right place to keep runtime evidence normalization mechanical and non-judgmental.
 - `docs/command-room/subtask-interfaces.md` is the stable discovery surface for handoff/subtask patterns.
+- `docs/command-room/progress-memory.md` defines the optional human/new-session continuation note for interrupted long work; it complements, but does not replace, RoundRecord, roundBrief, audit, or action_result evidence.
 - `docs/command-room/skills-policy.md` governs when a repeated one-shot specialist behavior becomes a skill.
 
 ## Development plan

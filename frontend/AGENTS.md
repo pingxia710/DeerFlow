@@ -84,6 +84,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   messages from the previous stream target.
 - Subtask UI state must be scoped by thread id when read or written. Do not
   treat backend task/tool-call ids as globally unique across chat sessions.
+  Prefer task-event `thread_id`/`run_id` and SDK run callback metadata over the
+  currently visible route id; users can switch chats while a run is still alive.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
 

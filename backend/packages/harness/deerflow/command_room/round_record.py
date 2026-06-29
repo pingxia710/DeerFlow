@@ -127,8 +127,14 @@ def extract_text(content: Any) -> str:
     return str(content) if content is not None else ""
 
 
-def extract_verdict(text: str | None) -> tuple[str, str]:
-    """Return the final visible Verdict line and normalized decision."""
+def extract_decision_signal(text: str | None) -> tuple[str, str]:
+    """Return the final visible legacy decision line and normalized advisory signal.
+
+    ``Verdict:`` and tokens such as ``PASS`` / ``NEEDS_MORE`` are historical
+    prompt/output compatibility conventions. They are parsed only as advisory
+    decision signals for the lead AI; they do not create a program gate or
+    automatic rework decision.
+    """
     if not text:
         return "", "NEEDS_MORE"
 
@@ -138,13 +144,19 @@ def extract_verdict(text: str | None) -> tuple[str, str]:
 
     value = matches[-1].group(1).strip()
     upper = value.upper()
-    for verdict in _ALLOWED_VERDICTS:
-        if re.search(rf"\b{re.escape(verdict)}\b", upper):
-            return f"Verdict: {value}", verdict
+    for decision_token in _ALLOWED_VERDICTS:
+        if re.search(rf"\b{re.escape(decision_token)}\b", upper):
+            return f"Verdict: {value}", decision_token
 
     if re.search(r"不能\s*PASS|不可\s*PASS|不应\s*PASS|不能判定\s*PASS", value, re.IGNORECASE):
         return f"Verdict: {value}", "NEEDS_MORE"
     return f"Verdict: {value}", "NEEDS_MORE"
+
+
+def extract_verdict(text: str | None) -> tuple[str, str]:
+    """Deprecated compatibility alias for :func:`extract_decision_signal`."""
+
+    return extract_decision_signal(text)
 
 
 def _extract_round_card_sections(text: str | None) -> dict[str, str]:
@@ -375,7 +387,7 @@ def evaluate_decision_signals(final_text: str | None, signals: list[dict[str, An
     program-level gate, PASS/FAIL result, automatic rework trigger, or default
     requirement to dispatch opposition.
     """
-    verdict_line, model_decision = extract_verdict(final_text)
+    verdict_line, model_decision = extract_decision_signal(final_text)
     sections = _extract_round_card_sections(final_text)
     decision = model_decision
     reasons: list[str] = []
@@ -483,17 +495,28 @@ def record_command_room_round(
         "roundBrief": round_brief,
         "roundContextAvailable": bool(round_signals),
         "roundContextReason": "command-room task action_result observed" if round_signals else "ordinary/no-task path; no round context signals observed",
+        "roundContextAliases": {
+            "roundRequired": bool(round_signals),
+            "roundRequiredReason": "command-room task action_result observed" if round_signals else "ordinary/no-task path; round not forced",
+        },
         "roundRequired": bool(round_signals),  # deprecated/internal alias: not an auto-return or hard requirement
         "roundRequiredReason": "command-room task action_result observed" if round_signals else "ordinary/no-task path; round not forced",  # deprecated/internal alias
+        "compatibilityAliases": {
+            "verdict": "decisionSignals",
+            "roundRequired": "roundContextAvailable",
+            "requiredEvidence": "nextRoundContract.evidenceSignals",
+        },
         "verdict": decision_signals,  # deprecated/internal alias for decisionSignals
         "nextRoundContract": {
             "nextGoal": sections.get("next", ""),
             "inheritedBoundary": sections.get("boundary", ""),
             "evidenceSignals": decision_signals["reasons"],
-            "requiredEvidence": decision_signals["reasons"],  # deprecated/internal alias
+            "nextSafeAction": sections.get("next", ""),
+            "needsUserConfirmation": any("redline" in reason.lower() for reason in decision_signals["reasons"]),
+            "requiredEvidence": decision_signals["reasons"],  # deprecated/internal alias for evidenceSignals
             "allowedDispatch": [],
             "stopBefore": ["new authorization", "production write", "credential/customer/payment exposure"],
-            "userConfirmationNeeded": any("redline" in reason.lower() for reason in decision_signals["reasons"]),
+            "userConfirmationNeeded": any("redline" in reason.lower() for reason in decision_signals["reasons"]),  # deprecated/internal alias
         },
         "artifacts": {
             "finalText": _text_fingerprint(final_text),

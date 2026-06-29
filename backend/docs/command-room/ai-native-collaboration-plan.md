@@ -62,7 +62,7 @@ The lead AI should see hard gaps and evidence links, then decide.
 
 ### 5. Naming cleanup and verdict residue
 
-The code still contains compatibility names such as `verdict`, `evaluate_verdict_gate`, `roundRequired`, and gate-like wording. Keep public/runtime compatibility, but migrate new names toward `decisionSignals`, `readinessSignals`, `roundContextAvailable`, `hardGaps`, and `boundarySignals`. Do this in small documentation-first or alias-preserving patches; do not break persisted audit readers.
+The code still contains compatibility names such as `verdict`, `evaluate_verdict_gate`, `roundRequired`, and gate-like wording. Keep public/runtime compatibility, but migrate new names toward `decisionSignals`, `readinessSignals`, `roundContextAvailable`, `roundContextSignals`, `roundBrief`, `nextSafeAction`, `needsUserConfirmation`, `hardGaps`, and `boundarySignals`. Treat `verdict`, `roundRequired`, `requiredEvidence`, and gate-like booleans as legacy compatibility aliases only; they must not be described or consumed as program adjudication, automatic return requirements, or rework triggers. Do this in small documentation-first or alias-preserving patches; do not break persisted audit readers.
 
 ### 6. Continuity bridge
 

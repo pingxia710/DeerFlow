@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from deerflow.command_room.evidence import analyze_evidence_ref
 from deerflow.command_room.round_record import (
-    evaluate_verdict_gate,
+    evaluate_decision_signals,
     record_command_room_round,
     signals_from_handoffs,
 )
@@ -36,10 +36,10 @@ def _opposition_record(*, decision: str = "STOP_CONFIRM", redline: str = "true")
     }
 
 
-def test_verdict_gate_reports_risk_without_overriding_pass():
+def test_decision_signals_report_risk_without_overriding_legacy_pass():
     signals = signals_from_handoffs([_opposition_record()])
 
-    gate = evaluate_verdict_gate(
+    readiness = evaluate_decision_signals(
         """Round Card
 Evidence: worker self-claims only
 Verdict: PASS
@@ -48,16 +48,16 @@ Next: enter execution
         signals,
     )
 
-    assert gate["decision"] == "PASS"
-    assert gate["modelDecision"] == "PASS"
-    assert gate["gated"] is False
-    reasons = " ".join(gate["reasons"]).lower()
+    assert readiness["decision"] == "PASS"
+    assert readiness["modelDecision"] == "PASS"
+    assert readiness["gated"] is False  # legacy compatibility field; not a runtime gate
+    reasons = " ".join(readiness["reasons"]).lower()
     assert "opposition" in reasons
     assert "risk signal" in reasons
 
 
-def test_verdict_gate_reports_exemption_readiness_with_evidence():
-    gate = evaluate_verdict_gate(
+def test_decision_signals_report_exemption_readiness_with_evidence():
+    readiness = evaluate_decision_signals(
         """Round Card
 Evidence: backend/tests/test_command_room_round_record.py::test_example passed
 Opposition:
@@ -72,9 +72,9 @@ Next: done
         [],
     )
 
-    assert gate["decision"] == "PASS"
-    assert gate["gated"] is False
-    assert any("readiness signal" in reason.lower() for reason in gate["reasons"])
+    assert readiness["decision"] == "PASS"
+    assert readiness["gated"] is False  # legacy compatibility field; not a runtime gate
+    assert any("readiness signal" in reason.lower() for reason in readiness["reasons"])
 
 
 def test_record_command_room_round_omits_raw_user_and_final_text(tmp_path):
@@ -103,9 +103,12 @@ SECRET_FINAL_TEXT_SHOULD_NOT_APPEAR
     assert "SECRET_FINAL_TEXT_SHOULD_NOT_APPEAR" not in text
 
     record = json.loads(text)
-    assert record["verdict"]["decision"] == "PASS"
+    assert record["decisionSignals"]["decision"] == "PASS"
+    assert record["readinessSignals"] == record["decisionSignals"]
+    assert record["verdict"] == record["decisionSignals"]  # deprecated compatibility alias
     assert record["verdict"]["gated"] is False
-    assert any("risk signal" in reason.lower() for reason in record["verdict"]["reasons"])
+    assert record["compatibilityAliases"]["verdict"] == "decisionSignals"
+    assert any("risk signal" in reason.lower() for reason in record["decisionSignals"]["reasons"])
     assert record["intentSeed"]["sha256"]
     assert record["artifacts"]["finalText"]["sha256"]
     assert record["signals"][0]["role"] == "opposition"
@@ -156,7 +159,10 @@ def test_command_room_action_result_becomes_round_context_signals(tmp_path):
     record = json.loads(path.read_text(encoding="utf-8"))
     round_signals = record["roundContextSignals"]
     brief = record["roundBrief"]
-    assert record["roundRequired"] is True
+    assert record["roundContextAvailable"] is True
+    assert record["roundRequired"] is True  # deprecated compatibility alias
+    assert record["roundContextAliases"]["roundRequired"] is True
+    assert record["compatibilityAliases"]["roundRequired"] == "roundContextAvailable"
     assert round_signals["action_count"] == 1
     assert brief["goal"] == "implement and test feature"
     assert "trusted observable evidence" in brief["evidence_status"]
@@ -187,9 +193,10 @@ def test_command_room_no_task_path_does_not_force_round(tmp_path):
     )
 
     record = json.loads(path.read_text(encoding="utf-8"))
-    assert record["roundRequired"] is False
+    assert record["roundContextAvailable"] is False
+    assert record["roundRequired"] is False  # deprecated compatibility alias
     assert record["roundContextSignals"] is None
-    assert record["verdict"]["gated"] is False
+    assert record["decisionSignals"]["gated"] is False  # legacy compatibility field; not a runtime gate
 
 
 def test_record_command_room_round_filters_handoffs_by_run_id(tmp_path):
@@ -292,6 +299,10 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
     assert signal["evidenceState"] == "STALE"
     assert signal["selfAttestationOnly"] is True
     assert any("self-claims" in reason.lower() for reason in record["decisionSignals"]["reasons"])
+    contract = record["nextRoundContract"]
+    assert contract["requiredEvidence"] == contract["evidenceSignals"]  # deprecated compatibility alias
+    assert contract["userConfirmationNeeded"] == contract["needsUserConfirmation"]  # deprecated compatibility alias
+    assert record["compatibilityAliases"]["requiredEvidence"] == "nextRoundContract.evidenceSignals"
 
 
 def test_self_claimed_evidence_refs_are_not_trusted_sources():

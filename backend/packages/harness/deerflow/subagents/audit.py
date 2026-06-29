@@ -70,6 +70,32 @@ _BLOCKING_DECISION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_HANDOFF_PACKET_FIELD_RE = re.compile(
+    r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*)?"
+    r"(Goal|Task|Boundary|Forbidden|Expected(?: Evidence| Output)?|Evidence|Stop(?: Conditions?)?|Escalation|Capabilities|Tools|Model|Skill)"
+    r"(?:\*\*)?\s*[:：]\s*(.*)$",
+    re.IGNORECASE,
+)
+_HANDOFF_PACKET_KEYS = {
+    "goal": "goal",
+    "task": "goal",
+    "boundary": "boundary",
+    "forbidden": "boundary",
+    "expected": "expectedEvidence",
+    "expected evidence": "expectedEvidence",
+    "expected output": "expectedOutput",
+    "evidence": "expectedEvidence",
+    "stop": "stopConditions",
+    "stop conditions": "stopConditions",
+    "stop condition": "stopConditions",
+    "escalation": "stopConditions",
+    "capabilities": "releasedCapabilities",
+    "tools": "releasedCapabilities",
+    "model": "releasedCapabilities",
+    "skill": "releasedCapabilities",
+}
+_HANDOFF_PACKET_LIMIT = 500
+
 
 def _sha256_text(text: str | None) -> str | None:
     if text is None:
@@ -257,6 +283,43 @@ def extract_evidence_signal(text: str | None) -> dict[str, Any]:
     return {"valid": not missing, "fields": fields, "missing": missing}
 
 
+def extract_handoff_packet(prompt: str | None, *, description: str = "", subagent_type: str = "") -> dict[str, Any]:
+    """Extract compact, mechanical handoff signals from a worker prompt.
+
+    Raw prompts stay out of audit. These fields are best-effort handoff memory
+    for comparing a worker result with the packet that produced it; they are not
+    runtime evidence and must not upgrade worker self-claims.
+    """
+    packet: dict[str, Any] = {
+        "goal": _truncate(description.strip() or _first_meaningful_line(prompt), _HANDOFF_PACKET_LIMIT),
+        "boundary": "",
+        "expectedEvidence": "",
+        "expectedOutput": "",
+        "stopConditions": "",
+        "releasedCapabilities": _truncate(subagent_type.strip(), _HANDOFF_PACKET_LIMIT),
+    }
+    current_key: str | None = None
+    for line in (prompt or "").splitlines():
+        match = _HANDOFF_PACKET_FIELD_RE.match(line)
+        if match:
+            raw_key, raw_value = match.groups()
+            current_key = _HANDOFF_PACKET_KEYS.get(raw_key.lower())
+            if current_key:
+                value = _clean_field_value(raw_value)
+                if value:
+                    existing = packet.get(current_key, "")
+                    packet[current_key] = _truncate(f"{existing}; {value}" if existing else value, _HANDOFF_PACKET_LIMIT)
+            continue
+        if current_key and (line[:1].isspace() or line.strip().startswith(("-", "*"))):
+            value = line.strip(" -*\t")
+            if value:
+                existing = packet.get(current_key, "")
+                packet[current_key] = _truncate(f"{existing}; {value}" if existing else value, _HANDOFF_PACKET_LIMIT)
+    present = [key for key, value in packet.items() if value]
+    packet["present"] = present
+    return packet
+
+
 def _audit_file(thread_id: str | None, user_id: str | None, base_dir: Path | None = None) -> Path:
     if base_dir is not None:
         return base_dir / "subagent_handoffs.jsonl"
@@ -314,6 +377,7 @@ def record_subagent_handoff(
             "status": status,
             "prompt_sha256": _sha256_text(prompt),
             "prompt_chars": len(prompt),
+            "handoff_packet": extract_handoff_packet(prompt, description=description, subagent_type=subagent_type),
             "result_sha256": _sha256_text(result),
             "result_chars": len(result or ""),
             "error_sha256": _sha256_text(error),

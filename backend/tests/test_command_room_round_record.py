@@ -233,3 +233,54 @@ def test_record_command_room_round_filters_handoffs_by_run_id(tmp_path):
     assert "old risk" not in record["roundContextSignals"]["risks"]
     assert "old evidence" not in json.dumps(record["roundContextSignals"])
     assert "old-task" not in json.dumps(record["signals"])
+
+
+def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="implement",
+        final_text="Evidence: worker says done\nVerdict: PASS",
+        run_id="new",
+        audit_records=[
+            {
+                "run_id": "new",
+                "status": "completed",
+                "task_id": "new-task",
+                "subagent_type": "general-purpose",
+                "description": "audit task",
+                "prompt_sha256": "prompt-hash",
+                "prompt_chars": 123,
+                "handoff_packet": {
+                    "goal": "audit task",
+                    "boundary": "do not touch production",
+                    "expectedEvidence": "file refs and test output",
+                    "stopConditions": "stop on unrelated dirty files",
+                    "releasedCapabilities": "read backend; pytest targeted",
+                    "present": ["goal", "boundary"],
+                },
+                "signal": {
+                    "valid": True,
+                    "missing": [],
+                    "fields": {
+                        "Role": "general-purpose",
+                        "Claim": "done",
+                        "EvidenceRefs": "worker says done",
+                        "RedlineTouched": "false",
+                        "RecommendedDecision": "PASS",
+                    },
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    packet = record["dispatchPlan"][0]["handoffPacket"]
+    assert packet["boundary"] == "do not touch production"
+    assert packet["expectedEvidence"] == "file refs and test output"
+    signal = record["signals"][0]
+    assert signal["evidenceState"] == "STALE"
+    assert signal["selfAttestationOnly"] is True
+    assert any("self-claims" in reason.lower() for reason in record["decisionSignals"]["reasons"])

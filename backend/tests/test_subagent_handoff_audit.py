@@ -2,7 +2,7 @@
 
 import json
 
-from deerflow.subagents.audit import extract_evidence_signal, record_subagent_handoff
+from deerflow.subagents.audit import extract_evidence_signal, extract_handoff_packet, record_subagent_handoff
 
 
 def test_extract_evidence_signal_fields():
@@ -209,3 +209,44 @@ RecommendedDecision:
     assert signal["missing"] == []
     assert signal["fields"]["RecommendedDecision"] == "STOP_CONFIRM"
     assert "RecommendedDecision" in signal["derived"]
+
+
+def test_record_subagent_handoff_records_compact_handoff_packet(tmp_path):
+    raw_prompt = """Goal: inspect the audit path
+Boundary: do not modify scripts/serve.sh or production data
+Expected Evidence: cite files and tests only
+Stop Conditions: stop if unrelated dirty files appear
+Capabilities: read backend tests; run targeted pytest
+
+SECRET_PROMPT_DETAIL_SHOULD_NOT_APPEAR
+"""
+
+    path = record_subagent_handoff(
+        thread_id="thread-1",
+        run_id="run-1",
+        task_id="task-1",
+        trace_id="trace-1",
+        user_id="user-1",
+        subagent_type="general-purpose",
+        description="audit packet",
+        prompt=raw_prompt,
+        status="started",
+        base_dir=tmp_path,
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert "SECRET_PROMPT_DETAIL_SHOULD_NOT_APPEAR" not in text
+    record = json.loads(text)
+    packet = record["handoff_packet"]
+    assert packet["goal"] == "audit packet; inspect the audit path"
+    assert "scripts/serve.sh" in packet["boundary"]
+    assert "files and tests" in packet["expectedEvidence"]
+    assert "unrelated dirty files" in packet["stopConditions"]
+    assert "targeted pytest" in packet["releasedCapabilities"]
+
+
+def test_extract_handoff_packet_falls_back_to_description_without_raw_prompt():
+    packet = extract_handoff_packet("free-form prompt body", description="short task", subagent_type="opposition")
+
+    assert packet["goal"] == "short task"
+    assert packet["releasedCapabilities"] == "opposition"

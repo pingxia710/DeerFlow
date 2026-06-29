@@ -252,6 +252,9 @@ def _dispatch_plan_from_handoffs(records: list[dict[str, Any]]) -> list[dict[str
             "sha256": record.get("prompt_sha256"),
             "chars": record.get("prompt_chars", 0),
         }
+        handoff_packet = record.get("handoff_packet")
+        if isinstance(handoff_packet, dict):
+            lane["handoffPacket"] = _json_safe(handoff_packet)
     return list(by_task.values())
 
 

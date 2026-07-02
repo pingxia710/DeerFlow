@@ -428,6 +428,7 @@ test("task event run messages update subtask state without entering visible hist
     {
       id: "call-1",
       threadId: "thread-1",
+      notify: true,
       status: "completed",
       result: "done",
     },
@@ -499,6 +500,7 @@ test("task event run messages are idempotent and scoped to the requested thread 
     {
       id: "call-1",
       threadId: "thread-1",
+      notify: true,
       status: "in_progress",
       latestMessage: { type: "ai", content: "working" },
     },

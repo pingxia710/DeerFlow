@@ -539,7 +539,7 @@ export function applyTaskEventToSubtask(
 
   const threadId =
     stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
-  const base: SubtaskUpdate = { id: taskId, threadId };
+  const base: SubtaskUpdate = { id: taskId, threadId, notify: true };
 
   if (taskEvent.type === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };

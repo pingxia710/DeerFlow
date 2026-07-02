@@ -76,3 +76,44 @@ test("mergeSubtaskUpdate keeps completed tasks terminal on later running events"
     result: "done",
   });
 });
+
+test("mergeSubtaskUpdate does not invent volatile startedAt timestamps", async () => {
+  const { mergeSubtaskUpdate } = await import("@/core/tasks/context");
+
+  expect(
+    mergeSubtaskUpdate(undefined, {
+      id: "task-1",
+      threadId: "thread-a",
+      status: "in_progress",
+    }),
+  ).not.toHaveProperty("startedAt");
+});
+
+test("didSubtaskChange ignores repeated equivalent updates", async () => {
+  const { didSubtaskChange } = await import("@/core/tasks/context");
+  const task = {
+    id: "task-1",
+    threadId: "thread-a",
+    subagent_type: "executor",
+    description: "check",
+    prompt: "check",
+    status: "completed" as const,
+    result: "done",
+  };
+
+  expect(didSubtaskChange(task, { ...task })).toBe(false);
+  expect(didSubtaskChange(task, { ...task, result: "new result" })).toBe(true);
+});
+
+test("mergeSubtaskUpdate does not persist notification metadata", async () => {
+  const { mergeSubtaskUpdate } = await import("@/core/tasks/context");
+
+  expect(
+    mergeSubtaskUpdate(undefined, {
+      id: "task-1",
+      threadId: "thread-a",
+      notify: true,
+      status: "completed",
+    }),
+  ).not.toHaveProperty("notify");
+});

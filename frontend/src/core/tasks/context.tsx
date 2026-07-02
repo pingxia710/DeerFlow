@@ -1,17 +1,6 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { createContext, useCallback, useContext, useState } from "react";
 
 import type { Subtask } from "./types";
-
-function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
-  return status === "completed" || status === "failed";
-}
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
@@ -21,6 +10,7 @@ export interface SubtaskContextValue {
 export type SubtaskUpdate = Partial<Subtask> & {
   id: string;
   threadId?: string | null;
+  notify?: boolean;
 };
 
 export function getSubtaskStorageKey(id: string, threadId?: string | null) {
@@ -64,10 +54,13 @@ export function useSubtask(id: string, threadId?: string | null) {
 export function mergeSubtaskUpdate(
   previous: Subtask | undefined,
   task: SubtaskUpdate,
-  now = Date.now(),
+  now?: number,
 ) {
   const previousStatus = previous?.status;
-  const { threadId, ...taskPatch } = task;
+  const { threadId } = task;
+  const taskPatch = { ...task };
+  delete taskPatch.threadId;
+  delete taskPatch.notify;
   // Completed is definitive. A failed status can be explicit, but older UI
   // code also inferred it from the parent turn ending; allow later running
   // signals to recover that stale local state. Explicit ToolMessage failures
@@ -79,7 +72,9 @@ export function mergeSubtaskUpdate(
     ...(task.status === "in_progress" && previousStatus !== "completed"
       ? { error: undefined, result: undefined }
       : {}),
-    ...(task.status === "in_progress" && previous?.startedAt === undefined
+    ...(task.status === "in_progress" &&
+    previous?.startedAt === undefined &&
+    (task.startedAt !== undefined || now !== undefined)
       ? { startedAt: task.startedAt ?? now }
       : {}),
     ...(task.status === "in_progress" && previousStatus === "completed"
@@ -88,34 +83,37 @@ export function mergeSubtaskUpdate(
   } as Subtask;
 }
 
+export function didSubtaskChange(previous: Subtask | undefined, next: Subtask) {
+  if (!previous) {
+    return true;
+  }
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  for (const key of keys) {
+    const field = key as keyof Subtask;
+    if (!Object.is(previous[field], next[field])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function useUpdateSubtask() {
   const { tasks, setTasks } = useSubtaskContext();
-  const shouldNotifyAfterRenderRef = useRef(false);
-  // No deps: must run after every render to check the ref set during render.
-  useEffect(() => {
-    if (!shouldNotifyAfterRenderRef.current) {
-      return;
-    }
-    shouldNotifyAfterRenderRef.current = false;
-    setTasks({ ...tasks });
-  });
 
   const updateSubtask = useCallback(
     (task: SubtaskUpdate) => {
       const storageKey = getSubtaskStorageKey(task.id, task.threadId);
       const previous = tasks[storageKey];
-      const previousStatus = previous?.status;
       const next = mergeSubtaskUpdate(previous, task);
 
-      const becameTerminal =
-        isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
+      if (!didSubtaskChange(previous, next)) {
+        return;
+      }
 
       tasks[storageKey] = next;
 
-      if (task.latestMessage) {
+      if (task.notify || task.latestMessage) {
         setTasks({ ...tasks });
-      } else if (becameTerminal) {
-        shouldNotifyAfterRenderRef.current = true;
       }
     },
     [tasks, setTasks],

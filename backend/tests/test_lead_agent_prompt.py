@@ -109,8 +109,33 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     prompt = prompt_module.apply_prompt_template()
 
-    assert "Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` as your default current working directory" in prompt
+    assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
+
+
+def test_apply_prompt_template_includes_trusted_local_host_access(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            unrestricted_host_access=True,
+            default_cwd="/Users/pingxia",
+            mounts=[SimpleNamespace(container_path="/mnt/obsidian-vault", host_path="/Users/pingxia/Documents/Obsidian Vault", read_only=False)],
+        ),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "sandbox.unrestricted_host_access: true" in prompt
+    assert "direct host absolute paths such as `/Users/...`" in prompt
+    assert "Configured default bash cwd: `/Users/pingxia`" in prompt
+    assert "`/mnt/obsidian-vault` -> `/Users/pingxia/Documents/Obsidian Vault`" in prompt
 
 
 def test_apply_prompt_template_threads_explicit_app_config_without_global_config(monkeypatch):
@@ -198,6 +223,23 @@ def test_command_room_prompt_allows_live_discussion_without_implicit_interventio
     assert "not a silent mutation of an already-running worker" in section
 
 
+def test_command_room_prompt_allows_direct_grounding_but_keeps_risky_work_delegated():
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+        ),
+        subagents=SubagentsAppConfig(),
+    )
+
+    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+
+    assert "You may inspect project files directly" in section
+    assert "run bounded bash commands directly" not in section
+    assert "Delegate bash execution, risky, long-running, write-heavy, web, or multi-lane work" in section
+    assert "Do not perform direct file/web/bash investigation" not in section
+
+
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(acp_agents={"codex": object()})
 
@@ -209,7 +251,7 @@ def test_build_acp_section_uses_explicit_app_config_without_global_config(monkey
     section = prompt_module._build_acp_section(app_config=explicit_config)
 
     assert "ACP Agent Tasks" in section
-    assert "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace" in section
+    assert "/mnt/acp-workspace" in section
 
 
 def test_get_memory_context_uses_explicit_app_config_without_global_config(monkeypatch):
@@ -518,6 +560,34 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
     assert "default reviewers, gates, dashboards" in prompt
     assert "Single task = No value from subagents = Execute directly" not in prompt
     assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
+
+
+def test_command_room_subagent_prompt_default_limit_is_six(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(custom_agents={}),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        agent_name="command-room",
+        app_config=explicit_config,
+    )
+
+    assert "maximum 6 `task` calls per response" in prompt
+    assert "max 6 `task` calls per response" in prompt
 
 
 def test_system_prompt_template_preserves_placeholders():

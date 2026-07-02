@@ -295,13 +295,13 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_command_room_forces_coordination_only_tool_groups():
+def test_command_room_allows_direct_file_read_tool_group_without_bash():
     agent_config = AgentConfig(
         name="command-room",
-        tool_groups=["sandbox", "bash"],
+        tool_groups=["file:write", "web", "bash"],
     )
 
-    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == []
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == ["file:read"]
     assert lead_agent_module._resolve_subagent_tool_groups("command-room", agent_config) is None
     assert lead_agent_module._can_update_self("command-room") is False
 
@@ -316,7 +316,7 @@ def test_command_room_forces_coordination_only_tool_groups():
     assert lead_agent_module._uses_todo_list("builder", True) is True
 
 
-def test_make_lead_agent_command_room_forces_empty_tool_groups(monkeypatch):
+def test_make_lead_agent_command_room_uses_direct_file_read_tool_group_without_bash(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -355,9 +355,9 @@ def test_make_lead_agent_command_room_forces_empty_tool_groups(monkeypatch):
 
     result = lead_agent_module._make_lead_agent(config, app_config=app_config)
 
-    assert captured_tools_kwargs["groups"] == []
+    assert captured_tools_kwargs["groups"] == ["file:read"]
     assert captured_tools_kwargs["include_mcp"] is False
-    assert config["metadata"]["tool_groups"] == []
+    assert config["metadata"]["tool_groups"] == ["file:read"]
     assert config["metadata"]["subagent_tool_groups"] is None
     assert result["tools"] == []
 

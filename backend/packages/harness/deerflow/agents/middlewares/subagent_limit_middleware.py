@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 # Valid range for max_concurrent_subagents
 MIN_SUBAGENT_LIMIT = 2
-MAX_SUBAGENT_LIMIT = 4
+MAX_SUBAGENT_LIMIT = 6
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [2, 4]."""
+    """Clamp subagent limit to valid range [2, 6]."""
     return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
 
 
@@ -31,7 +31,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [2, 4].
+            Defaults to MAX_CONCURRENT_SUBAGENTS (6). Clamped to [2, 6].
     """
 
     def __init__(self, max_concurrent: int = MAX_CONCURRENT_SUBAGENTS):

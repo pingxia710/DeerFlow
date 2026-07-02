@@ -86,6 +86,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   treat backend task/tool-call ids as globally unique across chat sessions.
   Prefer task-event `thread_id`/`run_id` and SDK run callback metadata over the
   currently visible route id; users can switch chats while a run is still alive.
+- Persisted `task_event` run messages are control rows: thread history should
+  use them to restore subtask state, then keep them out of visible chat bubbles.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
 

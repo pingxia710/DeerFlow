@@ -337,8 +337,13 @@ class _RemoteProtocolError(Exception):
     """Local stand-in for httpx.RemoteProtocolError — same class name, no httpx dependency."""
 
 
+class _ConnectError(Exception):
+    """Local stand-in for httpx.ConnectError — same class name, no httpx dependency."""
+
+
 _ReadError.__name__ = "ReadError"
 _RemoteProtocolError.__name__ = "RemoteProtocolError"
+_ConnectError.__name__ = "ConnectError"
 
 
 def test_classify_error_read_error_is_retriable() -> None:
@@ -354,6 +359,15 @@ def test_classify_error_remote_protocol_error_is_retriable() -> None:
     middleware = _build_middleware()
     exc = _RemoteProtocolError("Server closed connection unexpectedly")
     exc.__class__.__name__ = "RemoteProtocolError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_error_connect_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _ConnectError("[Errno 61] Connection refused")
+    exc.__class__.__name__ = "ConnectError"
     retriable, reason = middleware._classify_error(exc)
     assert retriable is True
     assert reason == "transient"

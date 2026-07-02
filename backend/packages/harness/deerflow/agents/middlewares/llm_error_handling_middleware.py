@@ -203,10 +203,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if exc_name in {
             "APITimeoutError",
             "APIConnectionError",
+            "ConnectError",  # httpx.ConnectError: local proxy/upstream refused connection
+            "ConnectTimeout",
             "InternalServerError",
             "ReadError",  # httpx.ReadError: connection dropped mid-stream
+            "ReadTimeout",
             "RemoteProtocolError",  # httpx: server closed connection unexpectedly
             "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
+            "TimeoutException",
         }:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:

@@ -84,6 +84,23 @@ def test_gateway_reload_is_opt_in_and_bounded():
     )
 
 
+def test_daemon_mode_starts_services_in_new_session():
+    serve_sh = _read("scripts/serve.sh")
+
+    assert "_start_daemon_command()" in serve_sh
+    assert "start_new_session=True" in serve_sh
+    assert '_start_daemon_command "$cmd"' in serve_sh
+
+
+def test_self_restart_from_daemon_hands_off_before_stopping_services():
+    serve_sh = _read("scripts/serve.sh")
+
+    assert "_start_detached_relauncher()" in serve_sh
+    assert "DEERFLOW_RELAUNCHER=1" in serve_sh
+    assert 'if [ "$ACTION" = "restart" ] && $DAEMON_MODE && [ "${DEERFLOW_RELAUNCHER:-}" != "1" ] && [ "${DEERFLOW_DAEMON_ROOT:-}" = "$REPO_ROOT" ]; then' in serve_sh
+    assert '_start_detached_relauncher "$@"' in serve_sh
+
+
 def test_backend_container_only_exposes_gateway_port():
     dockerfile = _read("backend/Dockerfile")
 

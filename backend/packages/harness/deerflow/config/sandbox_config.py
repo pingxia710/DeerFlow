@@ -48,6 +48,17 @@ class SandboxConfig(BaseModel):
         default=False,
         description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
+    default_cwd: str | None = Field(
+        default=None,
+        description=(
+            "Default working directory for LocalSandboxProvider bash commands. If unset, bash starts in the per-thread workspace. "
+            "Use an allowed virtual path in scoped mode; direct host paths are accepted only when unrestricted_host_access is enabled."
+        ),
+    )
+    unrestricted_host_access: bool = Field(
+        default=False,
+        description="Allow LocalSandboxProvider tools to access arbitrary host paths directly. Dangerous; use only in fully trusted single-user local workflows.",
+    )
     image: str | None = Field(
         default=None,
         description="Docker image to use for the sandbox container",

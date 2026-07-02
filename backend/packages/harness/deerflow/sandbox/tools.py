@@ -22,7 +22,7 @@ from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed, is_unrestricted_host_access_allowed
 from deerflow.tools.types import Runtime
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
@@ -388,7 +388,17 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
     return min(requested_max_results, configured_max_results)
 
 
+def _is_virtual_or_configured_mount_path(path: str) -> bool:
+    return path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or _is_skills_path(path) or _is_acp_workspace_path(path) or _is_custom_mount_path(path)
+
+
+def _should_use_direct_host_path(path: str) -> bool:
+    return _is_unrestricted_local_host_access_enabled() and not _is_virtual_or_configured_mount_path(path)
+
+
 def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
+    if _should_use_direct_host_path(path):
+        return path
     validate_local_tool_path(path, thread_data, read_only=True)
     if _is_skills_path(path):
         return _resolve_skills_path(path)
@@ -1079,17 +1089,62 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
+def _is_unrestricted_local_host_access_enabled() -> bool:
+    try:
+        return is_unrestricted_host_access_allowed(get_app_config())
+    except Exception:
+        return False
+
+
+def _get_configured_local_bash_default_cwd(thread_data: ThreadDataState | None) -> str | None:
+    """Return the configured cwd for local bash, if any.
+
+    In scoped mode this must be an allowed virtual path. In trusted
+    unrestricted mode it may be a direct host path.
+    """
+    try:
+        sandbox_config = get_app_config().sandbox
+        configured = getattr(sandbox_config, "default_cwd", None)
+    except Exception:
+        return None
+
+    if configured is None:
+        return None
+
+    cwd = str(configured).strip()
+    if not cwd:
+        return None
+    if not cwd.startswith("/"):
+        raise PermissionError("Invalid sandbox.default_cwd: use an absolute path such as /mnt/user-data/workspace, a configured mount path, or a host path when unrestricted_host_access is enabled")
+    if _is_unrestricted_local_host_access_enabled():
+        return cwd.rstrip("/") or "/"
+
+    try:
+        validate_local_tool_path(cwd, thread_data, read_only=True)
+    except PermissionError as exc:
+        raise PermissionError(f"Invalid sandbox.default_cwd: {cwd} is not an allowed virtual path") from exc
+
+    return cwd.rstrip("/") or "/"
+
+
 def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+    """Prepend 'cd <cwd> &&' so relative paths are anchored predictably.
+
+    Local trusted workflows may set ``sandbox.default_cwd`` to an already
+    allowed virtual path such as ``/mnt/global`` or, when unrestricted host
+    access is enabled, a direct host path. Otherwise commands fall back to the
+    per-thread workspace.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        The command prefixed with 'cd <cwd> &&' if a cwd is available,
         otherwise the original command unchanged.
     """
+    if configured_cwd := _get_configured_local_bash_default_cwd(thread_data):
+        return f"cd {shlex.quote(configured_cwd)} && {command}"
     if thread_data and (workspace := thread_data.get("workspace_path")):
         return f"cd {shlex.quote(workspace)} && {command}"
     return command
@@ -1407,9 +1462,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
-            validate_local_bash_command_paths(command, thread_data)
-            command = replace_virtual_paths_in_command(command, thread_data)
+            if not _is_unrestricted_local_host_access_enabled():
+                validate_local_bash_command_paths(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
+            command = replace_virtual_paths_in_command(command, thread_data)
             output = sandbox.execute_command(command)
             try:
                 from deerflow.config.app_config import get_app_config
@@ -1418,7 +1474,8 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
             except Exception:
                 max_chars = 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+            visible_output = output if _is_unrestricted_local_host_access_enabled() else mask_local_paths_in_output(output, thread_data)
+            return _truncate_bash_output(visible_output, max_chars)
         ensure_thread_directories_exist(runtime)
         try:
             from deerflow.config.app_config import get_app_config
@@ -1458,14 +1515,15 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            if not _should_use_direct_host_path(path):
+                validate_local_tool_path(path, thread_data, read_only=True)
+                if _is_skills_path(path):
+                    path = _resolve_skills_path(path)
+                elif _is_acp_workspace_path(path):
+                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+                elif not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -1687,14 +1745,15 @@ def read_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            if not _should_use_direct_host_path(path):
+                validate_local_tool_path(path, thread_data, read_only=True)
+                if _is_skills_path(path):
+                    path = _resolve_skills_path(path)
+                elif _is_acp_workspace_path(path):
+                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+                elif not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
@@ -1811,10 +1870,11 @@ def write_file_tool(
         ensure_thread_directories_exist(runtime)
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data)
-            if not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            if not _should_use_direct_host_path(path):
+                validate_local_tool_path(path, thread_data)
+                if not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
@@ -1874,10 +1934,11 @@ def str_replace_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data)
-            if not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            if not _should_use_direct_host_path(path):
+                validate_local_tool_path(path, thread_data)
+                if not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
             if not content:

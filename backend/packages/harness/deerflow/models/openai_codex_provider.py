@@ -257,6 +257,13 @@ class CodexChatModel(BaseChatModel):
                     time.sleep(wait_ms / 1000)
                 else:
                     raise
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                last_error = e
+                if attempt >= self.retry_max_attempts:
+                    raise
+                wait_ms = 1000 * (1 << (attempt - 1))
+                logger.warning(f"Codex API connection error, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms: {e}")
+                time.sleep(wait_ms / 1000)
             except Exception:
                 raise
 

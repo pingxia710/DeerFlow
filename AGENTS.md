@@ -35,6 +35,10 @@ Local `scripts/serve.sh` keeps these defaults but accepts `DEER_FLOW_GATEWAY_POR
 `DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. If frontend port `3000` is
 already held by a non-DeerFlow process and no override is set, it auto-selects a
 free `6001+` frontend port and renders the local nginx config to match.
+In daemon mode, `serve.sh` must detach stdin and start spawned services in a new
+session so the Gateway, frontend, and nginx survive after the launcher exits.
+If a daemon-owned process invokes `serve.sh --restart --daemon`, it must hand
+the restart to a detached relauncher before `stop_all` kills the current Gateway.
 
 Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
@@ -129,6 +133,15 @@ These apply repo-wide; module guides own the module-specific detail.
   Running sub-AIs do not freeze the lead AI's conversation with the user; live discussion is
   advisory context or next-round planning unless the user explicitly asks to intervene in
   execution. Do not turn this into fixed gates, dashboards, default reviewers, or process theater.
+- **Trusted local host access** — when `sandbox.unrestricted_host_access` is enabled with
+  `LocalSandboxProvider`, direct host paths are intentional and should remain visible to
+  lead/sub-AIs; `/mnt/*` paths are compatibility aliases, not the only working surface.
+- **Feishu/Lark private-link handling** — treat Feishu/Lark Doc/Wiki/Base links as
+  private resources by default. First follow `.agent/skills/feishu-cli-boundary/SKILL.md`;
+  use the local user-mode CLI path `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules//cli/scripts/run.js ... --as user`
+  before anonymous web access or asking for exports. Command Room hands Feishu CLI operations
+  to the sub-AI rooted at `/path/to/feishu-cli-worktree`, and returns only desensitized
+  evidence.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.

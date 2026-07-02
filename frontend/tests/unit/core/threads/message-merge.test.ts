@@ -2,22 +2,31 @@ import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  applyTaskEventRunMessages,
   buildRunMessagesUrl,
   buildVisibleHistoryMessages,
   completeOptimisticUploadMessages,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
+  getRecentRunIdsForRevalidation,
+  getTerminalTransitionRunIds,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
   HISTORY_CREATED_AT_KEY,
+  isAbortError,
+  isTaskEventRunMessage,
+  isTaskEventRunMessageForRequest,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   readRunMessagesPageResponse,
   removeSetItems,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
+  shouldAutoLoadLatestRun,
+  shouldKeepActiveEmptyRunPending,
+  taskEventRunMessageKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
@@ -385,6 +394,117 @@ test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", ()
   );
 });
 
+test("task event run messages update subtask state without entering visible history", () => {
+  const taskEventRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      type: "task_completed",
+      task_id: "call-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+      result: "done",
+    },
+    metadata: { caller: "task_event" },
+    created_at: "2026-05-22T00:00:00Z",
+  } as unknown as RunMessage;
+  const visibleAiRow = {
+    run_id: "run-1",
+    seq: 2,
+    content: {
+      id: "ai-1",
+      type: "ai",
+      content: "visible",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:00:01Z",
+  } as RunMessage;
+  const updates: unknown[] = [];
+
+  expect(isTaskEventRunMessage(taskEventRow)).toBe(true);
+  applyTaskEventRunMessages([taskEventRow], (update) => updates.push(update));
+
+  expect(updates).toEqual([
+    {
+      id: "call-1",
+      threadId: "thread-1",
+      status: "completed",
+      result: "done",
+    },
+  ]);
+  expect(
+    buildVisibleHistoryMessages(
+      [taskEventRow, visibleAiRow],
+      new Set(),
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["ai-1"]);
+});
+
+test("task event run messages are idempotent and scoped to the requested thread and run", () => {
+  const taskEventRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      type: "task_running",
+      task_id: "call-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+      message: { type: "ai", content: "working" },
+    },
+    metadata: { caller: "task_event" },
+    created_at: "2026-05-22T00:00:00Z",
+  } as unknown as RunMessage;
+  const wrongThreadRow = {
+    ...taskEventRow,
+    seq: 2,
+    content: {
+      ...taskEventRow.content,
+      thread_id: "thread-2",
+    },
+  } as unknown as RunMessage;
+  const wrongRunRow = {
+    ...taskEventRow,
+    seq: 3,
+    content: {
+      ...taskEventRow.content,
+      run_id: "run-2",
+    },
+  } as unknown as RunMessage;
+  const appliedKeys = new Set<string>();
+  const updates: unknown[] = [];
+
+  expect(taskEventRunMessageKey(taskEventRow)).toBe("run-1:1");
+  expect(isTaskEventRunMessageForRequest(taskEventRow, "thread-1")).toBe(true);
+  expect(isTaskEventRunMessageForRequest(wrongThreadRow, "thread-1")).toBe(
+    false,
+  );
+  expect(isTaskEventRunMessageForRequest(wrongRunRow, "thread-1")).toBe(false);
+
+  applyTaskEventRunMessages(
+    [taskEventRow, taskEventRow, wrongThreadRow, wrongRunRow],
+    (update) => updates.push(update),
+    "thread-1",
+    appliedKeys,
+  );
+  applyTaskEventRunMessages(
+    [taskEventRow],
+    (update) => updates.push(update),
+    "thread-1",
+    appliedKeys,
+  );
+
+  expect(appliedKeys).toEqual(new Set(["run-1:1"]));
+  expect(updates).toEqual([
+    {
+      id: "call-1",
+      threadId: "thread-1",
+      status: "in_progress",
+      latestMessage: { type: "ai", content: "working" },
+    },
+  ]);
+});
+
 test("readRunMessagesPageResponse rejects html without surfacing a JSON SyntaxError", async () => {
   await expect(
     readRunMessagesPageResponse(
@@ -405,6 +525,15 @@ test("readRunMessagesPageResponse uses backend JSON error detail", async () => {
       }),
     ),
   ).rejects.toThrow("Thread missing");
+});
+
+test("isAbortError detects manual request cancellation", () => {
+  const controller = new AbortController();
+  controller.abort();
+  expect(isAbortError(controller.signal.reason)).toBe(true);
+  expect(isAbortError(new DOMException("timed out", "TimeoutError"))).toBe(
+    false,
+  );
 });
 
 test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {
@@ -431,6 +560,39 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("getRecentRunIdsForRevalidation chooses the newest active run by default", () => {
+  const runs = [
+    { run_id: "R6", status: "success" },
+    { run_id: "R5", status: "running" },
+    { run_id: "R4", status: "pending" },
+  ] as unknown as Run[];
+
+  expect(getRecentRunIdsForRevalidation(runs)).toEqual(["R5"]);
+});
+
+test("getRecentRunIdsForRevalidation can revalidate multiple recent runs", () => {
+  const runs = [
+    { run_id: "R6", status: "running" },
+    { run_id: "R5", status: "success" },
+    { run_id: "R4", status: "pending" },
+  ] as unknown as Run[];
+
+  expect(getRecentRunIdsForRevalidation(runs, 2)).toEqual(["R6", "R4"]);
+});
+
+test("getTerminalTransitionRunIds selects active runs that just reached a terminal status", () => {
+  const runs = [
+    { run_id: "R6", status: "running" },
+    { run_id: "R5", status: "success" },
+    { run_id: "R4", status: "pending" },
+    { run_id: "R3", status: "error" },
+  ] as unknown as Run[];
+
+  expect(
+    getTerminalTransitionRunIds(new Set(["R6", "R5", "R3"]), runs),
+  ).toEqual(["R5", "R3"]);
 });
 
 test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
@@ -695,4 +857,25 @@ test("shouldAutoContinueOnEmptyRun input must use the post-filter visible count,
   const rawPageSize = 3; // pretend the raw page had 3 middleware-only entries
   expect(shouldAutoContinueOnEmptyRun(filteredVisibleCount, 0)).toBe(true);
   expect(shouldAutoContinueOnEmptyRun(rawPageSize, 0)).toBe(false);
+});
+
+test("shouldKeepActiveEmptyRunPending keeps active empty runs reloadable", () => {
+  expect(
+    shouldKeepActiveEmptyRunPending({ status: "running" } as unknown as Run, 0),
+  ).toBe(true);
+  expect(
+    shouldKeepActiveEmptyRunPending({ status: "pending" } as unknown as Run, 0),
+  ).toBe(true);
+  expect(
+    shouldKeepActiveEmptyRunPending({ status: "success" } as unknown as Run, 0),
+  ).toBe(false);
+  expect(
+    shouldKeepActiveEmptyRunPending({ status: "running" } as unknown as Run, 1),
+  ).toBe(false);
+});
+
+test("shouldAutoLoadLatestRun only auto-loads a new latest run", () => {
+  expect(shouldAutoLoadLatestRun("run-2", "run-1")).toBe(true);
+  expect(shouldAutoLoadLatestRun("run-2", "run-2")).toBe(false);
+  expect(shouldAutoLoadLatestRun(null, "run-2")).toBe(false);
 });

@@ -73,11 +73,23 @@ class LocalSandboxProvider(SandboxProvider):
                 the LRU cache. When exceeded, the least-recently-used entry is
                 evicted on the next ``acquire``.
         """
+        self._expose_host_paths = self._should_expose_host_paths()
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _should_expose_host_paths() -> bool:
+        """Return whether local sandbox outputs should keep host paths visible."""
+        try:
+            from deerflow.config import get_app_config
+            from deerflow.sandbox.security import is_unrestricted_host_access_allowed
+
+            return is_unrestricted_host_access_allowed(get_app_config())
+        except Exception:
+            return False
 
     def _setup_path_mappings(self) -> list[PathMapping]:
         """
@@ -272,7 +284,11 @@ class LocalSandboxProvider(SandboxProvider):
         if thread_id is None:
             with self._lock:
                 if self._generic_sandbox is None:
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=list(self._path_mappings))
+                    self._generic_sandbox = LocalSandbox(
+                        "local",
+                        path_mappings=list(self._path_mappings),
+                        expose_host_paths=self._expose_host_paths,
+                    )
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
@@ -297,7 +313,11 @@ class LocalSandboxProvider(SandboxProvider):
             # populated the cache while we were computing mappings.
             cached = self._thread_sandboxes.get(key)
             if cached is None:
-                cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
+                cached = LocalSandbox(
+                    self._sandbox_id_for_thread(thread_id, effective_user_id),
+                    path_mappings=new_mappings,
+                    expose_host_paths=self._expose_host_paths,
+                )
                 self._thread_sandboxes[key] = cached
                 self._evict_until_within_cap_locked()
             else:

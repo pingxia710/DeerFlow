@@ -347,10 +347,65 @@ stop_all() {
     echo "✓ All services stopped"
 }
 
+_start_daemon_command() {
+    local cmd="$1"
+    local python_bin
+
+    if python_bin="$(_pick_python)"; then
+        DEERFLOW_DAEMON_ROOT="$REPO_ROOT" "$python_bin" - "$cmd" <<'PY'
+import os
+import subprocess
+import sys
+
+subprocess.Popen(
+    sys.argv[1],
+    shell=True,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    env=os.environ.copy(),
+    start_new_session=True,
+)
+PY
+    else
+        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" </dev/null > /dev/null 2>&1 &
+        disown "$!" 2>/dev/null || true
+    fi
+}
+
+_start_detached_relauncher() {
+    local python_bin
+
+    python_bin="$(_pick_python)" || return 1
+    DEERFLOW_DAEMON_ROOT="$REPO_ROOT" DEERFLOW_RELAUNCHER=1 "$python_bin" - "$REPO_ROOT/scripts/serve.sh" "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+subprocess.Popen(
+    sys.argv[1:],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    env=os.environ.copy(),
+    start_new_session=True,
+)
+PY
+}
+
 # ── Action routing ───────────────────────────────────────────────────────────
 
 if [ "$ACTION" = "stop" ]; then
     stop_all
+    exit 0
+fi
+
+if [ "$ACTION" = "restart" ] && $DAEMON_MODE && [ "${DEERFLOW_RELAUNCHER:-}" != "1" ] && [ "${DEERFLOW_DAEMON_ROOT:-}" = "$REPO_ROOT" ]; then
+    _start_detached_relauncher "$@" || {
+        echo "✗ Failed to hand off restart to detached launcher."
+        exit 1
+    }
+    echo "✓ Restart handed off to detached launcher"
     exit 0
 fi
 
@@ -507,8 +562,6 @@ cleanup() {
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
-# ── Helper: start a service ──────────────────────────────────────────────────
-
 # run_service NAME COMMAND PORT TIMEOUT
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
@@ -522,10 +575,7 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        # Tag the daemon so every descendant (pnpm → next → next-server)
-        # carries DEERFLOW_DAEMON_ROOT in its environment, letting
-        # _is_deerflow_pid recognize it at stop time.
-        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
+        _start_daemon_command "$cmd"
     else
         sh -c "$cmd" &
     fi

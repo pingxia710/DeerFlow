@@ -70,7 +70,13 @@ class LocalSandbox(Sandbox):
 
         return None
 
-    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
+    def __init__(
+        self,
+        id: str,
+        path_mappings: list[PathMapping] | None = None,
+        *,
+        expose_host_paths: bool = False,
+    ):
         """
         Initialize local sandbox with optional path mappings.
 
@@ -78,9 +84,12 @@ class LocalSandbox(Sandbox):
             id: Sandbox identifier
             path_mappings: List of path mappings with optional read-only flag.
                           Skills directory is read-only by default.
+            expose_host_paths: When true, keep host paths visible in tool
+                outputs instead of rewriting them back to virtual mount paths.
         """
         super().__init__(id)
         self.path_mappings = path_mappings or []
+        self.expose_host_paths = expose_host_paths
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
@@ -215,6 +224,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Container path if mapping exists, otherwise original path
         """
+        if self.expose_host_paths:
+            return str(Path(path.replace("\\", "/")).resolve())
+
         normalized_path = path.replace("\\", "/")
         path_str = str(Path(normalized_path).resolve())
 
@@ -240,6 +252,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
+        if self.expose_host_paths:
+            return output
+
         # Patterns are compiled once per sandbox (longest local path first for
         # correct prefix matching) and reused across calls.
         result = output

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_CONCURRENT_SUBAGENTS = 6
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
@@ -231,7 +232,7 @@ def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
         if bash_available
-        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace/README.md")  # Direct execution, not task()'
+        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/workspace/README.md")  # Direct execution, not task()'
     )
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
@@ -264,8 +265,8 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 
 For complex queries, break them down into focused sub-tasks and execute in parallel batches (max {n} per turn):
 
-**Example 1: "Why is Tencent's stock price declining?" (3 sub-tasks → 1 batch)**
-→ Turn 1: Launch 3 subagents in parallel:
+**Example 1: "Why is Tencent's stock price declining?" ({n} or fewer sub-tasks → 1 batch)**
+→ Turn 1: Launch independent subagents in parallel:
 - Subagent 1: Recent financial reports, earnings data, and revenue trends
 - Subagent 2: Negative news, controversies, and regulatory issues
 - Subagent 3: Industry trends, competitor performance, and market sentiment
@@ -277,7 +278,7 @@ For complex queries, break them down into focused sub-tasks and execute in paral
 → Final turn: Synthesize ALL results into comprehensive comparison
 
 **Example 3: "Refactor the authentication system"**
-→ Turn 1: Launch 3 subagents in parallel:
+→ Turn 1: Launch independent subagents in parallel:
 - Subagent 1: Analyze current auth implementation and technical debt
 - Subagent 2: Research best practices and security patterns
 - Subagent 3: Review related tests, documentation, and vulnerabilities
@@ -320,13 +321,13 @@ For complex queries, break them down into focused sub-tasks and execute in paral
 
 ```python
 # User asks: "Why is Tencent's stock price declining?"
-# Thinking: 3 sub-tasks → fits in 1 batch
+# Thinking: 3 sub-tasks → fits within the current batch
 
-# Turn 1: Launch 3 subagents in parallel
+# Turn 1: Launch the independent subagents in parallel
 task(description="Tencent financial data", prompt="...", subagent_type="general-purpose")
 task(description="Tencent news & regulation", prompt="...", subagent_type="general-purpose")
 task(description="Industry & market trends", prompt="...", subagent_type="general-purpose")
-# All 3 run in parallel → synthesize results
+# All run in parallel → synthesize results
 ```
 
 **Usage Example 2 - Multiple Batches (>{n} sub-tasks):**
@@ -386,11 +387,11 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
   redirect, expand, or replace an already-running subtask unless the user explicitly asks for that intervention.
 - When a sub-AI finishes, merge its returned result/action_result with any user discussion that happened during the run. If that reveals a new executable issue
   inside the current boundary, dispatch a fresh `task` with a new handoff; if it changes the goal, boundary, or redlines, ask first.
-- If progress needs facts or ordinary technical execution you can handle with tools or sub-AIs inside the current round, dispatch `task` in this same response.
+- You may inspect project files directly to ground yourself in the current state before deciding whether delegation is useful.
   Do not stop for routine implementation choices such as function names, test style, commit splitting, or other technical details that stay within the confirmed boundary.
 - Use Next Round only as a concrete continuation state after this round's useful dispatches, evidence synthesis, or operational cap are exhausted.
   Do not use vague deferrals like "next round, if we continue..." or "I suggest digging into...".
-- Do not perform direct file/web/bash investigation as the command room. Direct inspection and execution belong in delegated sub-AIs.
+- Delegate bash execution, risky, long-running, write-heavy, web, or multi-lane work to sub-AIs; keep the command-room direct pass for file-reading grounding.
 - Each `task` starts a full subagent LLM in its own context with the tools available to it. Treat the returned tool result as processed sub-AI output, then synthesize it yourself.
 - **Operational cap: maximum {n} `task` calls per response.** If more delegations are useful, batch them across turns.
 
@@ -408,6 +409,7 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
 
 Give each sub-AI enough context to act: the goal, current round boundary, forbidden changes, evidence needed, and concrete executable actions.
 Account for sub-AI understanding; do not send vague assignments.
+Feishu/Lark handoff: when a delegation includes feishu.cn, larksuite, doc, wiki, or base links, explicitly state that these are private Feishu/Lark resources and the sub-AI must not try anonymous web access first. Prefer the enabled `feishu-cli-boundary` local chain: read the local lark skill/docs, run with `HOME=/Users/pingxia`, use `/Users/pingxia/.npm-global/bin/lark-cli`, and include `--as user`. If access fails, ask the sub-AI to classify whether the issue is link type, identity, tenant, permission, or command shape; do not jump to asking the user to export. Never expose tokens, secrets, chat IDs, webhooks, `.env` contents, or private recipients.
 Ask for concise findings and useful references when they matter. Do not require formal report formats unless the user asked for one.
 </subagent_system>"""
 
@@ -547,19 +549,19 @@ You: "Deploying to staging..." [proceed]
 {subagent_section}
 
 <working_directory existed="true">
-- User uploads: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/uploads` - Files uploaded by the user (automatically listed in context)
-- User workspace: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` - Working directory for temporary files
-- Output files: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs` - Final deliverables must be saved here
+- User uploads: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/uploads` - Files uploaded by the user (automatically listed in context)
+- User workspace: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/workspace` - Working directory for temporary files
+- Output files: `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/outputs` - Final deliverables must be saved here
 
 **File Management:**
 - Uploaded files are automatically listed in the <uploaded_files> section before each request
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
-- All temporary work happens in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace`
-- Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/workspace` as your default current working directory for coding and file-editing tasks
+- All temporary work happens in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/workspace`
+- Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/workspace` as your default current working directory for coding and file-editing tasks unless trusted local host access below names a broader host cwd
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
-- Avoid hardcoding `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs` and presented using `present_files` tool
+- Avoid hardcoding `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/...` inside generated scripts when a relative path from the workspace is enough
+- Final deliverables must be copied to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/outputs` and presented using `present_files` tool
 {acp_section}
 </working_directory>
 
@@ -636,7 +638,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
-- Output Files: Final deliverables must be in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs`
+- Output Files: Final deliverables must be in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/outputs`
 - File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -816,11 +818,52 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
 
     return (
         "\n**ACP Agent Tasks (invoke_acp_agent):**\n"
-        "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/`/n"
-        "- When writing prompts for ACP agents, describe the task only — do NOT reference `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data` paths\n"
-        "- ACP agent results are accessible at `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
-        "- To deliver ACP output to the user: copy from `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/acp-workspace<file>` to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data/outputs<file>`, then use `present_files`"
+        "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/`/n"
+        "- When writing prompts for ACP agents, describe the task only — do NOT reference `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data` paths\n"
+        "- ACP agent results are accessible at `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
+        "- To deliver ACP output to the user: copy from `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/acp-workspace<file>` to `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/outputs<file>`, then use `present_files`"
     )
+
+
+def _build_local_host_access_section(*, app_config: AppConfig | None = None) -> str:
+    """Build prompt guidance for trusted LocalSandboxProvider host access."""
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
+
+            config = get_app_config()
+        except Exception:
+            logger.exception("Failed to load sandbox config for the lead-agent prompt")
+            return ""
+    else:
+        config = app_config
+
+    try:
+        from deerflow.sandbox.security import is_unrestricted_host_access_allowed, uses_local_sandbox_provider
+
+        if not uses_local_sandbox_provider(config):
+            return ""
+        unrestricted = is_unrestricted_host_access_allowed(config)
+    except Exception:
+        logger.exception("Failed to resolve sandbox host-access mode for the lead-agent prompt")
+        return ""
+
+    sandbox_cfg = getattr(config, "sandbox", None)
+    default_cwd = getattr(sandbox_cfg, "default_cwd", None)
+
+    if unrestricted:
+        lines = [
+            "\n**Trusted Local Host Access:**",
+            "- This run uses LocalSandboxProvider with `sandbox.unrestricted_host_access: true`; tools run on this computer as the Gateway OS user, not inside a separate container.",
+            "- You may use direct host absolute paths such as `/Users/...` with bash, ls, read_file, write_file, str_replace, glob, and grep.",
+            "- Prefer direct host paths for real project directories and Obsidian notes. Treat `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/*`, `/Users/pingxia/projects/deer-flow/skills`, `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/acp-workspace`, and custom `/mnt/*` mounts as compatibility aliases.",
+            "- If an old `/mnt/*` alias looks missing, stale, or read-only, verify the corresponding host path directly before giving up.",
+        ]
+        if default_cwd:
+            lines.append(f"- Configured default bash cwd: `{default_cwd}`")
+        return "\n".join(lines)
+
+    return "\n**Local Sandbox:**\n- This run uses LocalSandboxProvider with virtual path scoping. Use `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data/*`, `/Users/pingxia/projects/deer-flow/skills`, `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/acp-workspace`, and configured mount paths."
 
 
 def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
@@ -836,23 +879,35 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     else:
         config = app_config
 
-    mounts = config.sandbox.mounts or []
+    sandbox_cfg = config.sandbox
+    mounts = sandbox_cfg.mounts or []
 
     if not mounts:
         return ""
 
+    try:
+        from deerflow.sandbox.security import is_unrestricted_host_access_allowed
+
+        unrestricted = is_unrestricted_host_access_allowed(config)
+    except Exception:
+        unrestricted = False
+
     lines = []
     for mount in mounts:
         access = "read-only" if mount.read_only else "read-write"
-        lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
+        host_path = getattr(mount, "host_path", None)
+        if unrestricted and host_path:
+            lines.append(f"- Custom mount: `{mount.container_path}` -> `{host_path}` ({access}; host path is preferred in trusted local mode)")
+        else:
+            lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
 
     mounts_list = "\n".join(lines)
-    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e7c6fe40-ee1d-48f6-9205-9ff0f5bc80ce/user-data`, use these absolute container paths directly when they match the requested directory"
+    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/796958bf-5736-452a-9076-2a2f3a4a5299/user-data`, use these paths directly when they match the requested directory"
 
 
 def apply_prompt_template(
     subagent_enabled: bool = False,
-    max_concurrent_subagents: int = 3,
+    max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
@@ -918,8 +973,9 @@ def apply_prompt_template(
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section(app_config=app_config)
+    local_host_access_section = _build_local_host_access_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
-    acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
+    acp_and_mounts_section = "\n".join(section for section in (local_host_access_section, acp_section, custom_mounts_section) if section)
 
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware

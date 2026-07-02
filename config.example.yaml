@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 15
+config_version: 17
 
 # ============================================================================
 # Logging
@@ -922,6 +922,16 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # Optional: default working directory for local host-bash commands.
+  # If unset, bash starts in each thread's /mnt/user-data/workspace. In normal
+  # scoped mode, use an already allowed virtual path such as /mnt/my-project or
+  # /mnt/global. When unrestricted_host_access is true for trusted single-user
+  # local work, this may be a direct host path such as /Users/me.
+  # default_cwd: /mnt/my-project
+  # Optional: bypass virtual path limits for LocalSandboxProvider tools, allowing
+  # direct host paths such as /Users/me/project or /etc/hosts. Dangerous; keep
+  # false except in fully trusted single-user local workflows.
+  unrestricted_host_access: false
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
@@ -932,6 +942,9 @@ sandbox:
   #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
   #     read_only: true                     # Whether the mount is read-only (default: false)
+  #   - host_path: "/Users/me/Documents/Obsidian Vault"
+  #     container_path: /mnt/obsidian-vault
+  #     read_only: false
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.

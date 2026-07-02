@@ -32,7 +32,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
+_COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -84,11 +85,11 @@ def _is_coordinator_only_agent(agent_name: str | None) -> bool:
 def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
     """Return config-tool groups for the lead agent.
 
-    Coordinator-only agents are command surfaces: they may dispatch and present
-    coordination state, but direct inspection/execution belongs in delegated sub-AIs.
+    Command room gets only the direct tools needed to ground itself in the
+    project; broader tool access still belongs in delegated sub-AIs.
     """
     if _is_coordinator_only_agent(agent_name):
-        return []
+        return list(_COMMAND_ROOM_DIRECT_TOOL_GROUPS)
     return agent_config.tool_groups if agent_config else None
 
 
@@ -399,7 +400,7 @@ def build_middlewares(
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
@@ -477,7 +478,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 

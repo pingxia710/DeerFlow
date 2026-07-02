@@ -604,6 +604,54 @@ class RunJournal(BaseCallbackHandler):
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
 
+    def record_task_event(self, event: dict[str, Any]) -> None:
+        """Persist subagent task events so switched chats can replay task state."""
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            return
+
+        task_id = event.get("task_id")
+        thread_id = event.get("thread_id")
+        run_id = event.get("run_id")
+        if not isinstance(task_id, str) or not task_id or not isinstance(thread_id, str) or not thread_id or not isinstance(run_id, str) or not run_id:
+            logger.warning("Skipping task event without complete identity: %s", event_type)
+            return
+        if thread_id != self.thread_id or run_id != self.run_id:
+            logger.warning(
+                "Skipping task event with mismatched identity: event_type=%s event_thread_id=%s event_run_id=%s journal_thread_id=%s journal_run_id=%s",
+                event_type,
+                thread_id,
+                run_id,
+                self.thread_id,
+                self.run_id,
+            )
+            return
+
+        metadata: dict[str, Any] = {
+            "caller": "task_event",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "task_id": task_id,
+        }
+        self._put(
+            event_type=event_type,
+            category="message",
+            content=self._jsonable(event),
+            metadata=metadata,
+        )
+        self._flush_sync()
+
+    def _jsonable(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): self._jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._jsonable(item) for item in value]
+        if hasattr(value, "model_dump"):
+            return self._jsonable(value.model_dump())
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._pending_flush_tasks:

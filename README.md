@@ -232,6 +232,8 @@ Docker builds use the upstream `uv` registry by default. If you need faster mirr
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
+For trusted single-user local development with `LocalSandboxProvider`, `sandbox.default_cwd` can point host-bash commands at an existing virtual mount such as `/mnt/global`, or at a direct host path such as `/Users/me` when `sandbox.unrestricted_host_access: true`; when unset, bash starts in each thread's `/mnt/user-data/workspace`. `sandbox.unrestricted_host_access: true` additionally lets local sandbox tools use direct host paths and keeps host paths visible in tool output, and should stay disabled outside fully trusted single-user workflows.
+
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
 
@@ -301,6 +303,8 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 |---|---|---|---|
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
+
+Daemon mode detaches service stdin and disowns the spawned Gateway, frontend, and nginx processes so `make dev-daemon` / `make start-daemon` remain alive after the launcher exits.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
@@ -649,6 +653,7 @@ This is how DeerFlow handles tasks that take minutes to hours: a research task m
 
 For `command-room` runs, DeerFlow can keep compact internal audit records under the thread audit directory without exposing them in the chat UI.
 The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output.
+Sub-agent task progress is also persisted into run history, so switching conversations can restore task status without relying only on the live stream.
 User-facing command-room replies stay natural by default; internal audit is not a visible product surface.
 
 ### Sandbox & File System

@@ -49,6 +49,20 @@ def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, enabled: boo
         _subagent_usage_cache[tool_call_id] = usage
 
 
+def _iter_runtime_callbacks(runtime: Any) -> list[Any]:
+    if runtime is None:
+        return []
+    config = getattr(runtime, "config", None)
+    if not isinstance(config, dict):
+        return []
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, BaseCallbackManager):
+        callbacks = callbacks.handlers
+    if not callbacks or not isinstance(callbacks, list):
+        return []
+    return callbacks
+
+
 def _task_event_base(event_type: str, task_id: str, *, thread_id: Any, run_id: Any) -> dict[str, Any]:
     event: dict[str, Any] = {"type": event_type, "task_id": task_id}
     if isinstance(thread_id, str) and thread_id:
@@ -125,22 +139,32 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
     list wrapper) cannot be iterated safely; treat it as "no recorder" rather
     than raise.
     """
-    if runtime is None:
-        return None
-    config = getattr(runtime, "config", None)
-    if not isinstance(config, dict):
-        return None
-    callbacks = config.get("callbacks")
-    if isinstance(callbacks, BaseCallbackManager):
-        callbacks = callbacks.handlers
-    if not callbacks:
-        return None
-    if not isinstance(callbacks, list):
-        return None
-    for cb in callbacks:
+    for cb in _iter_runtime_callbacks(runtime):
         if hasattr(cb, "record_external_llm_usage_records"):
             return cb
     return None
+
+
+def _find_task_event_recorder(runtime: Any) -> Any | None:
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    if isinstance(context, dict):
+        journal = context.get("__run_journal")
+        if hasattr(journal, "record_task_event"):
+            return journal
+    for cb in _iter_runtime_callbacks(runtime):
+        if hasattr(cb, "record_task_event"):
+            return cb
+    return None
+
+
+def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
+    recorder = _find_task_event_recorder(runtime)
+    if recorder is not None:
+        try:
+            recorder.record_task_event(event)
+        except Exception:
+            logger.warning("Failed to persist task event %s", event.get("type"), exc_info=True)
+    writer(event)
 
 
 def _summarize_usage(records: list[dict] | None) -> dict | None:
@@ -390,7 +414,16 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({**_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id), "description": description})
+    _emit_task_event(
+        writer,
+        runtime,
+        {
+            **_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id),
+            "description": description,
+            "subagent_type": subagent_type,
+            "prompt": prompt,
+        },
+    )
 
     try:
         while True:
@@ -398,7 +431,14 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({**_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id), "error": "Task disappeared from background tasks"})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {
+                        **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
+                        "error": "Task disappeared from background tasks",
+                    },
+                )
                 cleanup_background_task(task_id)
                 return f"Error: Task {task_id} disappeared from background tasks"
 
@@ -414,13 +454,15 @@ async def task_tool(
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
                     message = ai_messages[i]
-                    writer(
+                    _emit_task_event(
+                        writer,
+                        runtime,
                         {
                             **_task_event_base("task_running", task_id, thread_id=thread_id, run_id=run_id),
                             "message": message,
                             "message_index": i + 1,  # 1-based index for display
                             "total_messages": current_message_count,
-                        }
+                        },
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
@@ -445,7 +487,16 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({**_task_event_base("task_completed", task_id, thread_id=thread_id, run_id=run_id), "result": result.result, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {
+                        **_task_event_base("task_completed", task_id, thread_id=thread_id, run_id=run_id),
+                        "result": result.result,
+                        "usage": usage,
+                        "action_result": task_action_result_event(action_result)["action_result"],
+                    },
+                )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 return f"Task Succeeded. Result: {result.result}"
@@ -467,7 +518,16 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({**_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {
+                        **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
+                        "error": result.error,
+                        "usage": usage,
+                        "action_result": task_action_result_event(action_result)["action_result"],
+                    },
+                )
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
@@ -489,7 +549,16 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({**_task_event_base("task_cancelled", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {
+                        **_task_event_base("task_cancelled", task_id, thread_id=thread_id, run_id=run_id),
+                        "error": result.error,
+                        "usage": usage,
+                        "action_result": task_action_result_event(action_result)["action_result"],
+                    },
+                )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
@@ -511,7 +580,16 @@ async def task_tool(
                     usage=usage,
                     action_result=task_action_result_event(action_result)["action_result"],
                 )
-                writer({**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "error": result.error, "usage": usage, "action_result": task_action_result_event(action_result)["action_result"]})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {
+                        **_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id),
+                        "error": result.error,
+                        "usage": usage,
+                        "action_result": task_action_result_event(action_result)["action_result"],
+                    },
+                )
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task timed out. Error: {result.error}"
@@ -542,7 +620,11 @@ async def task_tool(
                     error=f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}",
                     usage=usage,
                 )
-                writer({**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "usage": usage})
+                _emit_task_event(
+                    writer,
+                    runtime,
+                    {**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "usage": usage},
+                )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.

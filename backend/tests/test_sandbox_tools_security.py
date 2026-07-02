@@ -22,6 +22,7 @@ from deerflow.sandbox.tools import (
     _resolve_skills_path,
     bash_tool,
     mask_local_paths_in_output,
+    read_file_tool,
     replace_virtual_path,
     replace_virtual_paths_in_command,
     str_replace_tool,
@@ -35,6 +36,23 @@ _THREAD_DATA = {
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+def _mock_local_sandbox_config(
+    *,
+    default_cwd: str | None = None,
+    unrestricted_host_access: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            default_cwd=default_cwd,
+            unrestricted_host_access=unrestricted_host_access,
+            bash_output_max_chars=20000,
+            read_file_output_max_chars=50000,
+            ls_output_max_chars=20000,
+        )
+    )
 
 
 # ---------- replace_virtual_path ----------
@@ -563,13 +581,176 @@ def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) 
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
 
-    result = bash_tool.func(
-        runtime=runtime,
-        description="run command",
-        command="cat ../uploads/secret.txt",
-    )
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config()):
+        result = bash_tool.func(
+            runtime=runtime,
+            description="run command",
+            command="cat ../uploads/secret.txt",
+        )
 
     assert "path traversal" in result
+
+
+def test_bash_tool_uses_configured_default_cwd_for_local_host_bash(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    executed: dict[str, str] = {}
+
+    def execute_command(command: str) -> str:
+        executed["command"] = command
+        return "ok"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=execute_command),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    with (
+        patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd="/mnt/data")),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()),
+    ):
+        result = bash_tool.func(
+            runtime=runtime,
+            description="run command",
+            command="pwd",
+        )
+
+    assert result == "ok"
+    assert executed["command"] == "cd /mnt/data && pwd"
+
+
+def test_bash_tool_unrestricted_host_access_skips_path_validation(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    executed: dict[str, str] = {}
+
+    def execute_command(command: str) -> str:
+        executed["command"] = command
+        return "ok"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=execute_command),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    with patch(
+        "deerflow.sandbox.tools.get_app_config",
+        return_value=_mock_local_sandbox_config(default_cwd="/mnt/data", unrestricted_host_access=True),
+    ):
+        result = bash_tool.func(
+            runtime=runtime,
+            description="run command",
+            command="cat /etc/hosts",
+        )
+
+    assert result == "ok"
+    assert executed["command"] == "cd /mnt/data && cat /etc/hosts"
+
+
+def test_bash_tool_unrestricted_host_access_keeps_host_paths_visible(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+
+    def execute_command(command: str) -> str:
+        return "wrote /tmp/deer-flow/threads/t1/user-data/workspace/out.txt"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=execute_command),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    with patch(
+        "deerflow.sandbox.tools.get_app_config",
+        return_value=_mock_local_sandbox_config(unrestricted_host_access=True),
+    ):
+        result = bash_tool.func(
+            runtime=runtime,
+            description="run command",
+            command="pwd",
+        )
+
+    assert result == "wrote /tmp/deer-flow/threads/t1/user-data/workspace/out.txt"
+    assert "/mnt/user-data" not in result
+
+
+def test_read_file_tool_unrestricted_host_access_allows_direct_host_path(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    captured: dict[str, str] = {}
+
+    def read_file(path: str) -> str:
+        captured["path"] = path
+        return "hello"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(read_file=read_file),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    with patch(
+        "deerflow.sandbox.tools.get_app_config",
+        return_value=_mock_local_sandbox_config(unrestricted_host_access=True),
+    ):
+        result = read_file_tool.func(
+            runtime=runtime,
+            description="read host file",
+            path="/etc/hosts",
+        )
+
+    assert result == "hello"
+    assert captured["path"] == "/etc/hosts"
+
+
+def test_write_file_tool_unrestricted_host_access_allows_direct_host_path(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    captured: dict[str, str] = {}
+
+    def write_file(path: str, content: str, append: bool = False) -> None:
+        captured["path"] = path
+        captured["content"] = content
+        captured["append"] = str(append)
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(write_file=write_file),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    with patch(
+        "deerflow.sandbox.tools.get_app_config",
+        return_value=_mock_local_sandbox_config(unrestricted_host_access=True),
+    ):
+        result = write_file_tool.func(
+            runtime=runtime,
+            description="write host file",
+            path="/tmp/deerflow-unrestricted-test.txt",
+            content="hello",
+        )
+
+    assert result == "OK"
+    assert captured == {
+        "path": "/tmp/deerflow-unrestricted-test.txt",
+        "content": "hello",
+        "append": "False",
+    }
 
 
 # ---------- Skills path tests ----------
@@ -797,7 +978,8 @@ def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
 
 def test_apply_cwd_prefix_prepends_workspace() -> None:
     """Command is prefixed with cd <workspace> && when workspace_path is set."""
-    result = _apply_cwd_prefix("ls -la", _THREAD_DATA)
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd=None)):
+        result = _apply_cwd_prefix("ls -la", _THREAD_DATA)
     assert result.startswith("cd ")
     assert "ls -la" in result
     assert "/tmp/deer-flow/threads/t1/user-data/workspace" in result
@@ -805,19 +987,46 @@ def test_apply_cwd_prefix_prepends_workspace() -> None:
 
 def test_apply_cwd_prefix_no_thread_data() -> None:
     """Command is returned unchanged when thread_data is None."""
-    assert _apply_cwd_prefix("ls -la", None) == "ls -la"
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd=None)):
+        assert _apply_cwd_prefix("ls -la", None) == "ls -la"
 
 
 def test_apply_cwd_prefix_missing_workspace_path() -> None:
     """Command is returned unchanged when workspace_path is absent from thread_data."""
-    assert _apply_cwd_prefix("ls -la", {}) == "ls -la"
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd=None)):
+        assert _apply_cwd_prefix("ls -la", {}) == "ls -la"
 
 
 def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     """Workspace path containing spaces is properly shell-quoted."""
     thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
-    result = _apply_cwd_prefix("echo hello", thread_data)
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd=None)):
+        result = _apply_cwd_prefix("echo hello", thread_data)
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
+
+
+def test_apply_cwd_prefix_prefers_configured_virtual_default_cwd() -> None:
+    """Trusted local workflows can start bash from an allowed mounted path."""
+    with (
+        patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd="/mnt/data")),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()),
+    ):
+        assert _apply_cwd_prefix("pwd", _THREAD_DATA) == "cd /mnt/data && pwd"
+
+
+def test_apply_cwd_prefix_allows_host_default_cwd_when_unrestricted() -> None:
+    with patch(
+        "deerflow.sandbox.tools.get_app_config",
+        return_value=_mock_local_sandbox_config(default_cwd="/Users/pingxia", unrestricted_host_access=True),
+    ):
+        assert _apply_cwd_prefix("pwd", _THREAD_DATA) == "cd /Users/pingxia && pwd"
+
+
+def test_apply_cwd_prefix_rejects_invalid_default_cwd() -> None:
+    """Configured cwd must stay inside the virtual path contract."""
+    with patch("deerflow.sandbox.tools.get_app_config", return_value=_mock_local_sandbox_config(default_cwd="/etc")):
+        with pytest.raises(PermissionError, match="Invalid sandbox.default_cwd"):
+            _apply_cwd_prefix("pwd", _THREAD_DATA)
 
 
 def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:

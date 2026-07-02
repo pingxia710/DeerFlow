@@ -439,6 +439,59 @@ class TestAgentConstruction:
         assert isinstance(messages[1], HumanMessage)
 
     @pytest.mark.anyio
+    async def test_build_initial_state_includes_trusted_local_runtime_environment(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Trusted local host-access guidance is appended for every subagent."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+        security_module = sys.modules["deerflow.sandbox.security"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        monkeypatch.setattr(security_module, "uses_local_sandbox_provider", lambda config=None: True)
+        monkeypatch.setattr(security_module, "is_unrestricted_host_access_allowed", lambda config=None: True)
+
+        app_config = SimpleNamespace(
+            tool_search=SimpleNamespace(enabled=False),
+            sandbox=SimpleNamespace(
+                default_cwd="/Users/pingxia",
+                mounts=[
+                    SimpleNamespace(
+                        container_path="/mnt/obsidian-vault",
+                        host_path="/Users/pingxia/Documents/Obsidian Vault",
+                        read_only=False,
+                    )
+                ],
+            ),
+        )
+        executor_module.get_app_config = lambda: app_config
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import SystemMessage
+
+        assert isinstance(messages[0], SystemMessage)
+        assert "trusted local host-access mode" in messages[0].content
+        assert "Use direct host absolute paths such as `/Users/...`" in messages[0].content
+        assert "`/mnt/obsidian-vault` -> `/Users/pingxia/Documents/Obsidian Vault`" in messages[0].content
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(
         self,
         classes,
@@ -1774,10 +1827,10 @@ class TestCooperativeCancellation:
         SubagentResult = classes["SubagentResult"]
         SubagentStatus = classes["SubagentStatus"]
 
-        def run_inline(fn, *args, **kwargs):
+        def submit_inline(_context, coro_factory):
             future = concurrent.futures.Future()
             try:
-                future.set_result(fn(*args, **kwargs))
+                future.set_result(asyncio.run(coro_factory()))
             except Exception as exc:
                 future.set_exception(exc)
             return future
@@ -1801,7 +1854,7 @@ class TestCooperativeCancellation:
         )
 
         with (
-            patch.object(executor_module._scheduler_pool, "submit", side_effect=run_inline),
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submit_inline),
             patch.object(executor, "_aexecute", side_effect=fake_aexecute),
             patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
         ):
@@ -1813,25 +1866,19 @@ class TestCooperativeCancellation:
         assert result.result == "done: Task"
         assert result.error is None
 
-    def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
-        """Regression: background subagent execution must keep request user context."""
+    def test_execute_async_has_no_process_wide_six_task_cap(self, executor_module, classes, base_config):
+        """Six is a per-command-room dispatch cap, not a global executor cap."""
         import concurrent.futures
-
-        from deerflow.runtime.user_context import (
-            get_effective_user_id,
-            reset_current_user,
-            set_current_user,
-        )
 
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
-        async def fake_aexecute(task, result_holder=None):
-            result = result_holder
-            result.status = SubagentStatus.COMPLETED
-            result.result = get_effective_user_id()
-            result.completed_at = datetime.now()
-            return result
+        pending_futures = []
+
+        def submit_never_finishes(_context, _coro_factory):
+            future = concurrent.futures.Future()
+            pending_futures.append(future)
+            return future
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1840,19 +1887,59 @@ class TestCooperativeCancellation:
             trace_id="test-trace",
         )
 
-        scheduler = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        task_ids = []
+        with patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submit_never_finishes):
+            task_ids = [executor.execute_async(f"Task {i}", task_id=f"uncapped-task-{i}") for i in range(8)]
+
+            assert len(pending_futures) == 8
+            statuses = [executor_module._background_tasks[task_id].status.value for task_id in task_ids]
+            assert statuses == [SubagentStatus.RUNNING.value] * 8
+
+        for future in pending_futures:
+            if not future.done():
+                future.set_result(None)
+        for task_id in task_ids:
+            executor_module._background_tasks.pop(task_id, None)
+
+    def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
+        """Regression: background subagent execution must keep request user context."""
+        from deerflow.runtime.user_context import (
+            get_effective_user_id,
+            reset_current_user,
+            set_current_user,
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        execution_done = threading.Event()
+
+        async def fake_aexecute(task, result_holder=None):
+            try:
+                result = result_holder
+                result.status = SubagentStatus.COMPLETED
+                result.result = get_effective_user_id()
+                result.completed_at = datetime.now()
+                return result
+            finally:
+                execution_done.set()
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
         token = set_current_user(SimpleNamespace(id="alice"))
         try:
             with (
-                patch.object(executor_module, "_scheduler_pool", scheduler),
                 patch.object(executor, "_aexecute", side_effect=fake_aexecute),
                 patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
             ):
                 task_id = executor.execute_async("Task")
-                executor_module._scheduler_pool.shutdown(wait=True)
+                assert execution_done.wait(timeout=3), "_aexecute() did not finish"
         finally:
             reset_current_user(token)
-            scheduler.shutdown(wait=False, cancel_futures=True)
 
         result = executor_module._background_tasks.get(task_id)
         assert result is not None
@@ -1882,7 +1969,6 @@ class TestCooperativeCancellation:
 
         # Synchronisation primitives
         execute_entered = threading.Event()  # signals that _aexecute() has started
-        run_task_done = threading.Event()  # signals that run_task() has finished
 
         # A blocking _aexecute() replacement so we control the timing exactly.
         async def blocking_aexecute(task, result_holder=None):
@@ -1896,19 +1982,7 @@ class TestCooperativeCancellation:
             trace_id="test-trace",
         )
 
-        # Wrap _scheduler_pool.submit so we know when run_task finishes
-        original_scheduler_submit = executor_module._scheduler_pool.submit
-
-        def tracked_submit(fn, *args, **kwargs):
-            def wrapper():
-                try:
-                    fn(*args, **kwargs)
-                finally:
-                    run_task_done.set()
-
-            return original_scheduler_submit(wrapper)
-
-        with patch.object(executor, "_aexecute", side_effect=blocking_aexecute), patch.object(executor_module._scheduler_pool, "submit", tracked_submit):
+        with patch.object(executor, "_aexecute", side_effect=blocking_aexecute):
             task_id = executor.execute_async("Task")
 
             # Wait until _aexecute() is entered on the persistent loop.
@@ -1921,9 +1995,8 @@ class TestCooperativeCancellation:
                 executor_module._background_tasks[task_id].error = "Cancelled by user"
                 executor_module._background_tasks[task_id].completed_at = datetime.now()
 
-            # Wait for run_task to finish — the FuturesTimeoutError handler has
-            # now executed and (should have) left CANCELLED intact.
-            assert run_task_done.wait(timeout=5), "run_task() did not finish"
+            # Wait for the timeout handler to fire and request cancellation.
+            assert executor_module._background_tasks[task_id].cancel_event.wait(timeout=5), "timeout handler did not fire"
 
         result = executor_module._background_tasks.get(task_id)
         assert result is not None

@@ -31,7 +31,7 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
-import { useUpdateSubtask } from "../tasks/context";
+import { type SubtaskUpdate, useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -451,13 +451,179 @@ export function resolveVisibleTaskRunningThreadId({
   return liveMessagesThreadId === viewThreadId ? viewThreadId : null;
 }
 
+const TASK_EVENT_CALLER = "task_event";
+const TASK_EVENT_TYPES = new Set([
+  "task_started",
+  "task_running",
+  "task_completed",
+  "task_failed",
+  "task_cancelled",
+  "task_timed_out",
+]);
+
+type PersistedTaskEvent = {
+  type: string;
+  task_id?: unknown;
+  thread_id?: unknown;
+  run_id?: unknown;
+  description?: unknown;
+  subagent_type?: unknown;
+  prompt?: unknown;
+  message?: unknown;
+  result?: unknown;
+  error?: unknown;
+};
+
+type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
+
+function asTaskEvent(value: unknown): PersistedTaskEvent | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("type" in value) ||
+    typeof value.type !== "string" ||
+    !TASK_EVENT_TYPES.has(value.type)
+  ) {
+    return null;
+  }
+  return value as PersistedTaskEvent;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function taskEventStartedAt(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
+}
+
+export function isTaskEventRunMessage(message: RunMessage) {
+  return message.metadata.caller === TASK_EVENT_CALLER;
+}
+
+export function taskEventRunMessageKey(message: RunMessage) {
+  if (!isTaskEventRunMessage(message) || typeof message.seq !== "number") {
+    return null;
+  }
+  return `${message.run_id}:${message.seq}`;
+}
+
+export function isTaskEventRunMessageForRequest(
+  message: RunMessage,
+  fallbackThreadId?: string | null,
+) {
+  const taskEvent = asTaskEvent(message.content);
+  const eventRunId = stringValue(taskEvent?.run_id);
+  const eventThreadId = stringValue(taskEvent?.thread_id);
+  if (!taskEvent || !eventRunId || eventRunId !== message.run_id) {
+    return false;
+  }
+  return !fallbackThreadId || eventThreadId === fallbackThreadId;
+}
+
+export function applyTaskEventToSubtask(
+  event: unknown,
+  updateSubtask: TaskEventUpdateSubtask,
+  fallbackThreadId?: string | null,
+  startedAt?: number,
+) {
+  const taskEvent = asTaskEvent(event);
+  const taskId = stringValue(taskEvent?.task_id);
+  if (!taskEvent || !taskId) {
+    return false;
+  }
+
+  const threadId =
+    stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
+  const base: SubtaskUpdate = { id: taskId, threadId };
+
+  if (taskEvent.type === "task_started") {
+    const update: SubtaskUpdate = { ...base, status: "in_progress" };
+    if (startedAt !== undefined) {
+      update.startedAt = startedAt;
+    }
+    const description = stringValue(taskEvent.description);
+    if (description) {
+      update.description = description;
+    }
+    const subagentType = stringValue(taskEvent.subagent_type);
+    if (subagentType) {
+      update.subagent_type = subagentType;
+    }
+    const prompt = stringValue(taskEvent.prompt);
+    if (prompt) {
+      update.prompt = prompt;
+    }
+    updateSubtask(update);
+    return true;
+  }
+
+  if (taskEvent.type === "task_running") {
+    const update: SubtaskUpdate = { ...base, status: "in_progress" };
+    if (typeof taskEvent.message === "object" && taskEvent.message !== null) {
+      update.latestMessage = taskEvent.message as AIMessage;
+    }
+    updateSubtask(update);
+    return true;
+  }
+
+  if (taskEvent.type === "task_completed") {
+    const update: SubtaskUpdate = { ...base, status: "completed" };
+    const result = stringValue(taskEvent.result);
+    if (result) {
+      update.result = result;
+    }
+    updateSubtask(update);
+    return true;
+  }
+
+  const update: SubtaskUpdate = { ...base, status: "failed" };
+  const error = stringValue(taskEvent.error);
+  if (error) {
+    update.error = error;
+  }
+  updateSubtask(update);
+  return true;
+}
+
+export function applyTaskEventRunMessages(
+  messages: RunMessage[],
+  updateSubtask: TaskEventUpdateSubtask,
+  fallbackThreadId?: string | null,
+  appliedEventKeys?: Set<string>,
+) {
+  for (const message of messages) {
+    if (!isTaskEventRunMessageForRequest(message, fallbackThreadId)) {
+      continue;
+    }
+    const eventKey = taskEventRunMessageKey(message);
+    if (eventKey && appliedEventKeys?.has(eventKey)) {
+      continue;
+    }
+    const applied = applyTaskEventToSubtask(
+      message.content,
+      updateSubtask,
+      fallbackThreadId,
+      taskEventStartedAt(message.created_at),
+    );
+    if (applied && eventKey) {
+      appliedEventKeys?.add(eventKey);
+    }
+  }
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
   appendedMessages: Message[],
 ) {
   const visibleRows = messageRows.filter(
-    (message) => !supersededRunIds.has(message.run_id),
+    (message) =>
+      !supersededRunIds.has(message.run_id) && !isTaskEventRunMessage(message),
   );
   return dedupeMessagesByIdentity([
     ...visibleRows.map((message) => ({
@@ -484,6 +650,49 @@ export function findLatestUnloadedRunIndex(
   return -1;
 }
 
+export const RECENT_RUN_REVALIDATION_COUNT = 1;
+export const RECENT_RUN_REVALIDATION_INTERVAL_MS = 5000;
+const ACTIVE_RUN_REVALIDATION_STATUSES = new Set(["pending", "running"]);
+const TERMINAL_RUN_REVALIDATION_STATUSES = new Set([
+  "success",
+  "error",
+  "interrupted",
+]);
+
+export function isActiveRunStatus(status: unknown) {
+  return (
+    typeof status === "string" && ACTIVE_RUN_REVALIDATION_STATUSES.has(status)
+  );
+}
+
+export function isTerminalRunStatus(status: unknown) {
+  return (
+    typeof status === "string" && TERMINAL_RUN_REVALIDATION_STATUSES.has(status)
+  );
+}
+
+export function getRecentRunIdsForRevalidation(
+  runs: Run[],
+  limit = RECENT_RUN_REVALIDATION_COUNT,
+) {
+  return runs
+    .filter((run) => isActiveRunStatus(run.status))
+    .slice(0, limit)
+    .map((run) => run.run_id);
+}
+
+export function getTerminalTransitionRunIds(
+  previousActiveRunIds: ReadonlySet<string>,
+  runs: Run[],
+) {
+  return runs
+    .filter(
+      (run) =>
+        previousActiveRunIds.has(run.run_id) && isTerminalRunStatus(run.status),
+    )
+    .map((run) => run.run_id);
+}
+
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
 
 export function shouldAutoContinueOnEmptyRun(
@@ -495,6 +704,20 @@ export function shouldAutoContinueOnEmptyRun(
     fetchedMessageCount === 0 &&
     consecutiveEmptyLoads < maxConsecutiveEmptyLoads
   );
+}
+
+export function shouldKeepActiveEmptyRunPending(
+  run: Pick<Run, "status"> | undefined,
+  visibleMessageCount: number,
+): boolean {
+  return visibleMessageCount === 0 && isActiveRunStatus(run?.status);
+}
+
+export function shouldAutoLoadLatestRun(
+  latestRunId: string | null | undefined,
+  autoLoadedLatestRunId: string | null | undefined,
+) {
+  return Boolean(latestRunId) && latestRunId !== autoLoadedLatestRunId;
 }
 
 type RunMessagesPageResponse = {
@@ -558,6 +781,15 @@ export async function readRunMessagesPageResponse(
   } catch {
     throw new Error(response.statusText || fallback);
   }
+}
+
+export function isAbortError(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
 }
 
 export function mergeMessages(
@@ -975,6 +1207,7 @@ export function useThreadStream({
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     appendMessages,
+    refreshRuns: refreshHistoryRuns,
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: !isMock,
     pendingSupersededRunIds,
@@ -1067,6 +1300,9 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       markThreadBusyInCaches(queryClient, meta.thread_id);
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", meta.thread_id],
+      });
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
         thread_id: meta.thread_id,
@@ -1194,21 +1430,10 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "task_running"
-      ) {
-        const e = event as {
-          type: "task_running";
-          task_id: string;
-          thread_id?: string;
-          run_id?: string;
-          message: AIMessage;
-        };
+      const taskEvent = asTaskEvent(event);
+      if (taskEvent) {
         const taskThreadId = resolveVisibleTaskRunningThreadId({
-          eventThreadId: e.thread_id ?? null,
+          eventThreadId: stringValue(taskEvent.thread_id) ?? null,
           streamThreadId: streamThreadIdRef.current,
           viewThreadId: currentViewThreadIdRef.current,
           liveMessagesThreadId: liveMessagesThreadIdRef.current,
@@ -1216,12 +1441,16 @@ export function useThreadStream({
         if (!taskThreadId) {
           return;
         }
-        updateSubtask({
-          id: e.task_id,
-          threadId: taskThreadId,
-          status: "in_progress",
-          latestMessage: e.message,
-        });
+        applyTaskEventToSubtask(taskEvent, updateSubtask, taskThreadId);
+        if (
+          taskEvent.type === "task_completed" ||
+          taskEvent.type === "task_failed" ||
+          taskEvent.type === "task_cancelled" ||
+          taskEvent.type === "task_timed_out"
+        ) {
+          const taskRunId = stringValue(taskEvent.run_id);
+          refreshHistoryRuns(taskRunId ? [taskRunId] : undefined);
+        }
         return;
       }
 
@@ -1854,9 +2083,18 @@ export function useThreadHistory(
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const loadGenerationRef = useRef(0);
+  const historyLoadAbortRef = useRef<AbortController | null>(null);
+  const autoLoadedLatestRunIdRef = useRef<string | null>(null);
+  const activeRunIdsRef = useRef<Set<string>>(new Set());
+  const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
+  const refetchRunsRef = useRef(runs.refetch);
+  const updateSubtask = useUpdateSubtask();
+  const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
   const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
+  refetchRunsRef.current = runs.refetch;
+  updateSubtaskRef.current = updateSubtask;
 
   const supersededRunIds = useMemo(() => {
     return getSupersededRunIds(runs.data, pendingSupersededRunIds);
@@ -1892,6 +2130,9 @@ export function useThreadHistory(
 
     loadingRef.current = true;
     setLoading(true);
+    const abortController = new AbortController();
+    historyLoadAbortRef.current?.abort();
+    historyLoadAbortRef.current = abortController;
 
     try {
       let consecutiveEmptyLoads = 0;
@@ -1926,15 +2167,27 @@ export function useThreadHistory(
           },
           credentials: "include",
           timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+          signal: abortController.signal,
         }).then(readRunMessagesPageResponse);
         if (
           loadGenerationRef.current !== loadGeneration ||
-          threadIdRef.current !== requestThreadId
+          threadIdRef.current !== requestThreadId ||
+          !runsRef.current.some(
+            (currentRun) => currentRun.run_id === run.run_id,
+          )
         ) {
           return;
         }
+        applyTaskEventRunMessages(
+          result.data,
+          updateSubtaskRef.current,
+          requestThreadId,
+          appliedTaskEventKeysRef.current,
+        );
         const _messages = result.data.filter(
-          (m) => !m.metadata.caller?.startsWith("middleware:"),
+          (m) =>
+            !m.metadata.caller?.startsWith("middleware:") &&
+            !isTaskEventRunMessage(m),
         );
         setMessageRows((prev) =>
           dedupeRunMessagesByIdentity([..._messages, ...prev]),
@@ -1949,6 +2202,10 @@ export function useThreadHistory(
           );
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
+          if (shouldKeepActiveEmptyRunPending(run, _messages.length)) {
+            consecutiveEmptyLoads = 0;
+            continue;
+          }
           loadedRunIdsRef.current.add(run.run_id);
           if (
             shouldAutoContinueOnEmptyRun(
@@ -1968,8 +2225,14 @@ export function useThreadHistory(
         );
       } while (pendingLoadRef.current);
     } catch (err) {
+      if (isAbortError(err)) {
+        return;
+      }
       console.warn("Failed to load thread history.", err);
     } finally {
+      if (historyLoadAbortRef.current === abortController) {
+        historyLoadAbortRef.current = null;
+      }
       if (loadGenerationRef.current === loadGeneration) {
         loadingRef.current = false;
         loadingRunIdRef.current = null;
@@ -1983,12 +2246,17 @@ export function useThreadHistory(
 
     if (!enabled || threadChanged) {
       loadGenerationRef.current += 1;
+      historyLoadAbortRef.current?.abort();
+      historyLoadAbortRef.current = null;
       runsRef.current = [];
       indexRef.current = -1;
       pendingLoadRef.current = false;
       loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
       runBeforeSeqRef.current = new Map();
+      autoLoadedLatestRunIdRef.current = null;
+      activeRunIdsRef.current = new Set();
+      appliedTaskEventKeysRef.current = new Set();
       loadingRef.current = false;
       setLoading(false);
       setMessageRows([]);
@@ -2006,16 +2274,106 @@ export function useThreadHistory(
         loadedRunIdsRef.current,
       );
     }
-    loadMessages().catch(() => {
-      toast.error("Failed to load thread history.");
-    });
+    const latestRunId = runs.data?.[0]?.run_id ?? null;
+    if (
+      shouldAutoLoadLatestRun(latestRunId, autoLoadedLatestRunIdRef.current)
+    ) {
+      autoLoadedLatestRunIdRef.current = latestRunId;
+      loadMessages().catch(() => {
+        toast.error("Failed to load thread history.");
+      });
+    }
   }, [enabled, threadId, runs.data, loadMessages]);
+
+  useEffect(() => {
+    return () => {
+      historyLoadAbortRef.current?.abort();
+      historyLoadAbortRef.current = null;
+    };
+  }, []);
 
   const appendMessages = useCallback((_messages: Message[]) => {
     setAppendedMessages((prev) => {
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
+
+  const refreshRuns = useCallback(
+    (runIds?: Iterable<string>) => {
+      if (!enabled) {
+        return;
+      }
+      const ids = Array.from(
+        runIds ?? getRecentRunIdsForRevalidation(runsRef.current),
+      ).filter((runId) => runsRef.current.some((run) => run.run_id === runId));
+      if (ids.length === 0) {
+        return;
+      }
+      for (const runId of ids) {
+        loadedRunIdsRef.current.delete(runId);
+        runBeforeSeqRef.current.delete(runId);
+      }
+      indexRef.current = findLatestUnloadedRunIndex(
+        runsRef.current,
+        loadedRunIdsRef.current,
+      );
+      loadMessages().catch(() => {
+        toast.error("Failed to load thread history.");
+      });
+    },
+    [enabled, loadMessages],
+  );
+
+  useEffect(() => {
+    if (!enabled || !runs.data) {
+      activeRunIdsRef.current = new Set();
+      return;
+    }
+    const terminalTransitionRunIds = getTerminalTransitionRunIds(
+      activeRunIdsRef.current,
+      runs.data,
+    );
+    activeRunIdsRef.current = new Set(
+      runs.data
+        .filter((run) => isActiveRunStatus(run.status))
+        .map((run) => run.run_id),
+    );
+    if (terminalTransitionRunIds.length > 0) {
+      refreshRuns(terminalTransitionRunIds);
+    }
+  }, [enabled, refreshRuns, runs.data]);
+
+  useEffect(() => {
+    if (!enabled || !threadId) {
+      return;
+    }
+    const refreshThreadRuns = () => {
+      void refetchRunsRef.current();
+      refreshRuns();
+    };
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshThreadRuns();
+      }
+    }, RECENT_RUN_REVALIDATION_INTERVAL_MS);
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshThreadRuns();
+      }
+    };
+    const refreshOnFocus = () => {
+      refreshThreadRuns();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [enabled, refreshRuns, threadId]);
+
   const hasThreadId = Boolean(threadId);
   const hasUnloadedRuns = Boolean(
     runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
@@ -2033,6 +2391,7 @@ export function useThreadHistory(
     messages,
     loading: loading || isRunsLoading || isRunsUnresolved,
     appendMessages,
+    refreshRuns,
     hasMore,
     loadMore: loadMessages,
   };
@@ -2143,7 +2502,8 @@ export function useThreadRuns(
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
-    refetchOnWindowFocus: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 }
 

@@ -7,7 +7,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field
@@ -38,6 +38,50 @@ if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
+
+
+def _build_subagent_runtime_environment_section(app_config: AppConfig | None = None) -> str:
+    """Return runtime path guidance shared by built-in and custom subagents."""
+    try:
+        config = app_config or get_app_config()
+        sandbox_cfg = getattr(config, "sandbox", None)
+        if sandbox_cfg is None:
+            return ""
+
+        from deerflow.sandbox.security import is_unrestricted_host_access_allowed, uses_local_sandbox_provider
+
+        if not uses_local_sandbox_provider(config):
+            return ""
+
+        default_cwd = getattr(sandbox_cfg, "default_cwd", None)
+        mounts = getattr(sandbox_cfg, "mounts", None) or []
+
+        if not is_unrestricted_host_access_allowed(config):
+            return "<runtime_environment>\nLocalSandboxProvider is using virtual path scoping. Use `/mnt/user-data/*`, `/mnt/skills`, `/mnt/acp-workspace`, and configured mount paths.\n</runtime_environment>"
+
+        lines = [
+            "<runtime_environment>",
+            "LocalSandboxProvider is in trusted local host-access mode (`sandbox.unrestricted_host_access: true`).",
+            "Tools run on this computer as the Gateway OS user, not inside a separate container.",
+            "Use direct host absolute paths such as `/Users/...` for real project directories and Obsidian notes.",
+            "Treat `/mnt/user-data/*`, `/mnt/skills`, `/mnt/acp-workspace`, and custom `/mnt/*` mounts as compatibility aliases.",
+            "If a `/mnt/*` alias looks missing, stale, or read-only, verify the corresponding direct host path before reporting a blocker.",
+        ]
+        if default_cwd:
+            lines.append(f"Configured default bash cwd: `{default_cwd}`.")
+        if mounts:
+            lines.append("Configured mount aliases:")
+            for mount in mounts:
+                access = "read-only" if getattr(mount, "read_only", False) else "read-write"
+                host_path = getattr(mount, "host_path", "")
+                container_path = getattr(mount, "container_path", "")
+                if host_path and container_path:
+                    lines.append(f"- `{container_path}` -> `{host_path}` ({access})")
+        lines.append("</runtime_environment>")
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("Failed to build subagent runtime environment section")
+        return ""
 
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
@@ -139,8 +183,9 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
-# Thread pool for background task scheduling and orchestration
-_scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
+# Per lead-agent response dispatch cap. This is not a process-wide worker cap:
+# each command-room run may dispatch up to this many subagents in a round.
+MAX_CONCURRENT_SUBAGENTS = 6
 
 # Persistent event loop for isolated subagent executions triggered from an
 # already-running parent loop. Reusing one long-lived loop avoids creating a
@@ -481,6 +526,9 @@ class SubagentExecutor:
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
         if deferred_section:
             system_parts.append(deferred_section)
+        runtime_environment_section = _build_subagent_runtime_environment_section(self.app_config)
+        if runtime_environment_section:
+            system_parts.append(runtime_environment_section)
 
         messages: list[Any] = []
         if system_parts:
@@ -852,43 +900,52 @@ class SubagentExecutor:
 
         parent_context = copy_context()
 
-        # Submit to scheduler pool
-        def run_task():
-            with _background_tasks_lock:
-                _background_tasks[task_id].status = SubagentStatus.RUNNING
-                _background_tasks[task_id].started_at = datetime.now()
-                result_holder = _background_tasks[task_id]
+        with _background_tasks_lock:
+            result.status = SubagentStatus.RUNNING
+            result.started_at = datetime.now()
 
+        try:
+            # Submit execution directly to the persistent isolated loop. A fixed
+            # global scheduler pool would make "6" a process-wide cap instead
+            # of a per-command-room dispatch cap.
+            execution_future = _submit_to_isolated_loop_in_context(
+                parent_context,
+                lambda: self._aexecute(task, result),
+            )
+        except Exception as e:
+            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+            result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+            return task_id
+
+        def handle_timeout() -> None:
+            if result.status.is_terminal:
+                result.cancel_event.set()
+                execution_future.cancel()
+                return
+            logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
+            result.cancel_event.set()
+            result.try_set_terminal(
+                SubagentStatus.TIMED_OUT,
+                error=f"Execution timed out after {self.config.timeout_seconds} seconds",
+            )
+            execution_future.cancel()
+
+        timeout_timer = threading.Timer(self.config.timeout_seconds, handle_timeout)
+        timeout_timer.daemon = True
+
+        def handle_done(future: Future[SubagentResult]) -> None:
+            timeout_timer.cancel()
             try:
-                # Submit execution directly to the persistent isolated loop so the
-                # background path does not create a temporary loop via execute().
-                execution_future = _submit_to_isolated_loop_in_context(
-                    parent_context,
-                    lambda: self._aexecute(task, result_holder),
-                )
-                try:
-                    # Wait for execution with timeout
-                    execution_future.result(timeout=self.config.timeout_seconds)
-                except FuturesTimeoutError:
-                    logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
-                    # Signal cooperative cancellation and cancel the future
-                    result_holder.cancel_event.set()
-                    result_holder.try_set_terminal(
-                        SubagentStatus.TIMED_OUT,
-                        error=f"Execution timed out after {self.config.timeout_seconds} seconds",
-                    )
-                    execution_future.cancel()
+                future.result()
             except Exception as e:
+                if result.status.is_terminal:
+                    return
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-                with _background_tasks_lock:
-                    task_result = _background_tasks[task_id]
-                task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
-        _scheduler_pool.submit(run_task)
+        timeout_timer.start()
+        execution_future.add_done_callback(handle_done)
         return task_id
-
-
-MAX_CONCURRENT_SUBAGENTS = 3
 
 
 def request_cancel_background_task(task_id: str) -> None:

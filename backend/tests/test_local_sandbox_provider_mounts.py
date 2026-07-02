@@ -99,6 +99,26 @@ class TestLocalSandboxPathResolution:
         resolved = sandbox._reverse_resolve_path(str(file_path))
         assert resolved == "/mnt/skills/agent/prompt.py"
 
+    def test_expose_host_paths_keeps_local_paths_visible(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        file_path = skills_dir / "agent" / "prompt.py"
+        file_path.parent.mkdir()
+        file_path.write_text("test")
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/skills", local_path=str(skills_dir)),
+            ],
+            expose_host_paths=True,
+        )
+
+        resolved = sandbox._reverse_resolve_path(str(file_path))
+        assert resolved == str(file_path.resolve())
+        output = f"Use {file_path.resolve()} directly"
+        assert sandbox._reverse_resolve_paths_in_output(output) == output
+
 
 class TestReadOnlyPath:
     def test_is_read_only_true(self):
@@ -623,6 +643,29 @@ class TestLocalSandboxProviderMounts:
             provider = LocalSandboxProvider()
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+
+    def test_provider_enables_host_path_visibility_when_unrestricted(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        sandbox_config = SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            unrestricted_host_access=True,
+        )
+        config = SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+            sandbox=sandbox_config,
+        )
+
+        with patch("deerflow.config.get_app_config", return_value=config):
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire()
+            sandbox = provider.get(sandbox_id)
+
+        assert isinstance(sandbox, LocalSandbox)
+        assert sandbox.expose_host_paths is True
 
     def test_setup_path_mappings_logs_actionable_error_for_missing_host_path(self, tmp_path, caplog):
         """Regression for #3244.

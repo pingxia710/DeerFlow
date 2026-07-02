@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models.credential_loader import CodexCliCredential
@@ -229,6 +230,27 @@ def test_call_codex_api_includes_response_controls(monkeypatch):
         "summary": "concise",
     }
     assert captured["payload"]["text"] == {"verbosity": "high"}
+
+
+def test_call_codex_api_retries_transient_connection_errors(monkeypatch):
+    model = _make_model()
+    attempts = 0
+    sleeps = []
+
+    def flaky_stream_response(headers, payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("Connection refused")
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_refresh_codex_auth", lambda: None)
+    monkeypatch.setattr(model, "_stream_response", flaky_stream_response)
+    monkeypatch.setattr("deerflow.models.openai_codex_provider.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert model._call_codex_api([HumanMessage(content="Hello")]) == {"output": [], "usage": {}}
+    assert attempts == 3
+    assert sleeps == [1, 2]
 
 
 # ---------------------------------------------------------------------------

@@ -43,3 +43,14 @@ def is_host_bash_allowed(config=None) -> bool:
     if not uses_local_sandbox_provider(config):
         return True
     return bool(getattr(sandbox_cfg, "allow_host_bash", False))
+
+
+def is_unrestricted_host_access_allowed(config=None) -> bool:
+    """Return whether LocalSandboxProvider tools may bypass virtual path limits."""
+    if config is None:
+        config = get_app_config()
+
+    sandbox_cfg = getattr(config, "sandbox", None)
+    if sandbox_cfg is None:
+        return False
+    return uses_local_sandbox_provider(config) and bool(getattr(sandbox_cfg, "unrestricted_host_access", False))

@@ -12,6 +12,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
+from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 from app.gateway.routers import uploads
 
 
@@ -34,6 +35,10 @@ def _mounted_provider() -> MagicMock:
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
     return provider
+
+
+def _request_for_user(user_id: str) -> SimpleNamespace:
+    return SimpleNamespace(headers={}, state=SimpleNamespace(user=SimpleNamespace(id=user_id, system_role="user")))
 
 
 def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_path):
@@ -108,6 +113,30 @@ def test_upload_openapi_schema_exposes_file_size_as_integer():
 
     assert upload_schema["$defs"]["UploadedFileInfo"]["properties"]["size"]["type"] == "integer"
     assert list_schema["$defs"]["UploadedFileInfo"]["properties"]["size"]["type"] == "integer"
+
+
+def test_list_uploaded_files_uses_trusted_internal_owner_header(tmp_path, monkeypatch):
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    owner_uploads = tmp_path / "users" / "owner-upload" / "threads" / "thread-owned" / "user-data" / "uploads"
+    owner_uploads.mkdir(parents=True)
+    (owner_uploads / "owner.txt").write_text("owner", encoding="utf-8")
+
+    default_uploads = tmp_path / "users" / "default" / "threads" / "thread-owned" / "user-data" / "uploads"
+    default_uploads.mkdir(parents=True)
+    (default_uploads / "default.txt").write_text("default", encoding="utf-8")
+
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-upload"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+    )
+
+    result = asyncio.run(call_unwrapped(uploads.list_uploaded_files, "thread-owned", request=request))
+
+    assert [item.filename for item in result.files] == ["owner.txt"]
 
 
 def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
@@ -307,12 +336,11 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
     provider.acquire.side_effect = acquire_before_writes
 
     with (
-        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
     ):
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
-        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=_request_for_user("owner-upload"), files=[file], config=SimpleNamespace()))
 
     assert result.success is True
     provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
@@ -415,7 +443,6 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     provider.get.return_value = sandbox
 
     with (
-        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_get_upload_limits", return_value=uploads.UploadLimits(max_files=10, max_file_size=10, max_total_size=5)),
@@ -425,7 +452,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
             ChunkedUpload("second.txt", [b"456"]),
         ]
         with pytest.raises(HTTPException) as exc_info:
-            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=files, config=SimpleNamespace()))
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=_request_for_user("owner-upload"), files=files, config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 413
     provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
@@ -444,7 +471,6 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.get.return_value = sandbox
 
     with (
-        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
@@ -452,7 +478,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
         with pytest.raises(HTTPException) as exc_info:
-            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=_request_for_user("owner-upload"), files=[file], config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 500
     provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")

@@ -246,6 +246,13 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
+Docker production and Docker development stacks bind nginx to `127.0.0.1` by
+default. Set `DEER_FLOW_BIND_HOST=0.0.0.0` only when you intentionally expose
+DeerFlow beyond the local machine. API docs (`/docs`, `/redoc`,
+`/openapi.json`) and the sandbox provisioner API (`/api/sandboxes`) are also
+closed at nginx by default; opt in with `DEER_FLOW_EXPOSE_API_DOCS=true` and
+`DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
@@ -257,7 +264,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Local service ports default to Gateway `8001`, Frontend `3000`, and Nginx `2026`; override them with `DEER_FLOW_GATEWAY_PORT`, `DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. If frontend port `3000` is already occupied by a non-DeerFlow process and no override is set, `make dev` chooses a free `6001+` frontend port and renders nginx to match. Run `make doctor` to verify your setup before starting.
+Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Local service ports default to Gateway `8001`, Frontend `3000`, and Nginx `2026`; override them with `DEER_FLOW_GATEWAY_PORT`, `DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. Local services bind to `127.0.0.1` by default; set `DEER_FLOW_BIND_HOST` or `DEER_FLOW_GATEWAY_HOST` only when you intentionally need a broader bind. If frontend port `3000` is already occupied by a non-DeerFlow process and no override is set, `make dev` chooses a free `6001+` frontend port and renders nginx to match. Run `make doctor` to verify your setup before starting.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:

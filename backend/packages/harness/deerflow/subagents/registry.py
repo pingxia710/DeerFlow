@@ -9,6 +9,19 @@ from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
+_CUSTOM_OVERRIDABLE_BUILTINS = {
+    "planner",
+    "boundary",
+    "evidence",
+    "opposition",
+    "recorder",
+    "project-steward",
+    "debt-curator",
+    "freshness-keeper",
+    "capability-governor",
+    "learning-curator",
+    "conflict-mapper",
+}
 
 
 def _resolve_subagents_app_config(app_config: Any | None = None):
@@ -62,10 +75,16 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     Returns:
         SubagentConfig if found (with any config.yaml overrides applied), None otherwise.
     """
-    # Step 1: Look up built-in, then fall back to custom_agents
-    config = BUILTIN_SUBAGENTS.get(name)
-    if config is None:
+    # Step 1: Look up built-in, then fall back to custom_agents. Allow selected
+    # Command Room roles to keep local custom definitions when present.
+    if name in _CUSTOM_OVERRIDABLE_BUILTINS:
         config = _build_custom_subagent_config(name, app_config=app_config)
+        if config is None:
+            config = BUILTIN_SUBAGENTS.get(name)
+    else:
+        config = BUILTIN_SUBAGENTS.get(name)
+        if config is None:
+            config = _build_custom_subagent_config(name, app_config=app_config)
     if config is None:
         return None
 

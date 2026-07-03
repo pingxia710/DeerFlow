@@ -772,6 +772,107 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert task_context["user_id"] == "owner-1"
 
 
+def test_start_run_uses_authenticated_user_for_persistence(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    async def _scenario():
+        run_store = MemoryRunStore()
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        run_manager = RunManager(store=run_store)
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(user=SimpleNamespace(id="owner-browser", system_role="user")),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        task_context: dict[str, str] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            task_context["user_id"] = get_effective_user_id()
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "browser-thread", request)
+            await record.task
+
+        owner_run = await run_store.get(record.run_id, user_id="owner-browser")
+        default_run = await run_store.get(record.run_id, user_id="default")
+        owner_thread = await thread_store.get("browser-thread", user_id="owner-browser")
+        default_thread = await thread_store.get("browser-thread", user_id="default")
+        return owner_run, default_run, owner_thread, default_thread, task_context
+
+    owner_run, default_run, owner_thread, default_thread, task_context = asyncio.run(_scenario())
+
+    assert owner_run is not None
+    assert owner_run["user_id"] == "owner-browser"
+    assert default_run is None
+    assert owner_thread is not None
+    assert owner_thread["user_id"] == "owner-browser"
+    assert default_thread is None
+    assert task_context["user_id"] == "owner-browser"
+
+
+def test_resolve_thread_run_denies_foreign_run_owner():
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+    from app.gateway.services import resolve_thread_run
+    from deerflow.runtime import RunManager
+
+    async def _scenario():
+        run_manager = RunManager()
+        record = await run_manager.create("thread-owned", user_id="owner-a")
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(run_manager=run_manager)),
+            state=SimpleNamespace(
+                user=SimpleNamespace(id="owner-b", system_role="user"),
+                auth_source=AUTH_SOURCE_SESSION,
+            ),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await resolve_thread_run("thread-owned", record.run_id, request)
+        return exc.value.status_code
+
+    assert asyncio.run(_scenario()) == 404
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

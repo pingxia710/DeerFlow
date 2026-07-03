@@ -1,10 +1,18 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
-  setTasks: (tasks: Record<string, Subtask>) => void;
+  setTasks: Dispatch<SetStateAction<Record<string, Subtask>>>;
 }
 
 export type SubtaskUpdate = Partial<Subtask> & {
@@ -27,7 +35,7 @@ export const SubtaskContext = createContext<SubtaskContextValue>({
   },
 });
 
-export function SubtasksProvider({ children }: { children: React.ReactNode }) {
+export function SubtasksProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<Record<string, Subtask>>({});
   return (
     <SubtaskContext.Provider value={{ tasks, setTasks }}>
@@ -102,6 +110,21 @@ export function useUpdateSubtask() {
 
   const updateSubtask = useCallback(
     (task: SubtaskUpdate) => {
+      if (task.notify || task.latestMessage) {
+        setTasks((currentTasks) => {
+          const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+          const previous = currentTasks[storageKey];
+          const next = mergeSubtaskUpdate(previous, task);
+
+          if (!didSubtaskChange(previous, next)) {
+            return currentTasks;
+          }
+
+          return { ...currentTasks, [storageKey]: next };
+        });
+        return;
+      }
+
       const storageKey = getSubtaskStorageKey(task.id, task.threadId);
       const previous = tasks[storageKey];
       const next = mergeSubtaskUpdate(previous, task);
@@ -111,10 +134,6 @@ export function useUpdateSubtask() {
       }
 
       tasks[storageKey] = next;
-
-      if (task.notify || task.latestMessage) {
-        setTasks({ ...tasks });
-      }
     },
     [tasks, setTasks],
   );

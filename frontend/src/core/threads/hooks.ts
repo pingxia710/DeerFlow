@@ -209,7 +209,9 @@ export function buildThreadRunContext(
   const requestedReasoningEffort =
     mergedContext.reasoning_effort === "minimal" ||
     mergedContext.reasoning_effort === "low"
-      ? "xhigh"
+      ? isCommandRoom
+        ? "high"
+        : "xhigh"
       : mergedContext.reasoning_effort;
 
   return {
@@ -220,7 +222,7 @@ export function buildThreadRunContext(
     is_plan_mode: mode === "pro" || mode === "ultra",
     subagent_enabled: mode === "ultra",
     reasoning_effort: isCommandRoom
-      ? (requestedReasoningEffort ?? "xhigh")
+      ? (requestedReasoningEffort ?? "high")
       : (requestedReasoningEffort ??
         (mode === "ultra"
           ? "xhigh"
@@ -463,9 +465,16 @@ const TASK_EVENT_TYPES = new Set([
 
 type PersistedTaskEvent = {
   type: string;
+  schema_version?: unknown;
   task_id?: unknown;
   thread_id?: unknown;
   run_id?: unknown;
+  status?: unknown;
+  summary?: unknown;
+  result_preview?: unknown;
+  error_preview?: unknown;
+  redacted?: unknown;
+  artifact_refs?: unknown;
   description?: unknown;
   subagent_type?: unknown;
   prompt?: unknown;
@@ -486,7 +495,15 @@ function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   ) {
     return null;
   }
-  return value as PersistedTaskEvent;
+  const event = value as PersistedTaskEvent;
+  if (
+    !stringValue(event.task_id) ||
+    !stringValue(event.thread_id) ||
+    !stringValue(event.run_id)
+  ) {
+    return null;
+  }
+  return event;
 }
 
 function stringValue(value: unknown) {
@@ -546,7 +563,8 @@ export function applyTaskEventToSubtask(
     if (startedAt !== undefined) {
       update.startedAt = startedAt;
     }
-    const description = stringValue(taskEvent.description);
+    const description =
+      stringValue(taskEvent.description) ?? stringValue(taskEvent.summary);
     if (description) {
       update.description = description;
     }
@@ -573,7 +591,8 @@ export function applyTaskEventToSubtask(
 
   if (taskEvent.type === "task_completed") {
     const update: SubtaskUpdate = { ...base, status: "completed" };
-    const result = stringValue(taskEvent.result);
+    const result =
+      stringValue(taskEvent.result_preview) ?? stringValue(taskEvent.result);
     if (result) {
       update.result = result;
     }
@@ -582,7 +601,8 @@ export function applyTaskEventToSubtask(
   }
 
   const update: SubtaskUpdate = { ...base, status: "failed" };
-  const error = stringValue(taskEvent.error);
+  const error =
+    stringValue(taskEvent.error_preview) ?? stringValue(taskEvent.error);
   if (error) {
     update.error = error;
   }

@@ -1,7 +1,9 @@
 """Task tool for delegating work to subagents."""
 
 import asyncio
+import hashlib
 import logging
+import re
 import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -15,7 +17,7 @@ from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.audit import record_subagent_handoff
+from deerflow.subagents.audit import extract_handoff_packet, record_subagent_handoff
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -29,6 +31,24 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+_TARGET_ROLE_RE = re.compile(r"^\s*(?:[-*+]\s+)?(?:\*\*)?(?:Target Role|Target|Receiver|To)(?:\*\*)?\s*[:：]\s*(.*?)\s*$", re.IGNORECASE | re.MULTILINE)
+_CHAIR_TARGETS = {"chair", "command-room", "command room", "指挥室"}
+_TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1"
+_EVENT_PREVIEW_MAX_CHARS = 240
+_SAFE_ACTION_RESULT_EVENT_KEYS = {
+    "action_id",
+    "description",
+    "status",
+    "evidence_refs",
+    "output_ref",
+    "risks",
+    "conflicts",
+    "open_questions",
+}
+_SECRET_LIKE_RE = re.compile(
+    r"(?i)(sk-[a-z0-9_-]{12,}|ak(?:ia|as)[a-z0-9]{12,}|"
+    r"(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*['\"]?[^'\"\s]+)"
+)
 
 # Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
 # write it back to the triggering AIMessage's usage_metadata.
@@ -64,12 +84,72 @@ def _iter_runtime_callbacks(runtime: Any) -> list[Any]:
 
 
 def _task_event_base(event_type: str, task_id: str, *, thread_id: Any, run_id: Any) -> dict[str, Any]:
-    event: dict[str, Any] = {"type": event_type, "task_id": task_id}
+    event: dict[str, Any] = {"type": event_type, "schema_version": _TASK_EVENT_SCHEMA_VERSION, "task_id": task_id, "redacted": True, "artifact_refs": []}
     if isinstance(thread_id, str) and thread_id:
         event["thread_id"] = thread_id
     if isinstance(run_id, str) and run_id:
         event["run_id"] = run_id
     return event
+
+
+def _redacted_preview(value: Any, *, fallback: str = "") -> str:
+    text = _redacted_tool_text(fallback if value is None else value)
+    text = " ".join(text.split())
+    if len(text) > _EVENT_PREVIEW_MAX_CHARS:
+        return f"{text[:_EVENT_PREVIEW_MAX_CHARS]}..."
+    return text
+
+
+def _redacted_tool_text(value: Any) -> str:
+    return _SECRET_LIKE_RE.sub("[redacted]", "" if value is None else str(value))
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sanitize_task_event_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _sanitize_task_event_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_task_event_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_task_event_value(item) for item in value]
+    if isinstance(value, str):
+        return _redacted_preview(value)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return _redacted_preview(value)
+
+
+def _sanitize_task_event(event: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _sanitize_task_event_value(event)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _compact_action_result_event(action_result: Any) -> dict[str, Any]:
+    payload = task_action_result_event(action_result)["action_result"]
+    compact = {key: payload[key] for key in _SAFE_ACTION_RESULT_EVENT_KEYS if key in payload}
+    for key in ("summary", "error"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        compact[key] = _redacted_preview(text)
+        compact[f"{key}_sha256"] = _sha256_text(text)
+        compact[f"{key}_chars"] = len(text)
+    return compact
+
+
+def _artifact_refs(action_result: Any) -> list[str]:
+    refs: list[str] = []
+    output_ref = getattr(action_result, "output_ref", None)
+    if isinstance(output_ref, str) and output_ref:
+        refs.append(output_ref)
+    evidence_refs = getattr(action_result, "evidence_refs", None)
+    if isinstance(evidence_refs, list):
+        refs.extend(ref for ref in evidence_refs if isinstance(ref, str) and ref)
+    return refs
 
 
 def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
@@ -158,6 +238,7 @@ def _find_task_event_recorder(runtime: Any) -> Any | None:
 
 
 def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
+    event = _sanitize_task_event(event)
     recorder = _find_task_event_recorder(runtime)
     if recorder is not None:
         try:
@@ -231,6 +312,45 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 
     parent_set = set(parent)
     return [skill for skill in child if skill in parent_set]
+
+
+def _with_ai_handoff_envelope(prompt: str, *, description: str, subagent_type: str) -> str:
+    packet = extract_handoff_packet(prompt, description=description, subagent_type=subagent_type)
+    envelope = "\n".join(
+        [
+            "AI Handoff Envelope",
+            f"Source Role: {packet.get('sourceRole') or 'command-room'}",
+            f"Target Role: {packet.get('targetRole') or subagent_type}",
+            f"Task/Question: {packet.get('taskOrQuestion') or description}",
+            f"EvidenceRefs: {packet.get('evidenceRefs') or 'none'}",
+            f"EvidenceStrength: {packet.get('evidenceStrength') or 'Unverified'}",
+            f"OutputRefs: {packet.get('outputRefs') or 'none'}",
+            f"Handoff File: {packet.get('handoffFile') or 'none'}",
+            f"ArtifactRefs: {packet.get('artifactRefs') or 'none'}",
+            f"Boundary Status: {packet.get('boundaryStatus') or packet.get('boundary') or 'unknown'}",
+            f"Recommended Next Decision: {packet.get('recommendedNextDecision') or 'NEEDS_MORE'}",
+            "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement.",
+        ]
+    )
+    return f"{envelope}\n\nTask Prompt\n{prompt}"
+
+
+def _normalize_handoff_target(value: str) -> str:
+    return value.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def _next_handoff_target(result: str | None, available_subagent_names: list[str]) -> tuple[str | None, str, dict[str, Any]]:
+    match = _TARGET_ROLE_RE.search(result or "")
+    if not match:
+        return None, "", {}
+    packet = extract_handoff_packet(result, description="", subagent_type="")
+    target_role = str(packet.get("targetRole") or match.group(1)).strip()
+    normalized = _normalize_handoff_target(target_role)
+    if normalized in {_normalize_handoff_target(item) for item in _CHAIR_TARGETS}:
+        return None, "chair", packet
+
+    available = {_normalize_handoff_target(name): name for name in available_subagent_names}
+    return available.get(normalized), target_role, packet
 
 
 @tool("task", parse_docstring=True)
@@ -390,7 +510,8 @@ async def task_tool(
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
-    task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    handoff_prompt = _with_ai_handoff_envelope(prompt, description=description, subagent_type=subagent_type)
+    task_id = executor.execute_async(handoff_prompt, task_id=tool_call_id)
     record_subagent_handoff(
         thread_id=thread_id,
         run_id=run_id,
@@ -399,7 +520,7 @@ async def task_tool(
         user_id=user_id,
         subagent_type=subagent_type,
         description=description,
-        prompt=prompt,
+        prompt=handoff_prompt,
         status="started",
     )
 
@@ -409,7 +530,6 @@ async def task_tool(
     last_message_count = 0  # Track how many AI messages we've already sent
     # Polling timeout: execution timeout + 60s buffer, checked every 5s
     max_poll_count = (config.timeout_seconds + 60) // 5
-
     logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
     writer = get_stream_writer()
@@ -421,7 +541,8 @@ async def task_tool(
             **_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id),
             "description": description,
             "subagent_type": subagent_type,
-            "prompt": prompt,
+            "status": "in_progress",
+            "summary": _redacted_preview(description, fallback="Task started"),
         },
     )
 
@@ -436,7 +557,9 @@ async def task_tool(
                     runtime,
                     {
                         **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
-                        "error": "Task disappeared from background tasks",
+                        "status": "failed",
+                        "summary": "Task failed",
+                        "error_preview": "Task disappeared from background tasks",
                     },
                 )
                 cleanup_background_task(task_id)
@@ -453,13 +576,13 @@ async def task_tool(
             if current_message_count > last_message_count:
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
-                    message = ai_messages[i]
                     _emit_task_event(
                         writer,
                         runtime,
                         {
                             **_task_event_base("task_running", task_id, thread_id=thread_id, run_id=run_id),
-                            "message": message,
+                            "status": "in_progress",
+                            "summary": f"Subagent message {i + 1}/{current_message_count}",
                             "message_index": i + 1,  # 1-based index for display
                             "total_messages": current_message_count,
                         },
@@ -481,7 +604,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=prompt,
+                    prompt=handoff_prompt,
                     status="completed",
                     result=result.result,
                     usage=usage,
@@ -492,14 +615,25 @@ async def task_tool(
                     runtime,
                     {
                         **_task_event_base("task_completed", task_id, thread_id=thread_id, run_id=run_id),
-                        "result": result.result,
+                        "status": "completed",
+                        "summary": "Task completed",
+                        "result_preview": _redacted_preview(result.result, fallback="Task completed"),
                         "usage": usage,
-                        "action_result": task_action_result_event(action_result)["action_result"],
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
-                return f"Task Succeeded. Result: {result.result}"
+                next_subagent_type, target_role, _packet = _next_handoff_target(result.result, available_subagent_names)
+                result_text = _redacted_tool_text(result.result)
+                if target_role == "chair":
+                    return f"Task Succeeded. Handoff returned to Chair. Result: {result_text}"
+                if target_role and next_subagent_type is not None:
+                    return f"Task Succeeded. Handoff returned to Chair for target role '{target_role}'. Result: {result_text}"
+                if target_role and next_subagent_type is None:
+                    return f"Task Succeeded. Handoff returned to Chair because target role '{target_role}' is not available. Result: {result_text}"
+                return f"Task Succeeded. Result: {result_text}"
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
@@ -512,7 +646,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=prompt,
+                    prompt=handoff_prompt,
                     status="failed",
                     error=result.error,
                     usage=usage,
@@ -523,14 +657,18 @@ async def task_tool(
                     runtime,
                     {
                         **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
-                        "error": result.error,
+                        "status": "failed",
+                        "summary": "Task failed",
+                        "error_preview": _redacted_preview(result.error, fallback="Task failed"),
                         "usage": usage,
-                        "action_result": task_action_result_event(action_result)["action_result"],
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
-                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                error_text = _redacted_tool_text(result.error)
+                logger.error(f"[trace={trace_id}] Task {task_id} failed: {error_text}")
                 cleanup_background_task(task_id)
-                return f"Task failed. Error: {result.error}"
+                return f"Task failed. Error: {error_text}"
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
@@ -543,7 +681,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=prompt,
+                    prompt=handoff_prompt,
                     status="cancelled",
                     error=result.error,
                     usage=usage,
@@ -554,12 +692,15 @@ async def task_tool(
                     runtime,
                     {
                         **_task_event_base("task_cancelled", task_id, thread_id=thread_id, run_id=run_id),
-                        "error": result.error,
+                        "status": "cancelled",
+                        "summary": "Task cancelled",
+                        "error_preview": _redacted_preview(result.error, fallback="Task cancelled"),
                         "usage": usage,
-                        "action_result": task_action_result_event(action_result)["action_result"],
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {_redacted_tool_text(result.error)}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
@@ -574,7 +715,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=prompt,
+                    prompt=handoff_prompt,
                     status="timed_out",
                     error=result.error,
                     usage=usage,
@@ -585,14 +726,18 @@ async def task_tool(
                     runtime,
                     {
                         **_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id),
-                        "error": result.error,
+                        "status": "timed_out",
+                        "summary": "Task timed out",
+                        "error_preview": _redacted_preview(result.error, fallback="Task timed out"),
                         "usage": usage,
-                        "action_result": task_action_result_event(action_result)["action_result"],
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
-                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                error_text = _redacted_tool_text(result.error)
+                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {error_text}")
                 cleanup_background_task(task_id)
-                return f"Task timed out. Error: {result.error}"
+                return f"Task timed out. Error: {error_text}"
 
             # Still running, wait before next poll
             await asyncio.sleep(5)
@@ -615,7 +760,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=prompt,
+                    prompt=handoff_prompt,
                     status="polling_timed_out",
                     error=f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}",
                     usage=usage,
@@ -623,7 +768,12 @@ async def task_tool(
                 _emit_task_event(
                     writer,
                     runtime,
-                    {**_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id), "usage": usage},
+                    {
+                        **_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id),
+                        "status": "timed_out",
+                        "summary": "Task polling timed out",
+                        "usage": usage,
+                    },
                 )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from

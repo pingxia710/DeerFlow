@@ -1,0 +1,43 @@
+{
+  "skill_path": "/Users/pingxia/projects/deer-flow/skills/custom/naxus-round/SKILL.md",
+  "baseline": {
+    "train": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    },
+    "val": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    },
+    "test": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 20
+    }
+  },
+  "candidate": {
+    "train": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    },
+    "val": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    },
+    "test": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 20
+    }
+  },
+  "gate": {
+    "accepted": false,
+    "action": "reject",
+    "candidate_score": 1.0,
+    "applied_edits": []
+  }
+}

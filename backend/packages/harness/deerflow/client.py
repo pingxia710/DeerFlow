@@ -50,6 +50,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -261,7 +262,7 @@ class DeerFlowClient:
 
         thinking_enabled = cfg.get("thinking_enabled", True)
         subagent_enabled = cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
 
         tools = self._get_tools(
             model_name=model_name,

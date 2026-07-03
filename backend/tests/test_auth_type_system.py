@@ -514,9 +514,9 @@ def _make_auth_app():
     return create_app()
 
 
-def _get_auth_client():
+def _get_auth_client(**kwargs):
     """Get TestClient for auth API contract tests."""
-    return TestClient(_make_auth_app())
+    return TestClient(_make_auth_app(), **kwargs)
 
 
 def test_api_auth_me_no_cookie_returns_structured_401():
@@ -649,10 +649,11 @@ def test_register_http_cookie_httponly_true_secure_false():
     assert "secure" not in cookie_header.lower().replace("samesite", "")
 
 
-def test_register_https_cookie_httponly_true_secure_true():
-    """HTTPS register (x-forwarded-proto) → access_token cookie is httponly=True, secure=True, has max_age."""
+def test_register_https_cookie_httponly_true_secure_true(monkeypatch):
+    """Trusted HTTPS forwarded register → access_token cookie is httponly=True, secure=True, has max_age."""
     _setup_config()
-    client = _get_auth_client()
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = _get_auth_client(client=("127.0.0.1", 50000))
     resp = client.post(
         "/api/v1/auth/register",
         json={"email": _unique_email("https-cookie"), "password": "Tr0ub4dor3a"},
@@ -666,10 +667,11 @@ def test_register_https_cookie_httponly_true_secure_true():
     assert "max-age" in cookie_header.lower()
 
 
-def test_login_https_sets_secure_cookie():
-    """HTTPS login → access_token cookie has secure flag."""
+def test_login_https_sets_secure_cookie(monkeypatch):
+    """Trusted HTTPS forwarded login → access_token cookie has secure flag."""
     _setup_config()
-    client = _get_auth_client()
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = _get_auth_client(client=("127.0.0.1", 50000))
     email = _unique_email("https-login")
     client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
     resp = client.post(
@@ -684,10 +686,11 @@ def test_login_https_sets_secure_cookie():
     assert "secure" in cookie_header.lower()
 
 
-def test_csrf_cookie_secure_on_https():
-    """HTTPS register → csrf_token cookie has secure flag but NOT httponly."""
+def test_csrf_cookie_secure_on_https(monkeypatch):
+    """Trusted HTTPS forwarded register → csrf_token cookie has secure flag but NOT httponly."""
     _setup_config()
-    client = _get_auth_client()
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = _get_auth_client(client=("127.0.0.1", 50000))
     resp = client.post(
         "/api/v1/auth/register",
         json={"email": _unique_email("csrf-https"), "password": "Tr0ub4dor3a"},

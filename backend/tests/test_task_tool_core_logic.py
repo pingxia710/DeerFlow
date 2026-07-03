@@ -83,6 +83,41 @@ async def _no_sleep(_: float) -> None:
     return None
 
 
+def test_with_ai_handoff_envelope_preserves_explicit_fields():
+    prompt = """Source Role: Planner
+Target Role: Boundary
+Task/Question: check bottom-boundary risk
+EvidenceRefs: docs/command-room/run-protocol.md:25
+EvidenceStrength: Strong
+OutputRefs: planner-output:round-1
+Handoff File: docs/command-room/spec.md
+ArtifactRefs: docs/command-room/spec.md; docs/command-room/findings.md
+Boundary Status: unclear
+Recommended Next Decision: NEEDS_MORE
+"""
+
+    handoff_prompt = task_tool_module._with_ai_handoff_envelope(
+        prompt,
+        description="boundary review",
+        subagent_type="boundary",
+    )
+    envelope = handoff_prompt.split("\n\nTask Prompt\n", 1)[0]
+
+    assert handoff_prompt.startswith("AI Handoff Envelope\n")
+    assert "Task Prompt\nSource Role: Planner" in handoff_prompt
+    assert "Source Role: Planner" in envelope
+    assert "Target Role: Boundary" in envelope
+    assert "Task/Question: check bottom-boundary risk" in envelope
+    assert "EvidenceRefs: docs/command-room/run-protocol.md:25" in envelope
+    assert "EvidenceStrength: Strong" in envelope
+    assert "OutputRefs: planner-output:round-1" in envelope
+    assert "Handoff File: docs/command-room/spec.md" in envelope
+    assert "ArtifactRefs: docs/command-room/spec.md; docs/command-room/findings.md" in envelope
+    assert "Boundary Status: unclear" in envelope
+    assert "Recommended Next Decision: NEEDS_MORE" in envelope
+    assert "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement." in envelope
+
+
 class _DummyScheduledTask:
     def add_done_callback(self, _callback):
         return None
@@ -185,6 +220,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     runtime = _make_runtime()
     events = []
     captured = {}
+    handoff_records = []
     get_available_tools = MagicMock(return_value=["tool-a", "tool-b"])
 
     class DummyExecutor:
@@ -215,6 +251,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: handoff_records.append(kwargs))
     # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
 
@@ -227,7 +264,10 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     )
 
     assert output == "Task Succeeded. Result: all done"
-    assert captured["prompt"] == "collect diagnostics"
+    assert captured["prompt"].startswith("AI Handoff Envelope\n")
+    assert "Target Role: general-purpose" in captured["prompt"]
+    assert "Task/Question: 运行子任务" in captured["prompt"]
+    assert "Task Prompt\ncollect diagnostics" in captured["prompt"]
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
@@ -240,9 +280,347 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert all(e["schema_version"] == "deerflow.task-event/v1" for e in events)
     assert all(e["thread_id"] == "thread-1" for e in events)
     assert all(e["run_id"] == "run-1" for e in events)
-    assert events[-1]["result"] == "all done"
+    assert events[0]["summary"] == "运行子任务"
+    assert events[0]["redacted"] is True
+    assert "prompt" not in events[0]
+    assert events[-1]["summary"] == "Task completed"
+    assert events[-1]["result_preview"] == "all done"
+    assert events[-1]["redacted"] is True
+    assert "result" not in events[-1]
+    assert "action_result" not in events[0]
+    assert events[-1]["action_result"] == {
+        "action_id": "tc-123",
+        "description": "运行子任务",
+        "status": "completed",
+        "evidence_refs": [],
+        "output_ref": None,
+        "risks": [],
+        "conflicts": [],
+        "open_questions": [],
+        "summary": "all done",
+        "summary_sha256": task_tool_module._sha256_text("all done"),
+        "summary_chars": 8,
+    }
+    assert [record["status"] for record in handoff_records] == ["started", "completed"]
+    assert all(record["prompt"] == captured["prompt"] for record in handoff_records)
+    packet = task_tool_module.extract_handoff_packet(
+        handoff_records[0]["prompt"],
+        description="运行子任务",
+        subagent_type="general-purpose",
+    )
+    assert packet["sourceRole"] == "command-room"
+    assert packet["targetRole"] == "general-purpose"
+    assert packet["taskOrQuestion"] == "运行子任务"
+
+
+def test_task_tool_redacts_secret_like_text_in_parent_return(monkeypatch):
+    config = _make_subagent_config()
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(
+            FakeSubagentStatus.COMPLETED,
+            result="Finding: keep context\napi_key=sk-1234567890abcdef\nTarget Role: Chair",
+        ),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="secret check",
+        prompt="inspect",
+        subagent_type="general-purpose",
+        tool_call_id="tc-secret",
+    )
+
+    assert "sk-1234567890abcdef" not in output
+    assert "[redacted]" in output
+    assert "Finding: keep context" in output
+    assert events[-1]["result_preview"] == "Finding: keep context [redacted] Target Role: Chair"
+    assert events[-1]["action_result"]["summary"] == "Finding: keep context [redacted] Target Role: Chair"
+
+
+def test_task_event_writer_recursively_sanitizes_event_payload():
+    events = []
+    raw_event = {
+        "type": "task_completed",
+        "task_id": "task-secret",
+        "description": "api_key=sk-1234567890abcdef",
+        "artifact_refs": ["outputs/password=hidden-token/report.md"],
+        "action_result": {
+            "status": "completed",
+            "risks": ["token: secret-value"],
+        },
+    }
+
+    task_tool_module._emit_task_event(events.append, None, raw_event)
+
+    rendered = str(events[0])
+    assert "sk-1234567890abcdef" not in rendered
+    assert "hidden-token" not in rendered
+    assert "secret-value" not in rendered
+    assert "[redacted]" in rendered
+
+
+def test_task_tool_returns_explicit_ai_handoff_to_chair_without_auto_running_next_subagent(monkeypatch):
+    runtime = _make_runtime()
+    events = []
+    captured_prompts = []
+    handoff_records = []
+    get_available_tools = MagicMock(return_value=["tool-a"])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            self.config = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            captured_prompts.append((self.config.name, prompt, task_id))
+            return task_id or "generated-task-id"
+
+    result = _make_result(
+        FakeSubagentStatus.COMPLETED,
+        result="""AI Handoff Envelope
+Target Role: opposition
+Task/Question: attack the plan before Chair decides
+EvidenceRefs: planner-output:1
+OutputRefs: planner-result:1
+Boundary Status: unclear
+Recommended Next Decision: NEEDS_MORE
+
+Planner Raw Judgment:
+这个方案里真正重要的是“只读授权”和“直接修掉”的冲突。
+不要因为字段没齐就丢掉这段自然语言判断。
+""",
+    )
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda app_config=None: ["general-purpose", "opposition"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda name, *, app_config=None: _make_subagent_config(name=name))
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: handoff_records.append(kwargs))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="plan review",
+        prompt="draft plan",
+        subagent_type="general-purpose",
+        tool_call_id="tc-chain",
+    )
+
+    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'opposition'.")
+    assert [item[0] for item in captured_prompts] == ["general-purpose"]
+    assert captured_prompts[0][2] == "tc-chain"
+    assert "Task Prompt\ndraft plan" in captured_prompts[0][1]
+    assert [event["type"] for event in events] == ["task_started", "task_completed"]
+    assert [record["status"] for record in handoff_records] == ["started", "completed"]
+    assert len(handoff_records) == 2
+
+
+def test_task_tool_returns_command_room_role_handoff_to_chair(monkeypatch):
+    runtime = _make_runtime()
+    events = []
+    captured_prompts = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            self.config = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            captured_prompts.append((self.config.name, prompt, task_id))
+            return task_id or "generated-task-id"
+
+    result = _make_result(
+        FakeSubagentStatus.COMPLETED,
+        result="AI Handoff Envelope\nTarget Role: boundary\nTask/Question: check redlines\nRecommended Next Decision: NEEDS_MORE\n",
+    )
+
+    role_names = ["planner", "boundary", "evidence", "opposition", "recorder"]
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda app_config=None: role_names)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda name, *, app_config=None: _make_subagent_config(name=name) if name in role_names else None)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=["tool-a"]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="plan",
+        prompt="draft",
+        subagent_type="planner",
+        tool_call_id="tc-roles",
+    )
+
+    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'boundary'.")
+    assert [item[0] for item in captured_prompts] == ["planner"]
+    assert [item[2] for item in captured_prompts] == ["tc-roles"]
+    assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
+
+
+def test_task_tool_smoke_uses_real_command_room_role_registry(monkeypatch):
+    from deerflow.config.subagents_config import load_subagents_config_from_dict
+
+    load_subagents_config_from_dict({})
+    runtime = _make_runtime()
+    events = []
+    captured_prompts = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            self.config = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            captured_prompts.append((self.config.name, self.config.skills, prompt, task_id))
+            return task_id or "generated-task-id"
+
+    result = _make_result(FakeSubagentStatus.COMPLETED, result="AI Handoff Envelope\nTarget Role: boundary\nTask/Question: check redlines\nRecommended Next Decision: NEEDS_MORE\n")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=["tool-a"]))
+
+    try:
+        output = _run_task_tool(
+            runtime=runtime,
+            description="plan",
+            prompt="draft",
+            subagent_type="planner",
+            tool_call_id="tc-real-roles",
+        )
+    finally:
+        load_subagents_config_from_dict({})
+
+    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'boundary'.")
+    assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
+        ("planner", ["command-room-planner"]),
+    ]
+    assert [item[3] for item in captured_prompts] == ["tc-real-roles"]
+    assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
+
+
+def test_task_tool_smoke_uses_real_command_room_angle_role_registry(monkeypatch):
+    from deerflow.config.subagents_config import load_subagents_config_from_dict
+
+    load_subagents_config_from_dict({})
+    runtime = _make_runtime()
+    events = []
+    captured_prompts = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            self.config = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            captured_prompts.append((self.config.name, self.config.skills, prompt, task_id))
+            return task_id or "generated-task-id"
+
+    result = _make_result(
+        FakeSubagentStatus.COMPLETED,
+        result="AI Handoff Envelope\nTarget Role: capability-governor\nTask/Question: narrow capability release\nRecommended Next Decision: NEEDS_MORE\n",
+    )
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=["tool-a"]))
+
+    try:
+        output = _run_task_tool(
+            runtime=runtime,
+            description="plan",
+            prompt="draft",
+            subagent_type="planner",
+            tool_call_id="tc-angle-roles",
+        )
+    finally:
+        load_subagents_config_from_dict({})
+
+    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'capability-governor'.")
+    assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
+        ("planner", ["command-room-planner"]),
+    ]
+    assert [item[3] for item in captured_prompts] == ["tc-angle-roles"]
+    assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
+
+
+def test_task_tool_returns_to_chair_when_handoff_target_unavailable(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda app_config=None: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda name, *, app_config=None: config if name == "general-purpose" else None)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(
+            FakeSubagentStatus.COMPLETED,
+            result="""AI Handoff Envelope
+Target Role: boundary
+Task/Question: check permissions
+Recommended Next Decision: NEEDS_MORE
+""",
+        ),
+    )
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=["tool-a"]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="plan review",
+        prompt="draft plan",
+        subagent_type="general-purpose",
+        tool_call_id="tc-chain",
+    )
+
+    assert "Handoff returned to Chair because target role 'boundary' is not available" in output
+    assert [event["type"] for event in events] == ["task_started", "task_completed"]
 
 
 def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
@@ -644,7 +1022,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
 
     assert output == "Task failed. Error: subagent crashed"
     assert events[-1]["type"] == "task_failed"
-    assert events[-1]["error"] == "subagent crashed"
+    assert events[-1]["error_preview"] == "subagent crashed"
 
 
 def test_task_tool_returns_timed_out_message(monkeypatch):
@@ -678,7 +1056,7 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
 
     assert output == "Task timed out. Error: timeout"
     assert events[-1]["type"] == "task_timed_out"
-    assert events[-1]["error"] == "timeout"
+    assert events[-1]["error_preview"] == "timeout"
 
 
 def test_task_tool_polling_safety_timeout(monkeypatch):
@@ -1338,6 +1716,7 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     completed = [e for e in events if e["type"] == "task_completed"]
     assert len(completed) == 1
     assert completed[0]["usage"] is None
+    assert completed[0]["action_result"]["status"] == "completed"
 
 
 def test_subagent_usage_cache_is_skipped_when_config_file_is_missing(monkeypatch):

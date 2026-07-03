@@ -94,8 +94,25 @@ def test_auth_post_allows_same_origin_default_port_equivalence():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_forwarded_same_origin():
+def test_auth_post_rejects_untrusted_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
+
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={
+            "Origin": "https://deerflow.example",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "deerflow.example, internal:8000",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.cookies.get("csrf_token") is None
+
+
+def test_auth_post_allows_forwarded_same_origin_from_trusted_proxy(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("127.0.0.1", 50000))
 
     response = client.post(
         "/api/v1/auth/login/local",
@@ -110,8 +127,9 @@ def test_auth_post_allows_forwarded_same_origin():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
-    client = TestClient(_make_app(), base_url="http://internal:8000")
+def test_auth_post_allows_forwarded_same_origin_with_non_default_port(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("127.0.0.1", 50000))
 
     response = client.post(
         "/api/v1/auth/login/local",
@@ -126,8 +144,9 @@ def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_rfc_forwarded_same_origin():
-    client = TestClient(_make_app(), base_url="http://internal:8000")
+def test_auth_post_allows_rfc_forwarded_same_origin(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("127.0.0.1", 50000))
 
     response = client.post(
         "/api/v1/auth/login/local",

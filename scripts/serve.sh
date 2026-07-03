@@ -38,9 +38,22 @@ NGINX_RUNTIME_CONFIG="$REPO_ROOT/logs/nginx.local.generated.conf"
 # ── Load .env ────────────────────────────────────────────────────────────────
 
 if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    source "$REPO_ROOT/.env"
-    set +a
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        key=${line%%=*}
+        value=${line#*=}
+        [ "$line" != "$key" ] || continue
+        if ! printf '%s\n' "$key" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+            continue
+        fi
+        case "$value" in
+            \"*\") value=${value#\"}; value=${value%\"} ;;
+            \'*\') value=${value#\'}; value=${value%\'} ;;
+        esac
+        export "$key=$value"
+    done < "$REPO_ROOT/.env"
 fi
 
 _pick_python() {
@@ -82,6 +95,7 @@ done
 GATEWAY_PORT="${DEER_FLOW_GATEWAY_PORT:-8001}"
 FRONTEND_PORT="${DEER_FLOW_FRONTEND_PORT:-3000}"
 NGINX_PORT="${DEER_FLOW_NGINX_PORT:-2026}"
+GATEWAY_HOST="${DEER_FLOW_BIND_HOST:-${DEER_FLOW_GATEWAY_HOST:-127.0.0.1}}"
 
 _validate_port_value() {
     local name=$1 value=$2
@@ -544,7 +558,7 @@ echo ""
 echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
-echo "    Gateway     → localhost:$GATEWAY_PORT  (REST API + agent runtime)"
+echo "    Gateway     → ${GATEWAY_HOST}:$GATEWAY_PORT  (REST API + agent runtime; local by default)"
 echo "    Frontend    → localhost:$FRONTEND_PORT  (Next.js)"
 echo "    Nginx       → localhost:$NGINX_PORT  (reverse proxy)"
 echo ""
@@ -597,7 +611,7 @@ render_nginx_config
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host '$GATEWAY_HOST' --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     "$GATEWAY_PORT" 30
 
 # 2. Frontend

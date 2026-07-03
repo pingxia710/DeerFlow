@@ -10,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
+from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
@@ -34,7 +35,7 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
         return original_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text_with_gbk_default)
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
 
     request = _make_request()
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/note.txt", request))
@@ -43,12 +44,42 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     assert response.media_type == "text/plain"
 
 
+def test_get_artifact_uses_trusted_internal_owner_header(tmp_path, monkeypatch) -> None:
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    owner_outputs = tmp_path / "users" / "owner-artifact" / "threads" / "thread-owned" / "user-data" / "outputs"
+    owner_outputs.mkdir(parents=True)
+    (owner_outputs / "owner.txt").write_text("owner artifact", encoding="utf-8")
+
+    default_outputs = tmp_path / "users" / "default" / "threads" / "thread-owned" / "user-data" / "outputs"
+    default_outputs.mkdir(parents=True)
+    (default_outputs / "owner.txt").write_text("default artifact", encoding="utf-8")
+
+    request = _make_request()
+    request.state.user = type("InternalUser", (), {"id": "default", "system_role": INTERNAL_SYSTEM_ROLE})()
+    request.scope["headers"] = [(INTERNAL_OWNER_USER_ID_HEADER_NAME.lower().encode(), b"owner-artifact")]
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.get_artifact,
+            "thread-owned",
+            "mnt/user-data/outputs/owner.txt",
+            request,
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "owner artifact"
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename
     artifact_path.write_text(content, encoding="utf-8")
 
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
 
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/{filename}", _make_request()))
 
@@ -62,7 +93,7 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
     with zipfile.ZipFile(skill_path, "w") as zip_ref:
         zip_ref.writestr(filename, content)
 
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: skill_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: skill_path)
 
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
@@ -74,7 +105,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("hello", encoding="utf-8")
 
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
 
     app = make_authed_test_app()
     app.include_router(artifacts_router.router)
@@ -92,7 +123,7 @@ def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path
     with zipfile.ZipFile(skill_path, "w") as zip_ref:
         zip_ref.writestr("notes.txt", "hello")
 
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: skill_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: skill_path)
 
     app = make_authed_test_app()
     app.include_router(artifacts_router.router)

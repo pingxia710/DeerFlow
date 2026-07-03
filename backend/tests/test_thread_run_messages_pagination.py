@@ -10,12 +10,26 @@ from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager
+from deerflow.runtime import RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _RunManagerForPaginationTests:
+    async def get(self, run_id: str, *, user_id=None):
+        if not run_id.startswith("run-"):
+            return None
+        suffix = run_id.removeprefix("run-")
+        return RunRecord(
+            run_id=run_id,
+            thread_id=f"thread-{suffix}",
+            assistant_id=None,
+            status=RunStatus.success,
+            on_disconnect="cancel",
+        )
 
 
 def _make_app(event_store=None, run_manager=None):
@@ -26,8 +40,7 @@ def _make_app(event_store=None, run_manager=None):
     if event_store is not None:
         app.state.run_event_store = event_store
     if run_manager is None:
-        run_manager = AsyncMock()
-        run_manager.get.return_value = None
+        run_manager = _RunManagerForPaginationTests()
     app.state.run_manager = run_manager
 
     return app
@@ -190,6 +203,27 @@ def test_empty_data_when_no_messages():
     body = response.json()
     assert body["data"] == []
     assert body["has_more"] is False
+
+
+def test_run_thread_mismatch_returns_404_without_reading_events():
+    """The run resolver must reject mismatched thread/run pairs before event reads."""
+    rows = [_make_message(1)]
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id="run-1",
+        thread_id="thread-other",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+    )
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 404
+    event_store.list_messages_by_run.assert_not_awaited()
 
 
 def test_get_run_hydrates_store_only_run():

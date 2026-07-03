@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
@@ -508,6 +508,8 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed:
+        record = await run_mgr.get(record.run_id) or record
+    if completed and record.status == RunStatus.success:
         checkpointer = get_checkpointer(request)
         config = {"configurable": {"thread_id": thread_id}}
         try:
@@ -536,11 +538,7 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
-    run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
-    record = await run_mgr.get(run_id, user_id=user_id)
-    if record is None or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    record = await resolve_thread_run(thread_id, run_id, request)
     return _record_to_response(record)
 
 
@@ -561,9 +559,7 @@ async def cancel_run(
     - wait=false: Return immediately with 202
     """
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    record = await resolve_thread_run(thread_id, run_id, request)
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
@@ -584,9 +580,7 @@ async def cancel_run(
 async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    record = await resolve_thread_run(thread_id, run_id, request)
     if record.store_only:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
@@ -624,9 +618,7 @@ async def stream_existing_run(
     remaining buffered events so the client observes a clean shutdown.
     """
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    record = await resolve_thread_run(thread_id, run_id, request)
     if record.store_only and action is None:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
@@ -740,6 +732,7 @@ async def list_run_messages(
 
     Response: { data: [...], has_more: bool }
     """
+    record = await resolve_thread_run(thread_id, run_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -751,20 +744,17 @@ async def list_run_messages(
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
 
     if data:
-        run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id)
-        if record:
-            durations = compute_run_durations([record])
-            duration = durations.get(run_id)
-            if duration is not None:
-                for msg in reversed(data):
-                    content = msg.get("content")
-                    metadata = msg.get("metadata", {})
-                    is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
-                    if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
-                        if "additional_kwargs" not in content:
-                            content["additional_kwargs"] = {}
-                        content["additional_kwargs"]["turn_duration"] = duration
+        durations = compute_run_durations([record])
+        duration = durations.get(run_id)
+        if duration is not None:
+            for msg in reversed(data):
+                content = msg.get("content")
+                metadata = msg.get("metadata", {})
+                is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
+                if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
+                    if "additional_kwargs" not in content:
+                        content["additional_kwargs"] = {}
+                    content["additional_kwargs"]["turn_duration"] = duration
 
     return {"data": data, "has_more": has_more}
 
@@ -779,6 +769,7 @@ async def list_run_events(
     limit: int = Query(default=500, le=2000),
 ) -> list[dict]:
     """Return the full event stream for a run (debug/audit)."""
+    await resolve_thread_run(thread_id, run_id, request)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)

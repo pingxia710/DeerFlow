@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
+from app.gateway.path_utils import get_request_storage_user_id
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
@@ -232,7 +232,7 @@ async def upload_files(
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
     try:
-        effective_user_id = get_effective_user_id()
+        effective_user_id = get_request_storage_user_id(request)
         uploads_dir = ensure_uploads_dir(thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -382,15 +382,16 @@ async def get_upload_limits(
 @require_permission("threads", "read", owner_check=True)
 async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
+    effective_user_id = get_request_storage_user_id(request)
     try:
-        uploads_dir = get_uploads_dir(thread_id)
+        uploads_dir = get_uploads_dir(thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     result = list_files_in_dir(uploads_dir)
     enrich_file_listing(result, thread_id)
 
     # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=effective_user_id)
     for f in result["files"]:
         f["path"] = str(sandbox_uploads / f["filename"])
 
@@ -401,8 +402,9 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
+    effective_user_id = get_request_storage_user_id(request)
     try:
-        uploads_dir = get_uploads_dir(thread_id)
+        uploads_dir = get_uploads_dir(thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:

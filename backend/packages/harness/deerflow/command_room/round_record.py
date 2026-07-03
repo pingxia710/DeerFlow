@@ -266,7 +266,11 @@ def _dispatch_plan_from_handoffs(records: list[dict[str, Any]]) -> list[dict[str
         }
         handoff_packet = record.get("handoff_packet")
         if isinstance(handoff_packet, dict):
-            lane["handoffPacket"] = _json_safe(handoff_packet)
+            packet = dict(handoff_packet)
+            packet.setdefault("sourceRole", "command-room")
+            packet.setdefault("targetRole", lane["role"])
+            packet.setdefault("taskOrQuestion", packet.get("goal") or lane["task"])
+            lane["handoffPacket"] = _json_safe(packet)
     return list(by_task.values())
 
 

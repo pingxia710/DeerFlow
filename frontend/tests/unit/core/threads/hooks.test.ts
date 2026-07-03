@@ -41,6 +41,25 @@ test("buildThreadRunContext forces command-room into ultra subagent mode", async
   });
 });
 
+test("buildThreadRunContext defaults command-room reasoning to high", async () => {
+  const { buildThreadRunContext } = await import("@/core/threads/hooks");
+
+  expect(
+    buildThreadRunContext(
+      {
+        agent_name: "command-room",
+        model_name: "safe-model",
+        mode: "flash",
+      },
+      "thread-123",
+    ),
+  ).toMatchObject({
+    mode: "ultra",
+    reasoning_effort: "high",
+    subagent_enabled: true,
+  });
+});
+
 test("buildThreadRunContext defaults ordinary thinking chat to xhigh", async () => {
   const { buildThreadRunContext } = await import("@/core/threads/hooks");
 
@@ -144,4 +163,53 @@ test("resolveVisibleTaskRunningThreadId prefers task event identity across threa
       liveMessagesThreadId: "thread-b",
     }),
   ).toBe("thread-a");
+});
+
+test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        type: "task_completed",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        summary: "Task completed",
+        result_preview: "safe preview",
+        redacted: true,
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      notify: true,
+      status: "completed",
+      result: "safe preview",
+    },
+  ]);
+});
+
+test("applyTaskEventToSubtask rejects task events without full run identity", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        type: "task_completed",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        result_preview: "safe preview",
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(false);
+
+  expect(updates).toEqual([]);
 });

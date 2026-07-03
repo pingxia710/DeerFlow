@@ -20,7 +20,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_current_user, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
@@ -40,6 +40,25 @@ from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
+
+
+async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
+    """Resolve a run through one thread/user boundary check before use."""
+    run_mgr = get_run_manager(request)
+    record = await run_mgr.get(run_id, user_id=None)
+    if record is None or record.thread_id != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    user_id = await get_current_user(request)
+    if user_id is not None and record.user_id is not None and str(record.user_id) != user_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return record
+
+
+def _request_user_id(request: Request) -> str | None:
+    user = getattr(getattr(request, "state", None), "user", None)
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id else None
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +414,7 @@ async def start_run(
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-    owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = get_trusted_internal_owner_user_id(request) or _request_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
     # @require_permission(owner_check=True) decorator -- which resolves ownership
     # from the path param -- cannot protect them. Enforce thread ownership here,

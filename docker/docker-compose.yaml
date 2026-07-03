@@ -29,11 +29,19 @@ services:
     image: nginx:alpine
     container_name: deer-flow-nginx
     ports:
-      - "${PORT:-2026}:2026"
+      - "${DEER_FLOW_BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    environment:
+      - DEER_FLOW_EXPOSE_API_DOCS=${DEER_FLOW_EXPOSE_API_DOCS:-false}
+      - DEER_FLOW_EXPOSE_SANDBOX_API=${DEER_FLOW_EXPOSE_SANDBOX_API:-false}
     command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      sh -c "{
+      if [ \"$${DEER_FLOW_EXPOSE_API_DOCS}\" = \"true\" ]; then echo 'set $$expose_api_docs 1;'; else echo 'set $$expose_api_docs 0;'; fi;
+      if [ \"$${DEER_FLOW_EXPOSE_SANDBOX_API}\" = \"true\" ]; then echo 'set $$expose_sandbox_api 1;'; else echo 'set $$expose_sandbox_api 0;'; fi;
+      } > /etc/nginx/conf.d/deer-flow-exposure.conf
+      && cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      && nginx -t
       && nginx -g 'daemon off;'"
     depends_on:
       - frontend

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _WRITE_LOCK = threading.Lock()
 _FIELD_RE = re.compile(
     r"^(?:[-*+]\s+|\d+[.)]\s+)?[\"'`]*(?:\*\*)?"
-    r"(SchemaVersion|SignalId|Role|Claim|EvidenceRefs|EvidenceState|SelfAttestationOnly|"
+    r"(SchemaVersion|SignalId|Role|Claim|EvidenceStrength|EvidenceRefs|EvidenceState|SelfAttestationOnly|"
     r"Unknown/Stale|Conflicts|RedlineTouched|RecommendedDecision|NextAction)"
     r"\s*(?:\*\*)?[\"'`]*\s*[:：]\s*(?:\*\*)?\s*(.*?)\s*,?\s*(?:\*\*)?\s*$",
     re.IGNORECASE,
@@ -33,6 +33,7 @@ _FIELD_CANONICAL = {
     "signalid": "signalId",
     "role": "Role",
     "claim": "Claim",
+    "evidencestrength": "EvidenceStrength",
     "evidencerefs": "EvidenceRefs",
     "evidencestate": "evidenceState",
     "selfattestationonly": "selfAttestationOnly",
@@ -72,24 +73,63 @@ _BLOCKING_DECISION_RE = re.compile(
 
 _HANDOFF_PACKET_FIELD_RE = re.compile(
     r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*)?"
-    r"(Goal|Task|Context|Inherited Context|Current Context|Required Inputs|Inputs|Boundary|Forbidden|Expected(?: Evidence| Output)?|Evidence|Stop(?: Conditions?)?|Failure Conditions|Escalation|Capabilities|Tools|Model|Skill)"
+    r"(Source Role|Source|Sender|From|Target Role|Target|Receiver|To|Goal|"
+    r"Task(?:/Question| or Question)?|Question|Context|Inherited Context|Current Context|"
+    r"Required Inputs|Inputs|Boundary Status|Boundary|Forbidden|Expected(?: Evidence| Output)?|"
+    r"Evidence(?: ?Refs?)?|EvidenceRefs|Evidence(?: ?Strength)?|EvidenceStrength|Output(?: ?Refs?)?|OutputRefs|"
+    r"Handoff File|HandoffFile|Handoff Path|HandoffPath|Artifact(?: ?Refs?)?|ArtifactRefs|Artifacts|"
+    r"Recommended(?: Next)? Decision|RecommendedDecision|Next Decision|Stop(?: Conditions?)?|"
+    r"Failure Conditions|Escalation|Capabilities|Tools|Model|Skill)"
     r"(?:\*\*)?\s*[:：]\s*(.*)$",
     re.IGNORECASE,
 )
 _HANDOFF_PACKET_KEYS = {
+    "source role": "sourceRole",
+    "source": "sourceRole",
+    "sender": "sourceRole",
+    "from": "sourceRole",
+    "target role": "targetRole",
+    "target": "targetRole",
+    "receiver": "targetRole",
+    "to": "targetRole",
     "goal": "goal",
     "task": "goal",
+    "task/question": "taskOrQuestion",
+    "task or question": "taskOrQuestion",
+    "question": "taskOrQuestion",
     "context": "context",
     "inherited context": "context",
     "current context": "context",
     "required inputs": "requiredInputs",
     "inputs": "requiredInputs",
+    "boundary status": "boundaryStatus",
     "boundary": "boundary",
     "forbidden": "boundary",
     "expected": "expectedEvidence",
     "expected evidence": "expectedEvidence",
     "expected output": "expectedOutput",
     "evidence": "expectedEvidence",
+    "evidence refs": "evidenceRefs",
+    "evidence ref": "evidenceRefs",
+    "evidencerefs": "evidenceRefs",
+    "evidence strength": "evidenceStrength",
+    "evidencestrength": "evidenceStrength",
+    "output refs": "outputRefs",
+    "output ref": "outputRefs",
+    "outputrefs": "outputRefs",
+    "handoff file": "handoffFile",
+    "handofffile": "handoffFile",
+    "handoff path": "handoffFile",
+    "handoffpath": "handoffFile",
+    "artifact": "artifactRefs",
+    "artifacts": "artifactRefs",
+    "artifact refs": "artifactRefs",
+    "artifact ref": "artifactRefs",
+    "artifactrefs": "artifactRefs",
+    "recommended decision": "recommendedNextDecision",
+    "recommended next decision": "recommendedNextDecision",
+    "recommendeddecision": "recommendedNextDecision",
+    "next decision": "recommendedNextDecision",
     "stop": "stopConditions",
     "stop conditions": "stopConditions",
     "stop condition": "stopConditions",
@@ -100,13 +140,37 @@ _HANDOFF_PACKET_KEYS = {
     "model": "releasedCapabilities",
     "skill": "releasedCapabilities",
 }
+_HANDOFF_PACKET_REPLACE_KEYS = {"sourceRole", "targetRole", "taskOrQuestion", "evidenceStrength", "handoffFile", "boundaryStatus", "recommendedNextDecision"}
 _HANDOFF_PACKET_LIMIT = 500
+_SAFE_ACTION_RESULT_KEYS = {
+    "action_id",
+    "description",
+    "status",
+    "evidence_refs",
+    "output_ref",
+    "risks",
+    "conflicts",
+    "open_questions",
+}
 
 
 def _sha256_text(text: str | None) -> str | None:
     if text is None:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _compact_action_result(action_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not action_result:
+        return None
+    compact = {key: action_result[key] for key in _SAFE_ACTION_RESULT_KEYS if key in action_result}
+    for key in ("summary", "error"):
+        value = action_result.get(key)
+        if value is not None:
+            text = str(value)
+            compact[f"{key}_sha256"] = _sha256_text(text)
+            compact[f"{key}_chars"] = len(text)
+    return compact
 
 
 def _truncate(value: str, limit: int = _FIELD_VALUE_LIMIT) -> str:
@@ -297,12 +361,22 @@ def extract_handoff_packet(prompt: str | None, *, description: str = "", subagen
     runtime evidence and must not upgrade worker self-claims.
     """
     packet: dict[str, Any] = {
+        "sourceRole": "command-room",
+        "targetRole": _truncate(subagent_type.strip(), _HANDOFF_PACKET_LIMIT),
         "goal": _truncate(description.strip() or _first_meaningful_line(prompt), _HANDOFF_PACKET_LIMIT),
+        "taskOrQuestion": _truncate(description.strip() or _first_meaningful_line(prompt), _HANDOFF_PACKET_LIMIT),
         "context": "",
         "requiredInputs": "",
         "boundary": "",
+        "boundaryStatus": "",
         "expectedEvidence": "",
         "expectedOutput": "",
+        "evidenceRefs": "",
+        "evidenceStrength": "",
+        "outputRefs": "",
+        "handoffFile": "",
+        "artifactRefs": "",
+        "recommendedNextDecision": "",
         "stopConditions": "",
         "releasedCapabilities": _truncate(subagent_type.strip(), _HANDOFF_PACKET_LIMIT),
     }
@@ -315,8 +389,11 @@ def extract_handoff_packet(prompt: str | None, *, description: str = "", subagen
             if current_key:
                 value = _clean_field_value(raw_value)
                 if value:
-                    existing = packet.get(current_key, "")
-                    packet[current_key] = _truncate(f"{existing}; {value}" if existing else value, _HANDOFF_PACKET_LIMIT)
+                    if current_key in _HANDOFF_PACKET_REPLACE_KEYS:
+                        packet[current_key] = _truncate(value, _HANDOFF_PACKET_LIMIT)
+                    else:
+                        existing = packet.get(current_key, "")
+                        packet[current_key] = _truncate(f"{existing}; {value}" if existing else value, _HANDOFF_PACKET_LIMIT)
             continue
         if current_key and (line[:1].isspace() or line.strip().startswith(("-", "*"))):
             value = line.strip(" -*\t")
@@ -386,13 +463,14 @@ def record_subagent_handoff(
             "prompt_sha256": _sha256_text(prompt),
             "prompt_chars": len(prompt),
             "handoff_packet": extract_handoff_packet(prompt, description=description, subagent_type=subagent_type),
+            "output_handoff_packet": extract_handoff_packet(result, description=description, subagent_type=subagent_type) if result else None,
             "result_sha256": _sha256_text(result),
             "result_chars": len(result or ""),
             "error_sha256": _sha256_text(error),
             "error_chars": len(error or ""),
             "usage": usage,
             "signal": signal,
-            "action_result": action_result,
+            "action_result": _compact_action_result(action_result),
         }
         with _WRITE_LOCK:
             path.parent.mkdir(parents=True, exist_ok=True)

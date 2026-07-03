@@ -9,6 +9,7 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,91 @@ from deerflow.subagents.config import SubagentConfig
 def _reset_subagents_config(**kwargs) -> None:
     """Reset global subagents config to a known state."""
     load_subagents_config_from_dict(kwargs)
+
+
+def test_command_room_findings_role_skills_require_evidence_strength():
+    repo_root = Path(__file__).resolve().parents[2]
+    for skill_name in ("command-room-evidence", "command-room-opposition"):
+        text = (repo_root / "skills" / "custom" / skill_name / "SKILL.md").read_text(encoding="utf-8")
+        assert "findings.md" in text
+        assert "EvidenceStrength:" in text
+        assert "Strong/Weak/Unverified" in text
+
+
+def test_command_room_capability_governor_skill_defines_boundary_signal():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "skills" / "custom" / "command-room-capability-governor" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "Capability Boundary Signal" in text
+    assert "Requested Expansion:" in text
+    assert "Current Boundary:" in text
+    assert "Current Capability Release:" in text
+    assert "Expansion Risks:" in text
+    assert "Chair Decision Options:" in text
+    assert "Target Role: Chair" in text
+
+
+def test_command_room_chair_skill_defines_capability_decision():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "skills" / "custom" / "command-room-chair" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "Capability Decision" in text
+    assert "Signal Ref:" in text
+    assert "Decision: keep current release / narrow release / ask user / stop" in text
+    assert "Adopted Capability Release:" in text
+    assert "Reason:" in text
+    assert "Next Role:" in text
+    assert "Program logic must not choose this decision" in text
+
+
+def test_command_room_chair_skill_bounds_code_reading_and_visible_thinking():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "skills" / "custom" / "command-room-chair" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "Chair Code Reading Policy" in text
+    assert "decisive refs" in text
+    assert "delegate broad exploration" in text
+    assert "Return to envelope and Chair decision flow" in text
+    assert "Visible Thinking Budget" in text
+    assert "Do not narrate long private deliberation" in text
+
+
+def test_command_room_recorder_skill_requires_chair_accepted_account_updates():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "skills" / "custom" / "command-room-recorder" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "Account Update Proposal" in text
+    assert "Goal / Boundary / Decision / Evidence / Debt / Learning" in text
+    assert "Chair-accepted" in text
+    assert "adopt / revise / defer / reject" in text
+    assert "Program logic must not auto-update accounts" in text
+    assert "Recorder Target:" in text
+
+
+def test_command_room_loop_scenario_library_is_linked_and_bounded():
+    repo_root = Path(__file__).resolve().parents[2]
+    doc = (repo_root / "docs" / "command-room" / "loop-scenarios.md").read_text(encoding="utf-8")
+    protocol = (repo_root / "docs" / "command-room" / "ai-control-protocol.md").read_text(encoding="utf-8")
+    skill = (repo_root / "skills" / "custom" / "naxus-round" / "SKILL.md").read_text(encoding="utf-8")
+
+    for expected in (
+        "Loop Scenario Library",
+        "New Task Startup Loop",
+        "Plan Loop",
+        "Development Loop",
+        "Evidence Loop",
+        "Capability Loop",
+        "Conflict Loop",
+        "Debt Loop",
+        "Learning Loop",
+        "Six-Lane Audit Loop",
+        "Do not force six lanes",
+        "must return to Chair",
+    ):
+        assert expected in doc
+
+    assert "docs/command-room/loop-scenarios.md" in protocol
+    assert "docs/command-room/loop-scenarios.md" in skill
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +497,56 @@ class TestRegistryCustomAgentLookup:
         config = get_subagent_config("general-purpose")
         # Should get the builtin description, not the custom one
         assert config.description == BUILTIN_SUBAGENTS["general-purpose"].description
+
+    def test_command_room_role_subagents_are_builtin_except_chair(self):
+        from deerflow.subagents.registry import get_subagent_config, get_subagent_names
+
+        _reset_subagents_config()
+        names = get_subagent_names()
+
+        for name, skill in [
+            ("planner", "command-room-planner"),
+            ("boundary", "command-room-boundary"),
+            ("evidence", "command-room-evidence"),
+            ("opposition", "command-room-opposition"),
+            ("recorder", "command-room-recorder"),
+            ("project-steward", "command-room-project-steward"),
+            ("debt-curator", "command-room-debt-curator"),
+            ("freshness-keeper", "command-room-freshness-keeper"),
+            ("capability-governor", "command-room-capability-governor"),
+            ("learning-curator", "command-room-learning-curator"),
+            ("conflict-mapper", "command-room-conflict-mapper"),
+        ]:
+            assert name in names
+            config = get_subagent_config(name)
+            assert config is not None
+            assert config.skills == [skill]
+            assert "EvidenceStrength:" in config.system_prompt
+            assert "Handoff File:" in config.system_prompt
+            assert "ArtifactRefs:" in config.system_prompt
+
+        assert "chair" not in names
+        assert "command-room" not in names
+
+    def test_custom_command_room_role_overrides_builtin_role(self):
+        from deerflow.subagents.registry import get_subagent_config
+
+        load_subagents_config_from_dict(
+            {
+                "custom_agents": {
+                    "capability-governor": {
+                        "description": "Local capability governor",
+                        "system_prompt": "Use local capability governor.",
+                        "skills": [],
+                    },
+                },
+            }
+        )
+
+        config = get_subagent_config("capability-governor")
+        assert config.description == "Local capability governor"
+        assert config.system_prompt == "Use local capability governor."
+        assert config.skills == []
 
     def test_custom_agent_with_override(self):
         """Per-agent overrides also apply to custom agents."""

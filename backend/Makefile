@@ -1,14 +1,16 @@
+GATEWAY_BIND_HOST ?= $(if $(DEER_FLOW_BIND_HOST),$(DEER_FLOW_BIND_HOST),$(if $(DEER_FLOW_GATEWAY_HOST),$(DEER_FLOW_GATEWAY_HOST),127.0.0.1))
+
 install:
 	uv sync
 
 dev:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host $(GATEWAY_BIND_HOST) --port 8001
 
 dev-reload:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --timeout-graceful-shutdown 5
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host $(GATEWAY_BIND_HOST) --port 8001 --reload --timeout-graceful-shutdown 5
 
 gateway:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host $(GATEWAY_BIND_HOST) --port 8001
 
 test:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/ -v

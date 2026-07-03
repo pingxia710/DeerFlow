@@ -4,9 +4,11 @@ Per RFC-001:
 State-changing operations require CSRF protection.
 """
 
+import logging
 import os
 import secrets
 from collections.abc import Awaitable, Callable
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
@@ -19,6 +21,7 @@ from app.gateway.auth_disabled import is_auth_disabled
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_TOKEN_LENGTH = 64  # bytes
+logger = logging.getLogger(__name__)
 
 
 def is_secure_request(request: Request) -> bool:
@@ -124,6 +127,36 @@ def _first_header_value(value: str | None) -> str | None:
     return first or None
 
 
+def _trusted_proxies() -> list:
+    raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return []
+    nets = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            nets.append(ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
+    return nets
+
+
+def _is_trusted_proxy_peer(request: Request) -> bool:
+    peer_host = request.client.host if request.client else None
+    if not peer_host:
+        return False
+    trusted = _trusted_proxies()
+    if not trusted:
+        return False
+    try:
+        peer_ip = ip_address(peer_host)
+    except ValueError:
+        return False
+    return any(peer_ip in net for net in trusted)
+
+
 def _forwarded_param(request: Request, name: str) -> str | None:
     """Extract a parameter from the first RFC 7239 Forwarded header entry."""
     forwarded = _first_header_value(request.headers.get("forwarded"))
@@ -139,18 +172,22 @@ def _forwarded_param(request: Request, name: str) -> str | None:
 
 def _request_scheme(request: Request) -> str:
     """Resolve the original request scheme from trusted proxy headers."""
-    scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
+    scheme = request.url.scheme
+    if _is_trusted_proxy_peer(request):
+        scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or scheme
     return scheme.lower()
 
 
 def _request_origin(request: Request) -> str | None:
     """Build the origin for the URL the browser is targeting."""
     scheme = _request_scheme(request)
-    host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
+    host = request.headers.get("host") or request.url.netloc
 
-    forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
-    if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
-        host = f"{host}:{forwarded_port}"
+    if _is_trusted_proxy_peer(request):
+        host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or host
+        forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
+        if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
+            host = f"{host}:{forwarded_port}"
 
     return _normalize_origin(f"{scheme}://{host}")
 

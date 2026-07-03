@@ -30,14 +30,15 @@ from uuid import uuid4
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
-from app.gateway.routers import runs
+from app.gateway.routers import runs, thread_runs
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
-from deerflow.runtime import ConflictError
+from deerflow.runtime import ConflictError, DisconnectMode, RunRecord, RunStatus
 
 USER_A = User(email="owner-a@example.com", password_hash="x", system_role="user", id=uuid4())
 USER_B = User(email="intruder-b@example.com", password_hash="x", system_role="user", id=uuid4())
@@ -97,6 +98,19 @@ def _body(thread_id: str | None = None) -> dict:
     return {"config": {"configurable": {"thread_id": thread_id}}}
 
 
+@pytest.mark.parametrize("path", ["/api/runs/stream", "/api/runs/wait"])
+def test_stateless_run_routes_require_route_auth_without_global_middleware(path: str):
+    """The stateless run routes fail closed even if mounted without AuthMiddleware."""
+    app = FastAPI()
+    app.include_router(runs.router)
+
+    with TestClient(app) as client:
+        response = client.post(path, json=_body())
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
+
+
 # ---------------------------------------------------------------------------
 # Denied: another user's thread
 # ---------------------------------------------------------------------------
@@ -138,6 +152,67 @@ def test_wait_owner_passes_owner_check():
         response = client.post("/api/runs/wait", json=_body(THREAD_A))
     assert response.status_code == 409
     create_or_reject.assert_awaited()
+
+
+@pytest.mark.parametrize(
+    "router_module, router, path",
+    [
+        (runs, runs.router, "/api/runs/wait"),
+        (thread_runs, thread_runs.router, f"/api/threads/{THREAD_A}/runs/wait"),
+    ],
+)
+def test_wait_routes_return_terminal_error_without_serializing_checkpoint(
+    monkeypatch,
+    router_module,
+    router,
+    path: str,
+):
+    """END_SENTINEL is not enough for success; /wait must re-check run status."""
+    start_record = RunRecord(
+        run_id="run-wait-error",
+        thread_id=THREAD_A,
+        assistant_id=None,
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.cancel,
+        user_id=str(USER_A.id),
+    )
+    start_record.task = MagicMock()
+    latest_record = RunRecord(
+        run_id=start_record.run_id,
+        thread_id=THREAD_A,
+        assistant_id=None,
+        status=RunStatus.error,
+        on_disconnect=DisconnectMode.cancel,
+        user_id=str(USER_A.id),
+        error="boom",
+    )
+
+    async def fake_start_run(*args, **kwargs):
+        return start_record
+
+    async def fake_wait_for_run_completion(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(router_module, "start_run", fake_start_run)
+    monkeypatch.setattr(router_module, "wait_for_run_completion", fake_wait_for_run_completion)
+
+    app = make_authed_test_app(user_factory=lambda: USER_A)
+    app.include_router(router)
+    app.state.stream_bridge = MagicMock()
+    run_manager = MagicMock()
+    run_manager.get = AsyncMock(return_value=latest_record)
+    app.state.run_manager = run_manager
+    checkpointer = MagicMock()
+    checkpointer.aget_tuple = AsyncMock(return_value={"checkpoint": {"channel_values": {"messages": ["not success"]}}})
+    app.state.checkpointer = checkpointer
+
+    with TestClient(app) as client:
+        response = client.post(path, json=_body(THREAD_A))
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "error", "error": "boom"}
+    run_manager.get.assert_awaited_once_with(start_record.run_id)
+    checkpointer.aget_tuple.assert_not_awaited()
 
 
 def test_stream_without_thread_id_passes_owner_check():

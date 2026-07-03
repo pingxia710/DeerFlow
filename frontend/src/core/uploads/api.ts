@@ -43,6 +43,10 @@ async function readErrorDetail(
   return error.detail ?? fallback;
 }
 
+function uploadsURL(threadId: string, suffix = ""): string {
+  return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/uploads${suffix}`;
+}
+
 /**
  * Upload files to a thread
  */
@@ -56,13 +60,10 @@ export async function uploadFiles(
     formData.append("files", file);
   });
 
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
+  const response = await fetch(uploadsURL(threadId), {
+    method: "POST",
+    body: formData,
+  });
 
   if (!response.ok) {
     throw new Error(await readErrorDetail(response, "Upload failed"));
@@ -77,9 +78,7 @@ export async function uploadFiles(
 export async function listUploadedFiles(
   threadId: string,
 ): Promise<ListFilesResponse> {
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/list`,
-  );
+  const response = await fetch(uploadsURL(threadId, "/list"));
 
   if (!response.ok) {
     throw new Error(
@@ -98,7 +97,7 @@ export async function deleteUploadedFile(
   filename: string,
 ): Promise<{ success: boolean; message: string }> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${filename}`,
+    uploadsURL(threadId, `/${encodeURIComponent(filename)}`),
     {
       method: "DELETE",
     },

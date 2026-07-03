@@ -20,6 +20,7 @@ from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import Paths
+from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -980,6 +981,7 @@ class TestEnsureAgent:
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
+        assert mock_apply_prompt.call_args.kwargs.get("max_concurrent_subagents") == MAX_CONCURRENT_SUBAGENTS
 
     def test_command_room_client_uses_agent_config_boundaries(self, client):
         mock_agent = MagicMock()
@@ -1015,7 +1017,7 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
         assert captured_model["name"] == "safe-model"
-        assert mock_get_tools.call_args.kwargs["groups"] == []
+        assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
         assert mock_get_tools.call_args.kwargs["include_mcp"] is False
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
         assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"naxus-round"}

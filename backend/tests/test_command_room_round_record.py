@@ -297,6 +297,9 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
 
     record = json.loads(path.read_text(encoding="utf-8"))
     packet = record["dispatchPlan"][0]["handoffPacket"]
+    assert packet["sourceRole"] == "command-room"
+    assert packet["targetRole"] == "general-purpose"
+    assert packet["taskOrQuestion"] == "audit task"
     assert packet["context"] == "known frontend dirty files exist"
     assert packet["requiredInputs"] == "backend audit files only"
     assert packet["boundary"] == "do not touch production"
@@ -310,6 +313,53 @@ def test_dispatch_plan_includes_handoff_packet_and_keeps_worker_claims_weak(tmp_
     assert contract["requiredEvidence"] == contract["evidenceSignals"]  # deprecated compatibility alias
     assert contract["userConfirmationNeeded"] == contract["needsUserConfirmation"]  # deprecated compatibility alias
     assert record["compatibilityAliases"]["requiredEvidence"] == "nextRoundContract.evidenceSignals"
+
+
+def test_dispatch_plan_preserves_ai_to_ai_handoff_envelope(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="handoff continuity",
+        final_text="Verdict: NEEDS_MORE",
+        audit_records=[
+            {
+                "status": "started",
+                "task_id": "boundary-task",
+                "subagent_type": "boundary",
+                "description": "boundary review",
+                "handoff_packet": {
+                    "sourceRole": "Planner",
+                    "targetRole": "Boundary",
+                    "goal": "boundary review",
+                    "taskOrQuestion": "check whether the plan crosses bottom boundaries",
+                    "evidenceRefs": "docs/command-room/run-protocol.md:25",
+                    "outputRefs": "planner-output:round-1",
+                    "handoffFile": "docs/command-room/spec.md",
+                    "artifactRefs": "docs/command-room/spec.md; docs/command-room/findings.md",
+                    "boundaryStatus": "unclear",
+                    "recommendedNextDecision": "NEEDS_MORE",
+                    "boundary": "do not change host access",
+                    "expectedEvidence": "redline list",
+                    "stopConditions": "stop before permission changes",
+                    "releasedCapabilities": "boundary",
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    packet = record["dispatchPlan"][0]["handoffPacket"]
+    assert packet["sourceRole"] == "Planner"
+    assert packet["targetRole"] == "Boundary"
+    assert packet["taskOrQuestion"] == "check whether the plan crosses bottom boundaries"
+    assert packet["evidenceRefs"] == "docs/command-room/run-protocol.md:25"
+    assert packet["outputRefs"] == "planner-output:round-1"
+    assert packet["handoffFile"] == "docs/command-room/spec.md"
+    assert packet["artifactRefs"] == "docs/command-room/spec.md; docs/command-room/findings.md"
+    assert packet["boundaryStatus"] == "unclear"
+    assert packet["recommendedNextDecision"] == "NEEDS_MORE"
 
 
 def test_self_claimed_evidence_refs_are_not_trusted_sources():

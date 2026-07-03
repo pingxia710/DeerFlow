@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy, RunRecord
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -35,6 +35,22 @@ class FlakyStatusRunStore(MemoryRunStore):
             self.status_failures -= 1
             raise sqlite3.OperationalError("database is locked")
         return await super().update_status(run_id, status, error=error)
+
+
+class FlakyProgressRunStore(MemoryRunStore):
+    """Memory run store that simulates transient SQLite progress-write failures."""
+
+    def __init__(self, *, progress_failures: int) -> None:
+        super().__init__()
+        self.progress_failures = progress_failures
+        self.progress_update_attempts = 0
+
+    async def update_run_progress(self, run_id, **kwargs):
+        self.progress_update_attempts += 1
+        if self.progress_failures > 0:
+            self.progress_failures -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return await super().update_run_progress(run_id, **kwargs)
 
 
 class MissingRowStatusRunStore(MemoryRunStore):
@@ -259,6 +275,26 @@ async def test_completion_persistence_warns_when_recreated_row_still_missing(cap
 
     assert store.completion_update_attempts == 2
     assert "affected no rows after row recreation" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_progress_persistence_retries_transient_sqlite_lock():
+    """Running progress snapshots should survive short SQLite write pressure."""
+    store = FlakyProgressRunStore(progress_failures=2)
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=4, initial_delay=0),
+    )
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    await manager.update_run_progress(record.run_id, total_tokens=42, message_count=2)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["total_tokens"] == 42
+    assert stored["message_count"] == 2
+    assert store.progress_update_attempts == 3
 
 
 @pytest.mark.anyio
@@ -797,6 +833,57 @@ async def test_aget_returns_in_memory_record(manager_with_store: RunManager):
 
 
 @pytest.mark.anyio
+async def test_aget_honors_user_filter_for_in_memory_record():
+    """aget should apply user_id filtering before returning an in-memory record."""
+    mgr = RunManager()
+    record = await mgr.create("thread-1", "agent-1", user_id="user-1")
+
+    assert await mgr.aget(record.run_id, user_id="user-1") is record
+    assert await mgr.aget(record.run_id, user_id="user-2") is None
+    assert await mgr.aget(record.run_id, user_id=None) is record
+
+
+@pytest.mark.anyio
+async def test_get_recheck_after_store_await_honors_user_filter():
+    """The post-store-await memory recheck must not bypass owner filtering."""
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+    get_started = asyncio.Event()
+    allow_get = asyncio.Event()
+
+    async def blocking_get(run_id, *, user_id=None):
+        get_started.set()
+        await allow_get.wait()
+        return None
+
+    store.get = blocking_get
+    get_task = asyncio.create_task(mgr.get("run-1", user_id="user-2"))
+
+    try:
+        await get_started.wait()
+        record = RunRecord(
+            run_id="run-1",
+            thread_id="thread-1",
+            assistant_id="agent-1",
+            status=RunStatus.pending,
+            on_disconnect=DisconnectMode.cancel,
+            user_id="user-1",
+        )
+        async with mgr._lock:
+            mgr._runs[record.run_id] = record
+            mgr._index_run_locked(record)
+
+        allow_get.set()
+
+        assert await get_task is None
+    finally:
+        allow_get.set()
+        if not get_task.done():
+            get_task.cancel()
+            await asyncio.gather(get_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_aget_falls_back_to_store(manager_with_store: RunManager):
     """aget should return a record from the store when not in memory."""
     mgr = manager_with_store
@@ -871,6 +958,21 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_honors_user_filter_for_in_memory_records():
+    """list_by_thread should apply user_id filtering to active in-memory runs too."""
+    mgr = RunManager()
+    user_1_run = await mgr.create("thread-1", "agent-1", user_id="user-1")
+    user_2_run = await mgr.create("thread-1", "agent-1", user_id="user-2")
+    shared_run = await mgr.create("thread-1", "agent-1", user_id=None)
+
+    filtered = await mgr.list_by_thread("thread-1", user_id="user-1")
+    unfiltered = await mgr.list_by_thread("thread-1", user_id=None)
+
+    assert [r.run_id for r in filtered] == [user_1_run.run_id]
+    assert {r.run_id for r in unfiltered} == {user_1_run.run_id, user_2_run.run_id, shared_run.run_id}
 
 
 # ---------------------------------------------------------------------------

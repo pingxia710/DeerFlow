@@ -61,6 +61,12 @@ def _is_retryable_persistence_error(exc: BaseException) -> bool:
     return False
 
 
+def _record_matches_user_id(record: RunRecord, user_id: str | None) -> bool:
+    if user_id is None:
+        return True
+    return record.user_id == user_id
+
+
 @dataclass(frozen=True)
 class PersistenceRetryPolicy:
     """Bounded retry policy for short run-store writes."""
@@ -350,7 +356,11 @@ class RunManager:
                 record.updated_at = _now_iso()
         if should_persist and self._store is not None:
             try:
-                await self._store.update_run_progress(run_id, **kwargs)
+                await self._call_store_with_retry(
+                    "update_run_progress",
+                    run_id,
+                    lambda: self._store.update_run_progress(run_id, **kwargs),
+                )
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
@@ -409,7 +419,7 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
-            return record
+            return record if _record_matches_user_id(record, user_id) else None
         if self._store is None:
             return None
         try:
@@ -422,7 +432,7 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
-            return record
+            return record if _record_matches_user_id(record, user_id) else None
         if row is None:
             return None
         try:
@@ -451,7 +461,7 @@ class RunManager:
             limit: Maximum number of runs to return.
         """
         async with self._lock:
-            memory_records = self._thread_records_locked(thread_id)
+            memory_records = [record for record in self._thread_records_locked(thread_id) if _record_matches_user_id(record, user_id)]
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}

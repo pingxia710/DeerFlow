@@ -414,3 +414,12 @@
 - Added route-level auth to Memory API routes so a bare-mounted router fails closed instead of falling back to a default memory owner.
 - Validation: `cd frontend && pnpm typecheck` passed; upload API unit tests passed; targeted frontend Prettier passed; `cd backend && uv run pytest tests/test_deployment_exposure_defaults.py tests/test_stateless_runs_owner_isolation.py tests/test_task_tool_core_logic.py tests/test_command_room_round_context.py tests/test_command_room_task_action_result.py tests/test_memory_router_auth.py -q` passed in targeted runs; targeted backend `ruff check` passed.
 - Deliberately skipped: no Skills API admin/user-tenancy change, no Target Role auto-chain implementation, no cross-process active-run lease, no run creation lock rewrite, and no rollback state-machine redesign in this mechanical follow-up slice.
+
+## 2026-07-04 — Task event/action_result contract convergence
+
+- Pinned `deerflow.task-event/v1` around task terminal events and compact `action_result` metadata so completed, failed, cancelled, and timed_out preserve both status and terminal_reason across backend and frontend.
+- Marked `task_running.message` optional/reserved because the current backend emits only message indexes/counts, not raw message payloads.
+- Marked `boundary_blocked` as a reserved future task terminal reason; current task terminal emissions do not use it.
+- Added backend/frontend regressions for schema v1 terminal cases, unknown future terminal states failing safe instead of staying in progress, cancelled staying `user_cancelled`, and timed_out staying `timed_out`.
+- Validation: targeted backend pytest, frontend hooks/subtask-result tests, `pnpm typecheck`, targeted ruff/prettier, and `git diff --check` passed.
+- Deliberately skipped: no RunManager/run store/stream persistence/checkpoint/rollback/lease/permission-model/Target Role auto-chain/skill-loading-policy changes.

@@ -454,6 +454,7 @@ export function resolveVisibleTaskRunningThreadId({
 }
 
 const TASK_EVENT_CALLER = "task_event";
+const TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1";
 const TASK_EVENT_TYPES = new Set([
   "task_started",
   "task_running",
@@ -464,7 +465,8 @@ const TASK_EVENT_TYPES = new Set([
 ]);
 
 type PersistedTaskEvent = {
-  type: string;
+  type?: unknown;
+  event_type?: unknown;
   schema_version?: unknown;
   task_id?: unknown;
   thread_id?: unknown;
@@ -481,21 +483,26 @@ type PersistedTaskEvent = {
   message?: unknown;
   result?: unknown;
   error?: unknown;
+  action_result?: unknown;
 };
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
 
 function asTaskEvent(value: unknown): PersistedTaskEvent | null {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("type" in value) ||
-    typeof value.type !== "string" ||
-    !TASK_EVENT_TYPES.has(value.type)
-  ) {
+  if (typeof value !== "object" || value === null) {
     return null;
   }
   const event = value as PersistedTaskEvent;
+  const eventType = taskEventType(event);
+  const schemaVersion = stringValue(event.schema_version);
+  if (
+    !eventType ||
+    (!TASK_EVENT_TYPES.has(eventType) &&
+      schemaVersion !== TASK_EVENT_SCHEMA_VERSION &&
+      !eventType.startsWith("task_"))
+  ) {
+    return null;
+  }
   if (
     !stringValue(event.task_id) ||
     !stringValue(event.thread_id) ||
@@ -503,11 +510,26 @@ function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   ) {
     return null;
   }
-  return event;
+  return { ...event, type: eventType, event_type: eventType };
 }
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function taskEventType(event: PersistedTaskEvent | null | undefined) {
+  return stringValue(event?.event_type) ?? stringValue(event?.type);
+}
+
+function actionResultString(event: PersistedTaskEvent, field: string) {
+  if (
+    typeof event.action_result !== "object" ||
+    event.action_result === null ||
+    !(field in event.action_result)
+  ) {
+    return undefined;
+  }
+  return stringValue((event.action_result as Record<string, unknown>)[field]);
 }
 
 function taskEventStartedAt(value?: string) {
@@ -553,12 +575,17 @@ export function applyTaskEventToSubtask(
   if (!taskEvent || !taskId) {
     return false;
   }
+  const eventType = taskEventType(taskEvent);
+  if (!eventType) {
+    return false;
+  }
+  const eventStatus = stringValue(taskEvent.status);
 
   const threadId =
     stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
   const base: SubtaskUpdate = { id: taskId, threadId, notify: true };
 
-  if (taskEvent.type === "task_started") {
+  if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
     if (startedAt !== undefined) {
       update.startedAt = startedAt;
@@ -580,7 +607,7 @@ export function applyTaskEventToSubtask(
     return true;
   }
 
-  if (taskEvent.type === "task_running") {
+  if (eventType === "task_running" || eventStatus === "in_progress") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
     if (typeof taskEvent.message === "object" && taskEvent.message !== null) {
       update.latestMessage = taskEvent.message as AIMessage;
@@ -589,10 +616,12 @@ export function applyTaskEventToSubtask(
     return true;
   }
 
-  if (taskEvent.type === "task_completed") {
+  if (eventType === "task_completed" || eventStatus === "completed") {
     const update: SubtaskUpdate = { ...base, status: "completed" };
     const result =
-      stringValue(taskEvent.result_preview) ?? stringValue(taskEvent.result);
+      stringValue(taskEvent.result_preview) ??
+      stringValue(taskEvent.result) ??
+      actionResultString(taskEvent, "summary");
     if (result) {
       update.result = result;
     }
@@ -602,7 +631,13 @@ export function applyTaskEventToSubtask(
 
   const update: SubtaskUpdate = { ...base, status: "failed" };
   const error =
-    stringValue(taskEvent.error_preview) ?? stringValue(taskEvent.error);
+    stringValue(taskEvent.error_preview) ??
+    stringValue(taskEvent.error) ??
+    actionResultString(taskEvent, "error") ??
+    actionResultString(taskEvent, "terminal_reason") ??
+    (TASK_EVENT_TYPES.has(eventType)
+      ? undefined
+      : `Unknown task event terminal status: ${eventStatus ?? eventType}`);
   if (error) {
     update.error = error;
   }

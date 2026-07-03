@@ -80,3 +80,15 @@ def test_status_aliases_include_running_pending_blocked_failed():
     assert action_result_from_value({"status": "pending"}).status == RoundItemStatus.PENDING
     assert action_result_from_value({"status": "blocked"}).status == RoundItemStatus.BLOCKED
     assert action_result_from_value({"status": "failed"}).status == RoundItemStatus.FAILED
+    assert action_result_from_value({"status": "cancelled"}).status == RoundItemStatus.CANCELLED
+    assert action_result_from_value({"status": "timed_out"}).status == RoundItemStatus.TIMED_OUT
+
+
+def test_terminal_reason_distinguishes_cancelled_timeout_and_boundary_blocked():
+    cancelled = action_result_from_value({"status": "cancelled"})
+    timed_out = action_result_from_value({"status": "timed_out"})
+    blocked = action_result_from_value({"status": "blocked"})
+
+    assert cancelled.terminal_reason == "user_cancelled"
+    assert timed_out.terminal_reason == "timed_out"
+    assert blocked.terminal_reason == "boundary_blocked"

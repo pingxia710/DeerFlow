@@ -246,12 +246,12 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.result).toBe("foo");
   });
 
-  it("falls back to prefix parsing when the structured status is an unknown future value", () => {
+  it("marks an unknown structured terminal status as failed instead of in_progress", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: foo", {
       [SUBAGENT_STATUS_KEY]: "renamed_in_v3",
     });
-    // Falls back to prefix and still finds the success path.
-    expect(parsed.status).toBe("completed");
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toContain("renamed_in_v3");
   });
 
   it("structured status overrides legacy text — opposite content", () => {

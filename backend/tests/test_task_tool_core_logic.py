@@ -281,6 +281,8 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
     assert all(e["schema_version"] == "deerflow.task-event/v1" for e in events)
+    assert [e["event_type"] for e in events] == event_types
+    assert all("started_at" in e for e in events)
     assert all(e["thread_id"] == "thread-1" for e in events)
     assert all(e["run_id"] == "run-1" for e in events)
     assert events[0]["summary"] == "运行子任务"
@@ -288,13 +290,16 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert "prompt" not in events[0]
     assert events[-1]["summary"] == "Task completed"
     assert events[-1]["result_preview"] == "all done"
+    assert isinstance(events[-1]["duration_ms"], int)
+    assert events[-1]["completed_at"]
     assert events[-1]["redacted"] is True
     assert "result" not in events[-1]
-    assert "action_result" not in events[0]
+    assert events[0]["action_result"] is None
     assert events[-1]["action_result"] == {
         "action_id": "tc-123",
         "description": "运行子任务",
         "status": "completed",
+        "terminal_reason": None,
         "evidence_refs": [],
         "output_ref": None,
         "risks": [],
@@ -1093,6 +1098,8 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert output.startswith("Task polling timed out after 0 minutes")
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
+    assert events[-1]["action_result"]["status"] == "timed_out"
+    assert events[-1]["action_result"]["terminal_reason"] == "timed_out"
 
 
 def test_cleanup_called_on_completed(monkeypatch):
@@ -1642,15 +1649,15 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "status, expected_type",
+    "status, expected_type, expected_action_status, expected_terminal_reason",
     [
-        (FakeSubagentStatus.COMPLETED, "task_completed"),
-        (FakeSubagentStatus.FAILED, "task_failed"),
-        (FakeSubagentStatus.CANCELLED, "task_cancelled"),
-        (FakeSubagentStatus.TIMED_OUT, "task_timed_out"),
+        (FakeSubagentStatus.COMPLETED, "task_completed", "completed", None),
+        (FakeSubagentStatus.FAILED, "task_failed", "failed", "failed"),
+        (FakeSubagentStatus.CANCELLED, "task_cancelled", "cancelled", "user_cancelled"),
+        (FakeSubagentStatus.TIMED_OUT, "task_timed_out", "timed_out", "timed_out"),
     ],
 )
-def test_terminal_events_include_usage(monkeypatch, status, expected_type):
+def test_terminal_events_include_usage(monkeypatch, status, expected_type, expected_action_status, expected_terminal_reason):
     """Terminal task events include a usage summary from token_usage_records."""
     config = _make_subagent_config()
     runtime = _make_runtime()
@@ -1681,7 +1688,15 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
 
     terminal_events = [e for e in events if e["type"] == expected_type]
     assert len(terminal_events) == 1
-    assert terminal_events[0]["usage"] == {
+    terminal_event = terminal_events[0]
+    assert terminal_event["event_type"] == expected_type
+    assert terminal_event["schema_version"] == "deerflow.task-event/v1"
+    assert terminal_event["started_at"]
+    assert terminal_event["completed_at"]
+    assert isinstance(terminal_event["duration_ms"], int)
+    assert terminal_event["action_result"]["status"] == expected_action_status
+    assert terminal_event["action_result"]["terminal_reason"] == expected_terminal_reason
+    assert terminal_event["usage"] == {
         "input_tokens": 300,
         "output_tokens": 130,
         "total_tokens": 430,

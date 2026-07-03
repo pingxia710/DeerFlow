@@ -27,6 +27,8 @@ class RoundItemStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class ActionResult:
     action_id: str
     description: str = ""
     status: RoundItemStatus = RoundItemStatus.COMPLETED
+    terminal_reason: str | None = None
     summary: str = ""
     evidence_refs: list[str] = field(default_factory=list)
     output_ref: str | None = None

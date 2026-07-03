@@ -26,6 +26,7 @@ def test_task_action_result_event_is_structured_metadata():
         status="failed",
         description="run check",
         error="boom",
+        terminal_reason="failed",
     )
 
     event = task_action_result_event(result)
@@ -33,8 +34,35 @@ def test_task_action_result_event_is_structured_metadata():
     assert event["type"] == "task_action_result"
     assert event["action_result"]["action_id"] == "task-2"
     assert event["action_result"]["status"] == "failed"
+    assert event["action_result"]["terminal_reason"] == "failed"
     assert event["action_result"]["error"] == "boom"
     assert event["action_result"]["evidence_refs"] == []
+
+
+def test_task_terminal_cancelled_is_not_boundary_blocked():
+    result = task_action_result_from_terminal_event(
+        task_id="task-cancel",
+        status="cancelled",
+        description="cancel check",
+        error="user cancelled",
+        terminal_reason="user_cancelled",
+    )
+
+    assert result.status == RoundItemStatus.CANCELLED
+    assert result.terminal_reason == "user_cancelled"
+
+
+def test_task_terminal_timeout_keeps_timeout_status():
+    result = task_action_result_from_terminal_event(
+        task_id="task-timeout",
+        status="timed_out",
+        description="timeout check",
+        error="timeout",
+        terminal_reason="timed_out",
+    )
+
+    assert result.status == RoundItemStatus.TIMED_OUT
+    assert result.terminal_reason == "timed_out"
 
 
 def test_task_terminal_dict_result_does_not_trust_model_claimed_evidence():

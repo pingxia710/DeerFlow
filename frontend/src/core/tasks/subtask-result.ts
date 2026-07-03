@@ -199,11 +199,12 @@ function readStructuredStatus(
   if (typeof rawStatus !== "string") return null;
   const mapped = STRUCTURED_STATUS_TO_SUBTASK[rawStatus];
   if (mapped === undefined) {
-    // Unknown future status value — stay on the legacy prefix fallback
-    // so a backend that ships a new enum variant before the frontend
-    // upgrades still renders something predictable instead of getting
-    // pinned to "in_progress" by an empty branch.
-    return null;
+    // Unknown future terminal status: surface a visible safe terminal state
+    // instead of leaving the card permanently in_progress.
+    return {
+      status: "failed",
+      error: `Unknown subagent_status from backend: ${rawStatus}`,
+    };
   }
   const rawError = additionalKwargs[SUBAGENT_ERROR_KEY];
   const result: StructuredStatus = { status: mapped };

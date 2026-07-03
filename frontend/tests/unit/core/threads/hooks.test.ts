@@ -1,4 +1,26 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { expect, test } from "@rstest/core";
+
+interface TaskEventContractCase {
+  event_type: string;
+  status: string;
+  action_result_status: string;
+  terminal_reason: string | null;
+}
+
+interface TaskEventContract {
+  schema_version: string;
+  terminal_cases: TaskEventContractCase[];
+}
+
+const TASK_EVENT_CONTRACT: TaskEventContract = JSON.parse(
+  readFileSync(
+    resolve(__dirname, "../../../../../contracts/task_event_contract.json"),
+    "utf-8",
+  ),
+) as TaskEventContract;
 
 test("resolveAssistantId uses the custom agent name when present", async () => {
   const { resolveAssistantId } = await import("@/core/threads/hooks");
@@ -193,6 +215,128 @@ test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
       result: "safe preview",
     },
   ]);
+});
+
+test("applyTaskEventToSubtask accepts canonical event_type and action_result summary", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        status: "completed",
+        action_result: {
+          status: "completed",
+          summary: "from action_result",
+        },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      notify: true,
+      status: "completed",
+      result: "from action_result",
+    },
+  ]);
+});
+
+for (const c of TASK_EVENT_CONTRACT.terminal_cases) {
+  test(`applyTaskEventToSubtask follows task event contract: ${c.event_type}`, async () => {
+    const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+    const updates: unknown[] = [];
+    const isCompleted = c.status === "completed";
+
+    expect(
+      applyTaskEventToSubtask(
+        {
+          type: c.event_type,
+          event_type: c.event_type,
+          schema_version: TASK_EVENT_CONTRACT.schema_version,
+          task_id: `task-${c.status}`,
+          thread_id: "thread-1",
+          run_id: "run-1",
+          status: c.status,
+          action_result: {
+            status: c.action_result_status,
+            terminal_reason: c.terminal_reason,
+            summary: "contract summary",
+            error: isCompleted ? undefined : `${c.terminal_reason} detail`,
+          },
+        },
+        (task) => updates.push(task),
+      ),
+    ).toBe(true);
+
+    expect(updates[0]).toMatchObject({
+      id: `task-${c.status}`,
+      threadId: "thread-1",
+      status: isCompleted ? "completed" : "failed",
+    });
+    if (isCompleted) {
+      expect(updates[0]).toMatchObject({ result: "contract summary" });
+    } else {
+      expect(updates[0]).toMatchObject({
+        error: `${c.terminal_reason} detail`,
+      });
+    }
+  });
+}
+
+test("applyTaskEventToSubtask fails safe for unknown terminal task event enums", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_terminal_vNext",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-unknown",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        status: "renamed_terminal",
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-unknown",
+      threadId: "thread-1",
+      notify: true,
+      status: "failed",
+      error: "Unknown task event terminal status: renamed_terminal",
+    },
+  ]);
+});
+
+test("applyTaskEventToSubtask rejects unknown content shapes", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        status: "completed",
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(false);
+
+  expect(updates).toEqual([]);
 });
 
 test("applyTaskEventToSubtask rejects task events without full run identity", async () => {

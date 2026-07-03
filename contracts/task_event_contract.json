@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "schema_version": "deerflow.task-event/v1",
+  "description": "Cross-component contract for task event rows and compact action_result metadata. The backend emits these fields to the live stream and RunJournal; the frontend parses them to restore subtask cards without depending on prose.",
+  "legacy_type_alias": "type",
+  "event_type_field": "event_type",
+  "event_types": [
+    "task_started",
+    "task_running",
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+    "task_timed_out"
+  ],
+  "status_values": [
+    "in_progress",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out"
+  ],
+  "terminal_reasons": [
+    "failed",
+    "user_cancelled",
+    "timed_out",
+    "boundary_blocked"
+  ],
+  "required_event_fields": [
+    "schema_version",
+    "type",
+    "event_type",
+    "task_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "result_preview",
+    "error_preview",
+    "artifact_refs",
+    "action_result",
+    "usage"
+  ],
+  "identity_fields_required_for_persistence": [
+    "thread_id",
+    "run_id",
+    "task_id"
+  ],
+  "task_started_fields": ["description", "subagent_type"],
+  "task_running_fields": ["message_index", "total_messages"],
+  "optional_task_running_fields": ["message"],
+  "reserved_terminal_reasons": ["boundary_blocked"],
+  "action_result_fields": [
+    "action_id",
+    "description",
+    "status",
+    "terminal_reason",
+    "summary",
+    "summary_sha256",
+    "summary_chars",
+    "error",
+    "error_sha256",
+    "error_chars",
+    "evidence_refs",
+    "output_ref",
+    "risks",
+    "conflicts",
+    "open_questions"
+  ],
+  "terminal_cases": [
+    {
+      "event_type": "task_completed",
+      "status": "completed",
+      "action_result_status": "completed",
+      "terminal_reason": null
+    },
+    {
+      "event_type": "task_failed",
+      "status": "failed",
+      "action_result_status": "failed",
+      "terminal_reason": "failed"
+    },
+    {
+      "event_type": "task_cancelled",
+      "status": "cancelled",
+      "action_result_status": "cancelled",
+      "terminal_reason": "user_cancelled"
+    },
+    {
+      "event_type": "task_timed_out",
+      "status": "timed_out",
+      "action_result_status": "timed_out",
+      "terminal_reason": "timed_out"
+    }
+  ],
+  "compatibility_notes": [
+    "The legacy type field remains for existing RunJournal/frontend code; event_type is the canonical duplicate and must match type.",
+    "task_running.message is optional/reserved; the current backend does not emit raw AI message payloads in task_running events.",
+    "boundary_blocked is reserved for a future blocked task terminal reason; current task() terminal emissions are completed, failed, cancelled, and timed_out.",
+    "Frontend cards may collapse cancelled and timed_out into their existing failed pill, but action_result.status and terminal_reason must preserve the real terminal cause.",
+    "Unknown structured terminal statuses must not leave a subtask permanently in_progress."
+  ]
+}

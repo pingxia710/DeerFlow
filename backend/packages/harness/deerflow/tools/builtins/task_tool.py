@@ -4,8 +4,10 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
@@ -39,6 +41,7 @@ _SAFE_ACTION_RESULT_EVENT_KEYS = {
     "action_id",
     "description",
     "status",
+    "terminal_reason",
     "evidence_refs",
     "output_ref",
     "risks",
@@ -83,13 +86,65 @@ def _iter_runtime_callbacks(runtime: Any) -> list[Any]:
     return callbacks
 
 
-def _task_event_base(event_type: str, task_id: str, *, thread_id: Any, run_id: Any) -> dict[str, Any]:
-    event: dict[str, Any] = {"type": event_type, "schema_version": _TASK_EVENT_SCHEMA_VERSION, "task_id": task_id, "redacted": True, "artifact_refs": []}
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_ms(started_monotonic: float) -> int:
+    return max(0, int((time.monotonic() - started_monotonic) * 1000))
+
+
+def _task_event_base(
+    event_type: str,
+    task_id: str,
+    *,
+    thread_id: Any,
+    run_id: Any,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    duration_ms: int | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": event_type,
+        "event_type": event_type,
+        "schema_version": _TASK_EVENT_SCHEMA_VERSION,
+        "task_id": task_id,
+        "redacted": True,
+        "status": None,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms,
+        "result_preview": None,
+        "error_preview": None,
+        "artifact_refs": [],
+        "action_result": None,
+        "usage": None,
+    }
     if isinstance(thread_id, str) and thread_id:
         event["thread_id"] = thread_id
     if isinstance(run_id, str) and run_id:
         event["run_id"] = run_id
     return event
+
+
+def _terminal_task_event_base(
+    event_type: str,
+    task_id: str,
+    *,
+    thread_id: Any,
+    run_id: Any,
+    started_at: str,
+    started_monotonic: float,
+) -> dict[str, Any]:
+    return _task_event_base(
+        event_type,
+        task_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=_utc_now_iso(),
+        duration_ms=_elapsed_ms(started_monotonic),
+    )
 
 
 def _redacted_preview(value: Any, *, fallback: str = "") -> str:
@@ -512,6 +567,8 @@ async def task_tool(
     # Use tool_call_id as task_id for better traceability
     handoff_prompt = _with_ai_handoff_envelope(prompt, description=description, subagent_type=subagent_type)
     task_id = executor.execute_async(handoff_prompt, task_id=tool_call_id)
+    started_at = _utc_now_iso()
+    started_monotonic = time.monotonic()
     record_subagent_handoff(
         thread_id=thread_id,
         run_id=run_id,
@@ -538,7 +595,7 @@ async def task_tool(
         writer,
         runtime,
         {
-            **_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id),
+            **_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id, started_at=started_at),
             "description": description,
             "subagent_type": subagent_type,
             "status": "in_progress",
@@ -552,14 +609,31 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
+                error = "Task disappeared from background tasks"
+                action_result = task_action_result_from_terminal_event(
+                    task_id=task_id,
+                    status="failed",
+                    description=description,
+                    error=error,
+                    terminal_reason="failed",
+                )
                 _emit_task_event(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_failed",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "failed",
                         "summary": "Task failed",
-                        "error_preview": "Task disappeared from background tasks",
+                        "error_preview": error,
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
                 cleanup_background_task(task_id)
@@ -580,7 +654,7 @@ async def task_tool(
                         writer,
                         runtime,
                         {
-                            **_task_event_base("task_running", task_id, thread_id=thread_id, run_id=run_id),
+                            **_task_event_base("task_running", task_id, thread_id=thread_id, run_id=run_id, started_at=started_at),
                             "status": "in_progress",
                             "summary": f"Subagent message {i + 1}/{current_message_count}",
                             "message_index": i + 1,  # 1-based index for display
@@ -614,7 +688,14 @@ async def task_tool(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_completed", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_completed",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "completed",
                         "summary": "Task completed",
                         "result_preview": _redacted_preview(result.result, fallback="Task completed"),
@@ -637,7 +718,7 @@ async def task_tool(
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error)
+                action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error, terminal_reason="failed")
                 record_subagent_handoff(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -656,7 +737,14 @@ async def task_tool(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_failed", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_failed",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "failed",
                         "summary": "Task failed",
                         "error_preview": _redacted_preview(result.error, fallback="Task failed"),
@@ -672,7 +760,13 @@ async def task_tool(
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                action_result = task_action_result_from_terminal_event(task_id=task_id, status="blocked", description=description, error=result.error)
+                action_result = task_action_result_from_terminal_event(
+                    task_id=task_id,
+                    status="cancelled",
+                    description=description,
+                    error=result.error,
+                    terminal_reason="user_cancelled",
+                )
                 record_subagent_handoff(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -691,7 +785,14 @@ async def task_tool(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_cancelled", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_cancelled",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "cancelled",
                         "summary": "Task cancelled",
                         "error_preview": _redacted_preview(result.error, fallback="Task cancelled"),
@@ -706,7 +807,13 @@ async def task_tool(
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error)
+                action_result = task_action_result_from_terminal_event(
+                    task_id=task_id,
+                    status="timed_out",
+                    description=description,
+                    error=result.error,
+                    terminal_reason="timed_out",
+                )
                 record_subagent_handoff(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -725,7 +832,14 @@ async def task_tool(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_timed_out",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "timed_out",
                         "summary": "Task timed out",
                         "error_preview": _redacted_preview(result.error, fallback="Task timed out"),
@@ -748,10 +862,18 @@ async def task_tool(
             # This catches edge cases where the background task gets stuck
             if poll_count > max_poll_count:
                 timeout_minutes = config.timeout_seconds // 60
+                error = f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}"
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                action_result = task_action_result_from_terminal_event(
+                    task_id=task_id,
+                    status="timed_out",
+                    description=description,
+                    error=error,
+                    terminal_reason="timed_out",
+                )
                 record_subagent_handoff(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -762,17 +884,28 @@ async def task_tool(
                     description=description,
                     prompt=handoff_prompt,
                     status="polling_timed_out",
-                    error=f"Polling timed out after {timeout_minutes} minutes; status={result.status.value}",
+                    error=error,
                     usage=usage,
+                    action_result=task_action_result_event(action_result)["action_result"],
                 )
                 _emit_task_event(
                     writer,
                     runtime,
                     {
-                        **_task_event_base("task_timed_out", task_id, thread_id=thread_id, run_id=run_id),
+                        **_terminal_task_event_base(
+                            "task_timed_out",
+                            task_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
                         "status": "timed_out",
                         "summary": "Task polling timed out",
+                        "error_preview": _redacted_preview(error, fallback="Task polling timed out"),
                         "usage": usage,
+                        "artifact_refs": _artifact_refs(action_result),
+                        "action_result": _compact_action_result_event(action_result),
                     },
                 )
                 # The task may still be running in the background. Signal cooperative

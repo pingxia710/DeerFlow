@@ -23,6 +23,11 @@ _STATUS_ALIASES = {
     "running": RoundItemStatus.RUNNING,
     "pending": RoundItemStatus.PENDING,
     "blocked": RoundItemStatus.BLOCKED,
+    "cancelled": RoundItemStatus.CANCELLED,
+    "canceled": RoundItemStatus.CANCELLED,
+    "timed_out": RoundItemStatus.TIMED_OUT,
+    "timeout": RoundItemStatus.TIMED_OUT,
+    "polling_timed_out": RoundItemStatus.TIMED_OUT,
 }
 
 
@@ -43,6 +48,7 @@ def action_result_from_value(value: Any, *, default_action_id: str = "") -> Acti
         return ActionResult(
             action_id=default_action_id,
             status=RoundItemStatus.FAILED,
+            terminal_reason="failed",
             summary=str(value),
             error=str(value) or value.__class__.__name__,
         )
@@ -64,13 +70,18 @@ def action_result_from_value(value: Any, *, default_action_id: str = "") -> Acti
 def _from_mapping(value: Mapping[str, Any], *, default_action_id: str) -> ActionResult:
     status = _normalize_status(value.get("status"))
     error = _optional_str(value.get("error"))
+    terminal_reason = _optional_str(value.get("terminal_reason"))
     if error and status is None:
         status = RoundItemStatus.FAILED
+        terminal_reason = terminal_reason or "failed"
+    if terminal_reason is None:
+        terminal_reason = _default_terminal_reason(status, has_error=bool(error))
 
     return ActionResult(
         action_id=_optional_str(value.get("action_id")) or default_action_id,
         description=_optional_str(value.get("description")) or "",
         status=status or RoundItemStatus.COMPLETED,
+        terminal_reason=terminal_reason,
         summary=_optional_str(value.get("summary")) or "",
         evidence_refs=_string_list(value.get("evidence_refs")),
         output_ref=_optional_str(value.get("output_ref")),
@@ -87,6 +98,18 @@ def _normalize_status(value: Any) -> RoundItemStatus | None:
     if value is None:
         return None
     return _STATUS_ALIASES.get(str(value).strip().lower())
+
+
+def _default_terminal_reason(status: RoundItemStatus | None, *, has_error: bool) -> str | None:
+    if status == RoundItemStatus.CANCELLED:
+        return "user_cancelled"
+    if status == RoundItemStatus.TIMED_OUT:
+        return "timed_out"
+    if status == RoundItemStatus.BLOCKED:
+        return "boundary_blocked"
+    if status == RoundItemStatus.FAILED and has_error:
+        return "failed"
+    return None
 
 
 def _optional_str(value: Any) -> str | None:

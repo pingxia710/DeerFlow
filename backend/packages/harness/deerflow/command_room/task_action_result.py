@@ -21,6 +21,7 @@ def task_action_result_from_terminal_event(
     description: str = "",
     result: Any = None,
     error: Any = None,
+    terminal_reason: str | None = None,
 ) -> ActionResult:
     """Build an ``ActionResult`` from a terminal task-tool outcome.
 
@@ -49,6 +50,8 @@ def task_action_result_from_terminal_event(
     payload.setdefault("action_id", task_id)
     payload.setdefault("description", description)
     payload["status"] = status
+    if terminal_reason:
+        payload["terminal_reason"] = terminal_reason
     if error is not None:
         payload["error"] = str(error)
         payload.setdefault("summary", str(error))

@@ -11,7 +11,38 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+
+
+@dataclass(frozen=True)
+class RunLease:
+    thread_id: str
+    run_id: str
+    owner_worker_id: str
+    lease_token: str
+    generation: int
+    lease_expires_at: datetime
+    lease_heartbeat_at: datetime
+
+
+@dataclass(frozen=True)
+class CancelIntent:
+    run_id: str
+    action: str
+    requested_at: str
+    requested_by: str | None = None
+
+
+@dataclass(frozen=True)
+class CancelRequestResult:
+    run_id: str
+    status: str | None
+    action: str | None
+    accepted: bool
+    terminal: bool = False
+    terminal_reason: str | None = None
 
 
 class RunStore(abc.ABC):
@@ -123,6 +154,130 @@ class RunStore(abc.ABC):
     ) -> None:
         """Persist a best-effort running snapshot without changing run status."""
         return None
+
+    async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Create a pending run row for lease/CAS callers.
+
+        This is a convenience contract over ``put``. It is not wired into
+        RunManager yet.
+        """
+        await self.put(run_id, thread_id=thread_id, status="pending", **kwargs)
+        row = await self.get(run_id)
+        if row is None:
+            raise RuntimeError(f"pending run {run_id!r} was not persisted")
+        return row
+
+    async def try_acquire_active_slot(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_token: str | None = None,
+        lease_expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> RunLease | None:
+        raise NotImplementedError
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+        lease_expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def request_cancel(
+        self,
+        run_id: str,
+        action: str,
+        *,
+        requested_by: str | None = None,
+        now: datetime | None = None,
+    ) -> CancelRequestResult | None:
+        raise NotImplementedError
+
+    async def consume_cancel_intent(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+        now: datetime | None = None,
+    ) -> CancelIntent | None:
+        raise NotImplementedError
+
+    async def cas_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: set[str] | tuple[str, ...] | list[str],
+        to_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def complete_run(
+        self,
+        run_id: str,
+        *,
+        from_statuses: set[str] | tuple[str, ...] | list[str],
+        terminal_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+        completion_fields: dict[str, Any] | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def backfill_completion_metadata(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def release_active_slot(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def list_expired_active_leases(self, now: datetime) -> list[RunLease]:
+        raise NotImplementedError
+
+    async def recover_expired_lease(
+        self,
+        run_id: str,
+        *,
+        generation: int,
+        terminal_status: str = "error",
+        terminal_reason: str | None = None,
+        recovery_worker_id: str = "recovery",
+        recovery_lease_token: str | None = None,
+        now: datetime | None = None,
+        error: str | None = None,
+    ) -> bool:
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def list_pending(self, *, before: str | None = None) -> list[dict[str, Any]]:

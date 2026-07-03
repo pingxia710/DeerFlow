@@ -8,16 +8,20 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.schemas import ACTIVE_RUN_STATUS_VALUES, is_active_status, is_terminal_status
+from deerflow.runtime.runs.store.base import CancelIntent, CancelRequestResult, RunLease, RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
+
+_DEFAULT_LEASE_TTL = timedelta(seconds=30)
 
 
 class RunRepository(RunStore):
@@ -62,6 +66,57 @@ class RunRepository(RunStore):
             return obj
         except (TypeError, ValueError):
             return str(obj)
+
+    @staticmethod
+    def _now(now: datetime | None = None) -> datetime:
+        if now is None:
+            return datetime.now(UTC)
+        if now.tzinfo is None:
+            return now.replace(tzinfo=UTC)
+        return now
+
+    @staticmethod
+    def _lease_expires_at(now: datetime, lease_expires_at: datetime | None) -> datetime:
+        if lease_expires_at is None:
+            return now + _DEFAULT_LEASE_TTL
+        if lease_expires_at.tzinfo is None:
+            return lease_expires_at.replace(tzinfo=UTC)
+        return lease_expires_at
+
+    @staticmethod
+    def _metadata(row: RunRow) -> dict[str, Any]:
+        return dict(row.metadata_json or {})
+
+    @staticmethod
+    def _lease_from_metadata(row: RunRow) -> RunLease | None:
+        metadata = RunRepository._metadata(row)
+        try:
+            expires_at = datetime.fromisoformat(metadata["lease_expires_at"])
+            heartbeat_at = datetime.fromisoformat(metadata["lease_heartbeat_at"])
+            generation = int(metadata["generation"])
+            owner_worker_id = str(metadata["owner_worker_id"])
+            lease_token = str(metadata["lease_token"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return RunLease(
+            thread_id=row.thread_id,
+            run_id=row.run_id,
+            owner_worker_id=owner_worker_id,
+            lease_token=lease_token,
+            generation=generation,
+            lease_expires_at=expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC),
+            lease_heartbeat_at=heartbeat_at if heartbeat_at.tzinfo is not None else heartbeat_at.replace(tzinfo=UTC),
+        )
+
+    @staticmethod
+    def _terminal_reason(row: RunRow) -> str | None:
+        return RunRepository._metadata(row).get("terminal_reason")
+
+    @staticmethod
+    def _with_metadata(row: RunRow, **values: Any) -> dict[str, Any]:
+        metadata = RunRepository._metadata(row)
+        metadata.update({key: value for key, value in values.items() if value is not None})
+        return metadata
 
     @staticmethod
     def _row_to_dict(row: RunRow) -> dict[str, Any]:
@@ -304,6 +359,330 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
+
+    async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:
+        await self.put(run_id, thread_id=thread_id, status="pending", **kwargs)
+        row = await self.get(run_id)
+        if row is None:
+            raise RuntimeError(f"pending run {run_id!r} was not persisted")
+        return row
+
+    async def _next_generation(self, session: AsyncSession, thread_id: str) -> int:
+        rows = (await session.execute(select(RunRow.metadata_json).where(RunRow.thread_id == thread_id))).scalars()
+        generations: list[int] = []
+        for metadata in rows:
+            try:
+                generations.append(int((metadata or {}).get("generation") or 0))
+            except (TypeError, ValueError):
+                continue
+        return max(generations, default=0) + 1
+
+    async def try_acquire_active_slot(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_token: str | None = None,
+        lease_expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> RunLease | None:
+        now_dt = self._now(now)
+        expires_at = self._lease_expires_at(now_dt, lease_expires_at)
+        token = lease_token or uuid4().hex
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None or row.thread_id != thread_id or row.status != "pending":
+                    return None
+                generation = await self._next_generation(session, thread_id)
+                active_exists = exists(
+                    select(RunRow.run_id).where(
+                        RunRow.thread_id == thread_id,
+                        RunRow.status.in_(tuple(ACTIVE_RUN_STATUS_VALUES)),
+                    )
+                )
+                metadata = self._with_metadata(
+                    row,
+                    owner_worker_id=owner_worker_id,
+                    lease_token=token,
+                    generation=generation,
+                    lease_expires_at=expires_at.isoformat(),
+                    lease_heartbeat_at=now_dt.isoformat(),
+                )
+                result = await session.execute(
+                    update(RunRow)
+                    .where(
+                        RunRow.run_id == run_id,
+                        RunRow.thread_id == thread_id,
+                        RunRow.status == "pending",
+                        ~active_exists,
+                    )
+                    .values(status="running", metadata_json=metadata, updated_at=now_dt)
+                )
+                if result.rowcount == 0:
+                    return None
+                return RunLease(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_token=token,
+                    generation=generation,
+                    lease_expires_at=expires_at,
+                    lease_heartbeat_at=now_dt,
+                )
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+        lease_expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return False
+                lease = self._lease_from_metadata(row)
+                if lease is None or lease.lease_token != lease_token or lease.generation != generation or lease.lease_expires_at < now_dt:
+                    return False
+                expires_at = self._lease_expires_at(now_dt, lease_expires_at)
+                row.metadata_json = self._with_metadata(row, lease_expires_at=expires_at.isoformat(), lease_heartbeat_at=now_dt.isoformat())
+                row.updated_at = now_dt
+                return True
+
+    async def request_cancel(
+        self,
+        run_id: str,
+        action: str,
+        *,
+        requested_by: str | None = None,
+        now: datetime | None = None,
+    ) -> CancelRequestResult | None:
+        if action not in {"interrupt", "rollback"}:
+            raise ValueError(f"unsupported cancel action: {action}")
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return None
+                metadata = self._metadata(row)
+                if is_terminal_status(row.status):
+                    return CancelRequestResult(
+                        run_id=run_id,
+                        status=row.status,
+                        action=metadata.get("cancel_action"),
+                        accepted=False,
+                        terminal=True,
+                        terminal_reason=metadata.get("terminal_reason"),
+                    )
+                current = metadata.get("cancel_action")
+                next_action = "rollback" if action == "rollback" or current == "rollback" else "interrupt"
+                metadata["cancellation_requested_at"] = metadata.get("cancellation_requested_at") or now_dt.isoformat()
+                metadata["cancel_action"] = next_action
+                if requested_by is not None:
+                    metadata["cancel_requested_by"] = requested_by
+                if next_action == "rollback":
+                    metadata["rollback_requested_at"] = metadata.get("rollback_requested_at") or now_dt.isoformat()
+                row.metadata_json = metadata
+                row.updated_at = now_dt
+                return CancelRequestResult(run_id=run_id, status=row.status, action=next_action, accepted=True)
+
+    async def consume_cancel_intent(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+        now: datetime | None = None,
+    ) -> CancelIntent | None:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return None
+                lease = self._lease_from_metadata(row)
+                if lease is None or lease.lease_token != lease_token or lease.generation != generation:
+                    return None
+                metadata = self._metadata(row)
+                action = metadata.get("cancel_action")
+                requested_at = metadata.get("cancellation_requested_at")
+                if action is None or requested_at is None:
+                    return None
+                row.status = "rolling_back" if action == "rollback" else "cancelling"
+                row.updated_at = now_dt
+                return CancelIntent(run_id=run_id, action=action, requested_at=requested_at, requested_by=metadata.get("cancel_requested_by"))
+
+    async def cas_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: set[str] | tuple[str, ...] | list[str],
+        to_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None or row.status not in set(from_statuses):
+                    return False
+                lease = self._lease_from_metadata(row)
+                if lease is None or lease.lease_token != lease_token or lease.generation != generation:
+                    return False
+                row.status = to_status
+                if terminal_reason is not None:
+                    row.metadata_json = self._with_metadata(row, terminal_reason=terminal_reason)
+                if error is not None:
+                    row.error = error
+                row.updated_at = now_dt
+                return True
+
+    async def complete_run(
+        self,
+        run_id: str,
+        *,
+        from_statuses: set[str] | tuple[str, ...] | list[str],
+        terminal_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+        completion_fields: dict[str, Any] | None = None,
+    ) -> bool:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return False
+                metadata = self._metadata(row)
+                lease = self._lease_from_metadata(row)
+                if is_terminal_status(row.status):
+                    return row.status == terminal_status and metadata.get("lease_token") == lease_token and metadata.get("generation") == generation and metadata.get("terminal_reason") == terminal_reason
+                if row.status not in set(from_statuses):
+                    return False
+                if lease is None or lease.lease_token != lease_token or lease.generation != generation:
+                    return False
+                row.status = terminal_status
+                metadata["terminal_reason"] = terminal_reason
+                metadata["completed_at"] = now_dt.isoformat()
+                row.metadata_json = metadata
+                if error is not None:
+                    row.error = error
+                for key, value in (completion_fields or {}).items():
+                    if value is not None and hasattr(row, key):
+                        setattr(row, key, value)
+                row.updated_at = now_dt
+                return True
+
+    async def backfill_completion_metadata(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        lease_token: str,
+        generation: int,
+        terminal_reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return False
+                existing = self._metadata(row)
+                if row.status != terminal_status or existing.get("lease_token") != lease_token or existing.get("generation") != generation or existing.get("terminal_reason") != terminal_reason:
+                    return False
+                for key, value in (metadata or {}).items():
+                    if key in {"status", "terminal_reason"} or value is None:
+                        continue
+                    if hasattr(row, key):
+                        setattr(row, key, value)
+                    else:
+                        existing[key] = value
+                row.metadata_json = existing
+                row.updated_at = now_dt
+                return True
+
+    async def release_active_slot(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        lease_token: str,
+        generation: int,
+    ) -> bool:
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None or row.thread_id != thread_id:
+                    return False
+                lease = self._lease_from_metadata(row)
+                if lease is None or lease.lease_token != lease_token or lease.generation != generation:
+                    return False
+                metadata = self._with_metadata(row, active_slot_released_at=datetime.now(UTC).isoformat())
+                row.metadata_json = metadata
+                row.updated_at = datetime.now(UTC)
+                return True
+
+    async def list_expired_active_leases(self, now: datetime) -> list[RunLease]:
+        now_dt = self._now(now)
+        stmt = select(RunRow).where(RunRow.status.in_(tuple(ACTIVE_RUN_STATUS_VALUES)))
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars()
+            leases = [lease for row in rows if (lease := self._lease_from_metadata(row)) is not None]
+            return [lease for lease in leases if lease.lease_expires_at < now_dt]
+
+    async def recover_expired_lease(
+        self,
+        run_id: str,
+        *,
+        generation: int,
+        terminal_status: str = "error",
+        terminal_reason: str | None = None,
+        recovery_worker_id: str = "recovery",
+        recovery_lease_token: str | None = None,
+        now: datetime | None = None,
+        error: str | None = None,
+    ) -> bool:
+        now_dt = self._now(now)
+        async with self._sf() as session:
+            async with session.begin():
+                row = await session.get(RunRow, run_id)
+                if row is None or not is_active_status(row.status):
+                    return False
+                lease = self._lease_from_metadata(row)
+                if lease is None or lease.generation != generation or lease.lease_expires_at >= now_dt:
+                    return False
+                metadata = self._metadata(row)
+                metadata["owner_worker_id"] = recovery_worker_id
+                metadata["lease_token"] = recovery_lease_token or uuid4().hex
+                metadata["lease_heartbeat_at"] = now_dt.isoformat()
+                reason = terminal_reason
+                if reason is None:
+                    reason = "rollback_failed_owner_lost" if metadata.get("cancel_action") == "rollback" else "lease_expired_recovered"
+                metadata["terminal_reason"] = reason
+                metadata["completed_at"] = now_dt.isoformat()
+                row.metadata_json = metadata
+                row.status = terminal_status
+                if error is not None:
+                    row.error = error
+                row.updated_at = now_dt
+                return True
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage for a thread.

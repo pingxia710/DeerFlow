@@ -157,13 +157,21 @@ def test_list_run_messages_attaches_display_visibility_contract():
         {
             "seq": 4,
             "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "compressed summary"},
+            "metadata": {"caller": "middleware:summarize"},
+        },
+        {
+            "seq": 5,
+            "run_id": "run-1",
             "event_type": "task_running",
             "category": "message",
             "content": {"type": "task_running", "task_id": "call-1", "thread_id": "thread-1", "run_id": "run-1"},
             "metadata": {"caller": "task_event"},
         },
         {
-            "seq": 5,
+            "seq": 6,
             "run_id": "run-1",
             "event_type": "llm.ai.response",
             "category": "message",
@@ -171,7 +179,7 @@ def test_list_run_messages_attaches_display_visibility_contract():
             "metadata": {"caller": "lead_agent"},
         },
         {
-            "seq": 6,
+            "seq": 7,
             "run_id": "run-1",
             "event_type": "llm.human.input",
             "category": "message",
@@ -188,6 +196,7 @@ def test_list_run_messages_attaches_display_visibility_contract():
     assert displays == [
         {"visible_in_chat": True, "surface": "chat", "reason": "human_message"},
         {"visible_in_chat": True, "surface": "chat", "reason": "lead_ai_response"},
+        {"visible_in_chat": True, "surface": "chat", "reason": "middleware_message"},
         {"visible_in_chat": True, "surface": "chat", "reason": "middleware_message"},
         {"visible_in_chat": False, "surface": "control", "reason": "task_event"},
         {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"},

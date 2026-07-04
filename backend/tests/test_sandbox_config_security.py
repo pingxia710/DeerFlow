@@ -16,6 +16,8 @@ def test_custom_mounts_default_to_read_only() -> None:
         ("/", "root filesystem"),
         ("/home/user", "home directory root"),
         ("/Users/user", "home directory root"),
+        ("C:/Users", "home parent directory"),
+        ("C:\\Users\\Alice", "home directory root"),
         ("/var/run/docker.sock", "Docker socket"),
         ("/private/var/run/docker.sock.raw", "Docker socket"),
         ("/tmp/project/.ssh", "sensitive credential"),

@@ -5,6 +5,8 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _WINDOWS_DRIVE_ROOT_RE = re.compile(r"^[a-zA-Z]:[/\\]?$")
+_WINDOWS_USERS_ROOT_RE = re.compile(r"^[a-z]:/users$")
+_WINDOWS_USER_HOME_RE = re.compile(r"^[a-z]:/users/[^/]+$")
 _SENSITIVE_PATH_PARTS = {
     ".aws",
     ".azure",
@@ -61,6 +63,11 @@ def dangerous_host_mount_reason(host_path: str) -> str | None:
 
     if lowered == "~" or lowered.startswith("~/"):
         return "home directory mount"
+
+    if _WINDOWS_USERS_ROOT_RE.match(lowered):
+        return "home parent directory mount"
+    if _WINDOWS_USER_HOME_RE.match(lowered):
+        return "home directory root mount"
 
     if lowered in _SENSITIVE_EXACT_PATHS:
         return "home parent directory mount"

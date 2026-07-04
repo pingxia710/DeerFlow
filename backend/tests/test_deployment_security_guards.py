@@ -2,8 +2,13 @@ import pytest
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 
+from app.gateway.app import _assert_safe_sandbox_config_for_environment
 from app.gateway.routers.auth import InitializeAdminRequest, _validate_first_boot_setup_access
 from app.gateway.routers.runs import stateless_wait
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
+_ENV_KEYS = ("DEER_FLOW_ENV", "ENVIRONMENT", "APP_ENV", "NODE_ENV")
 
 
 class DummyClient:
@@ -19,6 +24,20 @@ class DummyRequest:
 
 def _init_body(token: str | None = None) -> InitializeAdminRequest:
     return InitializeAdminRequest(email="admin@example.com", password="StrongPassword123", setup_token=token)
+
+
+def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def _config(**sandbox_overrides) -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            **sandbox_overrides,
+        )
+    )
 
 
 def test_initialize_allows_loopback_without_setup_token(monkeypatch):
@@ -75,3 +94,47 @@ async def test_stateless_wait_sanitizes_failed_run_error(monkeypatch):
     result = await stateless_wait.__wrapped__(SimpleNamespace(config={}), object())
 
     assert result == {"status": "error", "error": "Run failed"}
+
+
+def test_dangerous_sandbox_settings_allowed_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("NODE_ENV", "development")
+
+    _assert_safe_sandbox_config_for_environment(
+        _config(
+            allow_host_bash=True,
+            unrestricted_host_access=True,
+            allow_dangerous_host_mounts=True,
+            seccomp_unconfined=True,
+        )
+    )
+
+
+def test_dangerous_sandbox_settings_allowed_when_environment_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+
+    _assert_safe_sandbox_config_for_environment(_config(allow_host_bash=True))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "allow_host_bash",
+        "unrestricted_host_access",
+        "allow_dangerous_host_mounts",
+        "seccomp_unconfined",
+    ],
+)
+def test_dangerous_sandbox_settings_fail_fast_in_production(monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match=field):
+        _assert_safe_sandbox_config_for_environment(_config(**{field: True}))
+
+
+def test_safe_sandbox_settings_allowed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    _assert_safe_sandbox_config_for_environment(_config())

@@ -1,4 +1,84 @@
-from pydantic import BaseModel, ConfigDict, Field
+import re
+from pathlib import Path
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+_WINDOWS_DRIVE_ROOT_RE = re.compile(r"^[a-zA-Z]:[/\\]?$")
+_SENSITIVE_PATH_PARTS = {
+    ".aws",
+    ".azure",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".ssh",
+}
+_SENSITIVE_EXACT_PATHS = {
+    "/home",
+    "/users",
+}
+_SENSITIVE_PREFIXES = {
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib64",
+    "/private/etc",
+    "/private/var/run/docker.sock",
+    "/proc",
+    "/root",
+    "/run/docker.sock",
+    "/sbin",
+    "/sys",
+    "/usr/bin",
+    "/usr/sbin",
+    "/var/lib/docker",
+    "/var/lib/kubelet",
+    "/var/run/docker.sock",
+}
+
+
+def _normalized_host_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/").rstrip("/")
+    return normalized or "/"
+
+
+def dangerous_host_mount_reason(host_path: str) -> str | None:
+    """Return why a configured host mount is unsafe by default, if any."""
+    raw = _normalized_host_path(host_path)
+    lowered = raw.lower()
+
+    if raw == "/" or _WINDOWS_DRIVE_ROOT_RE.match(raw):
+        return "root filesystem mount"
+
+    home = str(Path.home()).replace("\\", "/").rstrip("/")
+    if home and raw == home:
+        return "home directory root mount"
+
+    if lowered == "~" or lowered.startswith("~/"):
+        return "home directory mount"
+
+    if lowered in _SENSITIVE_EXACT_PATHS:
+        return "home parent directory mount"
+    if (lowered.startswith("/home/") or lowered.startswith("/users/")) and lowered.count("/") == 2:
+        return "home directory root mount"
+
+    parts = {part.lower() for part in lowered.split("/") if part}
+    if any(part.startswith("docker.sock") for part in parts):
+        return "Docker socket mount"
+
+    if parts & _SENSITIVE_PATH_PARTS:
+        return "sensitive credential/config path mount"
+
+    for prefix in _SENSITIVE_PREFIXES:
+        if lowered == prefix or lowered.startswith(prefix + "/"):
+            return f"sensitive system path mount: {prefix}"
+
+    return None
 
 
 class VolumeMountConfig(BaseModel):
@@ -19,7 +99,7 @@ class VolumeMountConfig(BaseModel):
         ),
     )
     container_path: str = Field(..., description="Path inside the container")
-    read_only: bool = Field(default=False, description="Whether the mount is read-only")
+    read_only: bool = Field(default=True, description="Whether the mount is read-only")
 
 
 class SandboxConfig(BaseModel):
@@ -83,6 +163,10 @@ class SandboxConfig(BaseModel):
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
     )
+    allow_dangerous_host_mounts: bool = Field(
+        default=False,
+        description="Allow sandbox.mounts host paths that expose root, home roots, Docker sockets, or credential directories. Dangerous; use only for fully trusted local debugging.",
+    )
     environment: dict[str, str] = Field(
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
@@ -109,3 +193,16 @@ class SandboxConfig(BaseModel):
     )
 
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _reject_dangerous_host_mounts(self) -> Self:
+        if self.allow_dangerous_host_mounts:
+            return self
+
+        for mount in self.mounts:
+            reason = dangerous_host_mount_reason(mount.host_path)
+            if reason:
+                raise ValueError(
+                    f"sandbox.mounts host_path {mount.host_path!r} is unsafe by default ({reason}); mount a narrower project directory or set sandbox.allow_dangerous_host_mounts: true only in a fully trusted local environment."
+                )
+        return self

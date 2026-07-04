@@ -297,16 +297,19 @@ sandbox:
   mounts:
     - host_path: /path/on/host
       container_path: /path/in/container
-      read_only: false
+      read_only: true
 ```
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+
+Custom mounts default to read-only. Set `read_only: false` only when the sandbox must write to that specific project directory. DeerFlow rejects clearly dangerous host mounts by default, including `/`, home directory roots, `.ssh`, `.kube`, and Docker socket paths. `sandbox.allow_dangerous_host_mounts: true` is a local debugging escape hatch and is blocked during staging/shared/production gateway startup.
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
 
 Docker-based AIO sandbox containers keep Docker's default seccomp profile by
 default. Set `sandbox.seccomp_unconfined: true` only when a custom sandbox image
-explicitly requires `--security-opt seccomp=unconfined`.
+explicitly requires `--security-opt seccomp=unconfined`. This override is also
+blocked during staging/shared/production gateway startup.
 
 ### Building a Custom AIO Sandbox Image
 

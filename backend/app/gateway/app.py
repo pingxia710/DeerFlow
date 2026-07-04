@@ -49,6 +49,22 @@ logger = logging.getLogger(__name__)
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
+_ENV_KEYS = ("DEER_FLOW_ENV", "ENVIRONMENT", "APP_ENV", "NODE_ENV")
+_SHARED_ENV_VALUES = {"prod", "production", "staging", "stage", "shared"}
+_DEV_ENV_VALUES = {"dev", "development", "local", "test", "testing"}
+
+
+def _current_environment_values() -> set[str]:
+    return {value.strip().lower() for key in _ENV_KEYS if (value := os.getenv(key)) and value.strip()}
+
+
+def _is_development_environment() -> bool:
+    env_values = _current_environment_values()
+    return bool(env_values) and not env_values & _SHARED_ENV_VALUES and env_values <= _DEV_ENV_VALUES
+
+
+def _is_shared_environment() -> bool:
+    return bool(_current_environment_values() & _SHARED_ENV_VALUES)
 
 
 def _assert_single_gateway_worker() -> None:
@@ -64,20 +80,27 @@ def _assert_single_gateway_worker() -> None:
     if workers <= 1:
         return
 
-    env_values = {
-        value.strip().lower()
-        for value in (
-            os.getenv("DEER_FLOW_ENV"),
-            os.getenv("ENVIRONMENT"),
-            os.getenv("APP_ENV"),
-            os.getenv("NODE_ENV"),
-        )
-        if value and value.strip()
-    }
-    shared_env_values = {"prod", "production", "staging", "stage", "shared"}
-    dev_env_values = {"dev", "development", "local", "test", "testing"}
-    if not env_values or env_values & shared_env_values or not env_values <= dev_env_values:
+    if not _is_development_environment():
         raise RuntimeError("DeerFlow gateway runtime is process-local; production/non-development deployments must run exactly one gateway worker until shared runtime is enabled.")
+
+
+def _assert_safe_sandbox_config_for_environment(config: AppConfig) -> None:
+    if not _is_shared_environment():
+        return
+
+    sandbox = config.sandbox
+    unsafe = [
+        name
+        for name in (
+            "allow_host_bash",
+            "unrestricted_host_access",
+            "allow_dangerous_host_mounts",
+            "seccomp_unconfined",
+        )
+        if bool(getattr(sandbox, name, False))
+    ]
+    if unsafe:
+        raise RuntimeError(f"Unsafe sandbox configuration is forbidden in staging/shared/production: sandbox.{', sandbox.'.join(unsafe)}")
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -205,6 +228,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
+        _assert_safe_sandbox_config_for_environment(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:

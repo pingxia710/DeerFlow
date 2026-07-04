@@ -228,6 +228,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 Docker-based AIO sandbox containers keep Docker's default seccomp profile unless `sandbox.seccomp_unconfined: true` is explicitly set for a custom image.
+Custom sandbox mounts default to read-only; dangerous host mounts and host-access escape hatches fail fast in staging/shared/production.
 
 Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
 

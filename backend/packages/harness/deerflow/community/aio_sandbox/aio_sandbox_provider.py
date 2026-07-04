@@ -123,7 +123,7 @@ class AioSandboxProvider(SandboxProvider):
         mounts:                         # Volume mounts for local containers
           - host_path: /path/on/host
             container_path: /path/in/container
-            read_only: false
+            read_only: true
         environment:                    # Environment variables for containers
           NODE_ENV: production
           API_KEY: $MY_API_KEY

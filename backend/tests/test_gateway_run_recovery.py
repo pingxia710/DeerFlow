@@ -25,7 +25,7 @@ class _FakeRunManager:
     """RunManager double that records startup reconciliation calls."""
 
     instances: list[_FakeRunManager] = []
-    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", user_id=None)]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
     def __init__(self, *, store):
@@ -67,7 +67,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     )
     thread_store = _FakeThreadStore()
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", user_id="owner-1")]
     _FakeRunManager.latest_by_thread = {}
 
     async def fake_init_engine_from_config(_database):
@@ -92,8 +92,8 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert len(_FakeRunManager.instances) == 1
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
-    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
-    assert thread_store.status_updates == [("thread-1", "error", None)]
+    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": "owner-1", "limit": 1}]
+    assert thread_store.status_updates == [("thread-1", "error", "owner-1")]
 
 
 @pytest.mark.anyio
@@ -106,8 +106,8 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     )
     thread_store = _FakeThreadStore()
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="old-running", thread_id="thread-1")]
-    _FakeRunManager.latest_by_thread = {"thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success")]}
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="old-running", thread_id="thread-1", user_id="owner-1")]
+    _FakeRunManager.latest_by_thread = {"thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success", user_id="owner-1")]}
 
     async def fake_init_engine_from_config(_database):
         return None
@@ -129,5 +129,5 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
         pass
 
     assert len(_FakeRunManager.instances) == 1
-    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
+    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": "owner-1", "limit": 1}]
     assert thread_store.status_updates == []

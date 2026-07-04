@@ -330,6 +330,78 @@ async def test_sse_consumer_replays_only_current_owner_task_events():
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscription():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-terminal-replay"
+    run_id = "run-terminal-replay"
+    user_id = "user-terminal"
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_started",
+        category="message",
+        content={
+            "schema_version": "deerflow.task-event/v1",
+            "type": "task_started",
+            "event_type": "task_started",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "task_id": "task-terminal",
+            "status": "running",
+        },
+        metadata={"caller": "task_event"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_started",
+        category="message",
+        content={
+            "schema_version": "deerflow.task-event/v1",
+            "type": "task_started",
+            "event_type": "task_started",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "task_id": "task-foreign-owner",
+            "status": "running",
+        },
+        metadata={"caller": "task_event"},
+        user_id="foreign-owner",
+    )
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal replay should not subscribe to a cleaned stream")
+            yield
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        _CleanedBridge(),
+        record,
+        _NeverDisconnectedRequest(),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["custom", "end"]
+    assert json.loads(_parse_sse_frame(frames[0])["data"])["task_id"] == "task-terminal"
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay():
     from app.gateway.services import sse_consumer
 

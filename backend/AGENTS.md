@@ -328,7 +328,9 @@ RunEventStore rows as LangGraph `values`/`updates` chunks until the SSE id and
 event-store `seq` cursor spaces are explicitly reconciled. If there are no
 replayable task events for a bridge gap, keep forwarding
 `stream_recovery_required`; silently swallowing the recovery signal hides data
-loss from the frontend. Every SSE route that creates or joins a run must pass
+loss from the frontend. Late reconnects to terminal runs may replay persisted
+task events before `end` without subscribing to the cleaned in-memory bridge.
+Every SSE route that creates or joins a run must pass
 the current `RunEventStore` and storage `user_id` into `sse_consumer` so replay
 uses the same owner scope as persisted events. Task-event replay must page with
 `after_seq`; do not reintroduce a single fixed-size first-page read.

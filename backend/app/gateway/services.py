@@ -595,6 +595,10 @@ async def sse_consumer(
     - ``continue``: let the task run; events are discarded.
     """
     if not is_inflight_status(record.status):
+        replay_frames = await _durable_task_replay_frames(event_store, record, user_id=user_id)
+        if replay_frames is not None:
+            for frame in replay_frames:
+                yield frame
         yield format_sse("end", None)
         return
 

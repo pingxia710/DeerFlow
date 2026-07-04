@@ -121,6 +121,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   or silently leave unknown structured terminal states in progress.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
+- Agent chat pages must pass `isMock` through `ThreadContext` and disable the
+  prompt input for mock/static demo threads, matching the normal chat page.
 
 ## Code Style
 

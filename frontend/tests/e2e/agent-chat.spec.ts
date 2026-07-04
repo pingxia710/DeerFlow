@@ -13,6 +13,7 @@ const MOCK_AGENTS = [
     system_prompt: "You are a test agent.",
   },
 ];
+const DEMO_THREAD_ID = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
 
 test.describe("Agent chat", () => {
   test("agent gallery page loads and shows agents", async ({ page }) => {
@@ -46,6 +47,18 @@ test.describe("Agent chat", () => {
     await expect(
       page.locator("header span", { hasText: "test-agent" }),
     ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("agent mock chat keeps the prompt read-only", async ({ page }) => {
+    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+
+    await page.goto(
+      `/workspace/agents/test-agent/chats/${DEMO_THREAD_ID}?mock=true`,
+    );
+
+    await expect(page.locator("textarea[name='message']")).toBeDisabled({
+      timeout: 15_000,
+    });
   });
 
   test("switching agent chats ignores a delayed stream from the previous chat", async ({

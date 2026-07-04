@@ -192,7 +192,7 @@ export default function AgentChatPage() {
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider value={{ thread, isMock }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
@@ -330,6 +330,7 @@ export default function AgentChatPage() {
                     )
                   }
                   disabled={
+                    isMock ||
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                     isUploading
                   }

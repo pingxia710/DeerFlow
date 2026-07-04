@@ -687,6 +687,12 @@ export function buildVisibleHistoryMessages(
       !supersededRunIds.has(message.run_id) &&
       isVisibleHistoryRunMessage(message),
   );
+  visibleRows.sort((a, b) => {
+    if (typeof a.seq !== "number" || typeof b.seq !== "number") {
+      return 0;
+    }
+    return a.seq - b.seq;
+  });
   return dedupeMessagesByIdentity([
     ...visibleRows.map((message) => ({
       ...message.content,

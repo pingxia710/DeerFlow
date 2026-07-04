@@ -766,6 +766,38 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   ]);
 });
 
+test("buildVisibleHistoryMessages orders refreshed run rows by seq", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 3,
+      content: { id: "ai-2", type: "ai", content: "third" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:03Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: { id: "human-1", type: "human", content: "first" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: { id: "ai-1", type: "ai", content: "second" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["first", "second", "third"]);
+});
+
 test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {
   const messages = buildVisibleHistoryMessages([runMessage(1)], new Set(), []);
 

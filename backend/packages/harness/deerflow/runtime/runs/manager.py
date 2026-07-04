@@ -96,6 +96,7 @@ class RunRecord:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
+    terminal_reason: str | None = None
     model_name: str | None = None
     store_only: bool = False
     total_input_tokens: int = 0

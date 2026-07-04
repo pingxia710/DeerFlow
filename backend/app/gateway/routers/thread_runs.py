@@ -219,7 +219,7 @@ def _normalize_run_terminal_reason(reason: str | None) -> str | None:
 
 
 def _run_terminal_reason(record: RunRecord) -> str | None:
-    stored_reason = _normalize_run_terminal_reason(record.terminal_reason)
+    stored_reason = _normalize_run_terminal_reason(getattr(record, "terminal_reason", None))
     if stored_reason is not None:
         return stored_reason
     if record.status == RunStatus.success:

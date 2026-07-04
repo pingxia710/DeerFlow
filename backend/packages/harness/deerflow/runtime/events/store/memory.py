@@ -45,6 +45,7 @@ class MemoryRunEventStore(RunEventStore):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         seq = self._next_seq(thread_id)
         record = {
@@ -57,6 +58,8 @@ class MemoryRunEventStore(RunEventStore):
             "seq": seq,
             "created_at": created_at or datetime.now(UTC).isoformat(),
         }
+        if user_id is not None:
+            record["user_id"] = str(user_id)
         self._events.setdefault(thread_id, []).append(record)
         self._events_by_run.setdefault(thread_id, {}).setdefault(run_id, []).append(record)
         if category == "message":
@@ -74,6 +77,7 @@ class MemoryRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id=None,
     ):
         return self._put_one(
             thread_id=thread_id,
@@ -83,6 +87,7 @@ class MemoryRunEventStore(RunEventStore):
             content=content,
             metadata=metadata,
             created_at=created_at,
+            user_id=user_id,
         )
 
     async def put_batch(self, events):

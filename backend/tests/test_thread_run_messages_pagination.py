@@ -93,6 +93,26 @@ def test_returns_paginated_envelope():
     assert len(body["data"]) == 3
 
 
+def test_returns_middleware_message_rows():
+    """Middleware LLM messages are persisted chat messages, not route-level control rows."""
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "generated title"},
+            "metadata": {"caller": "middleware:title"},
+        }
+    ]
+    app = _make_app(event_store=_make_event_store(rows))
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == rows
+
+
 def test_has_more_true_when_extra_row_returned():
     """has_more=True when event store returns limit+1 rows."""
     # Default limit is 50; provide 51 rows

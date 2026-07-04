@@ -60,6 +60,17 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
 
 class TestLlmCallbacks:
     @pytest.mark.anyio
+    async def test_on_llm_end_stamps_explicit_user_id(self):
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, flush_threshold=100, user_id="user-1")
+        run_id = uuid4()
+        j.on_llm_start({}, [], run_id=run_id, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Hi"), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+        messages = await store.list_messages("t1")
+        assert messages[0]["user_id"] == "user-1"
+
+    @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()

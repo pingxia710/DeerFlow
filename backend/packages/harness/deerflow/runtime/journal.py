@@ -47,6 +47,7 @@ class RunJournal(BaseCallbackHandler):
         thread_id: str,
         event_store: RunEventStore,
         *,
+        user_id: str | None = None,
         track_token_usage: bool = True,
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
@@ -55,6 +56,7 @@ class RunJournal(BaseCallbackHandler):
         super().__init__()
         self.run_id = run_id
         self.thread_id = thread_id
+        self.user_id = str(user_id) if user_id is not None else None
         self._store = event_store
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
@@ -432,17 +434,18 @@ class RunJournal(BaseCallbackHandler):
     # -- Internal methods --
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
-        self._buffer.append(
-            {
-                "thread_id": self.thread_id,
-                "run_id": self.run_id,
-                "event_type": event_type,
-                "category": category,
-                "content": content,
-                "metadata": metadata or {},
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        )
+        event = {
+            "thread_id": self.thread_id,
+            "run_id": self.run_id,
+            "event_type": event_type,
+            "category": category,
+            "content": content,
+            "metadata": metadata or {},
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if self.user_id is not None:
+            event["user_id"] = self.user_id
+        self._buffer.append(event)
         if len(self._buffer) >= self._flush_threshold:
             self._flush_sync()
 

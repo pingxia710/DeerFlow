@@ -174,6 +174,7 @@ async def run_agent(
                 run_id=run_id,
                 thread_id=thread_id,
                 event_store=event_store,
+                user_id=record.user_id,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )

@@ -303,7 +303,7 @@ test("completeOptimisticUploadMessages removes uploading placeholder after uploa
         {
           filename: "doc.md",
           size: 5400,
-          path: "/mnt/user-data/uploads/doc.md",
+          path: "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/f8c1a12e-9fc1-44d1-8ec7-e266fb337ed0/user-data/uploads/doc.md",
           status: "uploaded",
         },
       ],
@@ -316,7 +316,7 @@ test("completeOptimisticUploadMessages removes uploading placeholder after uploa
           {
             filename: "doc.md",
             size: 5400,
-            path: "/mnt/user-data/uploads/doc.md",
+            path: "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/f8c1a12e-9fc1-44d1-8ec7-e266fb337ed0/user-data/uploads/doc.md",
             status: "uploaded",
           },
         ],
@@ -840,6 +840,69 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
       },
     },
   ]);
+});
+
+test("buildVisibleHistoryMessages preserves same message id across different runs", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "shared-id",
+        type: "human",
+        content: "first run",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-2",
+      seq: 2,
+      content: {
+        id: "shared-id",
+        type: "human",
+        content: "second run",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+  ];
+
+  const history = buildVisibleHistoryMessages(rows, new Set(), []);
+
+  expect(history.map((message) => message.content)).toEqual([
+    "first run",
+    "second run",
+  ]);
+  expect(
+    mergeMessages(history, [], []).map((message) => message.content),
+  ).toEqual(["first run", "second run"]);
+});
+
+test("mergeMessages lets live messages replace overlapping scoped history", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-latest",
+      seq: 1,
+      content: {
+        id: "same-id",
+        type: "human",
+        content: "history copy",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+  ];
+  const history = buildVisibleHistoryMessages(rows, new Set(), []);
+  const live = {
+    id: "same-id",
+    type: "human",
+    content: "live copy",
+  } as Message;
+
+  expect(
+    mergeMessages(history, [live], []).map((message) => message.content),
+  ).toEqual(["live copy"]);
 });
 
 test("buildVisibleHistoryMessages orders refreshed run rows by seq", () => {

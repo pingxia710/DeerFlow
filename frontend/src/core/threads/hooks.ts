@@ -263,7 +263,7 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
 
-function messageIdentity(message: Message): string | undefined {
+function baseMessageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
     typeof message.tool_call_id === "string" &&
@@ -275,6 +275,16 @@ function messageIdentity(message: Message): string | undefined {
     return `message:${message.id}`;
   }
   return undefined;
+}
+
+function messageIdentity(message: Message): string | undefined {
+  const historyIdentity = (message as MessageWithHistoryIdentity)[
+    HISTORY_IDENTITY_SYMBOL
+  ];
+  if (typeof historyIdentity === "string" && historyIdentity.length > 0) {
+    return `history:${historyIdentity}`;
+  }
+  return baseMessageIdentity(message);
 }
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
@@ -359,6 +369,30 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
       }
       return message;
     });
+}
+
+const HISTORY_IDENTITY_SYMBOL = Symbol("deerflow.historyIdentity");
+
+type MessageWithHistoryIdentity = Message & {
+  [HISTORY_IDENTITY_SYMBOL]?: string;
+};
+
+function historyMessageFromRunMessage(message: RunMessage): Message {
+  const identity = messageIdentity(message.content);
+  const result = {
+    ...message.content,
+    additional_kwargs: {
+      ...message.content.additional_kwargs,
+      [HISTORY_CREATED_AT_KEY]: message.created_at,
+    },
+  } as MessageWithHistoryIdentity;
+  if (identity) {
+    Object.defineProperty(result, HISTORY_IDENTITY_SYMBOL, {
+      value: `${message.run_id}:${identity}`,
+      enumerable: false,
+    });
+  }
+  return result;
 }
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
@@ -715,13 +749,7 @@ export function buildVisibleHistoryMessages(
     return a.seq - b.seq;
   });
   return dedupeMessagesByIdentity([
-    ...visibleRows.map((message) => ({
-      ...message.content,
-      additional_kwargs: {
-        ...message.content.additional_kwargs,
-        [HISTORY_CREATED_AT_KEY]: message.created_at,
-      },
-    })),
+    ...visibleRows.map(historyMessageFromRunMessage),
     ...appendedMessages,
   ]);
 }
@@ -915,7 +943,7 @@ export function mergeMessages(
   const threadMessageIds = new Set(
     threadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
-      .map(messageIdentity)
+      .map(baseMessageIdentity)
       .filter(isNonEmptyString),
   );
 
@@ -928,7 +956,7 @@ export function mergeMessages(
     if (!msg) {
       continue;
     }
-    const identity = messageIdentity(msg);
+    const identity = baseMessageIdentity(msg);
     if (identity && threadMessageIds.has(identity)) {
       cutoff = i;
     } else {

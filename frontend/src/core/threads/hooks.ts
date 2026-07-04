@@ -377,7 +377,29 @@ type MessageWithHistoryIdentity = Message & {
   [HISTORY_IDENTITY_SYMBOL]?: string;
 };
 
-function historyMessageFromRunMessage(message: RunMessage): Message {
+type VisibleRunMessage = RunMessage & { content: Message };
+
+function isMessageContent(value: RunMessage["content"]): value is Message {
+  if (typeof value !== "object" || value === null || !("type" in value)) {
+    return false;
+  }
+  const type = (value as { type?: unknown }).type;
+  return (
+    type === "human" ||
+    type === "ai" ||
+    type === "system" ||
+    type === "tool" ||
+    type === "remove"
+  );
+}
+
+function runMessageIdentity(message: RunMessage): string | undefined {
+  return isMessageContent(message.content)
+    ? messageIdentity(message.content)
+    : undefined;
+}
+
+function historyMessageFromRunMessage(message: VisibleRunMessage): Message {
   const identity = messageIdentity(message.content);
   const result = {
     ...message.content,
@@ -406,14 +428,14 @@ function historyMessageFromRunMessage(message: RunMessage): Message {
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   const lastIndexByIdentity = new Map<string, number>();
   messages.forEach((message, index) => {
-    const identity = messageIdentity(message.content);
+    const identity = runMessageIdentity(message);
     if (identity) {
       lastIndexByIdentity.set(`${message.run_id}:${identity}`, index);
     }
   });
 
   return messages.filter((message, index) => {
-    const identity = messageIdentity(message.content);
+    const identity = runMessageIdentity(message);
     if (!identity) {
       return true;
     }
@@ -731,7 +753,12 @@ export function applyTaskEventRunMessages(
   }
 }
 
-export function isVisibleHistoryRunMessage(message: RunMessage) {
+export function isVisibleHistoryRunMessage(
+  message: RunMessage,
+): message is VisibleRunMessage {
+  if (!isMessageContent(message.content)) {
+    return false;
+  }
   if (typeof message.display?.visible_in_chat === "boolean") {
     return message.display.visible_in_chat;
   }
@@ -746,7 +773,7 @@ export function buildVisibleHistoryMessages(
   appendedMessages: Message[],
   runs: Run[] = [],
 ) {
-  const visibleRowsByRunId = new Map<string, RunMessage[]>();
+  const visibleRowsByRunId = new Map<string, VisibleRunMessage[]>();
   for (const message of messageRows) {
     if (
       supersededRunIds.has(message.run_id) ||

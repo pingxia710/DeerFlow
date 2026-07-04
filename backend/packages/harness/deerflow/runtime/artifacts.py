@@ -43,15 +43,15 @@ def _artifact_path_refs(value: Any) -> list[str]:
     return []
 
 
-def _artifact_refs(content: dict[str, Any]) -> list[str]:
-    refs: list[str] = []
-    refs.extend(_artifact_path_refs(content.get("artifact_refs")))
-    refs.extend(_artifact_path_refs(content.get("artifacts")))
+def _artifact_refs(content: dict[str, Any]) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    refs.extend((ref, "artifact_refs") for ref in _artifact_path_refs(content.get("artifact_refs")))
+    refs.extend((ref, "artifacts") for ref in _artifact_path_refs(content.get("artifacts")))
 
     action_result = content.get("action_result")
     if isinstance(action_result, dict):
-        refs.extend(_artifact_path_refs(action_result.get("output_ref")))
-        refs.extend(_artifact_path_refs(action_result.get("evidence_refs")))
+        refs.extend((ref, "action_result.output_ref") for ref in _artifact_path_refs(action_result.get("output_ref")))
+        refs.extend((ref, "action_result.evidence_refs") for ref in _artifact_path_refs(action_result.get("evidence_refs")))
 
     return list(dict.fromkeys(refs))
 
@@ -74,7 +74,7 @@ def build_artifact_index(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
         if source_tool is None and task_id:
             source_tool = "task"
 
-        for virtual_path in refs:
+        for virtual_path, ref_source in refs:
             entry = {
                 "user_id": event.get("user_id"),
                 "thread_id": event.get("thread_id"),
@@ -90,6 +90,7 @@ def build_artifact_index(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
                     "kind": "runtime_observed",
                     "store": "run_events",
                     "caller": metadata.get("caller"),
+                    "ref_source": ref_source,
                 },
             }
             entries_by_path.pop(virtual_path, None)

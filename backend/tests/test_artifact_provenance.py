@@ -54,7 +54,7 @@ def test_build_artifact_index_from_task_event_artifact_refs() -> None:
                         "command: pytest tests/test_artifact_provenance.py -q; exit code: 0",
                         "/mnt/user-data/outputs/evidence.json",
                     ],
-                    "output_ref": "outputs/not-a-virtual-path.md",
+                    "output_ref": "/mnt/user-data/outputs/output.md",
                 },
             },
             "metadata": {"caller": "task_event"},
@@ -66,6 +66,7 @@ def test_build_artifact_index_from_task_event_artifact_refs() -> None:
     assert [entry["virtual_path"] for entry in index] == [
         "/mnt/user-data/outputs/report.md",
         "/mnt/user-data/outputs/structured.md",
+        "/mnt/user-data/outputs/output.md",
         "/mnt/user-data/outputs/evidence.json",
     ]
     assert index[0]["task_id"] == "task-1"
@@ -75,7 +76,10 @@ def test_build_artifact_index_from_task_event_artifact_refs() -> None:
         "kind": "runtime_observed",
         "store": "run_events",
         "caller": "task_event",
+        "ref_source": "artifact_refs",
     }
+    assert index[2]["provenance"]["ref_source"] == "action_result.output_ref"
+    assert index[3]["provenance"]["ref_source"] == "action_result.evidence_refs"
 
 
 def test_build_artifact_index_dedupes_path_to_latest_observation() -> None:

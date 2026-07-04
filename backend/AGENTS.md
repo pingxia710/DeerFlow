@@ -343,6 +343,10 @@ Run artifact indexes are derived from owner-scoped runtime events and must mark
 missing files with `available: false` instead of silently omitting availability
 metadata. The run artifact index is current-state oriented: duplicate
 `virtual_path` observations collapse to the latest runtime event for that path.
+Artifact provenance must preserve which event field supplied the path
+(`artifact_refs`, `artifacts`, `action_result.output_ref`, or
+`action_result.evidence_refs`) so Command Room can distinguish displayed
+outputs from evidence references.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`

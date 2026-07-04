@@ -187,6 +187,37 @@ class TestListMessagesByRun:
         assert messages[0]["run_id"] == "r1"
         assert messages[0]["category"] == "message"
 
+    @pytest.mark.anyio
+    async def test_run_event_store_thread_timeline_filters_by_run_without_run_scoped_seq(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="r1-a", user_id="u1")
+        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message", content="r2-a", user_id="u1")
+        await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="r1-b", user_id="u1")
+        await store.put(thread_id="t1", run_id="r2", event_type="llm_end", category="trace", content="trace", user_id="u1")
+        await store.put(thread_id="t2", run_id="r1", event_type="human_message", category="message", content="other-thread", user_id="u1")
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="other-user", user_id="u2")
+
+        thread_messages = await store.list_messages("t1", user_id="u1")
+        assert [(m["run_id"], m["seq"], m["content"]) for m in thread_messages] == [
+            ("r1", 1, "r1-a"),
+            ("r2", 2, "r2-a"),
+            ("r1", 3, "r1-b"),
+        ]
+
+        run1_messages = await store.list_messages_by_run("t1", "r1", user_id="u1")
+        assert [(m["run_id"], m["seq"], m["content"]) for m in run1_messages] == [
+            ("r1", 1, "r1-a"),
+            ("r1", 3, "r1-b"),
+        ]
+        assert [m["seq"] for m in run1_messages] != [1, 2]
+
+        run2_events = await store.list_events("t1", "r2", user_id="u1")
+        assert [(e["run_id"], e["seq"], e["category"]) for e in run2_events] == [
+            ("r2", 2, "message"),
+            ("r2", 4, "trace"),
+        ]
+        assert [m["content"] for m in await store.list_messages("t2", user_id="u1")] == ["other-thread"]
+        assert [m["content"] for m in await store.list_messages("t1", user_id="u2")] == ["other-user"]
+
 
 # -- count_messages --
 

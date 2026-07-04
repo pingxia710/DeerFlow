@@ -677,10 +677,12 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
+    event_store = get_run_event_store(request)
+    user_id = get_request_storage_user_id(request)
     record = await start_run(body, thread_id, request)
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(bridge, record, request, run_mgr, event_store=event_store, user_id=user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

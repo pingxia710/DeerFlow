@@ -123,6 +123,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   switches unless a per-thread draft store is implemented.
 - Agent chat pages must pass `isMock` through `ThreadContext` and disable the
   prompt input for mock/static demo threads, matching the normal chat page.
+- Agent chat pages must wire assistant-message regeneration through the same
+  `useThreadStream.regenerateMessage` path as normal chat pages.
 
 ## Code Style
 

@@ -61,6 +61,39 @@ test.describe("Agent chat", () => {
     });
   });
 
+  test("agent chat exposes regenerate on assistant turns", async ({ page }) => {
+    mockLangGraphAPI(page, {
+      agents: MOCK_AGENTS,
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Agent answer to regenerate",
+          updated_at: "2025-06-04T12:00:00Z",
+          agent_name: "test-agent",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-agent-regenerate",
+              content: [{ type: "text", text: "Draft a launch plan" }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-agent-regenerate",
+              content: "Agent response eligible for regeneration",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/agents/test-agent/chats/${MOCK_THREAD_ID_2}`);
+    await expect(
+      page.getByText("Agent response eligible for regeneration"),
+    ).toBeVisible({ timeout: 15_000 });
+
+    await expect(page.getByLabel("Regenerate")).toHaveCount(1);
+  });
+
   test("switching agent chats ignores a delayed stream from the previous chat", async ({
     page,
   }) => {

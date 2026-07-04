@@ -9,7 +9,6 @@ import {
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
-  getRecentRunIdsForRevalidation,
   getTerminalTransitionRunIds,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
@@ -26,7 +25,6 @@ import {
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
-  shouldLoadNextRunMessagesPage,
   taskEventRunMessageKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -370,14 +368,6 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
   ).toBeNull();
 });
 
-test("shouldLoadNextRunMessagesPage continues normal history pagination", () => {
-  expect(shouldLoadNextRunMessagesPage(42)).toBe(true);
-});
-
-test("shouldLoadNextRunMessagesPage stops active run revalidation after the latest page", () => {
-  expect(shouldLoadNextRunMessagesPage(42, false)).toBe(false);
-});
-
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
@@ -699,26 +689,6 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
-});
-
-test("getRecentRunIdsForRevalidation chooses the newest active run by default", () => {
-  const runs = [
-    { run_id: "R6", status: "success" },
-    { run_id: "R5", status: "running" },
-    { run_id: "R4", status: "pending" },
-  ] as unknown as Run[];
-
-  expect(getRecentRunIdsForRevalidation(runs)).toEqual(["R5"]);
-});
-
-test("getRecentRunIdsForRevalidation can revalidate multiple recent runs", () => {
-  const runs = [
-    { run_id: "R6", status: "running" },
-    { run_id: "R5", status: "success" },
-    { run_id: "R4", status: "pending" },
-  ] as unknown as Run[];
-
-  expect(getRecentRunIdsForRevalidation(runs, 2)).toEqual(["R6", "R4"]);
 });
 
 test("getTerminalTransitionRunIds selects active runs that just reached a terminal status", () => {

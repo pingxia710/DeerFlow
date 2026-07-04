@@ -93,6 +93,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   older rows without the display contract.
 - History message ordering must treat run-message `seq` as run-local. Rebuild
   history by run list order first, then by `seq` within each run.
+- Thread history refreshes should be driven by run-list changes and explicit
+  run IDs such as terminal transitions, not timer/focus polling of recent active
+  runs.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

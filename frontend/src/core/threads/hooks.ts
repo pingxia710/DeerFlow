@@ -783,8 +783,6 @@ export function findLatestUnloadedRunIndex(
   return -1;
 }
 
-export const RECENT_RUN_REVALIDATION_COUNT = 1;
-export const RECENT_RUN_REVALIDATION_INTERVAL_MS = 5000;
 const ACTIVE_RUN_REVALIDATION_STATUSES = new Set(["pending", "running"]);
 const TERMINAL_RUN_REVALIDATION_STATUSES = new Set([
   "success",
@@ -802,16 +800,6 @@ export function isTerminalRunStatus(status: unknown) {
   return (
     typeof status === "string" && TERMINAL_RUN_REVALIDATION_STATUSES.has(status)
   );
-}
-
-export function getRecentRunIdsForRevalidation(
-  runs: Run[],
-  limit = RECENT_RUN_REVALIDATION_COUNT,
-) {
-  return runs
-    .filter((run) => isActiveRunStatus(run.status))
-    .slice(0, limit)
-    .map((run) => run.run_id);
 }
 
 export function getTerminalTransitionRunIds(
@@ -875,13 +863,6 @@ export function getNextRunMessagesBeforeSeq(
     return null;
   }
   return getOldestRunMessageSeq(result.data) ?? undefined;
-}
-
-export function shouldLoadNextRunMessagesPage(
-  nextBeforeSeq: number | null | undefined,
-  loadAllPages = true,
-) {
-  return typeof nextBeforeSeq === "number" && loadAllPages;
 }
 
 export function buildRunMessagesUrl(
@@ -2220,14 +2201,11 @@ export function useThreadHistory(
   const autoLoadedLatestRunIdRef = useRef<string | null>(null);
   const activeRunIdsRef = useRef<Set<string>>(new Set());
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
-  const loadAllPagesRef = useRef(true);
-  const refetchRunsRef = useRef(runs.refetch);
   const updateSubtask = useUpdateSubtask();
   const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
   const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
-  refetchRunsRef.current = runs.refetch;
   updateSubtaskRef.current = updateSubtask;
 
   const supersededRunIds = useMemo(() => {
@@ -2247,8 +2225,6 @@ export function useThreadHistory(
     if (!enabled) {
       return;
     }
-    const loadAllPages = loadAllPagesRef.current;
-    loadAllPagesRef.current = true;
     const loadGeneration = loadGenerationRef.current;
     if (loadingRef.current) {
       const pendingRunIndex = findLatestUnloadedRunIndex(
@@ -2328,10 +2304,7 @@ export function useThreadHistory(
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
-          pendingLoadRef.current = shouldLoadNextRunMessagesPage(
-            nextBeforeSeq,
-            loadAllPages,
-          );
+          pendingLoadRef.current = true;
         } else if (nextBeforeSeq === undefined) {
           console.warn(
             `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
@@ -2389,7 +2362,6 @@ export function useThreadHistory(
       autoLoadedLatestRunIdRef.current = null;
       activeRunIdsRef.current = new Set();
       appliedTaskEventKeysRef.current = new Set();
-      loadAllPagesRef.current = true;
       loadingRef.current = false;
       setLoading(false);
       setMessageRows([]);
@@ -2432,13 +2404,13 @@ export function useThreadHistory(
   }, []);
 
   const refreshRuns = useCallback(
-    (runIds?: Iterable<string>, loadAllPages = true) => {
+    (runIds?: Iterable<string>) => {
       if (!enabled) {
         return;
       }
-      const ids = Array.from(
-        runIds ?? getRecentRunIdsForRevalidation(runsRef.current),
-      ).filter((runId) => runsRef.current.some((run) => run.run_id === runId));
+      const ids = Array.from(runIds ?? []).filter((runId) =>
+        runsRef.current.some((run) => run.run_id === runId),
+      );
       if (ids.length === 0) {
         return;
       }
@@ -2450,7 +2422,6 @@ export function useThreadHistory(
         runsRef.current,
         loadedRunIdsRef.current,
       );
-      loadAllPagesRef.current = loadAllPages;
       loadMessages().catch(() => {
         toast.error("Failed to load thread history.");
       });
@@ -2476,37 +2447,6 @@ export function useThreadHistory(
       refreshRuns(terminalTransitionRunIds);
     }
   }, [enabled, refreshRuns, runs.data]);
-
-  useEffect(() => {
-    if (!enabled || !threadId) {
-      return;
-    }
-    const refreshThreadRuns = () => {
-      void refetchRunsRef.current();
-      refreshRuns(undefined, false);
-    };
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        refreshThreadRuns();
-      }
-    }, RECENT_RUN_REVALIDATION_INTERVAL_MS);
-
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") {
-        refreshThreadRuns();
-      }
-    };
-    const refreshOnFocus = () => {
-      refreshThreadRuns();
-    };
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    window.addEventListener("focus", refreshOnFocus);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-      window.removeEventListener("focus", refreshOnFocus);
-    };
-  }, [enabled, refreshRuns, threadId]);
 
   const hasThreadId = Boolean(threadId);
   const hasUnloadedRuns = Boolean(
@@ -2637,7 +2577,7 @@ export function useThreadRuns(
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnMount: "always",
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
 }
 

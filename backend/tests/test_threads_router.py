@@ -1,6 +1,7 @@
 import re
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -9,12 +10,19 @@ from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
+from app.gateway.auth.models import User
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+_HISTORY_USER_ID = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _make_user(user_id: UUID = _HISTORY_USER_ID) -> User:
+    return User(id=user_id, email=f"{user_id}@example.com", password_hash="x", system_role="user")
 
 
 class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
@@ -46,7 +54,7 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
         return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None)
 
 
-def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
+def _build_thread_app(*, user_factory=None) -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     """Build a stub-authed FastAPI app wired with an in-memory ThreadMetaStore.
 
     The thread_store on ``app.state`` is a permissive subclass of
@@ -55,7 +63,7 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
 
     Returns ``(app, store, checkpointer)`` for direct seeding/inspection.
     """
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=user_factory)
     store = InMemoryStore()
     checkpointer = InMemorySaver()
     app.state.store = store
@@ -464,6 +472,116 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+def test_get_thread_history_scopes_turn_duration_to_current_user() -> None:
+    app, _store, _checkpointer = _build_thread_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    thread_id = "shared-thread-id"
+    other_user_id = "33333333-3333-3333-3333-333333333333"
+    message_id = "shared-ai-message"
+
+    def _run(run_id: str, user_id: str, created_at: str, updated_at: str) -> RunRecord:
+        return RunRecord(
+            run_id=run_id,
+            thread_id=thread_id,
+            assistant_id=None,
+            status=RunStatus.success,
+            on_disconnect=DisconnectMode.continue_,
+            user_id=user_id,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    current_user_id = str(_HISTORY_USER_ID)
+    current_user_runs = [
+        _run(
+            "run-a",
+            current_user_id,
+            "2026-07-04T10:00:00+00:00",
+            "2026-07-04T10:00:03+00:00",
+        )
+    ]
+    other_user_runs = [
+        _run(
+            "run-b",
+            other_user_id,
+            "2026-07-04T10:00:00+00:00",
+            "2026-07-04T10:01:39+00:00",
+        )
+    ]
+
+    class UserScopedRunManager:
+        def __init__(self):
+            self.calls = []
+
+        async def list_by_thread(self, thread_id_arg, *, user_id=None, limit=100):
+            self.calls.append({"thread_id": thread_id_arg, "user_id": user_id, "limit": limit})
+            if user_id == current_user_id:
+                return current_user_runs
+            return other_user_runs
+
+    class UserScopedEventStore:
+        def __init__(self):
+            self.calls = []
+
+        async def list_messages(self, thread_id_arg, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+            self.calls.append(
+                {
+                    "thread_id": thread_id_arg,
+                    "limit": limit,
+                    "before_seq": before_seq,
+                    "after_seq": after_seq,
+                    "user_id": user_id,
+                }
+            )
+            if user_id == current_user_id:
+                return [{"run_id": "run-a", "content": {"type": "ai", "id": message_id}}]
+            return [{"run_id": "run-b", "content": {"type": "ai", "id": message_id}}]
+
+    class FakeCheckpointer:
+        async def alist(self, config, limit=None):
+            assert config == {"configurable": {"thread_id": thread_id}}
+            assert limit == 10
+            yield SimpleNamespace(
+                config={"configurable": {"checkpoint_id": "checkpoint-a"}},
+                parent_config=None,
+                metadata={
+                    "step": -1,
+                    "source": "input",
+                    "writes": None,
+                    "parents": {},
+                    "created_at": "2026-07-04T10:00:04+00:00",
+                },
+                checkpoint={
+                    "channel_values": {
+                        "messages": [
+                            {
+                                "type": "ai",
+                                "id": message_id,
+                                "content": "assistant answer",
+                            }
+                        ]
+                    }
+                },
+                tasks=[],
+            )
+
+    run_manager = UserScopedRunManager()
+    event_store = UserScopedEventStore()
+    app.state.checkpointer = FakeCheckpointer()
+    app.state.run_manager = run_manager
+    app.state.run_event_store = event_store
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    messages = response.json()[0]["values"]["messages"]
+    assert messages[0]["additional_kwargs"]["turn_duration"] == 3
+    assert run_manager.calls == [{"thread_id": thread_id, "user_id": current_user_id, "limit": 100}]
+    assert event_store.calls[0]["thread_id"] == thread_id
+    assert event_store.calls[0]["user_id"] == current_user_id
+    assert event_store.calls[0]["limit"] == 1000
 
 
 # ── Metadata filter validation at API boundary ────────────────────────────────

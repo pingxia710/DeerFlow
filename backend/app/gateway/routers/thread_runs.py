@@ -12,6 +12,7 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from typing import Any, Literal
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -162,10 +164,27 @@ class ThreadContextUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _supports_user_id_keyword(callable_obj: Any) -> bool:
+    """Return True when a store method can accept ``user_id=...``."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return "user_id" in parameters or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+
+
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     if record.status in (RunStatus.pending, RunStatus.running):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
+
+
+async def _resolve_thread_run_for_user(thread_id: str, run_id: str, request: Request, *, user_id: str) -> RunRecord:
+    run_mgr = get_run_manager(request)
+    record = await run_mgr.get(run_id, user_id=user_id)
+    if record is None or record.thread_id != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return record
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -387,7 +406,11 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
 
 async def _find_target_run_id(thread_id: str, message_id: str, target_message: Any, request: Request) -> str:
     event_store = get_run_event_store(request)
-    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    user_id = get_request_storage_user_id(request)
+    list_messages_kwargs: dict[str, Any] = {"limit": REGENERATE_HISTORY_SCAN_LIMIT}
+    if _supports_user_id_keyword(event_store.list_messages):
+        list_messages_kwargs["user_id"] = user_id
+    rows = await event_store.list_messages(thread_id, **list_messages_kwargs)
     for row in reversed(rows):
         if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
             continue
@@ -396,7 +419,6 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
             if isinstance(run_id, str) and run_id:
                 return run_id
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -715,12 +737,12 @@ async def list_thread_messages(
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
-    messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+    user_id = get_request_storage_user_id(request)
+    list_messages_kwargs: dict[str, Any] = {"limit": limit, "before_seq": before_seq, "after_seq": after_seq}
+    if _supports_user_id_keyword(event_store.list_messages):
+        list_messages_kwargs["user_id"] = user_id
+    messages = await event_store.list_messages(thread_id, **list_messages_kwargs)
     attach_message_display(messages)
-
-    # Resolve the caller once; it is needed both to scope the feedback query
-    # below and to list the thread's runs for turn-duration injection.
-    user_id = await get_current_user(request)
 
     # Find the last AI message per run_id. AI messages are persisted by
     # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
@@ -786,14 +808,20 @@ async def list_run_messages(
 
     Response: { data: [...], has_more: bool }
     """
-    record = await resolve_thread_run(thread_id, run_id, request)
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
     event_store = get_run_event_store(request)
+    list_messages_kwargs: dict[str, Any] = {
+        "limit": limit + 1,
+        "before_seq": before_seq,
+        "after_seq": after_seq,
+    }
+    if _supports_user_id_keyword(event_store.list_messages_by_run):
+        list_messages_kwargs["user_id"] = user_id
     rows = await event_store.list_messages_by_run(
         thread_id,
         run_id,
-        limit=limit + 1,
-        before_seq=before_seq,
-        after_seq=after_seq,
+        **list_messages_kwargs,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
     attach_message_display(data)
@@ -824,10 +852,14 @@ async def list_run_events(
     limit: int = Query(default=500, le=2000),
 ) -> list[dict]:
     """Return the full event stream for a run (debug/audit)."""
-    await resolve_thread_run(thread_id, run_id, request)
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+    list_events_kwargs: dict[str, Any] = {"event_types": types, "limit": limit}
+    if _supports_user_id_keyword(event_store.list_events):
+        list_events_kwargs["user_id"] = user_id
+    return await event_store.list_events(thread_id, run_id, **list_events_kwargs)
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
@@ -857,14 +889,18 @@ async def thread_context_usage(
     """Latest model-input context estimates for a thread."""
     run_store = get_run_store(request)
     event_store = get_run_event_store(request)
-    runs = await run_store.list_by_thread(thread_id, limit=run_limit)
+    user_id = get_request_storage_user_id(request)
+    runs = await run_store.list_by_thread(thread_id, user_id=user_id, limit=run_limit)
 
     snapshots: list[ThreadContextUsageSnapshot] = []
     for run in runs:
         run_id = run.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             continue
-        events = await event_store.list_events(thread_id, run_id, event_types=["llm.context"], limit=200)
+        list_events_kwargs: dict[str, Any] = {"event_types": ["llm.context"], "limit": 200}
+        if _supports_user_id_keyword(event_store.list_events):
+            list_events_kwargs["user_id"] = user_id
+        events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
         for event in events:
             snapshot = _context_usage_snapshot_from_event(event)
             if snapshot is not None:

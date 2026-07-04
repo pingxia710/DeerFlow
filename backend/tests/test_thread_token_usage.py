@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
 
+_TEST_USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 
-def _make_app(run_store: MagicMock, event_store: MagicMock | None = None):
-    app = make_authed_test_app()
+
+def _make_user(user_id: UUID = _TEST_USER_ID) -> User:
+    return User(id=user_id, email=f"{user_id}@example.com", password_hash="x", system_role="user")
+
+
+def _make_app(run_store: MagicMock, event_store: MagicMock | None = None, *, user_id: UUID = _TEST_USER_ID):
+    app = make_authed_test_app(user_factory=lambda: _make_user(user_id))
     app.include_router(thread_runs.router)
     app.state.run_store = run_store
     app.state.run_event_store = event_store or MagicMock()
@@ -154,4 +162,97 @@ def test_thread_context_usage_returns_latest_snapshots():
     assert data["latest_lead"]["estimated_tokens"] == 100
     assert data["by_caller"]["subagent:research"]["estimated_tokens"] == 30
     assert [item["run_id"] for item in data["recent"]] == ["run-2", "run-2", "run-1"]
-    run_store.list_by_thread.assert_awaited_once_with("thread-1", limit=20)
+    run_store.list_by_thread.assert_awaited_once_with("thread-1", user_id=str(_TEST_USER_ID), limit=20)
+    event_store.list_events.assert_any_await(
+        "thread-1",
+        "run-2",
+        event_types=["llm.context"],
+        limit=200,
+        user_id=str(_TEST_USER_ID),
+    )
+    event_store.list_events.assert_any_await(
+        "thread-1",
+        "run-1",
+        event_types=["llm.context"],
+        limit=200,
+        user_id=str(_TEST_USER_ID),
+    )
+
+
+def test_thread_context_usage_scopes_runs_and_events_to_current_user():
+    user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    thread_id = "shared-thread-id"
+
+    run_store = MagicMock()
+
+    async def list_by_thread(thread_id_arg, *, user_id=None, limit=20):
+        assert thread_id_arg == thread_id
+        assert limit == 20
+        if user_id == str(user_a):
+            return [{"run_id": "run-a"}]
+        if user_id == str(user_b):
+            return [{"run_id": "run-b"}]
+        return [{"run_id": "run-b"}]
+
+    run_store.list_by_thread = AsyncMock(side_effect=list_by_thread)
+
+    event_store = MagicMock()
+
+    async def list_events(thread_id_arg, run_id, *, event_types=None, limit=500, user_id=None):
+        assert thread_id_arg == thread_id
+        assert event_types == ["llm.context"]
+        assert limit == 200
+        if user_id == str(user_a) and run_id == "run-a":
+            return [
+                {
+                    "run_id": "run-a",
+                    "event_type": "llm.context",
+                    "content": {
+                        "caller": "lead_agent",
+                        "llm_call_index": 1,
+                        "message_count": 2,
+                        "char_count": 44,
+                        "estimated_tokens": 11,
+                        "role_counts": {"human": 1, "ai": 1},
+                    },
+                    "seq": 1,
+                    "created_at": "2026-07-04T10:00:00+00:00",
+                }
+            ]
+        return [
+            {
+                "run_id": "run-b",
+                "event_type": "llm.context",
+                "content": {
+                    "caller": "lead_agent",
+                    "llm_call_index": 1,
+                    "message_count": 20,
+                    "char_count": 400,
+                    "estimated_tokens": 99,
+                    "role_counts": {"human": 10, "ai": 10},
+                },
+                "seq": 1,
+                "created_at": "2026-07-04T10:01:00+00:00",
+            }
+        ]
+
+    event_store.list_events = AsyncMock(side_effect=list_events)
+    app = _make_app(run_store, event_store, user_id=user_a)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/context-usage")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["latest"]["run_id"] == "run-a"
+    assert data["latest"]["estimated_tokens"] == 11
+    assert [item["run_id"] for item in data["recent"]] == ["run-a"]
+    run_store.list_by_thread.assert_awaited_once_with(thread_id, user_id=str(user_a), limit=20)
+    event_store.list_events.assert_awaited_once_with(
+        thread_id,
+        "run-a",
+        event_types=["llm.context"],
+        limit=200,
+        user_id=str(user_a),
+    )

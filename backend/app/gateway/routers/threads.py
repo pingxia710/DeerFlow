@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from typing import Any
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
@@ -47,6 +49,15 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not metadata:
         return metadata or {}
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
+
+
+def _supports_user_id_keyword(callable_obj: Any) -> bool:
+    """Return True when a store method can accept ``user_id=...``."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return "user_id" in parameters or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
 
 
 # ---------------------------------------------------------------------------
@@ -673,13 +684,17 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
 
                         run_mgr = get_run_manager(request)
                         event_store = get_run_event_store(request)
+                        user_id = get_request_storage_user_id(request)
 
-                        runs = await run_mgr.list_by_thread(thread_id)
+                        runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
 
                         # FIXME: Fetching limit=1000 silently drops durations for messages older than the cap on long threads.
                         # We do this full fetch because raw LangGraph messages lack a native run_id link.
 
-                        events = await event_store.list_messages(thread_id, limit=1000)
+                        list_messages_kwargs: dict[str, Any] = {"limit": 1000}
+                        if _supports_user_id_keyword(event_store.list_messages):
+                            list_messages_kwargs["user_id"] = user_id
+                        events = await event_store.list_messages(thread_id, **list_messages_kwargs)
 
                         if runs and serialized_msgs:
                             # 1. Map each run_id to its actual duration

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
 from deerflow.runtime import RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -16,6 +18,13 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_TEST_USER_ID = UUID("55555555-5555-5555-5555-555555555555")
+
+
+def _make_user(user_id: UUID = _TEST_USER_ID) -> User:
+    return User(id=user_id, email=f"{user_id}@example.com", password_hash="x", system_role="user")
 
 
 class _RunManagerForPaginationTests:
@@ -32,9 +41,9 @@ class _RunManagerForPaginationTests:
         )
 
 
-def _make_app(event_store=None, run_manager=None):
+def _make_app(event_store=None, run_manager=None, *, user_id: UUID = _TEST_USER_ID):
     """Build a test FastAPI app with stub auth and mocked state."""
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: _make_user(user_id))
     app.include_router(thread_runs.router)
 
     if event_store is not None:
@@ -250,6 +259,7 @@ def test_after_seq_forwarded_to_event_store():
         limit=51,  # default limit(50) + 1
         before_seq=None,
         after_seq=5,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -267,6 +277,7 @@ def test_before_seq_forwarded_to_event_store():
         limit=51,
         before_seq=10,
         after_seq=None,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -284,6 +295,7 @@ def test_custom_limit_forwarded_to_event_store():
         limit=11,  # 10 + 1
         before_seq=None,
         after_seq=None,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -296,6 +308,104 @@ def test_empty_data_when_no_messages():
     body = response.json()
     assert body["data"] == []
     assert body["has_more"] is False
+
+
+def test_list_run_messages_scopes_events_to_current_user():
+    user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    thread_id = "shared-thread"
+    run_id = "shared-run"
+
+    event_store = MagicMock()
+
+    async def list_messages_by_run(thread_id_arg, run_id_arg, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        assert thread_id_arg == thread_id
+        assert run_id_arg == run_id
+        assert limit == 51
+        assert before_seq is None
+        assert after_seq is None
+        if user_id == str(user_a):
+            return [{"seq": 1, "run_id": run_id, "event_type": "llm.ai.response", "category": "message", "content": "owner-a"}]
+        if user_id == str(user_b):
+            return [{"seq": 1, "run_id": run_id, "event_type": "llm.ai.response", "category": "message", "content": "owner-b"}]
+        return [{"seq": 1, "run_id": run_id, "event_type": "llm.ai.response", "category": "message", "content": "owner-b"}]
+
+    event_store.list_messages_by_run = AsyncMock(side_effect=list_messages_by_run)
+
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(user_a),
+    )
+
+    app = _make_app(event_store=event_store, run_manager=run_manager, user_id=user_a)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["content"] == "owner-a"
+    run_manager.get.assert_awaited_once_with(run_id, user_id=str(user_a))
+    event_store.list_messages_by_run.assert_awaited_once_with(
+        thread_id,
+        run_id,
+        limit=51,
+        before_seq=None,
+        after_seq=None,
+        user_id=str(user_a),
+    )
+
+
+def test_list_run_events_scopes_events_to_current_user():
+    user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    thread_id = "shared-thread"
+    run_id = "shared-run"
+
+    event_store = MagicMock()
+
+    async def list_events(thread_id_arg, run_id_arg, *, event_types=None, limit=500, user_id=None):
+        assert thread_id_arg == thread_id
+        assert run_id_arg == run_id
+        assert event_types == ["llm.context"]
+        assert limit == 7
+        if user_id == str(user_a):
+            return [{"seq": 1, "run_id": run_id, "event_type": "llm.context", "content": {"owner": "a"}}]
+        if user_id == str(user_b):
+            return [{"seq": 1, "run_id": run_id, "event_type": "llm.context", "content": {"owner": "b"}}]
+        return [{"seq": 1, "run_id": run_id, "event_type": "llm.context", "content": {"owner": "b"}}]
+
+    event_store.list_events = AsyncMock(side_effect=list_events)
+
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(user_a),
+    )
+
+    app = _make_app(event_store=event_store, run_manager=run_manager, user_id=user_a)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/events?event_types=llm.context&limit=7")
+
+    assert response.status_code == 200
+    assert response.json()[0]["content"]["owner"] == "a"
+    run_manager.get.assert_awaited_once_with(run_id, user_id=str(user_a))
+    event_store.list_events.assert_awaited_once_with(
+        thread_id,
+        run_id,
+        event_types=["llm.context"],
+        limit=7,
+        user_id=str(user_a),
+    )
 
 
 def test_run_thread_mismatch_returns_404_without_reading_events():
@@ -492,3 +602,71 @@ def test_list_thread_messages_attaches_display_visibility_contract():
         "surface": "control",
         "reason": "task_event",
     }
+
+
+def test_list_thread_messages_scopes_events_to_current_user():
+    user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    thread_id = "shared-thread"
+
+    event_store = MagicMock()
+
+    async def list_messages(thread_id_arg, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        assert thread_id_arg == thread_id
+        assert limit == 50
+        assert before_seq is None
+        assert after_seq is None
+        if user_id == str(user_a):
+            return [
+                {
+                    "seq": 1,
+                    "run_id": "run-a",
+                    "event_type": "llm.ai.response",
+                    "category": "message",
+                    "content": {"type": "ai", "text": "owner-a"},
+                }
+            ]
+        if user_id == str(user_b):
+            return [
+                {
+                    "seq": 1,
+                    "run_id": "run-b",
+                    "event_type": "llm.ai.response",
+                    "category": "message",
+                    "content": {"type": "ai", "text": "owner-b"},
+                }
+            ]
+        return [
+            {
+                "seq": 1,
+                "run_id": "run-b",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"type": "ai", "text": "owner-b"},
+            }
+        ]
+
+    event_store.list_messages = AsyncMock(side_effect=list_messages)
+
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager, user_id=user_a)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+    assert response.status_code == 200
+    assert response.json()[0]["content"]["text"] == "owner-a"
+    event_store.list_messages.assert_awaited_once_with(
+        thread_id,
+        limit=50,
+        before_seq=None,
+        after_seq=None,
+        user_id=str(user_a),
+    )
+    feedback_repo.list_by_thread_grouped.assert_awaited_once_with(thread_id, user_id=str(user_a))
+    run_manager.list_by_thread.assert_awaited_once_with(thread_id, user_id=str(user_a))

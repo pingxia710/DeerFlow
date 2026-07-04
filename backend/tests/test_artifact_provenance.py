@@ -104,7 +104,14 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
     artifact_path = tmp_path / "report.md"
     artifact_payload = b"runtime observed report"
     artifact_path.write_bytes(artifact_payload)
-    monkeypatch.setattr(thread_runs, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
+    active_path = tmp_path / "page.html"
+    active_payload = b"<html><script>alert(1)</script></html>"
+    active_path.write_bytes(active_payload)
+    paths = {
+        "/mnt/user-data/outputs/report.md": artifact_path,
+        "/mnt/user-data/outputs/page.html": active_path,
+    }
+    monkeypatch.setattr(thread_runs, "resolve_thread_virtual_path", lambda _thread_id, path, **_kwargs: paths[path])
 
     app = make_authed_test_app(
         user_factory=lambda: User(
@@ -126,7 +133,7 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
                         "event_type": "artifact.presented",
                         "category": "artifact",
                         "seq": 3,
-                        "content": {"artifact_refs": ["/mnt/user-data/outputs/report.md"]},
+                        "content": {"artifact_refs": ["/mnt/user-data/outputs/report.md", "/mnt/user-data/outputs/page.html"]},
                         "metadata": {"caller": "lead_agent", "source_tool": "present_files"},
                     }
                 ]
@@ -142,8 +149,14 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
     assert response.status_code == 200
     artifact = response.json()[0]
     assert artifact["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    assert artifact["display_policy"] == "inline"
     assert artifact["sha256"] == hashlib.sha256(artifact_payload).hexdigest()
     assert artifact["size_bytes"] == len(artifact_payload)
+    active_artifact = response.json()[1]
+    assert active_artifact["virtual_path"] == "/mnt/user-data/outputs/page.html"
+    assert active_artifact["display_policy"] == "attachment"
+    assert active_artifact["sha256"] == hashlib.sha256(active_payload).hexdigest()
+    assert active_artifact["size_bytes"] == len(active_payload)
     event_store.list_events.assert_awaited_once_with(
         "thread-1",
         "run-1",

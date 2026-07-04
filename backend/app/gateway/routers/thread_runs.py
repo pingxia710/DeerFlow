@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import inspect
 import logging
+import mimetypes
 import re
 from typing import Any, Literal
 
@@ -52,7 +53,13 @@ _WORKER_LOST_ERROR_MARKERS = (
     "worker lost",
     "owner lost",
 )
+_ACTIVE_ARTIFACT_MIME_TYPES = {
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+}
 _ARTIFACT_HASH_CHUNK_BYTES = 1024 * 1024
+_ARTIFACT_TEXT_SAMPLE_BYTES = 8192
 _SENSITIVE_RUN_ERROR_MARKERS = (
     "secret",
     "stack trace",
@@ -266,13 +273,29 @@ def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str |
     if not actual_path.is_file():
         return {}
 
+    mime_type, _ = mimetypes.guess_type(actual_path)
     digest = hashlib.sha256()
     size = 0
+    sample = b""
     with actual_path.open("rb") as file:
         while chunk := file.read(_ARTIFACT_HASH_CHUNK_BYTES):
             size += len(chunk)
+            if len(sample) < _ARTIFACT_TEXT_SAMPLE_BYTES:
+                sample += chunk[: _ARTIFACT_TEXT_SAMPLE_BYTES - len(sample)]
             digest.update(chunk)
-    return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+    display_policy = "inline"
+    if mime_type in _ACTIVE_ARTIFACT_MIME_TYPES or (mime_type is None and b"\x00" in sample):
+        display_policy = "attachment"
+
+    metadata: dict[str, Any] = {
+        "display_policy": display_policy,
+        "sha256": digest.hexdigest(),
+        "size_bytes": size,
+    }
+    if mime_type:
+        metadata["mime_type"] = mime_type
+    return metadata
 
 
 def _attach_artifact_file_metadata(entries: list[dict[str, Any]], thread_id: str, *, user_id: str | None) -> list[dict[str, Any]]:

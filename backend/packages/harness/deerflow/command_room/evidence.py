@@ -51,6 +51,7 @@ class EvidenceSignal:
     weak_reasons: tuple[str, ...]
     strong_reasons: tuple[str, ...]
     trusted_source: bool = False
+    source_kind: str = "unknown"
 
 
 def analyze_evidence_ref(ref: str | None) -> EvidenceSignal:
@@ -87,7 +88,36 @@ def analyze_evidence_ref(ref: str | None) -> EvidenceSignal:
     strong_unique = tuple(dict.fromkeys(strong))
     weak_unique = tuple(dict.fromkeys(weak))
     trusted_source = bool(strong_unique) and "tests-passed-alone" not in weak_unique
-    return EvidenceSignal(ref=text, strong=trusted_source, weak_reasons=weak_unique, strong_reasons=strong_unique, trusted_source=trusted_source)
+    return EvidenceSignal(
+        ref=text,
+        strong=trusted_source,
+        weak_reasons=weak_unique,
+        strong_reasons=strong_unique,
+        trusted_source=trusted_source,
+        source_kind=_source_kind(text, lower, weak_unique, has_command=has_command, has_output=has_output),
+    )
+
+
+def _source_kind(text: str, lower: str, weak_reasons: tuple[str, ...], *, has_command: bool, has_output: bool) -> str:
+    if not text:
+        return "empty"
+    if "output-ref-only" in weak_reasons:
+        return "output_ref"
+    if "tests-passed-alone" in weak_reasons or "summary-only" in weak_reasons:
+        return "self_claim"
+    if has_command and has_output:
+        return "command_output"
+    if "artifact:" in lower or "artifacts/" in lower:
+        return "artifact"
+    if "hash:" in lower or "sha256" in lower or "sha1" in lower or "md5" in lower:
+        return "hash"
+    if "diff --git" in lower or "git diff" in lower:
+        return "diff"
+    if "log:" in lower or "logs/" in lower or ".log" in lower:
+        return "log"
+    if _PATH_RE.search(text):
+        return "path"
+    return "unknown"
 
 
 def summarize_evidence_refs(refs: Iterable[str | None]) -> dict[str, object]:

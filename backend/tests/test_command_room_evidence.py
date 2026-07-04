@@ -6,6 +6,7 @@ def test_tests_passed_alone_is_weak_not_strong():
 
     assert signal.strong is False
     assert "tests-passed-alone" in signal.weak_reasons
+    assert signal.source_kind == "self_claim"
 
 
 def test_command_with_output_or_exit_code_is_strong():
@@ -13,6 +14,7 @@ def test_command_with_output_or_exit_code_is_strong():
 
     assert signal.strong is True
     assert "command-output-or-exit-code" in signal.strong_reasons
+    assert signal.source_kind == "command_output"
 
 
 def test_artifact_hash_log_diff_and_path_are_strong_signals():
@@ -26,6 +28,7 @@ def test_artifact_hash_log_diff_and_path_are_strong_signals():
     signals = [analyze_evidence_ref(ref) for ref in refs]
 
     assert all(signal.strong for signal in signals)
+    assert [signal.source_kind for signal in signals] == ["artifact", "log", "diff", "path"]
 
 
 def test_output_ref_only_is_not_evidence():
@@ -33,6 +36,7 @@ def test_output_ref_only_is_not_evidence():
 
     assert signal.strong is False
     assert "output-ref-only" in signal.weak_reasons
+    assert signal.source_kind == "output_ref"
 
 
 def test_summary_does_not_make_quality_verdict_or_auto_rework():

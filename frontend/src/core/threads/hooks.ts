@@ -208,6 +208,16 @@ export function shouldReleaseQueuedThreadMessage({
   );
 }
 
+export function keepQueuedMessagesForThread<T extends { threadId: string }>(
+  messages: T[],
+  threadId: string | null | undefined,
+): T[] {
+  if (!threadId) {
+    return [];
+  }
+  return messages.filter((message) => message.threadId === threadId);
+}
+
 export function setManualThreadTitleLock(threadId: string, title: string) {
   manualThreadTitleLocks.set(threadId, title);
 }
@@ -1914,10 +1924,15 @@ export function useThreadStream({
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
+    const normalizedThreadId = threadId ?? null;
     startedRef.current = false;
     streamRunIdRef.current = null;
     sendInFlightRef.current = false;
     streamFinishedRef.current = true;
+    queuedMessagesRef.current = keepQueuedMessagesForThread(
+      queuedMessagesRef.current,
+      normalizedThreadId,
+    );
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();

@@ -194,6 +194,23 @@ test("shouldReleaseQueuedThreadMessage waits for explicit stream completion", as
   ).toBe(true);
 });
 
+test("keepQueuedMessagesForThread drops queued sends from other chats", async () => {
+  const { keepQueuedMessagesForThread } = await import("@/core/threads/hooks");
+
+  expect(
+    keepQueuedMessagesForThread(
+      [
+        { threadId: "thread-a", text: "from a" },
+        { threadId: "thread-b", text: "from b" },
+      ],
+      "thread-b",
+    ),
+  ).toEqual([{ threadId: "thread-b", text: "from b" }]);
+  expect(keepQueuedMessagesForThread([{ threadId: "thread-a" }], null)).toEqual(
+    [],
+  );
+});
+
 test("shouldShowThreadRunningStatus trusts backend terminal status over stale local running state", async () => {
   const { shouldShowThreadRunningStatus } =
     await import("@/core/threads/hooks");

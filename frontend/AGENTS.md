@@ -109,6 +109,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   prefer explicit user actions, route changes, or recovery probes.
 - Generic API fetch helpers should throw on 401 instead of performing global
   browser redirects; route guards and AuthProvider own login navigation.
+- Queued follow-up messages while a stream is active are thread-local UI state;
+  discard them on chat-thread switches unless a real per-thread queue/draft
+  store is implemented.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

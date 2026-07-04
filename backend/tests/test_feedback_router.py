@@ -95,6 +95,7 @@ def test_upsert_feedback_uses_internal_owner_header():
     response = asyncio.run(_scenario())
 
     assert response["user_id"] == "owner-1"
+    run_store.get.assert_awaited_once_with("run-1", user_id="owner-1")
     repo.upsert.assert_awaited_once_with(
         run_id="run-1",
         thread_id="thread-1",
@@ -124,4 +125,18 @@ def test_upsert_feedback_denies_foreign_run_owner():
         asyncio.run(_scenario())
 
     assert exc.value.status_code == 404
+    run_store.get.assert_awaited_once_with("run-1", user_id="owner-1")
     repo.upsert.assert_not_awaited()
+
+
+def test_feedback_stats_scopes_to_current_user():
+    repo = MagicMock()
+    repo.aggregate_by_run = AsyncMock(return_value={"run_id": "run-1", "total": 0, "positive": 0, "negative": 0})
+    app = _make_app(repo)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/feedback/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": "run-1", "total": 0, "positive": 0, "negative": 0}
+    repo.aggregate_by_run.assert_awaited_once_with("thread-1", "run-1", user_id=str(USER_ID))

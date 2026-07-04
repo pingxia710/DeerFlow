@@ -218,13 +218,22 @@ class FeedbackRepository:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def aggregate_by_run(self, thread_id: str, run_id: str) -> dict:
+    async def aggregate_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict:
         """Aggregate feedback stats for a run using database-side counting."""
+        resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.aggregate_by_run")
         stmt = select(
             func.count().label("total"),
             func.coalesce(func.sum(case((FeedbackRow.rating == 1, 1), else_=0)), 0).label("positive"),
             func.coalesce(func.sum(case((FeedbackRow.rating == -1, 1), else_=0)), 0).label("negative"),
         ).where(FeedbackRow.thread_id == thread_id, FeedbackRow.run_id == run_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
         async with self._sf() as session:
             row = (await session.execute(stmt)).one()
             return {

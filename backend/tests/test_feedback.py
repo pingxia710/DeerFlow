@@ -138,11 +138,22 @@ class TestFeedbackRepository:
         await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
         await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-2")
         await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-3")
-        stats = await repo.aggregate_by_run("t1", "r1")
+        stats = await repo.aggregate_by_run("t1", "r1", user_id=None)
         assert stats["total"] == 3
         assert stats["positive"] == 2
         assert stats["negative"] == 1
         assert stats["run_id"] == "r1"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_by_run_scopes_to_user(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
+        await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-2")
+        stats = await repo.aggregate_by_run("t1", "r1", user_id="user-1")
+        assert stats["total"] == 1
+        assert stats["positive"] == 1
+        assert stats["negative"] == 0
         await _cleanup()
 
     @pytest.mark.anyio

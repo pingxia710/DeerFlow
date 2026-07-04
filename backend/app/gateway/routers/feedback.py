@@ -61,7 +61,7 @@ class FeedbackStatsResponse(BaseModel):
 
 async def _get_feedback_run(thread_id: str, run_id: str, request: Request, *, user_id: str | None) -> dict[str, Any]:
     run_store = get_run_store(request)
-    run = await run_store.get(run_id)
+    run = await run_store.get(run_id, user_id=user_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.get("thread_id") != thread_id:
@@ -166,8 +166,9 @@ async def feedback_stats(
     request: Request,
 ) -> dict[str, Any]:
     """Get aggregated feedback stats (positive/negative counts) for a run."""
+    user_id = get_request_storage_user_id(request)
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.aggregate_by_run(thread_id, run_id)
+    return await feedback_repo.aggregate_by_run(thread_id, run_id, user_id=user_id)
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback/{feedback_id}")

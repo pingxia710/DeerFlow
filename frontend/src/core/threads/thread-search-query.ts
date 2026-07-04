@@ -19,8 +19,6 @@ export const DEFAULT_THREAD_SEARCH_PARAMS: ThreadSearchParams = {
   select: ["thread_id", "updated_at", "values", "metadata"],
 };
 
-export const THREAD_SEARCH_REFETCH_INTERVAL_MS = 5000;
-
 export function buildThreadsSearchQueryOptions(
   apiClient: ThreadsSearchClient,
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
@@ -79,8 +77,6 @@ export function buildThreadsSearchQueryOptions(
 
       return threads;
     },
-    refetchInterval: THREAD_SEARCH_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   };

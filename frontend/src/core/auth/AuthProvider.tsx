@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import React, {
+import {
   createContext,
   useContext,
   useState,
@@ -154,29 +154,6 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     // Redirect to home page
     router.push("/");
   }, [staticMode, router]);
-
-  /**
-   * Handle visibility change - refresh user when tab becomes visible again.
-   * Throttled to at most once per 60 s to avoid spamming the backend on rapid tab switches.
-   */
-  const lastCheckRef = React.useRef(0);
-
-  useEffect(() => {
-    if (staticMode) return;
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible" || user === null) return;
-      const now = Date.now();
-      if (now - lastCheckRef.current < 60_000) return;
-      lastCheckRef.current = now;
-      void refreshUser();
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [staticMode, user, refreshUser]);
 
   const value: AuthContextType = {
     user,

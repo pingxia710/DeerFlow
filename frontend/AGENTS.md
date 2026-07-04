@@ -96,6 +96,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
+- Thread list and auth refreshes should also avoid interval or focus polling;
+  prefer explicit user actions, route changes, or recovery probes.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

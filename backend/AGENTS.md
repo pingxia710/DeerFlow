@@ -300,7 +300,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
+| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json); API-managed stdio servers are command-allowlisted, and `@modelcontextprotocol/server-filesystem` cannot expose dangerous host paths such as `/`, home roots, credential dirs, or Docker sockets |
 | **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; admin-only `PUT /{name}`, `POST /install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |

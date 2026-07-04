@@ -423,6 +423,59 @@ def test_validate_mcp_update_allows_default_npx_stdio_command(monkeypatch):
     _validate_mcp_update_request(request)
 
 
+def test_validate_mcp_update_rejects_filesystem_server_root_path(monkeypatch):
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "fs": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/"],
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "unsafe filesystem path" in exc_info.value.detail
+
+
+def test_validate_mcp_update_rejects_filesystem_server_docker_socket(monkeypatch):
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "fs": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/var/run/docker.sock"],
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "Docker socket" in exc_info.value.detail
+
+
+def test_validate_mcp_update_allows_filesystem_server_narrow_project_path(monkeypatch):
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "fs": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem@latest", "/home/user/project"],
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
 def test_validate_mcp_update_rejects_shell_stdio_command(monkeypatch):
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(

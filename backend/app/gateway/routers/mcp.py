@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.sandbox_config import dangerous_host_mount_reason
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration.
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
 _DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST = frozenset({"npx", "uvx"})
 _SHELL_METACHARS = frozenset(";|&`$<>\n\r")
+_FILESYSTEM_MCP_PACKAGE = "@modelcontextprotocol/server-filesystem"
 
 
 class McpOAuthConfigResponse(BaseModel):
@@ -112,6 +114,26 @@ def _stdio_command_name(command: str | None, *, server_name: str) -> str:
     return stripped
 
 
+def _is_filesystem_mcp_package(arg: str) -> bool:
+    return arg == _FILESYSTEM_MCP_PACKAGE or arg.startswith(f"{_FILESYSTEM_MCP_PACKAGE}@")
+
+
+def _validate_filesystem_mcp_args(server_name: str, args: list[str]) -> None:
+    package_index = next((index for index, arg in enumerate(args) if _is_filesystem_mcp_package(arg)), None)
+    if package_index is None:
+        return
+
+    for raw_path in args[package_index + 1 :]:
+        if raw_path.startswith("-"):
+            continue
+        reason = dangerous_host_mount_reason(raw_path)
+        if reason:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(f"MCP server '{server_name}' exposes unsafe filesystem path {raw_path!r} ({reason}). Use a narrower project directory."),
+            )
+
+
 def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
     """Validate API-submitted MCP config before it is persisted.
 
@@ -132,6 +154,7 @@ def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
             )
+        _validate_filesystem_mcp_args(name, server.args)
 
 
 def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigResponse:

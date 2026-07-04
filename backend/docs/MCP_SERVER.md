@@ -27,6 +27,12 @@ paths such as `/mnt/user-data/...` to paths accepted by
 `@modelcontextprotocol/server-filesystem`. Use DeerFlow's built-in file tools
 for DeerFlow workspace files.
 
+When MCP servers are managed through the Gateway API, DeerFlow rejects
+`@modelcontextprotocol/server-filesystem` directory arguments that expose
+clearly dangerous host paths such as `/`, home directory roots, credential
+directories, or Docker socket paths. Use a narrower project directory when a
+filesystem MCP server is truly needed.
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.

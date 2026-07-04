@@ -76,9 +76,10 @@ async def test_sync_checkpoint_title_fills_empty_display_name():
         update_display_name=AsyncMock(),
     )
 
-    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1")
+    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1", user_id="owner-1")
 
-    thread_store.update_display_name.assert_awaited_once_with("thread-1", "Auto Title")
+    thread_store.get.assert_awaited_once_with("thread-1", user_id="owner-1")
+    thread_store.update_display_name.assert_awaited_once_with("thread-1", "Auto Title", user_id="owner-1")
     checkpointer.aput.assert_not_awaited()
 
 
@@ -98,8 +99,9 @@ async def test_sync_checkpoint_title_does_not_overwrite_existing_display_name():
         update_display_name=AsyncMock(),
     )
 
-    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1")
+    await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1", user_id="owner-1")
 
+    thread_store.get.assert_awaited_once_with("thread-1", user_id="owner-1")
     thread_store.update_display_name.assert_not_awaited()
     checkpointer.aput.assert_awaited_once()
     written_checkpoint = checkpointer.aput.await_args.args[1]
@@ -145,6 +147,37 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_updates_thread_meta_with_run_owner():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", user_id="owner-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(update_status=AsyncMock())
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, thread_store=thread_store),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    thread_store.update_status.assert_awaited_once_with("thread-1", "idle", user_id="owner-1")
 
 
 @pytest.mark.anyio

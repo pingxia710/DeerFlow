@@ -437,7 +437,7 @@ async def run_agent(
         # Sync title from checkpoint to threads_meta.display_name
         if checkpointer is not None and thread_store is not None:
             try:
-                await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id)
+                await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id, user_id=record.user_id)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
@@ -445,7 +445,7 @@ async def run_agent(
         if thread_store is not None:
             try:
                 final_status = "idle" if record.status == RunStatus.success else run_status_value(record.status) or RunStatus.error.value
-                await thread_store.update_status(thread_id, final_status)
+                await thread_store.update_status(thread_id, final_status, user_id=record.user_id)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
@@ -467,7 +467,7 @@ async def _flush_journal_before_terminal_status(journal: Any | None, run_id: str
         logger.warning("Failed to flush journal before terminal status for run %s", run_id, exc_info=True)
 
 
-async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str) -> None:
+async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:
     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
     if ckpt_tuple is None:
@@ -477,7 +477,7 @@ async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thr
     title = channel_values.get("title")
     if not title:
         return
-    record = await thread_store.get(thread_id)
+    record = await thread_store.get(thread_id, user_id=user_id)
     display_name = record.get("display_name") if record else None
     if display_name:
         if display_name != title:
@@ -487,7 +487,7 @@ async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thr
             metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
             await checkpointer.aput(ckpt_config, checkpoint, metadata, {})
         return
-    await thread_store.update_display_name(thread_id, title)
+    await thread_store.update_display_name(thread_id, title, user_id=user_id)
 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:

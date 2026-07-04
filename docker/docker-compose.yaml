@@ -105,6 +105,7 @@ services:
       # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
+      - ENVIRONMENT=production
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow

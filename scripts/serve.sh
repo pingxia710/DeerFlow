@@ -488,12 +488,14 @@ _resolve_frontend_port
 # Frontend command. Next.js honors PORT for both `next dev` and `next start`.
 if $DEV_MODE; then
     FRONTEND_CMD="env PORT=$FRONTEND_PORT pnpm run dev"
+    GATEWAY_ENVIRONMENT="development"
 else
     if ! PYTHON_BIN="$(_pick_python)"; then
         echo "Python is required to generate BETTER_AUTH_SECRET."
         exit 1
     fi
     FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    GATEWAY_ENVIRONMENT="production"
 fi
 
 # ── Config check ─────────────────────────────────────────────────────────────
@@ -611,7 +613,7 @@ render_nginx_config
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host '$GATEWAY_HOST' --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && ENVIRONMENT='$GATEWAY_ENVIRONMENT' PYTHONPATH=. uv run uvicorn app.gateway.app:app --host '$GATEWAY_HOST' --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     "$GATEWAY_PORT" 30
 
 # 2. Frontend

@@ -19,6 +19,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose.yaml"
+DEV_COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose-dev.yaml"
 
 
 def _gateway_command() -> str:
@@ -29,6 +30,11 @@ def _gateway_command() -> str:
     if isinstance(command, list):
         command = " ".join(str(part) for part in command)
     return command
+
+
+def _gateway_environment(path: Path) -> list[str]:
+    compose = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return compose["services"]["gateway"]["environment"]
 
 
 def test_gateway_defaults_to_single_worker():
@@ -43,3 +49,11 @@ def test_gateway_worker_count_remains_overridable():
     """The worker count must stay configurable, not hard-coded to 1."""
     command = _gateway_command()
     assert "${GATEWAY_WORKERS:-1}" in command, f"worker count must use ${{GATEWAY_WORKERS:-1}} so operators can override it; got: {command}"
+
+
+def test_production_compose_marks_gateway_as_production():
+    assert "ENVIRONMENT=production" in _gateway_environment(COMPOSE_PATH)
+
+
+def test_dev_compose_marks_gateway_as_development():
+    assert "NODE_ENV=development" in _gateway_environment(DEV_COMPOSE_PATH)

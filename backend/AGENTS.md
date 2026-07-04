@@ -345,6 +345,7 @@ are explicitly reconciled.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 - Late SSE reconnects to a terminal run must return an immediate `end` event so clients fetch final history instead of subscribing to an already-cleaned stream buffer.
+- Gateway runtime state is process-local. Any non-explicit-dev/local/test startup with `GATEWAY_WORKERS`, `WEB_CONCURRENCY`, or `UVICORN_WORKERS` greater than `1` must fail fast until a shared run manager/stream bridge exists.
 - Root `make dev` / `scripts/serve.sh --dev` should keep Gateway stable (no backend hot-reload) so command-room/subagent runs are not cancelled when they edit backend files. Gateway hot-reload is opt-in via `--gateway-reload` / backend `make dev-reload` and must keep a bounded graceful shutdown timeout.
 - Thread-scoped run creation accepts `checkpoint` / `checkpoint_id`; Gateway validates the checkpoint belongs to the request thread before writing `checkpoint_id` / `checkpoint_ns` into `config.configurable` for LangGraph branching.
 

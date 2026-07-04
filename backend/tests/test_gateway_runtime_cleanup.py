@@ -65,7 +65,7 @@ def test_local_dev_gateway_defaults_to_stable_runtime():
     assert "GATEWAY_RELOAD=false" in serve_sh
     assert "if $DEV_MODE && $GATEWAY_RELOAD && ! $DAEMON_MODE; then" in serve_sh
     assert re.search(
-        r"^dev:\n\tPYTHONPATH=.*uv run uvicorn app\.gateway\.app:app --host 0\.0\.0\.0 --port 8001$",
+        r"^dev:\n\tPYTHONPATH=.*uv run uvicorn app\.gateway\.app:app --host \$\(GATEWAY_BIND_HOST\) --port 8001$",
         backend_makefile,
         re.M,
     )

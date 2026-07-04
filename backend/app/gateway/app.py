@@ -53,9 +53,6 @@ _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
 def _assert_single_gateway_worker() -> None:
     """Fail fast outside development when in-process runtime would be split."""
-    env = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("NODE_ENV") or "development").lower()
-    if env in {"dev", "development", "local", "test", "testing"}:
-        return
     raw = os.getenv("GATEWAY_WORKERS") or os.getenv("WEB_CONCURRENCY") or os.getenv("UVICORN_WORKERS")
     if not raw:
         return
@@ -64,7 +61,22 @@ def _assert_single_gateway_worker() -> None:
     except ValueError:
         logger.warning("Ignoring non-integer gateway worker setting: %r", raw)
         return
-    if workers > 1:
+    if workers <= 1:
+        return
+
+    env_values = {
+        value.strip().lower()
+        for value in (
+            os.getenv("DEER_FLOW_ENV"),
+            os.getenv("ENVIRONMENT"),
+            os.getenv("APP_ENV"),
+            os.getenv("NODE_ENV"),
+        )
+        if value and value.strip()
+    }
+    shared_env_values = {"prod", "production", "staging", "stage", "shared"}
+    dev_env_values = {"dev", "development", "local", "test", "testing"}
+    if not env_values or env_values & shared_env_values or not env_values <= dev_env_values:
         raise RuntimeError("DeerFlow gateway runtime is process-local; production/non-development deployments must run exactly one gateway worker until shared runtime is enabled.")
 
 

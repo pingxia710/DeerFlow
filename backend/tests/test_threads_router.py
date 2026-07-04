@@ -319,9 +319,71 @@ def test_create_and_search_threads_use_request_auth_user_without_contextvar() ->
 
     asyncio.run(_scenario())
 
-    assert thread_store.get_calls == [{"thread_id": "auth-thread", "user_id": str(user_id)}]
+    assert thread_store.get_calls == [
+        {"thread_id": "auth-thread", "user_id": str(user_id)},
+        {"thread_id": "auth-thread", "user_id": None},
+    ]
     assert thread_store.create_calls == [{"thread_id": "auth-thread", "assistant_id": None, "user_id": str(user_id), "metadata": {}}]
     assert thread_store.search_calls == [{"metadata": None, "status": None, "limit": 100, "offset": 0, "user_id": str(user_id)}]
+
+
+def test_create_thread_rejects_thread_id_owned_by_another_user() -> None:
+    import asyncio
+
+    from app.gateway.authz import AuthContext, Permissions
+
+    class RecordingThreadStore:
+        def __init__(self) -> None:
+            self.get_calls = []
+            self.create = AsyncMock()
+            self.update_owner = AsyncMock()
+
+        async def get(self, thread_id, **kwargs):
+            self.get_calls.append({"thread_id": thread_id, **kwargs})
+            if kwargs.get("user_id") is None:
+                return {
+                    "thread_id": thread_id,
+                    "user_id": "other-user",
+                    "status": "idle",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "metadata": {},
+                }
+            return None
+
+    user_id = _HISTORY_USER_ID
+    thread_store = RecordingThreadStore()
+    checkpointer = SimpleNamespace(aput=AsyncMock())
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            user=_make_user(user_id),
+            auth=AuthContext(
+                user=_make_user(user_id),
+                permissions=[Permissions.THREADS_WRITE],
+            ),
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        with pytest.raises(HTTPException) as exc_info:
+            await threads.create_thread(
+                threads.ThreadCreateRequest(thread_id="shared-thread", metadata={}),
+                request=request,
+            )
+        return exc_info.value
+
+    exc = asyncio.run(_scenario())
+
+    assert exc.status_code == 409
+    assert thread_store.get_calls == [
+        {"thread_id": "shared-thread", "user_id": str(user_id)},
+        {"thread_id": "shared-thread", "user_id": None},
+    ]
+    thread_store.create.assert_not_awaited()
+    thread_store.update_owner.assert_not_awaited()
+    checkpointer.aput.assert_not_awaited()
 
 
 def test_create_thread_returns_iso_timestamps() -> None:

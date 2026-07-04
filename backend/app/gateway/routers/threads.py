@@ -283,13 +283,15 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
     Writes a thread_meta record (so the thread appears in /threads/search)
     and an empty checkpoint (so state endpoints work immediately).
-    Idempotent: returns the existing record when ``thread_id`` already exists.
+    Idempotent for the current owner: returns the existing record when
+    ``thread_id`` already exists for this user.
     """
     from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    thread_id = body.thread_id or str(uuid.uuid4())
+    requested_thread_id = body.thread_id
+    thread_id = requested_thread_id or str(uuid.uuid4())
     now = now_iso()
     storage_user_id = get_request_storage_user_id(request)
     trusted_owner_user_id = get_trusted_internal_owner_user_id(request)
@@ -299,12 +301,18 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
     # Idempotency: return existing record when already present
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
-    if existing_record is None and trusted_owner_user_id:
+    unscoped_record = None
+    if existing_record is None and (requested_thread_id or trusted_owner_user_id):
         unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != storage_user_id:
-                await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
-            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if existing_record is None and trusted_owner_user_id and unscoped_record is not None:
+        if unscoped_record.get("user_id") != storage_user_id:
+            await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
+        existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if existing_record is None and unscoped_record is not None:
+        if unscoped_record.get("user_id") == storage_user_id:
+            existing_record = unscoped_record
+        else:
+            raise HTTPException(status_code=409, detail="Thread ID is already in use")
     if existing_record is not None:
         return ThreadResponse(
             thread_id=thread_id,

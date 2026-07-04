@@ -333,6 +333,8 @@ are explicitly reconciled.
   `run_events` uses thread-scoped `seq` uniqueness. `user_id` is an ownership
   filter/stamp, not a duplicate-`thread_id` tenant key. Do not assume two users
   can own the same `thread_id` without an explicit migration design.
+- Browser/API thread creation is idempotent only for the current owner; a
+  requested `thread_id` already held by another owner returns HTTP 409.
 - Legacy NULL-owner thread rows are permissive for `check_access()`, but
   user-filtered metadata/event reads require an explicit owner match.
 - `JsonlRunEventStore` still uses the legacy unscoped

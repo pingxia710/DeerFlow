@@ -20,6 +20,7 @@ ACTIVE_CONTENT_MIME_TYPES = {
     "application/xhtml+xml",
     "image/svg+xml",
 }
+ARTIFACT_SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff"}
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
@@ -30,11 +31,15 @@ def _build_content_disposition(disposition_type: str, filename: str) -> str:
     return f"{disposition_type}; filename*=UTF-8''{quote(filename)}"
 
 
-def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
-    headers = {"Content-Disposition": _build_content_disposition("attachment", filename)}
+def _artifact_headers(extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(ARTIFACT_SECURITY_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     return headers
+
+
+def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    return _artifact_headers({"Content-Disposition": _build_content_disposition("attachment", filename), **(extra_headers or {})})
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -43,9 +48,13 @@ def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
         with open(path, "rb") as f:
             chunk = f.read(sample_size)
             # Text files shouldn't contain null bytes
-            return b"\x00" not in chunk
+            return _looks_like_text(chunk)
     except Exception:
         return False
+
+
+def _looks_like_text(content: bytes) -> bool:
+    return b"\x00" not in content
 
 
 def _read_skill_archive_member(zip_ref: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
@@ -197,7 +206,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         content, mime_type = await asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path)
 
         # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
-        cache_headers = {"Cache-Control": "private, max-age=300"}
+        cache_headers = _artifact_headers({"Cache-Control": "private, max-age=300"})
         download_name = Path(internal_path).name or actual_skill_path.stem
         if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
@@ -205,11 +214,15 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         if mime_type and mime_type.startswith("text/"):
             return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
 
-        # Default to plain text for unknown types that look like text
-        try:
-            return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
-        except UnicodeDecodeError:
-            return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
+        # Default to plain text for unknown types that look like text.
+        if _looks_like_text(content):
+            try:
+                return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
+            except UnicodeDecodeError:
+                pass
+
+        headers = cache_headers if mime_type else _build_attachment_headers(download_name, cache_headers)
+        return Response(content=content, media_type=mime_type or "application/octet-stream", headers=headers)
 
     actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path, user_id=storage_user_id)
 
@@ -226,6 +239,10 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
 
     if kind == "text":
-        return PlainTextResponse(content=payload, media_type=mime_type)
+        return PlainTextResponse(content=payload, media_type=mime_type, headers=_artifact_headers())
 
-    return Response(content=payload, media_type=mime_type, headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)})
+    if mime_type:
+        headers = _artifact_headers({"Content-Disposition": _build_content_disposition("inline", actual_path.name)})
+        return Response(content=payload, media_type=mime_type, headers=headers)
+
+    return Response(content=payload, media_type="application/octet-stream", headers=_build_attachment_headers(actual_path.name))

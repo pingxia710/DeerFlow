@@ -42,6 +42,7 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
 
     assert bytes(response.body).decode("utf-8") == text
     assert response.media_type == "text/plain"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_uses_trusted_internal_owner_header(tmp_path, monkeypatch) -> None:
@@ -85,6 +86,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
@@ -98,7 +100,39 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
     assert bytes(response.body) == content.encode("utf-8")
+
+
+def test_get_artifact_forces_download_for_unknown_binary(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "blob.unknown"
+    payload = b"\x00\x01\x02binary"
+    artifact_path.write_bytes(payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/blob.unknown", _make_request()))
+
+    assert bytes(response.body) == payload
+    assert response.media_type == "application/octet-stream"
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_get_artifact_forces_download_for_unknown_binary_in_skill_archive(tmp_path, monkeypatch) -> None:
+    payload = b"\x00\x01\x02binary"
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w") as zip_ref:
+        zip_ref.writestr("blob.unknown", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: skill_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/sample.skill/blob.unknown", _make_request()))
+
+    assert bytes(response.body) == payload
+    assert response.media_type == "application/octet-stream"
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeypatch) -> None:
@@ -116,6 +150,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.text == "hello"
     assert "content-disposition" not in response.headers
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path, monkeypatch) -> None:
@@ -134,6 +169,7 @@ def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path
     assert response.status_code == 200
     assert response.text == "hello"
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp_path) -> None:

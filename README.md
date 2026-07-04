@@ -794,7 +794,7 @@ blocking IO that may run on the backend event loop, prints a concise summary,
 and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
 The JSON includes compact review records with `priority`, `location`,
 `blocking_call`, `event_loop_exposure`, `reason`, and `code`.
-Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+Gateway artifact serving now sends `X-Content-Type-Options: nosniff`, forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments, and downloads unknown binary artifacts as attachments instead of inline rendering.
 
 ## License
 

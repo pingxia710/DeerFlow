@@ -98,6 +98,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
+- Background completion recovery may probe only known `thread_id` + `run_id`
+  pairs that the current frontend session started or resumed; do not add broad
+  thread-list polling to compensate for missing run lifecycle events.
 - Thread-list running indicators should treat backend `busy`/`pending`/`running`
   plus run-recovery statuses such as `cancelling`/`rolling_back` as active, but
   backend terminal statuses such as `idle`/`error`/`timeout`/`interrupted`

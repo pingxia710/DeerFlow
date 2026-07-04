@@ -103,6 +103,8 @@ const INACTIVE_THREAD_STATUSES = new Set([
   "rolled_back",
   "rollback_failed",
 ]);
+const BACKGROUND_RUN_PROBE_DELAY_MS = 5000;
+const backgroundRunProbeTimers = new Map<string, number>();
 
 type QueuedMessageReleaseState = {
   isLoading: boolean;
@@ -1279,6 +1281,136 @@ export function markThreadBusyInCaches(
   );
 }
 
+function setThreadStatusInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  status: string,
+) {
+  const nextStatus = status as AgentThread["status"];
+  queryClient.setQueriesData(
+    {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) =>
+      oldData?.map((t) =>
+        t.thread_id === threadId ? { ...t, status: nextStatus } : t,
+      ),
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+      mapInfiniteThreadsCache(oldData, (t) =>
+        t.thread_id === threadId ? { ...t, status: nextStatus } : t,
+      ),
+  );
+}
+
+export function applyBackgroundRunProbeResult(
+  queryClient: QueryClient,
+  threadId: string,
+  runId: string,
+  status: unknown,
+) {
+  if (!isTerminalRunStatus(status)) {
+    return false;
+  }
+  const threadStatus = status === "success" ? "idle" : String(status);
+  clearReconnectRun(threadId, runId);
+  if (status === "success") {
+    markThreadFinished(threadId);
+  } else {
+    clearThreadActivity(threadId);
+  }
+  setThreadStatusInCaches(queryClient, threadId, threadStatus);
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadRunsQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadTokenUsageQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadContextUsageQueryKey(threadId),
+  });
+  return true;
+}
+
+function backgroundRunProbeKey(threadId: string, runId: string) {
+  return `${threadId}:${runId}`;
+}
+
+export function stopBackgroundRunProbe(
+  threadId: string | null | undefined,
+  runId: string | null | undefined,
+) {
+  if (typeof window === "undefined" || !threadId || !runId) {
+    return;
+  }
+  const key = backgroundRunProbeKey(threadId, runId);
+  const timer = backgroundRunProbeTimers.get(key);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    backgroundRunProbeTimers.delete(key);
+  }
+}
+
+export function startBackgroundRunProbe({
+  queryClient,
+  threadId,
+  runId,
+  isMock,
+}: {
+  queryClient: QueryClient;
+  threadId: string;
+  runId: string;
+  isMock?: boolean;
+}) {
+  if (typeof window === "undefined" || isMock) {
+    return;
+  }
+  const key = backgroundRunProbeKey(threadId, runId);
+  if (backgroundRunProbeTimers.has(key)) {
+    return;
+  }
+
+  const timer = window.setTimeout(() => {
+    void (async () => {
+      try {
+        const run = await getAPIClient().runs.get(threadId, runId);
+        if (backgroundRunProbeTimers.get(key) !== timer) {
+          return;
+        }
+        backgroundRunProbeTimers.delete(key);
+        if (
+          applyBackgroundRunProbeResult(
+            queryClient,
+            threadId,
+            runId,
+            run.status,
+          )
+        ) {
+          return;
+        }
+      } catch {
+        if (backgroundRunProbeTimers.get(key) !== timer) {
+          return;
+        }
+        backgroundRunProbeTimers.delete(key);
+      }
+      startBackgroundRunProbe({ queryClient, threadId, runId });
+    })();
+  }, BACKGROUND_RUN_PROBE_DELAY_MS);
+
+  backgroundRunProbeTimers.set(key, timer);
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -1492,6 +1624,12 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       markThreadBusyInCaches(queryClient, meta.thread_id);
+      startBackgroundRunProbe({
+        queryClient,
+        threadId: meta.thread_id,
+        runId: meta.run_id,
+        isMock,
+      });
       void queryClient.invalidateQueries({
         queryKey: threadRunsQueryKey(meta.thread_id),
       });
@@ -1664,6 +1802,7 @@ export function useThreadStream({
       const streamRunId = run?.run_id ?? streamRunIdRef.current;
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
+        stopBackgroundRunProbe(streamThreadId, streamRunId);
       }
       if (streamThreadId) {
         clearThreadActivity(streamThreadId);
@@ -1694,6 +1833,7 @@ export function useThreadStream({
       const streamRunId = run?.run_id ?? streamRunIdRef.current;
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
+        stopBackgroundRunProbe(streamThreadId, streamRunId);
       }
       if (streamThreadId) {
         markThreadFinished(streamThreadId);

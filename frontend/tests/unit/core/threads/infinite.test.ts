@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 
 import {
+  applyBackgroundRunProbeResult,
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   getManualThreadTitleLock,
@@ -237,6 +238,68 @@ describe("markThreadBusyInCaches", () => {
     expect(getThreadActivitySnapshot().finished.has("activity-thread")).toBe(
       false,
     );
+  });
+});
+
+describe("applyBackgroundRunProbeResult", () => {
+  test("leaves active runs alone", () => {
+    const client = new QueryClient();
+    const threadId = "probe-active-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, "run-active", "running"),
+    ).toBe(false);
+
+    const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    expect(search?.[0]?.status).toBe("busy");
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+
+    clearThreadActivity(threadId);
+  });
+
+  test("marks successful background runs finished and restores idle cache status", () => {
+    const client = new QueryClient();
+    const threadId = "probe-success-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    client.setQueryData(
+      [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
+      makeInfiniteData([[makeThread(threadId)]]),
+    );
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, "run-success", "success"),
+    ).toBe(true);
+
+    const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    const infinite = client.getQueryData<InfiniteData<AgentThread[]>>([
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      {},
+    ]);
+    expect(search?.[0]?.status).toBe("idle");
+    expect(infinite?.pages[0]?.[0]?.status).toBe("idle");
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+
+    clearThreadActivity(threadId);
+  });
+
+  test("clears failed background runs and records terminal cache status", () => {
+    const client = new QueryClient();
+    const threadId = "probe-timeout-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, "run-timeout", "timeout"),
+    ).toBe(true);
+
+    const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    expect(search?.[0]?.status).toBe("timeout");
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
   });
 });
 

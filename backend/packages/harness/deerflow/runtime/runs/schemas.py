@@ -43,6 +43,11 @@ def is_active_status(status: Any) -> bool:
     return run_status_value(status) in ACTIVE_RUN_STATUS_VALUES
 
 
+def is_inflight_status(status: Any) -> bool:
+    value = run_status_value(status)
+    return value == RunStatus.pending.value or value in ACTIVE_RUN_STATUS_VALUES
+
+
 def is_terminal_status(status: Any) -> bool:
     return run_status_value(status) in TERMINAL_RUN_STATUS_VALUES
 

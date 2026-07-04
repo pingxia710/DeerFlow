@@ -32,7 +32,7 @@ from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wa
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
-from deerflow.runtime.runs.schemas import run_status_value
+from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
@@ -219,7 +219,7 @@ def _supports_user_id_keyword(callable_obj: Any) -> bool:
 
 
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
-    if record.status in (RunStatus.pending, RunStatus.running):
+    if is_inflight_status(record.status):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
     return f"Run {run_id} is not cancellable (status: {run_status_value(record.status)})"
 
@@ -787,7 +787,7 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     """Join an existing run's SSE stream."""
     run_mgr = get_run_manager(request)
     record = await resolve_thread_run(thread_id, run_id, request)
-    if record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+    if record.store_only and is_inflight_status(record.status):
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     bridge = get_stream_bridge(request)
@@ -827,7 +827,7 @@ async def stream_existing_run(
     """
     run_mgr = get_run_manager(request)
     record = await resolve_thread_run(thread_id, run_id, request)
-    if record.store_only and action is None and record.status in (RunStatus.pending, RunStatus.running):
+    if record.store_only and action is None and is_inflight_status(record.status):
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)

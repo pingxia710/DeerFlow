@@ -362,6 +362,7 @@ metadata.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - Runtime recovery reasons such as `boundary_stopped` and `worker_lost` are terminal statuses for store predicates and frontend recovery; store-only hydrated `RunRecord.status` may be a string, so response/serialization code should use `run_status_value()` instead of direct `.value`.
+- Inflight run checks should use `is_inflight_status()` so `pending`, `running`, `cancelling`, and `rolling_back` stay consistent across memory and store-only records.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 - Late SSE reconnects to a terminal run must return an immediate `end` event so clients fetch final history instead of subscribing to an already-cleaned stream buffer.
 - Gateway runtime state is process-local. Any non-explicit-dev/local/test startup with `GATEWAY_WORKERS`, `WEB_CONCURRENCY`, or `UVICORN_WORKERS` greater than `1` must fail fast until a shared run manager/stream bridge exists.

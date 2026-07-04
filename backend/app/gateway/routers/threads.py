@@ -27,7 +27,8 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime import RunStatus, serialize_channel_values_for_api
+from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.runtime.runs.schemas import is_inflight_status
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -234,7 +235,7 @@ async def _cleanup_thread_runtime_state(thread_id: str, request: Request, *, use
         return
 
     for run in runs:
-        if run.status not in (RunStatus.pending, RunStatus.running):
+        if not is_inflight_status(run.status):
             continue
         try:
             await run_manager.cancel(run.run_id)

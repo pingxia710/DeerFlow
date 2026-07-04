@@ -67,14 +67,14 @@ def _make_message(seq: int) -> dict:
     return {"seq": seq, "event_type": "ai_message", "category": "message", "content": f"msg-{seq}"}
 
 
-def _make_store_only_run_manager() -> RunManager:
+def _make_store_only_run_manager(status: str = "running") -> RunManager:
     store = MemoryRunStore()
     asyncio.run(
         store.put(
             "store-only-run",
             thread_id="thread-store",
             assistant_id="lead_agent",
-            status="running",
+            status=status,
             multitask_strategy="reject",
             metadata={},
             kwargs={},
@@ -531,6 +531,16 @@ def test_join_local_terminal_run_streams_end():
 def test_stream_store_only_run_returns_409():
     """stream endpoint (action=None) should return 409 for store-only runs."""
     app = _make_app(run_manager=_make_store_only_run_manager())
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-store/runs/store-only-run/stream")
+
+    assert response.status_code == 409
+    assert "not active on this worker" in response.json()["detail"]
+
+
+def test_stream_store_only_rolling_back_run_returns_409():
+    """Store-only cancel-in-progress runs are still active on another worker."""
+    app = _make_app(run_manager=_make_store_only_run_manager("rolling_back"))
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-store/runs/store-only-run/stream")
 

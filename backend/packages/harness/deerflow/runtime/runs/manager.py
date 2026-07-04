@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus, is_terminal_status, run_status_value
+from .schemas import DisconnectMode, RunStatus, is_inflight_status, is_terminal_status, run_status_value
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
@@ -561,7 +561,7 @@ class RunManager:
                 return False
             if record.status == RunStatus.interrupted:
                 return True  # idempotent — already cancelled on this worker
-            if record.status not in (RunStatus.pending, RunStatus.running):
+            if not is_inflight_status(record.status):
                 return False
             record.abort_action = action
             record.abort_event.set()
@@ -605,7 +605,7 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._thread_records_locked(thread_id) if is_inflight_status(r.status)]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -701,7 +701,7 @@ class RunManager:
 
             async with self._lock:
                 live_record = self._runs.get(record.run_id)
-                if live_record is not None and live_record.status in (RunStatus.pending, RunStatus.running):
+                if live_record is not None and is_inflight_status(live_record.status):
                     continue
 
             record.status = RunStatus.error
@@ -720,7 +720,7 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.status in (RunStatus.pending, RunStatus.running) for r in self._thread_records_locked(thread_id))
+            return any(is_inflight_status(r.status) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""
@@ -763,7 +763,7 @@ class RunManager:
         deadline = loop.time() + timeout
 
         async with self._lock:
-            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            inflight = [record for record in self._runs.values() if is_inflight_status(record.status) and record.task is not None and not record.task.done()]
             for record in inflight:
                 record.abort_action = "interrupt"
                 record.abort_event.set()
@@ -789,7 +789,7 @@ class RunManager:
                     # is not reported as "never retrieved", and keep its status.
                     task.exception()  # type: ignore[union-attr]  # done & not cancelled
                     continue
-                if record.status in (RunStatus.pending, RunStatus.running):
+                if is_inflight_status(record.status):
                     record.status = RunStatus.interrupted
                     record.updated_at = _now_iso()
                 to_persist.append(record)

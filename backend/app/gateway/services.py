@@ -31,12 +31,12 @@ from deerflow.runtime import (
     DisconnectMode,
     RunManager,
     RunRecord,
-    RunStatus,
     StreamBridge,
     UnsupportedStrategyError,
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.schemas import is_inflight_status
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -579,7 +579,7 @@ async def sse_consumer(
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
     """
-    if record.status not in (RunStatus.pending, RunStatus.running):
+    if not is_inflight_status(record.status):
         yield format_sse("end", None)
         return
 
@@ -609,7 +609,7 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        if record.status in (RunStatus.pending, RunStatus.running):
+        if is_inflight_status(record.status):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -657,6 +657,6 @@ async def wait_for_run_completion(
             # Heartbeats and regular events: keep waiting for END_SENTINEL.
         return completed
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        if not completed and is_inflight_status(record.status):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)

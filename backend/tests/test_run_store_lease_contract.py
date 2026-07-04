@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime.runs.schemas import is_active_status, is_terminal_status
+from deerflow.runtime.runs.schemas import is_active_status, is_inflight_status, is_terminal_status
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 STORE_KINDS = ("memory", "sql")
@@ -52,6 +52,11 @@ def test_status_predicates_cover_legacy_and_future_values() -> None:
     assert is_active_status("cancelling")
     assert is_active_status("rolling_back")
     assert not is_active_status("pending")
+    assert is_inflight_status("pending")
+    assert is_inflight_status("running")
+    assert is_inflight_status("cancelling")
+    assert is_inflight_status("rolling_back")
+    assert not is_inflight_status("success")
     assert is_terminal_status("success")
     assert is_terminal_status("interrupted")
     assert is_terminal_status("boundary_stopped")

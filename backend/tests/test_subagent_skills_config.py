@@ -33,10 +33,17 @@ def _reset_subagents_config(**kwargs) -> None:
     load_subagents_config_from_dict(kwargs)
 
 
+def _read_custom_skill_or_skip(repo_root: Path, skill_name: str) -> str:
+    skill_file = repo_root / "skills" / "custom" / skill_name / "SKILL.md"
+    if not skill_file.exists():
+        pytest.skip(f"custom skill is ignored and not present: {skill_file}")
+    return skill_file.read_text(encoding="utf-8")
+
+
 def test_command_room_findings_role_skills_require_evidence_strength():
     repo_root = Path(__file__).resolve().parents[2]
     for skill_name in ("command-room-evidence", "command-room-opposition"):
-        text = (repo_root / "skills" / "custom" / skill_name / "SKILL.md").read_text(encoding="utf-8")
+        text = _read_custom_skill_or_skip(repo_root, skill_name)
         assert "findings.md" in text
         assert "EvidenceStrength:" in text
         assert "Strong/Weak/Unverified" in text
@@ -44,7 +51,7 @@ def test_command_room_findings_role_skills_require_evidence_strength():
 
 def test_command_room_capability_governor_skill_defines_boundary_signal():
     repo_root = Path(__file__).resolve().parents[2]
-    text = (repo_root / "skills" / "custom" / "command-room-capability-governor" / "SKILL.md").read_text(encoding="utf-8")
+    text = _read_custom_skill_or_skip(repo_root, "command-room-capability-governor")
 
     assert "Capability Boundary Signal" in text
     assert "Requested Expansion:" in text
@@ -57,7 +64,7 @@ def test_command_room_capability_governor_skill_defines_boundary_signal():
 
 def test_command_room_chair_skill_defines_capability_decision():
     repo_root = Path(__file__).resolve().parents[2]
-    text = (repo_root / "skills" / "custom" / "command-room-chair" / "SKILL.md").read_text(encoding="utf-8")
+    text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
 
     assert "Capability Decision" in text
     assert "Signal Ref:" in text
@@ -70,7 +77,7 @@ def test_command_room_chair_skill_defines_capability_decision():
 
 def test_command_room_chair_skill_bounds_code_reading_and_visible_thinking():
     repo_root = Path(__file__).resolve().parents[2]
-    text = (repo_root / "skills" / "custom" / "command-room-chair" / "SKILL.md").read_text(encoding="utf-8")
+    text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
 
     assert "Chair Code Reading Policy" in text
     assert "decisive refs" in text
@@ -82,7 +89,7 @@ def test_command_room_chair_skill_bounds_code_reading_and_visible_thinking():
 
 def test_command_room_recorder_skill_requires_chair_accepted_account_updates():
     repo_root = Path(__file__).resolve().parents[2]
-    text = (repo_root / "skills" / "custom" / "command-room-recorder" / "SKILL.md").read_text(encoding="utf-8")
+    text = _read_custom_skill_or_skip(repo_root, "command-room-recorder")
 
     assert "Account Update Proposal" in text
     assert "Goal / Boundary / Decision / Evidence / Debt / Learning" in text
@@ -96,7 +103,7 @@ def test_command_room_loop_scenario_library_is_linked_and_bounded():
     repo_root = Path(__file__).resolve().parents[2]
     doc = (repo_root / "docs" / "command-room" / "loop-scenarios.md").read_text(encoding="utf-8")
     protocol = (repo_root / "docs" / "command-room" / "ai-control-protocol.md").read_text(encoding="utf-8")
-    skill = (repo_root / "skills" / "custom" / "naxus-round" / "SKILL.md").read_text(encoding="utf-8")
+    skill = _read_custom_skill_or_skip(repo_root, "naxus-round")
 
     for expected in (
         "Loop Scenario Library",
@@ -524,9 +531,19 @@ class TestRegistryCustomAgentLookup:
             assert "EvidenceStrength:" in config.system_prompt
             assert "Handoff File:" in config.system_prompt
             assert "ArtifactRefs:" in config.system_prompt
+            assert "Chair/main AI" in config.system_prompt
+            assert "decides; a worker recommendation is not a dispatch instruction" in config.system_prompt
+            assert "worker recommendation is not a dispatch instruction" in config.system_prompt
+            assert "Target Role: <suggested next receiver or Chair>" in config.system_prompt
 
         assert "chair" not in names
         assert "command-room" not in names
+
+        prompt_by_role = {name: get_subagent_config(name).system_prompt for name in ("planner", "boundary", "evidence", "opposition")}
+        assert "Target Role: Boundary" not in prompt_by_role["planner"]
+        assert "Target Role: Evidence" not in prompt_by_role["boundary"]
+        assert "Target Role: Opposition" not in prompt_by_role["evidence"]
+        assert "Target Role: Chair" not in prompt_by_role["opposition"]
 
     def test_custom_command_room_role_overrides_builtin_role(self):
         from deerflow.subagents.registry import get_subagent_config

@@ -27,7 +27,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.runtime import RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -222,6 +222,38 @@ def _derive_thread_status(checkpoint_tuple) -> str:
     return "idle"
 
 
+async def _cleanup_thread_runtime_state(thread_id: str, request: Request, *, user_id: str | None) -> None:
+    """Best-effort cleanup for in-process run and stream state owned by a thread."""
+    from app.gateway.deps import get_run_manager, get_stream_bridge
+
+    try:
+        run_manager = get_run_manager(request)
+        runs = await run_manager.list_by_thread(thread_id, user_id=user_id, limit=100000)
+    except Exception:
+        logger.debug("Could not list active runs for %s before delete (not critical)", sanitize_log_param(thread_id))
+        return
+
+    for run in runs:
+        if run.status not in (RunStatus.pending, RunStatus.running):
+            continue
+        try:
+            await run_manager.cancel(run.run_id)
+        except Exception:
+            logger.debug("Could not cancel run %s before thread delete (not critical)", sanitize_log_param(run.run_id))
+
+    try:
+        bridge = get_stream_bridge(request)
+    except Exception:
+        logger.debug("Could not access stream bridge for %s before delete (not critical)", sanitize_log_param(thread_id))
+        return
+
+    for run in runs:
+        try:
+            await bridge.cleanup(run.run_id)
+        except Exception:
+            logger.debug("Could not cleanup stream for run %s before thread delete (not critical)", sanitize_log_param(run.run_id))
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -238,8 +270,10 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     """
     from app.gateway.deps import get_run_event_store, get_run_store, get_thread_store
 
-    # Clean local filesystem
     storage_user_id = get_request_storage_user_id(request)
+    await _cleanup_thread_runtime_state(thread_id, request, user_id=storage_user_id)
+
+    # Clean local filesystem
     response = _delete_thread_data(thread_id, user_id=storage_user_id)
 
     # Remove checkpoints (best-effort)

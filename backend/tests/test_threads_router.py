@@ -1036,6 +1036,62 @@ async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_delete_thread_cancels_active_runs_and_cleans_streams(tmp_path):
+    from app.gateway.routers.threads import delete_thread_data
+
+    class AppState:
+        pass
+
+    class App:
+        pass
+
+    class Request:
+        pass
+
+    running = RunRecord(
+        run_id="run-active",
+        thread_id="thread-x",
+        assistant_id=None,
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id="user-a",
+    )
+    finished = RunRecord(
+        run_id="run-finished",
+        thread_id="thread-x",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        user_id="user-a",
+    )
+
+    request = Request()
+    request.app = App()
+    request.app.state = AppState()
+    request.app.state.run_manager = SimpleNamespace(
+        list_by_thread=AsyncMock(return_value=[running, finished]),
+        cancel=AsyncMock(return_value=True),
+    )
+    request.app.state.stream_bridge = SimpleNamespace(cleanup=AsyncMock())
+    request.app.state.run_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
+    request.app.state.run_event_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
+    request.app.state.thread_store = SimpleNamespace(delete=AsyncMock())
+    request.app.state.checkpointer = None
+    request.state = SimpleNamespace(user=SimpleNamespace(id="user-a"))
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        response = await delete_thread_data.__wrapped__("thread-x", request)
+
+    assert response.success is True
+    request.app.state.run_manager.list_by_thread.assert_awaited_once_with("thread-x", user_id="user-a", limit=100000)
+    request.app.state.run_manager.cancel.assert_awaited_once_with("run-active")
+    assert request.app.state.stream_bridge.cleanup.await_args_list == [
+        (("run-active",),),
+        (("run-finished",),),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_thread_without_runs_or_events_is_idempotent():
     from app.gateway.routers.threads import delete_thread_data
     from deerflow.runtime.events.store.memory import MemoryRunEventStore

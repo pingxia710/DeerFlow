@@ -6,6 +6,8 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+_VIRTUAL_ARTIFACT_PREFIX = "mnt/user-data/"
+
 
 def _content_dict(event: dict[str, Any]) -> dict[str, Any]:
     content = event.get("content")
@@ -20,23 +22,36 @@ def _content_dict(event: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _string_refs(value: Any) -> list[str]:
+def _is_virtual_artifact_path(value: str) -> bool:
+    stripped = value.lstrip("/")
+    return stripped == _VIRTUAL_ARTIFACT_PREFIX.rstrip("/") or stripped.startswith(_VIRTUAL_ARTIFACT_PREFIX)
+
+
+def _artifact_path_refs(value: Any) -> list[str]:
     if isinstance(value, str) and value:
-        return [value]
+        return [value] if _is_virtual_artifact_path(value) else []
+    if isinstance(value, dict):
+        refs: list[str] = []
+        for key in ("virtual_path", "path", "output_ref"):
+            refs.extend(_artifact_path_refs(value.get(key)))
+        return refs
     if isinstance(value, list):
-        return [item for item in value if isinstance(item, str) and item]
+        refs: list[str] = []
+        for item in value:
+            refs.extend(_artifact_path_refs(item))
+        return refs
     return []
 
 
 def _artifact_refs(content: dict[str, Any]) -> list[str]:
     refs: list[str] = []
-    refs.extend(_string_refs(content.get("artifact_refs")))
-    refs.extend(_string_refs(content.get("artifacts")))
+    refs.extend(_artifact_path_refs(content.get("artifact_refs")))
+    refs.extend(_artifact_path_refs(content.get("artifacts")))
 
     action_result = content.get("action_result")
     if isinstance(action_result, dict):
-        refs.extend(_string_refs(action_result.get("output_ref")))
-        refs.extend(_string_refs(action_result.get("evidence_refs")))
+        refs.extend(_artifact_path_refs(action_result.get("output_ref")))
+        refs.extend(_artifact_path_refs(action_result.get("evidence_refs")))
 
     return list(dict.fromkeys(refs))
 

@@ -3138,7 +3138,7 @@ class TestArtifactHardening:
             (outputs / "file.txt").write_text("content")
 
             with patch("deerflow.client.get_paths", return_value=paths):
-                content, _mime = client.get_artifact("t1", "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/641f142d-ba0c-4cdd-b2c1-897e1eea6653/user-data/outputs/file.txt")
+                content, _mime = client.get_artifact("t1", "/mnt/user-data/outputs/file.txt")
 
             assert content == b"content"
 

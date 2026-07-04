@@ -3,7 +3,7 @@
 These tests require a working config.yaml with valid API credentials.
 They are skipped in CI and must be run explicitly:
 
-    PYTHONPATH=. uv run pytest tests/test_client_live.py -v -s
+    DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. uv run pytest tests/test_client_live.py -v -s
 """
 
 import json
@@ -20,6 +20,8 @@ from deerflow.uploads.manager import PathTraversalError
 _skip_reason = None
 if os.environ.get("CI"):
     _skip_reason = "Live tests skipped in CI"
+elif os.environ.get("DEER_FLOW_RUN_LIVE_TESTS", "").lower() not in {"1", "true", "yes"}:
+    _skip_reason = "Live tests require DEER_FLOW_RUN_LIVE_TESTS=1"
 elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
     _skip_reason = "No config.yaml found — live tests require valid API credentials"
 

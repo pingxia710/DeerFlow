@@ -359,13 +359,14 @@ async def test_oidc_discover_accepts_issuer_with_trailing_slash_difference(monke
     await service.close()
 
 
-def _redirect_request(headers: dict, scheme: str = "http", netloc: str = "localhost:8001"):
+def _redirect_request(headers: dict, scheme: str = "http", netloc: str = "localhost:8001", client_host: str = "127.0.0.1"):
     from unittest.mock import MagicMock
 
     req = MagicMock()
     req.headers = headers
     req.url.scheme = scheme
     req.url.netloc = netloc
+    req.client.host = client_host
     return req
 
 
@@ -378,9 +379,10 @@ def test_oidc_redirect_uri_prefers_configured_value():
     assert _resolve_oidc_redirect_uri(req, "keycloak", cfg) == "https://app.example.com/api/v1/auth/callback/keycloak"
 
 
-def test_oidc_redirect_uri_fallback_uses_forwarded_headers_not_raw_host():
+def test_oidc_redirect_uri_fallback_uses_forwarded_headers_not_raw_host(monkeypatch):
     from app.gateway.routers.auth import _resolve_oidc_redirect_uri
 
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "127.0.0.1/32")
     cfg = _provider_config()
     # Raw Host is attacker-controlled; proxy-set X-Forwarded-* must win.
     req = _redirect_request(

@@ -18,6 +18,9 @@ from app.gateway.csrf_middleware import CSRFMiddleware
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
         "/api/v1/auth/setup-status",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
     ],
 )
 def test_public_paths(path: str):
@@ -27,9 +30,6 @@ def test_public_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
-        "/docs",
-        "/redoc",
-        "/openapi.json",
         "/api/models",
         "/api/mcp/config",
         "/api/mcp/cache/reset",

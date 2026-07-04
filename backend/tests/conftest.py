@@ -7,6 +7,7 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,49 @@ _executor_mock.MAX_CONCURRENT_SUBAGENTS = 6
 _executor_mock.get_background_task_result = MagicMock()
 
 sys.modules["deerflow.subagents.executor"] = _executor_mock
+
+
+def _live_tests_enabled() -> bool:
+    return os.getenv("DEER_FLOW_RUN_LIVE_TESTS", "").lower() in {"1", "true", "yes"}
+
+
+@pytest.fixture(scope="session")
+def _default_test_config_files(tmp_path_factory):
+    """Safe config files for tests that only need any valid AppConfig."""
+    config_dir = tmp_path_factory.mktemp("deerflow-test-config")
+    config_path = config_dir / "config.yaml"
+    extensions_path = config_dir / "extensions_config.json"
+    config_path.write_text(
+        "sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+        encoding="utf-8",
+    )
+    extensions_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    return config_path, extensions_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_config_files(monkeypatch, _default_test_config_files):
+    """Keep unit tests from reading a developer's real config.yaml."""
+    if _live_tests_enabled():
+        yield
+        return
+
+    config_path, extensions_path = _default_test_config_files
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    monkeypatch.setenv("DEER_FLOW_ENV", "test")
+
+    try:
+        from deerflow.config.app_config import reset_app_config
+    except ImportError:
+        yield
+        return
+
+    reset_app_config()
+    try:
+        yield
+    finally:
+        reset_app_config()
 
 
 @pytest.fixture()

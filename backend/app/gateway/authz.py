@@ -128,13 +128,43 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
+def _resolve_request_arg(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    request = kwargs.get("request")
+    if request is not None:
+        return request
+
+    signature = inspect.signature(func)
+    try:
+        bound = signature.bind_partial(*args, **kwargs)
+    except TypeError:
+        bound = None
+    if bound is not None:
+        request = bound.arguments.get("request")
+        if request is not None:
+            return request
+
+    if "request" not in signature.parameters:
+        return None
+    request = _make_test_request_stub()
+    kwargs["request"] = request
+    return request
+
+
 async def _authenticate(request: Request) -> AuthContext:
     """Authenticate request and return AuthContext.
 
     Delegates to deps.get_optional_user_from_request() for the JWT→User pipeline.
     Returns AuthContext with user=None for anonymous requests.
     """
+    from app.gateway.auth_disabled import get_auth_disabled_user, is_auth_disabled
     from app.gateway.deps import get_optional_user_from_request
+
+    state_user = getattr(request.state, "user", None)
+    if state_user is not None:
+        return AuthContext(user=state_user, permissions=_ALL_PERMISSIONS)
+
+    if is_auth_disabled():
+        return AuthContext(user=get_auth_disabled_user(), permissions=_ALL_PERMISSIONS)
 
     user = await get_optional_user_from_request(request)
     if user is None:
@@ -168,16 +198,9 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        request = kwargs.get("request")
+        request = _resolve_request_arg(func, args, kwargs)
         if request is None:
-            # Unit tests may call decorated handlers directly without a
-            # FastAPI Request object. Inject a minimal request stub when
-            # the wrapped function declares `request`.
-            if "request" in inspect.signature(func).parameters:
-                kwargs["request"] = _make_test_request_stub()
-            else:
-                raise ValueError("require_auth decorator requires 'request' parameter")
-            request = kwargs["request"]
+            raise ValueError("require_auth decorator requires 'request' parameter")
 
         if getattr(request, "_deerflow_test_bypass_auth", False):
             return await func(*args, **kwargs)
@@ -237,16 +260,9 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            request = kwargs.get("request")
+            request = _resolve_request_arg(func, args, kwargs)
             if request is None:
-                # Unit tests may call decorated route handlers directly without
-                # constructing a FastAPI Request object. Inject a minimal stub
-                # when the wrapped function declares `request`.
-                if "request" in inspect.signature(func).parameters:
-                    kwargs["request"] = _make_test_request_stub()
-                else:
-                    return await func(*args, **kwargs)
-                request = kwargs["request"]
+                return await func(*args, **kwargs)
 
             if getattr(request, "_deerflow_test_bypass_auth", False):
                 return await func(*args, **kwargs)

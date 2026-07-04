@@ -302,6 +302,27 @@ describe("applyBackgroundRunProbeResult", () => {
     expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
     expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
   });
+
+  test("clears lost background runs and records terminal cache status", () => {
+    const client = new QueryClient();
+    const threadId = "probe-worker-lost-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      applyBackgroundRunProbeResult(
+        client,
+        threadId,
+        "run-worker-lost",
+        "worker_lost",
+      ),
+    ).toBe(true);
+
+    const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    expect(search?.[0]?.status).toBe("worker_lost");
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+  });
 });
 
 describe("clearDeletedThreadClientState", () => {

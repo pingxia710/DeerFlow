@@ -24,6 +24,8 @@ TERMINAL_RUN_STATUS_VALUES = frozenset(
         "interrupted",
         "cancelled",
         "timed_out",
+        "boundary_stopped",
+        "worker_lost",
         "rolled_back",
         "rollback_failed",
     }

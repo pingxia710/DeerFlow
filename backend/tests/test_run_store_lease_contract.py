@@ -54,6 +54,8 @@ def test_status_predicates_cover_legacy_and_future_values() -> None:
     assert not is_active_status("pending")
     assert is_terminal_status("success")
     assert is_terminal_status("interrupted")
+    assert is_terminal_status("boundary_stopped")
+    assert is_terminal_status("worker_lost")
     assert is_terminal_status("rollback_failed")
 
 

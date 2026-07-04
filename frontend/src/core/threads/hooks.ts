@@ -100,6 +100,8 @@ const INACTIVE_THREAD_STATUSES = new Set([
   "interrupted",
   "cancelled",
   "timed_out",
+  "boundary_stopped",
+  "worker_lost",
   "rolled_back",
   "rollback_failed",
 ]);
@@ -887,6 +889,8 @@ const TERMINAL_RUN_REVALIDATION_STATUSES = new Set([
   "interrupted",
   "cancelled",
   "timed_out",
+  "boundary_stopped",
+  "worker_lost",
   "rolled_back",
   "rollback_failed",
 ]);

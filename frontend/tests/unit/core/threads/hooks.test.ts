@@ -221,6 +221,8 @@ test("shouldShowThreadRunningStatus trusts backend terminal status over stale lo
   expect(shouldShowThreadRunningStatus("idle", true)).toBe(false);
   expect(shouldShowThreadRunningStatus("error", true)).toBe(false);
   expect(shouldShowThreadRunningStatus("timeout", true)).toBe(false);
+  expect(shouldShowThreadRunningStatus("worker_lost", true)).toBe(false);
+  expect(shouldShowThreadRunningStatus("boundary_stopped", true)).toBe(false);
   expect(shouldShowThreadRunningStatus("rolled_back", true)).toBe(false);
   expect(shouldShowThreadRunningStatus(undefined, true)).toBe(true);
 });

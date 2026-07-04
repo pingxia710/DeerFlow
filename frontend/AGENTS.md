@@ -103,8 +103,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   thread-list polling to compensate for missing run lifecycle events.
 - Thread-list running indicators should treat backend `busy`/`pending`/`running`
   plus run-recovery statuses such as `cancelling`/`rolling_back` as active, but
-  backend terminal statuses such as `idle`/`error`/`timeout`/`interrupted`
-  override stale local running markers from disconnected streams.
+  backend terminal statuses such as `idle`/`error`/`timeout`/`interrupted`,
+  `boundary_stopped`, or `worker_lost` override stale local running markers
+  from disconnected streams.
 - Thread list and auth refreshes should also avoid interval or focus polling;
   prefer explicit user actions, route changes, or recovery probes.
 - Generic API fetch helpers should throw on 401 instead of performing global

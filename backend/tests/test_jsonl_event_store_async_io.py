@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -49,29 +48,47 @@ async def test_default_base_dir_uses_deer_flow_home_not_cwd(monkeypatch, tmp_pat
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_user_id_filter_uses_context_and_keeps_legacy_rows_visible(tmp_path):
-    from deerflow.runtime.user_context import reset_current_user, set_current_user
-
+async def test_user_id_filter_excludes_legacy_rows_from_user_scoped_queries_and_deletes(tmp_path):
     store = _make_store(tmp_path)
 
-    token = set_current_user(SimpleNamespace(id="user-a"))
-    try:
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="a")
-    finally:
-        reset_current_user(token)
-
-    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="b", user_id="user-b")
-    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="legacy")
+    await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="human_message",
+        category="message",
+        content="a",
+        user_id="user-a",
+    )
+    await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="human_message",
+        category="message",
+        content="b",
+        user_id="user-b",
+    )
+    await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="human_message",
+        category="message",
+        content="legacy",
+    )
 
     messages_a = await store.list_messages("t1", user_id="user-a")
-    assert [m["content"] for m in messages_a] == ["a", "legacy"]
+    assert [m["content"] for m in messages_a] == ["a"]
 
     messages_b = await store.list_messages("t1", user_id="user-b")
-    assert [m["content"] for m in messages_b] == ["b", "legacy"]
+    assert [m["content"] for m in messages_b] == ["b"]
+
+    events_a = await store.list_events("t1", "r1", user_id="user-a")
+    assert [event["content"] for event in events_a] == ["a"]
+
+    assert await store.count_messages("t1", user_id="user-a") == 1
 
     removed = await store.delete_by_run("t1", "r1", user_id="user-a")
-    assert removed == 2
-    assert [m["content"] for m in await store.list_messages("t1")] == ["b"]
+    assert removed == 1
+    assert [m["content"] for m in await store.list_messages("t1")] == ["b", "legacy"]
 
 
 # ---------------------------------------------------------------------------

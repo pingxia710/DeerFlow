@@ -83,9 +83,9 @@ class JsonlRunEventStore(RunEventStore):
         if user_id is None:
             return True
         record_user_id = record.get("user_id")
-        # Legacy JSONL rows were written before user_id existed. Keep them
-        # readable after owner-checked thread/run routes pass user_id through.
-        return record_user_id is None or str(record_user_id) == user_id
+        # User-scoped operations require an explicit owner match. Legacy
+        # rows without user_id stay visible only to internal unfiltered reads.
+        return record_user_id is not None and str(record_user_id) == user_id
 
     @classmethod
     def _filter_user(cls, events: list[dict], user_id: str | None) -> list[dict]:

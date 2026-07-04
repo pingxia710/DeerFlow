@@ -86,8 +86,23 @@ type ThreadActivitySnapshot = {
   finished: ReadonlySet<string>;
 };
 
-const ACTIVE_THREAD_STATUSES = new Set(["busy", "pending", "running"]);
-const INACTIVE_THREAD_STATUSES = new Set(["idle", "error", "interrupted"]);
+const ACTIVE_THREAD_STATUSES = new Set([
+  "busy",
+  "pending",
+  "running",
+  "cancelling",
+  "rolling_back",
+]);
+const INACTIVE_THREAD_STATUSES = new Set([
+  "idle",
+  "error",
+  "timeout",
+  "interrupted",
+  "cancelled",
+  "timed_out",
+  "rolled_back",
+  "rollback_failed",
+]);
 
 type QueuedMessageReleaseState = {
   isLoading: boolean;
@@ -836,11 +851,21 @@ export function findLatestUnloadedRunIndex(
   return -1;
 }
 
-const ACTIVE_RUN_REVALIDATION_STATUSES = new Set(["pending", "running"]);
+const ACTIVE_RUN_REVALIDATION_STATUSES = new Set([
+  "pending",
+  "running",
+  "cancelling",
+  "rolling_back",
+]);
 const TERMINAL_RUN_REVALIDATION_STATUSES = new Set([
   "success",
   "error",
+  "timeout",
   "interrupted",
+  "cancelled",
+  "timed_out",
+  "rolled_back",
+  "rollback_failed",
 ]);
 
 export function isActiveRunStatus(status: unknown) {

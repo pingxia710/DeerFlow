@@ -710,11 +710,13 @@ test("getTerminalTransitionRunIds selects active runs that just reached a termin
     { run_id: "R5", status: "success" },
     { run_id: "R4", status: "pending" },
     { run_id: "R3", status: "error" },
+    { run_id: "R2", status: "timeout" },
+    { run_id: "R1", status: "rolled_back" },
   ] as unknown as Run[];
 
   expect(
-    getTerminalTransitionRunIds(new Set(["R6", "R5", "R3"]), runs),
-  ).toEqual(["R5", "R3"]);
+    getTerminalTransitionRunIds(new Set(["R6", "R5", "R3", "R2", "R1"]), runs),
+  ).toEqual(["R5", "R3", "R2", "R1"]);
 });
 
 test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {

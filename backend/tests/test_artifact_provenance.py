@@ -78,6 +78,40 @@ def test_build_artifact_index_from_task_event_artifact_refs() -> None:
     }
 
 
+def test_build_artifact_index_dedupes_path_to_latest_observation() -> None:
+    events = [
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "event_type": "artifact.presented",
+            "seq": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "content": {"artifact_refs": ["/mnt/user-data/outputs/report.md"]},
+            "metadata": {"caller": "lead_agent", "source_tool": "present_files"},
+        },
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "event_type": "task_completed",
+            "seq": 2,
+            "created_at": "2026-01-01T00:01:00Z",
+            "content": {
+                "task_id": "task-1",
+                "artifact_refs": ["/mnt/user-data/outputs/report.md"],
+            },
+            "metadata": {"caller": "task_event"},
+        },
+    ]
+
+    index = build_artifact_index(events)
+
+    assert len(index) == 1
+    assert index[0]["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    assert index[0]["source_event_type"] == "task_completed"
+    assert index[0]["source_event_seq"] == 2
+    assert index[0]["task_id"] == "task-1"
+
+
 def test_run_journal_records_presented_artifacts_from_command() -> None:
     store = MemoryRunEventStore()
     journal = RunJournal("run-1", "thread-1", store, user_id="user-1", flush_threshold=100)

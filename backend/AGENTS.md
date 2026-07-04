@@ -339,7 +339,8 @@ through to the run store instead of aggregating every row with the same
 `thread_id`.
 Run artifact indexes are derived from owner-scoped runtime events and must mark
 missing files with `available: false` instead of silently omitting availability
-metadata.
+metadata. The run artifact index is current-state oriented: duplicate
+`virtual_path` observations collapse to the latest runtime event for that path.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`

@@ -58,7 +58,7 @@ def _artifact_refs(content: dict[str, Any]) -> list[str]:
 
 def build_artifact_index(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build a runtime-observed artifact index from persisted run events."""
-    entries: list[dict[str, Any]] = []
+    entries_by_path: dict[str, dict[str, Any]] = {}
     for event in events:
         content = _content_dict(event)
         refs = _artifact_refs(content)
@@ -75,23 +75,23 @@ def build_artifact_index(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
             source_tool = "task"
 
         for virtual_path in refs:
-            entries.append(
-                {
-                    "user_id": event.get("user_id"),
-                    "thread_id": event.get("thread_id"),
-                    "run_id": event.get("run_id"),
-                    "task_id": task_id if isinstance(task_id, str) and task_id else None,
-                    "virtual_path": virtual_path,
-                    "created_at": event.get("created_at"),
-                    "source_event_type": event.get("event_type"),
-                    "source_event_seq": event.get("seq"),
-                    "source_tool": source_tool,
-                    "source_node": metadata.get("source_node"),
-                    "provenance": {
-                        "kind": "runtime_observed",
-                        "store": "run_events",
-                        "caller": metadata.get("caller"),
-                    },
-                }
-            )
-    return entries
+            entry = {
+                "user_id": event.get("user_id"),
+                "thread_id": event.get("thread_id"),
+                "run_id": event.get("run_id"),
+                "task_id": task_id if isinstance(task_id, str) and task_id else None,
+                "virtual_path": virtual_path,
+                "created_at": event.get("created_at"),
+                "source_event_type": event.get("event_type"),
+                "source_event_seq": event.get("seq"),
+                "source_tool": source_tool,
+                "source_node": metadata.get("source_node"),
+                "provenance": {
+                    "kind": "runtime_observed",
+                    "store": "run_events",
+                    "caller": metadata.get("caller"),
+                },
+            }
+            entries_by_path.pop(virtual_path, None)
+            entries_by_path[virtual_path] = entry
+    return list(entries_by_path.values())

@@ -937,6 +937,57 @@ test("buildVisibleHistoryMessages orders refreshed run rows by seq", () => {
   ).toEqual(["first", "second", "third"]);
 });
 
+test("buildVisibleHistoryMessages groups repeated run-local seq by run order", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-new",
+      seq: 2,
+      content: { id: "new-ai", type: "ai", content: "new second" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:01:02Z",
+    },
+    {
+      run_id: "run-old",
+      seq: 2,
+      content: { id: "old-ai", type: "ai", content: "old second" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+    {
+      run_id: "run-new",
+      seq: 1,
+      content: {
+        id: "new-human",
+        type: "human",
+        content: "new first",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:01:01Z",
+    },
+    {
+      run_id: "run-old",
+      seq: 1,
+      content: {
+        id: "old-human",
+        type: "human",
+        content: "old first",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+  ];
+  const runs = [
+    { run_id: "run-new" },
+    { run_id: "run-old" },
+  ] as unknown as Run[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), [], runs).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["old first", "old second", "new first", "new second"]);
+});
+
 test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {
   const messages = buildVisibleHistoryMessages([runMessage(1)], new Set(), []);
 

@@ -736,17 +736,33 @@ export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
   appendedMessages: Message[],
+  runs: Run[] = [],
 ) {
-  const visibleRows = messageRows.filter(
-    (message) =>
-      !supersededRunIds.has(message.run_id) &&
-      isVisibleHistoryRunMessage(message),
-  );
-  visibleRows.sort((a, b) => {
-    if (typeof a.seq !== "number" || typeof b.seq !== "number") {
-      return 0;
+  const visibleRowsByRunId = new Map<string, RunMessage[]>();
+  for (const message of messageRows) {
+    if (
+      supersededRunIds.has(message.run_id) ||
+      !isVisibleHistoryRunMessage(message)
+    ) {
+      continue;
     }
-    return a.seq - b.seq;
+    const rows = visibleRowsByRunId.get(message.run_id) ?? [];
+    rows.push(message);
+    visibleRowsByRunId.set(message.run_id, rows);
+  }
+  const runIds = new Set([...runs].reverse().map((run) => run.run_id));
+  for (const message of messageRows) {
+    runIds.add(message.run_id);
+  }
+  const visibleRows = [...runIds].flatMap((runId) => {
+    const rows = visibleRowsByRunId.get(runId) ?? [];
+    // seq is run-local; never use it to order rows across different runs.
+    return [...rows].sort((a, b) => {
+      if (typeof a.seq !== "number" || typeof b.seq !== "number") {
+        return 0;
+      }
+      return a.seq - b.seq;
+    });
   });
   return dedupeMessagesByIdentity([
     ...visibleRows.map(historyMessageFromRunMessage),
@@ -2223,8 +2239,9 @@ export function useThreadHistory(
       messageRows,
       supersededRunIds,
       appendedMessages,
+      runs.data,
     );
-  }, [appendedMessages, messageRows, supersededRunIds]);
+  }, [appendedMessages, messageRows, runs.data, supersededRunIds]);
 
   const loadMessages = useCallback(async () => {
     if (!enabled) {

@@ -61,7 +61,7 @@ def test_thread_token_usage_returns_stable_shape():
             "middleware": 5,
         },
     }
-    run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1")
+    run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1", user_id=str(_TEST_USER_ID))
 
 
 def test_thread_token_usage_can_include_active_runs():
@@ -88,7 +88,7 @@ def test_thread_token_usage_can_include_active_runs():
     assert response.status_code == 200
     assert response.json()["total_tokens"] == 175
     assert response.json()["total_runs"] == 3
-    run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1", include_active=True)
+    run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1", include_active=True, user_id=str(_TEST_USER_ID))
 
 
 def test_thread_context_usage_returns_latest_snapshots():

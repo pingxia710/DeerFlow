@@ -400,6 +400,23 @@ async def test_memory_and_sql_stores_agree(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_memory_store_owner_filters_thread_token_usage():
+    store = MemoryRunStore()
+    await store.put("alice-run", thread_id=_THREAD, status="running", user_id="alice")
+    await store.update_run_completion("alice-run", status="success", total_tokens=100, lead_agent_tokens=100)
+    await store.put("bob-run", thread_id=_THREAD, status="running", user_id="bob")
+    await store.update_run_completion("bob-run", status="success", total_tokens=25, lead_agent_tokens=25)
+
+    alice = await store.aggregate_tokens_by_thread(_THREAD, user_id="alice")
+    unfiltered = await store.aggregate_tokens_by_thread(_THREAD, user_id=None)
+
+    assert alice["total_tokens"] == 100
+    assert alice["total_runs"] == 1
+    assert unfiltered["total_tokens"] == 125
+    assert unfiltered["total_runs"] == 2
+
+
+@pytest.mark.anyio
 async def test_include_active_picks_up_running_progress_snapshot(tmp_path):
     """``update_run_progress`` must persist ``token_usage_by_model`` so the
     ``include_active=true`` view of /token-usage reflects in-flight tokens."""

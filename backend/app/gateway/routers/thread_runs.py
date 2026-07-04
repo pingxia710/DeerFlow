@@ -1035,10 +1035,11 @@ async def thread_token_usage(
 ) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
+    user_id = get_request_storage_user_id(request)
     if include_active:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True, user_id=user_id)
     else:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, user_id=user_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, **agg)
 
 

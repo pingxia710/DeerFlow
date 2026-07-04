@@ -699,7 +699,13 @@ class RunRepository(RunStore):
                 row.updated_at = now_dt
                 return True
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(
+        self,
+        thread_id: str,
+        *,
+        include_active: bool = False,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Aggregate token usage for a thread.
 
         ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
@@ -727,6 +733,8 @@ class RunRepository(RunStore):
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
         ).where(_thread, _completed)
+        if user_id is not None:
+            stmt = stmt.where(RunRow.user_id == user_id)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()

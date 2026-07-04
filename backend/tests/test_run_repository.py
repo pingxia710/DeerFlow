@@ -391,6 +391,23 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_owner_filter(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("alice-run", thread_id="t1", status="running", user_id="alice")
+        await repo.update_run_completion("alice-run", status="success", total_tokens=100, lead_agent_tokens=100)
+        await repo.put("bob-run", thread_id="t1", status="running", user_id="bob")
+        await repo.update_run_completion("bob-run", status="success", total_tokens=25, lead_agent_tokens=25)
+
+        alice = await repo.aggregate_tokens_by_thread("t1", user_id="alice")
+        unfiltered = await repo.aggregate_tokens_by_thread("t1", user_id=None)
+
+        assert alice["total_tokens"] == 100
+        assert alice["total_runs"] == 1
+        assert unfiltered["total_tokens"] == 125
+        assert unfiltered["total_runs"] == 2
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_ordered_desc(self, tmp_path):
         """list_by_thread returns newest first."""
         repo = await _make_repo(tmp_path)

@@ -69,10 +69,13 @@ export function mergeSubtaskUpdate(
   const taskPatch = { ...task };
   delete taskPatch.threadId;
   delete taskPatch.notify;
-  // Completed is definitive. A failed status can be explicit, but older UI
-  // code also inferred it from the parent turn ending; allow later running
-  // signals to recover that stale local state. Explicit ToolMessage failures
-  // are applied again after the pending AI tool call is scanned.
+  // Completed and task-event terminal failures are definitive. Older UI code
+  // also inferred failed from the parent turn ending; allow later running
+  // signals to recover that stale local state.
+  const isTerminalFailure =
+    previousStatus === "failed" &&
+    (previous?.actionResultStatus !== undefined ||
+      previous?.terminalReason !== undefined);
   return {
     ...previous,
     ...taskPatch,
@@ -85,7 +88,8 @@ export function mergeSubtaskUpdate(
     (task.startedAt !== undefined || now !== undefined)
       ? { startedAt: task.startedAt ?? now }
       : {}),
-    ...(task.status === "in_progress" && previousStatus === "completed"
+    ...(task.status === "in_progress" &&
+    (previousStatus === "completed" || isTerminalFailure)
       ? { status: previousStatus }
       : {}),
   } as Subtask;

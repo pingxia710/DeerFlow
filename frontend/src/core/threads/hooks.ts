@@ -454,7 +454,7 @@ export function resolveVisibleTaskRunningThreadId({
 }
 
 const TASK_EVENT_CALLER = "task_event";
-const TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1";
+export const TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1";
 const TASK_EVENT_TYPES = new Set([
   "task_started",
   "task_running",
@@ -488,19 +488,19 @@ type PersistedTaskEvent = {
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
 
-function asTaskEvent(value: unknown): PersistedTaskEvent | null {
+export function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
   const event = value as PersistedTaskEvent;
   const eventType = taskEventType(event);
   const schemaVersion = stringValue(event.schema_version);
-  if (
-    !eventType ||
-    (!TASK_EVENT_TYPES.has(eventType) &&
-      schemaVersion !== TASK_EVENT_SCHEMA_VERSION &&
-      !eventType.startsWith("task_"))
-  ) {
+  if (!eventType || !TASK_EVENT_TYPES.has(eventType)) {
+    return null;
+  }
+  // Missing schema_version is accepted for legacy persisted task events, but
+  // unknown future schemas are rejected so replay cannot reinterpret payloads.
+  if (schemaVersion && schemaVersion !== TASK_EVENT_SCHEMA_VERSION) {
     return null;
   }
   if (
@@ -530,6 +530,24 @@ function actionResultString(event: PersistedTaskEvent, field: string) {
     return undefined;
   }
   return stringValue((event.action_result as Record<string, unknown>)[field]);
+}
+
+function isRedactedTaskEvent(event: PersistedTaskEvent) {
+  return event.redacted === true;
+}
+
+function applyActionResultMetadata(
+  event: PersistedTaskEvent,
+  update: SubtaskUpdate,
+) {
+  const status = actionResultString(event, "status");
+  const terminalReason = actionResultString(event, "terminal_reason");
+  if (status) {
+    update.actionResultStatus = status;
+  }
+  if (terminalReason) {
+    update.terminalReason = terminalReason;
+  }
 }
 
 function taskEventStartedAt(value?: string) {
@@ -608,20 +626,18 @@ export function applyTaskEventToSubtask(
   }
 
   if (eventType === "task_running" || eventStatus === "in_progress") {
-    const update: SubtaskUpdate = { ...base, status: "in_progress" };
-    if (typeof taskEvent.message === "object" && taskEvent.message !== null) {
-      update.latestMessage = taskEvent.message as AIMessage;
-    }
-    updateSubtask(update);
+    updateSubtask({ ...base, status: "in_progress" });
     return true;
   }
 
   if (eventType === "task_completed" || eventStatus === "completed") {
     const update: SubtaskUpdate = { ...base, status: "completed" };
-    const result =
-      stringValue(taskEvent.result_preview) ??
-      stringValue(taskEvent.result) ??
-      actionResultString(taskEvent, "summary");
+    applyActionResultMetadata(taskEvent, update);
+    const result = isRedactedTaskEvent(taskEvent)
+      ? stringValue(taskEvent.result_preview)
+      : (stringValue(taskEvent.result_preview) ??
+        stringValue(taskEvent.result) ??
+        actionResultString(taskEvent, "summary"));
     if (result) {
       update.result = result;
     }
@@ -630,14 +646,16 @@ export function applyTaskEventToSubtask(
   }
 
   const update: SubtaskUpdate = { ...base, status: "failed" };
-  const error =
-    stringValue(taskEvent.error_preview) ??
-    stringValue(taskEvent.error) ??
-    actionResultString(taskEvent, "error") ??
-    actionResultString(taskEvent, "terminal_reason") ??
-    (TASK_EVENT_TYPES.has(eventType)
-      ? undefined
-      : `Unknown task event terminal status: ${eventStatus ?? eventType}`);
+  applyActionResultMetadata(taskEvent, update);
+  const error = isRedactedTaskEvent(taskEvent)
+    ? stringValue(taskEvent.error_preview)
+    : (stringValue(taskEvent.error_preview) ??
+      stringValue(taskEvent.error) ??
+      actionResultString(taskEvent, "error") ??
+      actionResultString(taskEvent, "terminal_reason") ??
+      (TASK_EVENT_TYPES.has(eventType)
+        ? undefined
+        : `Unknown task event terminal status: ${eventStatus ?? eventType}`));
   if (error) {
     update.error = error;
   }

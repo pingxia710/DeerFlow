@@ -15,12 +15,33 @@ interface TaskEventContract {
   terminal_cases: TaskEventContractCase[];
 }
 
+const TASK_EVENT_FIXTURE_NAMES = [
+  "started",
+  "running_without_message",
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+] as const;
+
 const TASK_EVENT_CONTRACT: TaskEventContract = JSON.parse(
   readFileSync(
     resolve(__dirname, "../../../../../contracts/task_event_contract.json"),
     "utf-8",
   ),
 ) as TaskEventContract;
+
+function readTaskEventFixture(name: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(
+      resolve(
+        __dirname,
+        `../../../../../contracts/fixtures/task_events/${name}.json`,
+      ),
+      "utf-8",
+    ),
+  ) as Record<string, unknown>;
+}
 
 test("resolveAssistantId uses the custom agent name when present", async () => {
   const { resolveAssistantId } = await import("@/core/threads/hooks");
@@ -187,6 +208,71 @@ test("resolveVisibleTaskRunningThreadId prefers task event identity across threa
   ).toBe("thread-a");
 });
 
+test("applyTaskEventToSubtask accepts shared known task event fixtures", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+
+  for (const name of TASK_EVENT_FIXTURE_NAMES) {
+    const updates: unknown[] = [];
+    const event = readTaskEventFixture(name);
+
+    expect(applyTaskEventToSubtask(event, (task) => updates.push(task))).toBe(
+      true,
+    );
+    expect(updates).toHaveLength(1);
+  }
+});
+
+test("applyTaskEventToSubtask rejects shared unknown task event fixture", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(readTaskEventFixture("unknown"), (task) =>
+      updates.push(task),
+    ),
+  ).toBe(false);
+  expect(updates).toEqual([]);
+});
+
+test("applyTaskEventToSubtask preserves cancelled and timed_out fixture terminal metadata", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+
+  for (const [name, actionResultStatus, terminalReason] of [
+    ["cancelled", "cancelled", "user_cancelled"],
+    ["timed_out", "timed_out", "timed_out"],
+  ] as const) {
+    const updates: unknown[] = [];
+
+    expect(
+      applyTaskEventToSubtask(readTaskEventFixture(name), (task) =>
+        updates.push(task),
+      ),
+    ).toBe(true);
+    expect(updates[0]).toMatchObject({
+      status: "failed",
+      actionResultStatus,
+      terminalReason,
+    });
+  }
+});
+
+test("asTaskEvent accepts missing legacy schema but rejects unknown future schema", async () => {
+  const { TASK_EVENT_SCHEMA_VERSION, asTaskEvent } =
+    await import("@/core/threads/hooks");
+  const base = {
+    event_type: "task_completed",
+    task_id: "task-1",
+    thread_id: "thread-1",
+    run_id: "run-1",
+  };
+
+  expect(TASK_EVENT_SCHEMA_VERSION).toBe(TASK_EVENT_CONTRACT.schema_version);
+  expect(asTaskEvent(base)).toMatchObject(base);
+  expect(
+    asTaskEvent({ ...base, schema_version: "deerflow.task-event/vNext" }),
+  ).toBeNull();
+});
+
 test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   const updates: unknown[] = [];
@@ -213,6 +299,43 @@ test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
       notify: true,
       status: "completed",
       result: "safe preview",
+    },
+  ]);
+});
+
+test("applyTaskEventToSubtask does not expose raw redacted completion result", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-redacted-completed",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        status: "completed",
+        redacted: true,
+        result_preview: "safe preview",
+        result: "raw secret result",
+        action_result: {
+          status: "completed",
+          summary: "compact safe summary",
+        },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-redacted-completed",
+      threadId: "thread-1",
+      notify: true,
+      status: "completed",
+      result: "safe preview",
+      actionResultStatus: "completed",
     },
   ]);
 });
@@ -246,6 +369,7 @@ test("applyTaskEventToSubtask accepts canonical event_type and action_result sum
       notify: true,
       status: "completed",
       result: "from action_result",
+      actionResultStatus: "completed",
     },
   ]);
 });
@@ -281,7 +405,11 @@ for (const c of TASK_EVENT_CONTRACT.terminal_cases) {
       id: `task-${c.status}`,
       threadId: "thread-1",
       status: isCompleted ? "completed" : "failed",
+      actionResultStatus: c.action_result_status,
     });
+    if (c.terminal_reason) {
+      expect(updates[0]).toMatchObject({ terminalReason: c.terminal_reason });
+    }
     if (isCompleted) {
       expect(updates[0]).toMatchObject({ result: "contract summary" });
     } else {
@@ -292,7 +420,7 @@ for (const c of TASK_EVENT_CONTRACT.terminal_cases) {
   });
 }
 
-test("applyTaskEventToSubtask fails safe for unknown terminal task event enums", async () => {
+test("applyTaskEventToSubtask rejects unknown terminal task event enums", async () => {
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   const updates: unknown[] = [];
 
@@ -308,17 +436,9 @@ test("applyTaskEventToSubtask fails safe for unknown terminal task event enums",
       },
       (task) => updates.push(task),
     ),
-  ).toBe(true);
+  ).toBe(false);
 
-  expect(updates).toEqual([
-    {
-      id: "task-unknown",
-      threadId: "thread-1",
-      notify: true,
-      status: "failed",
-      error: "Unknown task event terminal status: renamed_terminal",
-    },
-  ]);
+  expect(updates).toEqual([]);
 });
 
 test("applyTaskEventToSubtask rejects unknown content shapes", async () => {
@@ -356,4 +476,221 @@ test("applyTaskEventToSubtask rejects task events without full run identity", as
   ).toBe(false);
 
   expect(updates).toEqual([]);
+});
+
+test("applyTaskEventToSubtask does not expose raw redacted fallbacks", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_failed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-redacted",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        status: "failed",
+        redacted: true,
+        error: "raw secret error",
+        action_result: {
+          status: "failed",
+          terminal_reason: "failed",
+          error: "raw action error",
+        },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-redacted",
+      threadId: "thread-1",
+      notify: true,
+      status: "failed",
+      actionResultStatus: "failed",
+      terminalReason: "failed",
+    },
+  ]);
+});
+
+test("applyTaskEventToSubtask ignores task_running message payload", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_running",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-running",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        status: "in_progress",
+        message: { content: "reserved raw payload must not be exposed" },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-running",
+      threadId: "thread-1",
+      notify: true,
+      status: "in_progress",
+    },
+  ]);
+});
+
+test("applyTaskEventRunMessages replays persisted task events with run seq dedupe", async () => {
+  const { applyTaskEventRunMessages } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+  const applied = new Set<string>();
+  const messages = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      created_at: "2024-01-01T00:00:00.000Z",
+      metadata: { caller: "task_event" },
+      content: {
+        event_type: "task_started",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        description: "start",
+      },
+    },
+    {
+      run_id: "run-1",
+      seq: 1,
+      created_at: "2024-01-01T00:00:01.000Z",
+      metadata: { caller: "task_event" },
+      content: {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        result_preview: "duplicate should not apply",
+      },
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      created_at: "2024-01-01T00:00:02.000Z",
+      metadata: { caller: "task_event" },
+      content: {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        result_preview: "safe done",
+      },
+    },
+  ];
+
+  applyTaskEventRunMessages(
+    messages as never,
+    (task) => updates.push(task),
+    "thread-1",
+    applied,
+  );
+
+  expect([...applied]).toEqual(["run-1:1", "run-1:2"]);
+  expect(updates).toEqual([
+    expect.objectContaining({
+      id: "task-1",
+      threadId: "thread-1",
+      status: "in_progress",
+      description: "start",
+      startedAt: Date.parse("2024-01-01T00:00:00.000Z"),
+    }),
+    expect.objectContaining({
+      id: "task-1",
+      threadId: "thread-1",
+      status: "completed",
+      result: "safe done",
+    }),
+  ]);
+});
+
+test("buildVisibleHistoryMessages excludes task_event run messages", async () => {
+  const { buildVisibleHistoryMessages, isTaskEventRunMessage } =
+    await import("@/core/threads/hooks");
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      created_at: "2024-01-01T00:00:00.000Z",
+      metadata: { caller: "task_event" },
+      content: {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+      },
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      created_at: "2024-01-01T00:00:01.000Z",
+      metadata: { caller: "lead_agent" },
+      content: { id: "msg-1", type: "ai", content: "visible" },
+    },
+  ];
+
+  expect(isTaskEventRunMessage(rows[0] as never)).toBe(true);
+  expect(buildVisibleHistoryMessages(rows as never, new Set(), [])).toEqual([
+    expect.objectContaining({ content: "visible" }),
+  ]);
+});
+
+test("mergeSubtaskUpdate does not regress terminal task events back to running", async () => {
+  const { mergeSubtaskUpdate } = await import("@/core/tasks/context");
+
+  for (const previous of [
+    {
+      id: "task-failed",
+      status: "failed" as const,
+      subagent_type: "test",
+      description: "test",
+      prompt: "test",
+      error: "failed",
+      actionResultStatus: "failed",
+      terminalReason: "failed",
+    },
+    {
+      id: "task-cancelled",
+      status: "failed" as const,
+      subagent_type: "test",
+      description: "test",
+      prompt: "test",
+      error: "cancelled",
+      actionResultStatus: "cancelled",
+      terminalReason: "user_cancelled",
+    },
+    {
+      id: "task-timed-out",
+      status: "failed" as const,
+      subagent_type: "test",
+      description: "test",
+      prompt: "test",
+      error: "timed out",
+      actionResultStatus: "timed_out",
+      terminalReason: "timed_out",
+    },
+  ]) {
+    expect(
+      mergeSubtaskUpdate(previous, {
+        id: previous.id,
+        status: "in_progress",
+        notify: true,
+      }),
+    ).toMatchObject({ status: "failed" });
+  }
 });

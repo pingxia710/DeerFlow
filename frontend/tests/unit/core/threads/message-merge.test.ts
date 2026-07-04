@@ -581,7 +581,6 @@ test("task event run messages are idempotent and scoped to the requested thread 
       task_id: "call-1",
       thread_id: "thread-1",
       run_id: "run-1",
-      message: { type: "ai", content: "working" },
     },
     metadata: { caller: "task_event" },
     created_at: "2026-05-22T00:00:00Z",
@@ -632,7 +631,6 @@ test("task event run messages are idempotent and scoped to the requested thread 
       threadId: "thread-1",
       notify: true,
       status: "in_progress",
-      latestMessage: { type: "ai", content: "working" },
     },
   ]);
 });

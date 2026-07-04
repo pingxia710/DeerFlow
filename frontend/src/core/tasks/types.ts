@@ -11,4 +11,6 @@ export interface Subtask {
   prompt: string;
   result?: string;
   error?: string;
+  actionResultStatus?: string;
+  terminalReason?: string;
 }

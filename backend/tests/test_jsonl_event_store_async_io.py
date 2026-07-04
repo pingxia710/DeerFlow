@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,53 @@ from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 def _make_store(base_dir: Path) -> JsonlRunEventStore:
     return JsonlRunEventStore(base_dir=base_dir)
+
+
+# ---------------------------------------------------------------------------
+# Runtime path + user scoping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_default_base_dir_uses_deer_flow_home_not_cwd(monkeypatch, tmp_path):
+    home = tmp_path / "runtime-home"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.chdir(cwd)
+
+    store = JsonlRunEventStore()
+    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+
+    assert (home / "threads" / "t1" / "runs" / "r1.jsonl").exists()
+    assert not (cwd / ".deer-flow" / "threads" / "t1" / "runs" / "r1.jsonl").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_user_id_filter_uses_context_and_keeps_legacy_rows_visible(tmp_path):
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    store = _make_store(tmp_path)
+
+    token = set_current_user(SimpleNamespace(id="user-a"))
+    try:
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="a")
+    finally:
+        reset_current_user(token)
+
+    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="b", user_id="user-b")
+    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="legacy")
+
+    messages_a = await store.list_messages("t1", user_id="user-a")
+    assert [m["content"] for m in messages_a] == ["a", "legacy"]
+
+    messages_b = await store.list_messages("t1", user_id="user-b")
+    assert [m["content"] for m in messages_b] == ["b", "legacy"]
+
+    removed = await store.delete_by_run("t1", "r1", user_id="user-a")
+    assert removed == 2
+    assert [m["content"] for m in await store.list_messages("t1")] == ["b"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 """JSONL file-backed RunEventStore implementation.
 
-Each run's events are stored in a single file:
-``.deer-flow/threads/{thread_id}/runs/{run_id}.jsonl``
+Each run's events are stored in a single file under DeerFlow's runtime
+home:
+``{base_dir}/threads/{thread_id}/runs/{run_id}.jsonl``
 
 All categories (message, trace, lifecycle) are in the same file.
 This backend is suitable for lightweight single-node deployments.
@@ -30,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.user_context import AUTO, get_current_user, resolve_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,11 @@ _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 class JsonlRunEventStore(RunEventStore):
     def __init__(self, base_dir: str | Path | None = None):
-        self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
+        if base_dir is None:
+            from deerflow.config.paths import get_paths
+
+            base_dir = get_paths().base_dir
+        self._base_dir = Path(base_dir)
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
         # Per-thread asyncio.Lock — serialises concurrent writes within one process.
         self._write_locks: dict[str, asyncio.Lock] = {}
@@ -60,6 +66,32 @@ class JsonlRunEventStore(RunEventStore):
     def _run_file(self, thread_id: str, run_id: str) -> Path:
         self._validate_id(run_id, "run_id")
         return self._thread_dir(thread_id) / f"{run_id}.jsonl"
+
+    @staticmethod
+    def _user_id_from_context() -> str | None:
+        user = get_current_user()
+        return str(user.id) if user is not None else None
+
+    @staticmethod
+    def _resolve_filter_user_id(user_id, *, method_name: str) -> str | None:
+        if user_id is AUTO:
+            return resolve_user_id(user_id, method_name=method_name)
+        return str(user_id) if user_id is not None else None
+
+    @staticmethod
+    def _matches_user(record: dict, user_id: str | None) -> bool:
+        if user_id is None:
+            return True
+        record_user_id = record.get("user_id")
+        # Legacy JSONL rows were written before user_id existed. Keep them
+        # readable after owner-checked thread/run routes pass user_id through.
+        return record_user_id is None or str(record_user_id) == user_id
+
+    @classmethod
+    def _filter_user(cls, events: list[dict], user_id: str | None) -> list[dict]:
+        if user_id is None:
+            return events
+        return [event for event in events if cls._matches_user(event, user_id)]
 
     def _next_seq(self, thread_id: str) -> int:
         self._seq_counters[thread_id] = self._seq_counters.get(thread_id, 0) + 1
@@ -125,21 +157,49 @@ class JsonlRunEventStore(RunEventStore):
         events.sort(key=lambda e: e.get("seq", 0))
         return events
 
+    def _rewrite_run_events(self, thread_id: str, run_id: str, events: list[dict]) -> None:
+        path = self._run_file(thread_id, run_id)
+        if not events:
+            if path.exists():
+                path.unlink()
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for event in events:
+                f.write(json.dumps(event, default=str, ensure_ascii=False) + "\n")
+
     def _delete_thread_files(self, thread_id: str) -> None:
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
                 f.unlink()
 
+    def _delete_thread_events_for_user(self, thread_id: str, user_id: str) -> int:
+        count = 0
+        thread_dir = self._thread_dir(thread_id)
+        if not thread_dir.exists():
+            return count
+        for f in thread_dir.glob("*.jsonl"):
+            events = self._read_run_events(thread_id, f.stem)
+            remaining = []
+            for event in events:
+                if self._matches_user(event, user_id):
+                    count += 1
+                else:
+                    remaining.append(event)
+            self._rewrite_run_events(thread_id, f.stem, remaining)
+        return count
+
     def _delete_run_file(self, thread_id: str, run_id: str) -> None:
         path = self._run_file(thread_id, run_id)
         if path.exists():
             path.unlink()
 
-    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
+    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None, user_id=None):
         async with self._get_write_lock(thread_id):
             await self._ensure_seq_loaded(thread_id)
             seq = self._next_seq(thread_id)
+            resolved_user_id = str(user_id) if user_id is not None else self._user_id_from_context()
             record = {
                 "thread_id": thread_id,
                 "run_id": run_id,
@@ -150,6 +210,8 @@ class JsonlRunEventStore(RunEventStore):
                 "seq": seq,
                 "created_at": created_at or datetime.now(UTC).isoformat(),
             }
+            if resolved_user_id is not None:
+                record["user_id"] = resolved_user_id
             await asyncio.to_thread(self._write_record, record)
             return record
 
@@ -162,8 +224,10 @@ class JsonlRunEventStore(RunEventStore):
             results.append(record)
         return results
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_messages")
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        all_events = self._filter_user(all_events, resolved_user_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
         if before_seq is not None:
@@ -175,14 +239,18 @@ class JsonlRunEventStore(RunEventStore):
         else:
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500):
+    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_events")
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        events = self._filter_user(events, resolved_user_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
         return events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_messages_by_run")
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        events = self._filter_user(events, resolved_user_id)
         filtered = [e for e in events if e.get("category") == "message"]
         if before_seq is not None:
             filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
@@ -193,15 +261,22 @@ class JsonlRunEventStore(RunEventStore):
         else:
             return filtered[-limit:] if len(filtered) > limit else filtered
 
-    async def count_messages(self, thread_id):
+    async def count_messages(self, thread_id, *, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.count_messages")
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        all_events = self._filter_user(all_events, resolved_user_id)
         return sum(1 for e in all_events if e.get("category") == "message")
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(self, thread_id, *, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.delete_by_thread")
         async with self._get_write_lock(thread_id):
             all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-            count = len(all_events)
-            await asyncio.to_thread(self._delete_thread_files, thread_id)
+            if resolved_user_id is None:
+                count = len(all_events)
+                await asyncio.to_thread(self._delete_thread_files, thread_id)
+            else:
+                count = sum(1 for event in all_events if self._matches_user(event, resolved_user_id))
+                await asyncio.to_thread(self._delete_thread_events_for_user, thread_id, resolved_user_id)
             self._seq_counters.pop(thread_id, None)
             # Pop the lock inside the held scope to minimise the window where a new caller
             # could obtain a fresh lock while a waiting coroutine still holds the old one.
@@ -210,9 +285,15 @@ class JsonlRunEventStore(RunEventStore):
             self._write_locks.pop(thread_id, None)
             return count
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id=None):
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.delete_by_run")
         async with self._get_write_lock(thread_id):
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-            count = len(events)
-            await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
+            if resolved_user_id is None:
+                count = len(events)
+                await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
+            else:
+                count = sum(1 for event in events if self._matches_user(event, resolved_user_id))
+                remaining = [event for event in events if not self._matches_user(event, resolved_user_id)]
+                await asyncio.to_thread(self._rewrite_run_events, thread_id, run_id, remaining)
             return count

@@ -91,6 +91,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - History run messages should honor backend `display.visible_in_chat` when
   present; only fall back to local `caller`/`name`/`hide_from_ui` checks for
   older rows without the display contract.
+- Task event/action_result parsing is pinned by
+  `contracts/task_event_contract.json`; do not depend on prose-only status text
+  or silently leave unknown structured terminal states in progress.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
 

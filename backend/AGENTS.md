@@ -50,7 +50,7 @@ deer-flow/
 │   │           ├── community/         # Community tools (search/fetch/scrape, image search, AIO sandbox)
 │   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
 │   │           ├── utils/             # Utilities (network, readability)
-│   │           └── client.py          # Embedded Python client (DeerFlowClient)
+│   │           └── client.py          # Embedded Python client (DeerFlowClient; skill management helpers are trusted/admin-side capabilities, not a bypass of Gateway permissions)
 │   ├── app/                   # Application layer (import: app.*)
 │   │   ├── gateway/           # FastAPI Gateway API
 │   │   │   ├── app.py         # FastAPI application
@@ -301,7 +301,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
-| **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
+| **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; admin-only `PUT /{name}`, `POST /install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
@@ -362,7 +362,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`; six is the maximum release, not a required number of subtasks); default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
-**Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`; task events must be emitted to the live stream and persisted through `RunJournal.record_task_event` so conversation switches can replay subtask state.
+**Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_cancelled`/`task_timed_out`; task event/action_result fields are a frontend-backend contract pinned in `contracts/task_event_contract.json`, must be emitted to the live stream, and must be persisted through `RunJournal.record_task_event` so conversation switches can replay subtask state.
 **Handoff audit**: `task()` appends compact records to `audit/subagent_handoffs.jsonl` under the thread directory when possible. Records keep prompt/result/error hashes, character counts, usage, status, and compact extracted fields; raw prompts, worker output, and errors are intentionally omitted.
 
 **Command-room audit**: `command-room` runs may append compact internal records to `audit/command_room_rounds.jsonl`. This is backend evidence for debugging and probes only; it must not drive visible chat UI or force user-facing response format.
@@ -419,7 +419,8 @@ Additional providers also live here (`brave`, `browserless`, `ddg_search`, `exa`
 - **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Slash activation**: `/skill-name task` loads that enabled skill's `SKILL.md` for the current model call only. The resolver rejects leading whitespace, missing separators, reserved channel commands (`/new`, `/help`, `/bootstrap`, `/status`, `/models`, `/memory`), disabled skills, and skills outside a custom agent's whitelist.
-- **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
+- **Gateway governance**: `skills/custom`, `extensions_config.json` skill enablement, and the skills prompt cache are global resources in the current storage model. Gateway install/edit/delete/rollback/history/raw custom content/enable-disable operations are admin-only; do not add route-level `user_id` tenancy without also tenant-scoping storage, config, cache, and activation.
+- **Installation**: Admin-only `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory.
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
@@ -663,7 +664,7 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 | Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
-**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
+**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent. DeerFlowClient skill management methods are trusted/admin-side capabilities for embedded callers; they do not mean ordinary Gateway users can bypass Gateway permissions. Gateway treats global skills as admin-managed resources: normal users may only perform the authenticated safe summary read, while install, raw/custom read, edit, delete, history, rollback, and enable/disable are admin-only.
 
 **Tests**: `tests/test_client.py` (77 unit tests including `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests, requires config.yaml)
 

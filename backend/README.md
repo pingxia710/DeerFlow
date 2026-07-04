@@ -114,8 +114,8 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
-| `GET/PUT /api/skills` | List and manage skills |
-| `POST /api/skills/install` | Install skill from `.skill` archive |
+| `GET /api/skills`, `GET /api/skills/{name}` | Authenticated safe summary/detail read of skills |
+| `PUT /api/skills/{name}`, `POST /api/skills/install`, `/api/skills/custom/*` | Global skill management is admin-only (install, raw/custom read, edit, delete, history, rollback, enable/disable). Global skills are admin-managed resources. |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |

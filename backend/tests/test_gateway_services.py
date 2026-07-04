@@ -1023,6 +1023,31 @@ def test_resolve_thread_run_denies_foreign_run_owner():
     assert asyncio.run(_scenario()) == 404
 
 
+def test_resolve_thread_run_allows_ownerless_legacy_run_fallback():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+    from app.gateway.services import resolve_thread_run
+    from deerflow.runtime import RunManager
+
+    async def _scenario():
+        run_manager = RunManager()
+        record = await run_manager.create("thread-legacy-ownerless", user_id=None)
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(run_manager=run_manager)),
+            state=SimpleNamespace(
+                user=SimpleNamespace(id="owner-a", system_role="user"),
+                auth_source=AUTH_SOURCE_SESSION,
+            ),
+        )
+        return await resolve_thread_run("thread-legacy-ownerless", record.run_id, request)
+
+    resolved = asyncio.run(_scenario())
+
+    assert resolved.user_id is None
+
+
 def test_resolve_thread_run_uses_internal_owner_header():
     import asyncio
     from types import SimpleNamespace

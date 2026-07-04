@@ -59,11 +59,13 @@ _CUSTOM_REPLAY_TYPES = [*_TASK_EVENT_REPLAY_TYPES, _RUN_TERMINAL_EVENT_TYPE]
 async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
     """Resolve a run through one thread/user boundary check before use."""
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id, user_id=None)
-    if record is None or record.thread_id != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     user_id = get_request_storage_user_id(request)
-    if user_id is not None and record.user_id is not None and str(record.user_id) != user_id:
+    record = await run_mgr.get(run_id, user_id=user_id)
+    if record is None:
+        legacy_record = await run_mgr.get(run_id, user_id=None)
+        if legacy_record is not None and legacy_record.user_id is None:
+            record = legacy_record
+    if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return record
 

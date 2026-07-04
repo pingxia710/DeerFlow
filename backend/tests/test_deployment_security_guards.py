@@ -86,7 +86,7 @@ async def test_stateless_wait_sanitizes_failed_run_error(monkeypatch):
     monkeypatch.setattr("app.gateway.routers.runs.get_stream_bridge", lambda request: object())
 
     class FakeRunManager:
-        async def get(self, run_id):
+        async def get(self, run_id, *, user_id=None):
             return None
 
     monkeypatch.setattr("app.gateway.routers.runs.get_run_manager", lambda request: FakeRunManager())

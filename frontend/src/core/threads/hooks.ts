@@ -1421,6 +1421,14 @@ export function applyBackgroundRunProbeResult(
     clearThreadActivity(threadId);
   }
   setThreadStatusInCaches(queryClient, threadId, threadStatus);
+  invalidateTerminalRunQueries(queryClient, threadId);
+  return true;
+}
+
+export function invalidateTerminalRunQueries(
+  queryClient: QueryClient,
+  threadId: string,
+) {
   void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
     queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -1434,7 +1442,6 @@ export function applyBackgroundRunProbeResult(
   void queryClient.invalidateQueries({
     queryKey: threadContextUsageQueryKey(threadId),
   });
-  return true;
 }
 
 function backgroundRunProbeKey(threadId: string, runId: string) {
@@ -1881,6 +1888,7 @@ export function useThreadStream({
 
       const runTerminalEvent = asRunTerminalEvent(event);
       if (runTerminalEvent) {
+        invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
         refreshHistoryRuns([runTerminalEvent.run_id]);
         return;
       }
@@ -1946,20 +1954,8 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-      if (streamThreadId && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: threadRunsQueryKey(streamThreadId),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(streamThreadId),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadContextUsageQueryKey(streamThreadId),
-        });
+      if (streamThreadId) {
+        invalidateTerminalRunQueries(queryClient, streamThreadId);
       }
     },
   });

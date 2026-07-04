@@ -10,14 +10,20 @@ import {
   getThreadActivitySnapshot,
   INFINITE_THREADS_PAGE_SIZE,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
+  invalidateTerminalRunQueries,
   mapInfiniteThreadsCache,
   markThreadBusyInCaches,
   markThreadFinished,
   clearThreadActivity,
   clearThreadFinishedActivity,
   setManualThreadTitleLock,
+  threadRunsQueryKey,
   upsertThreadInInfiniteCache,
 } from "@/core/threads/hooks";
+import {
+  threadContextUsageQueryKey,
+  threadTokenUsageQueryKey,
+} from "@/core/threads/token-usage";
 import type { AgentThread } from "@/core/threads/types";
 
 // Issue #3482: the sidebar and /workspace/chats list used to be capped at
@@ -322,6 +328,29 @@ describe("applyBackgroundRunProbeResult", () => {
     expect(search?.[0]?.status).toBe("worker_lost");
     expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
     expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+  });
+});
+
+describe("invalidateTerminalRunQueries", () => {
+  test("invalidates run-list and usage queries for the terminal run thread", () => {
+    const client = new QueryClient();
+    const threadId = "terminal-thread";
+    const keys = [
+      ["threads", "search"],
+      [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
+      threadRunsQueryKey(threadId),
+      threadTokenUsageQueryKey(threadId),
+      threadContextUsageQueryKey(threadId),
+    ];
+    for (const key of keys) {
+      client.setQueryData(key, "cached");
+    }
+
+    invalidateTerminalRunQueries(client, threadId);
+
+    expect(keys.map((key) => client.getQueryState(key)?.isInvalidated)).toEqual(
+      [true, true, true, true, true],
+    );
   });
 });
 

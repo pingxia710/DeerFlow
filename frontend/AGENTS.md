@@ -107,7 +107,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   the refreshed first page; do not append stale same-run rows that disappeared
   from the backend response.
 - SSE `run.terminal` custom events should trigger run-specific history refresh;
-  do not turn them into task cards or visible chat messages.
+  they should also invalidate thread run-list and usage queries so pending run
+  refreshes can resolve. Do not turn them into task cards or visible chat
+  messages.
 - Background completion recovery may probe only known `thread_id` + `run_id`
   pairs that the current frontend session started or resumed; do not add broad
   thread-list polling to compensate for missing run lifecycle events.

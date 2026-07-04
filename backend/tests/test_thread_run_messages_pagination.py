@@ -114,8 +114,76 @@ def test_returns_middleware_message_rows():
     assert data[0]["content"] == {"type": "ai", "content": "generated title"}
     assert data[0]["display"] == {
         "visible_in_chat": True,
-        "reason": "assistant_message",
+        "surface": "chat",
+        "reason": "middleware_message",
     }
+
+
+def test_list_run_messages_attaches_display_visibility_contract():
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.human.input",
+            "category": "message",
+            "content": {"type": "human", "content": "question"},
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 2,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "answer"},
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 3,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "generated title"},
+            "metadata": {"caller": "middleware:title"},
+        },
+        {
+            "seq": 4,
+            "run_id": "run-1",
+            "event_type": "task_running",
+            "category": "message",
+            "content": {"type": "task_running", "task_id": "call-1", "thread_id": "thread-1", "run_id": "run-1"},
+            "metadata": {"caller": "task_event"},
+        },
+        {
+            "seq": 5,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "hidden", "additional_kwargs": {"hide_from_ui": True}},
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 6,
+            "run_id": "run-1",
+            "event_type": "llm.human.input",
+            "category": "message",
+            "content": {"type": "human", "name": "summary", "content": "summary"},
+            "metadata": {"caller": "lead_agent"},
+        },
+    ]
+    app = _make_app(event_store=_make_event_store(rows))
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    displays = [row["display"] for row in response.json()["data"]]
+    assert displays == [
+        {"visible_in_chat": True, "surface": "chat", "reason": "human_message"},
+        {"visible_in_chat": True, "surface": "chat", "reason": "lead_ai_response"},
+        {"visible_in_chat": True, "surface": "chat", "reason": "middleware_message"},
+        {"visible_in_chat": False, "surface": "control", "reason": "task_event"},
+        {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"},
+        {"visible_in_chat": False, "surface": "control", "reason": "control_message"},
+    ]
 
 
 def test_has_more_true_when_extra_row_returned():
@@ -374,3 +442,53 @@ def test_list_thread_messages_injects_turn_duration():
 
     assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
     assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_thread_messages_attaches_display_visibility_contract():
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "answer"},
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 2,
+            "run_id": "run-1",
+            "event_type": "task_running",
+            "category": "message",
+            "content": {
+                "type": "task_running",
+                "task_id": "call-1",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+            },
+            "metadata": {"caller": "task_event"},
+        },
+    ]
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data[0]["display"] == {
+        "visible_in_chat": True,
+        "surface": "chat",
+        "reason": "lead_ai_response",
+    }
+    assert data[1]["display"] == {
+        "visible_in_chat": False,
+        "surface": "control",
+        "reason": "task_event",
+    }

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -30,6 +31,8 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
+HIDDEN_CONTROL_MESSAGE_NAMES = frozenset({"summary", "loop_warning", "todo_reminder", "todo_completion_reminder"})
+INTERNAL_CONTEXT_TAG_RE = re.compile(r"<(uploaded_files|slash_skill_activation)>[\s\S]*?</\1>")
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -230,7 +233,8 @@ def _message_additional_kwargs(message: Any) -> dict[str, Any]:
 def _is_hidden_or_control_message(message: Any) -> bool:
     message_type = _message_type(message)
     additional_kwargs = _message_additional_kwargs(message)
-    return message_type == "remove" or _message_name(message) == "summary" or additional_kwargs.get("hide_from_ui") is True
+    name = _message_name(message)
+    return message_type == "remove" or (name is not None and name in HIDDEN_CONTROL_MESSAGE_NAMES) or additional_kwargs.get("hide_from_ui") is True
 
 
 def _is_visible_human_message(message: Any) -> bool:
@@ -241,25 +245,43 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
+def _is_slash_skill_activation_only(message: Any) -> bool:
+    if _message_type(message) != "human":
+        return False
+    text = _message_text(message)
+    if "<slash_skill_activation>" not in text:
+        return False
+    public_text = INTERNAL_CONTEXT_TAG_RE.sub("", text)
+    public_text = re.sub(r"^--- BEGIN USER INPUT ---\n?", "", public_text)
+    public_text = re.sub(r"\n?--- END USER INPUT ---$", "", public_text).strip()
+    return public_text == ""
+
+
 def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     if metadata.get("caller") == "task_event":
-        return {"visible_in_chat": False, "reason": "task_event"}
+        return {"visible_in_chat": False, "surface": "control", "reason": "task_event"}
     additional_kwargs = _message_additional_kwargs(content)
     if additional_kwargs.get("hide_from_ui") is True:
-        return {"visible_in_chat": False, "reason": "hidden"}
-    if _message_type(content) == "remove" or _message_name(content) == "summary":
-        return {"visible_in_chat": False, "reason": "control"}
+        return {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"}
+    if _message_type(content) == "remove":
+        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
+    name = _message_name(content)
+    if name is not None and name in HIDDEN_CONTROL_MESSAGE_NAMES:
+        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
+    if _is_slash_skill_activation_only(content):
+        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
 
     message_type = _message_type(content)
+    caller = str(metadata.get("caller") or "")
     if message_type == "human":
-        reason = "user_message"
+        reason = "human_message"
     elif message_type == "ai":
-        reason = "assistant_message"
+        reason = "middleware_message" if caller.startswith("middleware:") else "lead_ai_response"
     elif message_type == "tool":
         reason = "tool_message"
     else:
         reason = "message"
-    return {"visible_in_chat": True, "reason": reason}
+    return {"visible_in_chat": True, "surface": "chat", "reason": reason}
 
 
 def attach_message_display(rows: list[dict]) -> list[dict]:

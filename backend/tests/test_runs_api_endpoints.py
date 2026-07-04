@@ -92,7 +92,8 @@ def test_run_messages_returns_display_contract():
     assert response.status_code == 200
     assert response.json()["data"][0]["display"] == {
         "visible_in_chat": True,
-        "reason": "assistant_message",
+        "surface": "chat",
+        "reason": "lead_ai_response",
     }
 
 

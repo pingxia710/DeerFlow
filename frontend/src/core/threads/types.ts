@@ -41,6 +41,7 @@ export interface RunMessage {
   };
   display?: {
     visible_in_chat: boolean;
+    surface?: "chat" | "control" | "audit" | "hidden";
     reason: string;
   };
   created_at: string;

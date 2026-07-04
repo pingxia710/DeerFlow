@@ -406,6 +406,11 @@ test("task event run messages update subtask state without entering visible hist
       result: "done",
     },
     metadata: { caller: "task_event" },
+    display: {
+      visible_in_chat: false,
+      surface: "control",
+      reason: "task_event",
+    },
     created_at: "2026-05-22T00:00:00Z",
   } as unknown as RunMessage;
   const visibleAiRow = {
@@ -442,7 +447,7 @@ test("task event run messages update subtask state without entering visible hist
   ).toEqual(["ai-1"]);
 });
 
-test("visible history run messages keep middleware chat but filter task events and hidden UI", () => {
+test("visible history run messages fall back to local rules for old rows without display", () => {
   const middlewareAiRow = {
     run_id: "run-1",
     seq: 1,
@@ -503,6 +508,47 @@ test("visible history run messages keep middleware chat but filter task events a
   ).toEqual(["ai-middleware-1", "human-middleware-1"]);
 });
 
+test("visible history run messages keep middleware rows marked visible by backend contract", () => {
+  const summarizeRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      id: "ai-middleware-1",
+      type: "ai",
+      content: "middleware summary",
+    } as Message,
+    metadata: { caller: "middleware:summarize" },
+    display: {
+      visible_in_chat: true,
+      surface: "chat",
+      reason: "middleware_message",
+    },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+  const titleRow = {
+    run_id: "run-1",
+    seq: 2,
+    content: {
+      id: "ai-middleware-2",
+      type: "ai",
+      content: "middleware title",
+    } as Message,
+    metadata: { caller: "middleware:title" },
+    display: {
+      visible_in_chat: true,
+      surface: "chat",
+      reason: "middleware_message",
+    },
+    created_at: "2026-05-22T00:00:01Z",
+  } as RunMessage;
+
+  expect(
+    buildVisibleHistoryMessages([summarizeRow, titleRow], new Set(), []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["ai-middleware-1", "ai-middleware-2"]);
+});
+
 test("visible history run messages honor backend display contract", () => {
   const visibleContentHiddenByContract = {
     run_id: "run-1",
@@ -513,7 +559,11 @@ test("visible history run messages honor backend display contract", () => {
       content: "normal content",
     } as Message,
     metadata: { caller: "lead_agent" },
-    display: { visible_in_chat: false, reason: "control" },
+    display: {
+      visible_in_chat: false,
+      surface: "control",
+      reason: "control_message",
+    },
     created_at: "2026-05-22T00:00:00Z",
   } as RunMessage;
 

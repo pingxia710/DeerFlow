@@ -114,15 +114,13 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    user_id = str(_HISTORY_USER_ID)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -132,6 +130,43 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
     assert not thread_dir.exists()
+
+
+def test_delete_thread_route_uses_trusted_internal_owner_bucket(tmp_path):
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    paths = Paths(tmp_path)
+    thread_id = "thread-route-internal"
+    owner_user_id = "owner-delete"
+
+    owner_dir = paths.thread_dir(thread_id, user_id=owner_user_id)
+    default_dir = paths.thread_dir(thread_id, user_id="default")
+    paths.sandbox_work_dir(thread_id, user_id=owner_user_id).mkdir(parents=True, exist_ok=True)
+    paths.sandbox_work_dir(thread_id, user_id="default").mkdir(parents=True, exist_ok=True)
+
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source="internal"),
+        app=SimpleNamespace(state=SimpleNamespace(thread_store=thread_store, checkpointer=None)),
+    )
+
+    async def _scenario():
+        await thread_store.create(thread_id, user_id=owner_user_id)
+        with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+            response = await threads.delete_thread_data(thread_id=thread_id, request=request)
+        deleted_owner_row = await thread_store.get(thread_id, user_id=owner_user_id)
+        return response, deleted_owner_row
+
+    response, deleted_owner_row = asyncio.run(_scenario())
+
+    assert response.success is True
+    assert not owner_dir.exists()
+    assert default_dir.exists()
+    assert deleted_owner_row is None
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
@@ -214,6 +249,81 @@ def test_strip_reserved_metadata_strips_all_reserved_keys():
 # records written by older Gateway versions.
 
 
+def test_create_and_search_threads_fail_closed_without_auth_middleware() -> None:
+    app = FastAPI()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store = MemoryThreadMetaStore(store)
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        create_response = client.post("/api/threads", json={"metadata": {}})
+        search_response = client.post("/api/threads/search", json={"metadata": {}})
+
+    assert create_response.status_code == 401
+    assert search_response.status_code == 401
+
+
+def test_create_and_search_threads_use_request_auth_user_without_contextvar() -> None:
+    import asyncio
+
+    from app.gateway.authz import AuthContext, Permissions
+
+    class RecordingThreadStore:
+        def __init__(self) -> None:
+            self.get_calls = []
+            self.create_calls = []
+            self.search_calls = []
+
+        async def get(self, thread_id, **kwargs):
+            self.get_calls.append({"thread_id": thread_id, **kwargs})
+            return None
+
+        async def create(self, thread_id, **kwargs):
+            self.create_calls.append({"thread_id": thread_id, **kwargs})
+            return {}
+
+        async def search(self, **kwargs):
+            self.search_calls.append(kwargs)
+            return []
+
+    class RecordingCheckpointer:
+        async def aput(self, *args, **kwargs):
+            return None
+
+    user_id = _HISTORY_USER_ID
+    thread_store = RecordingThreadStore()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="fallback-user"),
+            auth=AuthContext(
+                user=_make_user(user_id),
+                permissions=[Permissions.THREADS_WRITE, Permissions.THREADS_READ],
+            ),
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=RecordingCheckpointer(), thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="auth-thread", metadata={}),
+            request=request,
+        )
+        await threads.search_threads(
+            threads.ThreadSearchRequest(metadata={}),
+            request=request,
+        )
+
+    asyncio.run(_scenario())
+
+    assert thread_store.get_calls == [{"thread_id": "auth-thread", "user_id": str(user_id)}]
+    assert thread_store.create_calls == [{"thread_id": "auth-thread", "assistant_id": None, "user_id": str(user_id), "metadata": {}}]
+    assert thread_store.search_calls == [{"metadata": None, "status": None, "limit": 100, "offset": 0, "user_id": str(user_id)}]
+
+
 def test_create_thread_returns_iso_timestamps() -> None:
     app, _store, _checkpointer = _build_thread_app()
 
@@ -237,14 +347,14 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source="internal"),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
     async def _scenario():
         response = await threads.create_thread(
             threads.ThreadCreateRequest(thread_id="channel-thread", metadata={}),
-            request,
+            request=request,
         )
         owner_row = await thread_store.get("channel-thread", user_id="owner-1")
         internal_row = await thread_store.get("channel-thread", user_id="default")

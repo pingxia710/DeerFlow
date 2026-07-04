@@ -239,7 +239,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     from app.gateway.deps import get_thread_store
 
     # Clean local filesystem
-    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+    storage_user_id = get_request_storage_user_id(request)
+    response = _delete_thread_data(thread_id, user_id=storage_user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -254,7 +255,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
+        await thread_store.delete(thread_id, user_id=storage_user_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
@@ -262,6 +263,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
 
 
 @router.post("", response_model=ThreadResponse)
+@require_permission("threads", "write")
 async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
     """Create a new thread.
 
@@ -275,18 +277,19 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_store = get_thread_store(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = now_iso()
-    thread_owner_user_id = get_trusted_internal_owner_user_id(request)
-    thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
+    storage_user_id = get_request_storage_user_id(request)
+    trusted_owner_user_id = get_trusted_internal_owner_user_id(request)
+    thread_owner_kwargs = {"user_id": storage_user_id}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
-    if existing_record is None and thread_owner_user_id:
+    if existing_record is None and trusted_owner_user_id:
         unscoped_record = await thread_store.get(thread_id, user_id=None)
         if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
+            if unscoped_record.get("user_id") != storage_user_id:
+                await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
             existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is not None:
         return ThreadResponse(
@@ -336,6 +339,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
 
 @router.post("/search", response_model=list[ThreadResponse])
+@require_permission("threads", "read")
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads.
 
@@ -352,6 +356,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             status=body.status,
             limit=body.limit,
             offset=body.offset,
+            user_id=get_request_storage_user_id(request),
         )
     except InvalidMetadataFilterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

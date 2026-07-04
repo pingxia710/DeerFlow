@@ -18,7 +18,12 @@ def get_request_storage_user_id(request: Any | None) -> str:
         if owner_user_id:
             return owner_user_id
 
-        user = getattr(getattr(request, "state", None), "user", None)
+        state = getattr(request, "state", None)
+        user = getattr(getattr(state, "auth", None), "user", None) or getattr(
+            state,
+            "user",
+            None,
+        )
         user_id = getattr(user, "id", None)
         if isinstance(user_id, UUID):
             return str(user_id)

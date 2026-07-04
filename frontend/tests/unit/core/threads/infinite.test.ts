@@ -3,6 +3,7 @@ import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 
 import {
   applyBackgroundRunProbeResult,
+  clearDeletedThreadClientState,
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   getManualThreadTitleLock,
@@ -300,6 +301,41 @@ describe("applyBackgroundRunProbeResult", () => {
     expect(search?.[0]?.status).toBe("timeout");
     expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
     expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+  });
+});
+
+describe("clearDeletedThreadClientState", () => {
+  test("removes deleted thread activity and thread-scoped caches", () => {
+    const client = new QueryClient();
+    const threadId = "deleted-thread";
+    const otherThreadId = "other-thread";
+    markThreadBusyInCaches(client, threadId);
+    client.setQueryData(["thread", threadId, "runs"], ["stale-run"]);
+    client.setQueryData(["thread", otherThreadId, "runs"], ["other-run"]);
+    client.setQueryData(["thread", "metadata", threadId, false], {
+      thread_id: threadId,
+    });
+    client.setQueryData(["thread-token-usage", threadId], { total_tokens: 1 });
+    client.setQueryData(["thread-context-usage", threadId], {
+      latest: { estimated_tokens: 1 },
+    });
+
+    clearDeletedThreadClientState(client, threadId);
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(client.getQueryData(["thread", threadId, "runs"])).toBeUndefined();
+    expect(client.getQueryData(["thread", otherThreadId, "runs"])).toEqual([
+      "other-run",
+    ]);
+    expect(
+      client.getQueryData(["thread", "metadata", threadId, false]),
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(["thread-token-usage", threadId]),
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(["thread-context-usage", threadId]),
+    ).toBeUndefined();
   });
 });
 

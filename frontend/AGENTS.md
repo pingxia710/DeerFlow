@@ -112,6 +112,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Queued follow-up messages while a stream is active are thread-local UI state;
   discard them on chat-thread switches unless a real per-thread queue/draft
   store is implemented.
+- Deleting a chat thread must also clear thread-local client state such as
+  running/finished activity markers, run lists, metadata, token usage, and
+  context usage caches.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

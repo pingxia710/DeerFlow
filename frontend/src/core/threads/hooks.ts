@@ -2764,6 +2764,17 @@ export function filterInfiniteThreadsCache(
   };
 }
 
+export function clearDeletedThreadClientState(
+  queryClient: QueryClient,
+  threadId: string,
+) {
+  clearThreadActivity(threadId);
+  queryClient.removeQueries({ queryKey: threadRunsQueryKey(threadId) });
+  queryClient.removeQueries({ queryKey: ["thread", "metadata", threadId] });
+  queryClient.removeQueries({ queryKey: threadTokenUsageQueryKey(threadId) });
+  queryClient.removeQueries({ queryKey: threadContextUsageQueryKey(threadId) });
+}
+
 export function useInfiniteThreads(
   params: InfiniteThreadsParams = {
     sortBy: "updated_at",
@@ -2927,6 +2938,7 @@ export function useDeleteThread() {
       }
     },
     onSuccess(_, { threadId }) {
+      clearDeletedThreadClientState(queryClient, threadId);
       queryClient.setQueriesData(
         {
           queryKey: ["threads", "search"],

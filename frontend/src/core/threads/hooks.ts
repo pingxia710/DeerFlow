@@ -574,6 +574,7 @@ const TASK_EVENT_TYPES = new Set([
   "task_cancelled",
   "task_timed_out",
 ]);
+const RUN_TERMINAL_EVENT_TYPE = "run.terminal";
 
 type PersistedTaskEvent = {
   type?: unknown;
@@ -595,6 +596,15 @@ type PersistedTaskEvent = {
   result?: unknown;
   error?: unknown;
   action_result?: unknown;
+};
+
+type RunTerminalEvent = {
+  type: typeof RUN_TERMINAL_EVENT_TYPE;
+  event_type: typeof RUN_TERMINAL_EVENT_TYPE;
+  thread_id: string;
+  run_id: string;
+  status: string;
+  terminal_reason: string;
 };
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
@@ -630,6 +640,35 @@ function stringValue(value: unknown) {
 
 function taskEventType(event: PersistedTaskEvent | null | undefined) {
   return stringValue(event?.event_type) ?? stringValue(event?.type);
+}
+
+export function asRunTerminalEvent(value: unknown): RunTerminalEvent | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const event = value as Record<string, unknown>;
+  const eventType = stringValue(event.event_type) ?? stringValue(event.type);
+  const threadId = stringValue(event.thread_id);
+  const runId = stringValue(event.run_id);
+  const status = stringValue(event.status);
+  const terminalReason = stringValue(event.terminal_reason);
+  if (
+    eventType !== RUN_TERMINAL_EVENT_TYPE ||
+    !threadId ||
+    !runId ||
+    !status ||
+    !terminalReason
+  ) {
+    return null;
+  }
+  return {
+    type: RUN_TERMINAL_EVENT_TYPE,
+    event_type: RUN_TERMINAL_EVENT_TYPE,
+    thread_id: threadId,
+    run_id: runId,
+    status,
+    terminal_reason: terminalReason,
+  };
 }
 
 function actionResultString(event: PersistedTaskEvent, field: string) {
@@ -1809,6 +1848,12 @@ export function useThreadStream({
           const taskRunId = stringValue(taskEvent.run_id);
           refreshHistoryRuns(taskRunId ? [taskRunId] : undefined);
         }
+        return;
+      }
+
+      const runTerminalEvent = asRunTerminalEvent(event);
+      if (runTerminalEvent) {
+        refreshHistoryRuns([runTerminalEvent.run_id]);
         return;
       }
 

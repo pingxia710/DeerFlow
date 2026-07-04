@@ -306,6 +306,35 @@ test("asTaskEvent accepts missing legacy schema but rejects unknown future schem
   ).toBeNull();
 });
 
+test("asRunTerminalEvent accepts terminal custom replay without treating it as a task event", async () => {
+  const { asRunTerminalEvent, asTaskEvent } =
+    await import("@/core/threads/hooks");
+  const event = {
+    type: "run.terminal",
+    event_type: "run.terminal",
+    thread_id: "thread-1",
+    run_id: "run-1",
+    status: "success",
+    terminal_reason: "success",
+  };
+
+  expect(asTaskEvent(event)).toBeNull();
+  expect(asRunTerminalEvent(event)).toEqual(event);
+});
+
+test("asRunTerminalEvent rejects incomplete terminal custom replay", async () => {
+  const { asRunTerminalEvent } = await import("@/core/threads/hooks");
+
+  expect(
+    asRunTerminalEvent({
+      type: "run.terminal",
+      thread_id: "thread-1",
+      status: "success",
+      terminal_reason: "success",
+    }),
+  ).toBeNull();
+});
+
 test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   const updates: unknown[] = [];

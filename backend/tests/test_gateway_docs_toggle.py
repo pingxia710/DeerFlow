@@ -1,8 +1,8 @@
 """Tests for GATEWAY_ENABLE_DOCS configuration toggle.
 
 Verifies that Swagger UI (/docs), ReDoc (/redoc), and the OpenAPI schema
-(/openapi.json) can be disabled via the GATEWAY_ENABLE_DOCS environment
-variable for production deployments.
+(/openapi.json) are disabled by default and are only exposed when
+GATEWAY_ENABLE_DOCS=true is set explicitly.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ def _clean_config():
 # ---------------------------------------------------------------------------
 
 
-def test_enable_docs_defaults_to_true():
-    """When GATEWAY_ENABLE_DOCS is not set, enable_docs should be True."""
+def test_enable_docs_defaults_to_false():
+    """When GATEWAY_ENABLE_DOCS is not set, enable_docs should be False."""
     with patch.dict(os.environ, {}, clear=False):
         if "GATEWAY_ENABLE_DOCS" in os.environ:
             del os.environ["GATEWAY_ENABLE_DOCS"]
@@ -43,7 +43,7 @@ def test_enable_docs_defaults_to_true():
         from app.gateway.config import get_gateway_config
 
         config = get_gateway_config()
-        assert config.enable_docs is True
+        assert config.enable_docs is False
 
 
 def test_enable_docs_false():
@@ -83,11 +83,24 @@ def test_enable_docs_unexpected_value_disables():
 # ---------------------------------------------------------------------------
 
 
-def test_docs_endpoints_available_by_default():
-    """With enable_docs=True (default), /docs, /redoc, /openapi.json return 200."""
+def test_docs_endpoints_disabled_by_default():
+    """Without GATEWAY_ENABLE_DOCS, /docs, /redoc, /openapi.json return 404."""
     with patch.dict(os.environ, {}, clear=False):
         if "GATEWAY_ENABLE_DOCS" in os.environ:
             del os.environ["GATEWAY_ENABLE_DOCS"]
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        app = create_app()
+        client = TestClient(app)
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+
+
+def test_docs_endpoints_available_when_enabled():
+    """With GATEWAY_ENABLE_DOCS=true, /docs, /redoc, /openapi.json return 200."""
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "true"}):
         _reset_gateway_config()
         from app.gateway.app import create_app
 

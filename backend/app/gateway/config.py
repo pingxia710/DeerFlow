@@ -8,7 +8,7 @@ class GatewayConfig(BaseModel):
 
     host: str = Field(default="127.0.0.1", description="Host to bind the gateway server")
     port: int = Field(default=8001, description="Port to bind the gateway server")
-    enable_docs: bool = Field(default=True, description="Enable Swagger/ReDoc/OpenAPI endpoints")
+    enable_docs: bool = Field(default=False, description="Enable Swagger/ReDoc/OpenAPI endpoints")
 
 
 _gateway_config: GatewayConfig | None = None
@@ -21,6 +21,6 @@ def get_gateway_config() -> GatewayConfig:
         _gateway_config = GatewayConfig(
             host=os.getenv("GATEWAY_HOST", "127.0.0.1"),
             port=int(os.getenv("GATEWAY_PORT", "8001")),
-            enable_docs=os.getenv("GATEWAY_ENABLE_DOCS", "true").lower() == "true",
+            enable_docs=os.getenv("GATEWAY_ENABLE_DOCS", "false").lower() == "true",
         )
     return _gateway_config

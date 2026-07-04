@@ -16,7 +16,7 @@ from sqlalchemy import delete, exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.schemas import ACTIVE_RUN_STATUS_VALUES, is_active_status, is_terminal_status
+from deerflow.runtime.runs.schemas import ACTIVE_RUN_STATUS_VALUES, INFLIGHT_RUN_STATUS_VALUES, is_active_status, is_terminal_status
 from deerflow.runtime.runs.store.base import CancelIntent, CancelRequestResult, RunLease, RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -279,7 +279,7 @@ class RunRepository(RunStore):
         stmt = (
             select(RunRow)
             .where(
-                RunRow.status.in_(("pending", "running")),
+                RunRow.status.in_(INFLIGHT_RUN_STATUS_VALUES),
                 RunRow.created_at <= before_dt,
             )
             .order_by(RunRow.created_at.asc())

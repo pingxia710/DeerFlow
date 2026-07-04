@@ -291,7 +291,7 @@ class RunStore(abc.ABC):
 
     @abc.abstractmethod
     async def list_inflight(self, *, before: str | None = None) -> list[dict[str, Any]]:
-        """Return persisted runs that are still ``pending`` or ``running``."""
+        """Return persisted runs that are still pending or active."""
         pass
 
     @abc.abstractmethod

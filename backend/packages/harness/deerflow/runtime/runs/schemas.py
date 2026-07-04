@@ -16,6 +16,7 @@ class RunStatus(StrEnum):
 
 
 ACTIVE_RUN_STATUS_VALUES = frozenset({"running", "cancelling", "rolling_back"})
+INFLIGHT_RUN_STATUS_VALUES = frozenset({RunStatus.pending.value, *ACTIVE_RUN_STATUS_VALUES})
 TERMINAL_RUN_STATUS_VALUES = frozenset(
     {
         "success",
@@ -44,8 +45,7 @@ def is_active_status(status: Any) -> bool:
 
 
 def is_inflight_status(status: Any) -> bool:
-    value = run_status_value(status)
-    return value == RunStatus.pending.value or value in ACTIVE_RUN_STATUS_VALUES
+    return run_status_value(status) in INFLIGHT_RUN_STATUS_VALUES
 
 
 def is_terminal_status(status: Any) -> bool:

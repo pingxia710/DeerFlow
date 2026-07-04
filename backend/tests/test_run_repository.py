@@ -169,16 +169,23 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_list_inflight_returns_pending_and_running_before_cutoff(self, tmp_path):
+    async def test_list_inflight_returns_pending_and_active_before_cutoff(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("pending-old", thread_id="t1", status="pending", created_at="2026-01-01T00:00:00+00:00")
         await repo.put("running-old", thread_id="t1", status="running", created_at="2026-01-01T00:00:01+00:00")
-        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:02+00:00")
-        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:03+00:00")
+        await repo.put("cancelling-old", thread_id="t1", status="cancelling", created_at="2026-01-01T00:00:02+00:00")
+        await repo.put("rolling-back-old", thread_id="t1", status="rolling_back", created_at="2026-01-01T00:00:03+00:00")
+        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:04+00:00")
+        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:05+00:00")
 
-        inflight = await repo.list_inflight(before="2026-01-01T00:00:02+00:00")
+        inflight = await repo.list_inflight(before="2026-01-01T00:00:04+00:00")
 
-        assert [row["run_id"] for row in inflight] == ["pending-old", "running-old"]
+        assert [row["run_id"] for row in inflight] == [
+            "pending-old",
+            "running-old",
+            "cancelling-old",
+            "rolling-back-old",
+        ]
         await _cleanup()
 
     @pytest.mark.anyio

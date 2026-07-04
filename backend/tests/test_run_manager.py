@@ -422,18 +422,22 @@ async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
     store = MemoryRunStore()
     await store.put("pending-run", thread_id="thread-1", status="pending", created_at="2026-01-01T00:00:00+00:00")
     await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:01+00:00")
-    await store.put("success-run", thread_id="thread-1", status="success", created_at="2026-01-01T00:00:02+00:00")
+    await store.put("cancelling-run", thread_id="thread-1", status="cancelling", created_at="2026-01-01T00:00:02+00:00")
+    await store.put("rolling-back-run", thread_id="thread-1", status="rolling_back", created_at="2026-01-01T00:00:03+00:00")
+    await store.put("success-run", thread_id="thread-1", status="success", created_at="2026-01-01T00:00:04+00:00")
     manager = RunManager(store=store)
 
     recovered = await manager.reconcile_orphaned_inflight_runs(
         error="Gateway restarted before this run reached a durable final state.",
-        before="2026-01-01T00:00:02+00:00",
+        before="2026-01-01T00:00:04+00:00",
     )
 
-    assert {record.run_id for record in recovered} == {"pending-run", "running-run"}
-    assert await _stored_statuses(store, "pending-run", "running-run", "success-run") == {
+    assert {record.run_id for record in recovered} == {"pending-run", "running-run", "cancelling-run", "rolling-back-run"}
+    assert await _stored_statuses(store, "pending-run", "running-run", "cancelling-run", "rolling-back-run", "success-run") == {
         "pending-run": "error",
         "running-run": "error",
+        "cancelling-run": "error",
+        "rolling-back-run": "error",
         "success-run": "success",
     }
 

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from deerflow.runtime.runs.schemas import is_active_status, is_terminal_status
+from deerflow.runtime.runs.schemas import is_active_status, is_inflight_status, is_terminal_status
 from deerflow.runtime.runs.store.base import CancelIntent, CancelRequestResult, RunLease, RunStore
 
 _DEFAULT_LEASE_TTL = timedelta(seconds=30)
@@ -448,7 +448,7 @@ class MemoryRunStore(RunStore):
 
     async def list_inflight(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
-        results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
+        results = [r for r in self._runs.values() if is_inflight_status(r["status"]) and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
 

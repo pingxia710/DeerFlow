@@ -53,6 +53,7 @@ import {
 } from "@/core/threads/export";
 import {
   clearThreadFinishedActivity,
+  shouldShowThreadRunningStatus,
   useDeleteThread,
   useInfiniteThreads,
   useRenameThread,
@@ -246,9 +247,10 @@ export function RecentChatList() {
               {threads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 const channelSource = channelSourceOfThread(thread);
-                const isRunning =
-                  thread.status === "busy" ||
-                  threadActivity.running.has(thread.thread_id);
+                const isRunning = shouldShowThreadRunningStatus(
+                  thread.status,
+                  threadActivity.running.has(thread.thread_id),
+                );
                 const isFinished =
                   !isRunning && threadActivity.finished.has(thread.thread_id);
                 return (

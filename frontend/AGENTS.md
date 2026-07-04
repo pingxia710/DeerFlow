@@ -98,6 +98,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
+- Thread-list running indicators should treat backend `busy`/`pending`/`running`
+  statuses as active, but backend `idle`/`error`/`interrupted` statuses override
+  stale local running markers from disconnected streams.
 - Thread list and auth refreshes should also avoid interval or focus polling;
   prefer explicit user actions, route changes, or recovery probes.
 - Generic API fetch helpers should throw on 401 instead of performing global

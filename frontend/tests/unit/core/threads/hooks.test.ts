@@ -194,6 +194,18 @@ test("shouldReleaseQueuedThreadMessage waits for explicit stream completion", as
   ).toBe(true);
 });
 
+test("shouldShowThreadRunningStatus trusts backend terminal status over stale local running state", async () => {
+  const { shouldShowThreadRunningStatus } =
+    await import("@/core/threads/hooks");
+
+  expect(shouldShowThreadRunningStatus("running", false)).toBe(true);
+  expect(shouldShowThreadRunningStatus("pending", false)).toBe(true);
+  expect(shouldShowThreadRunningStatus("busy", false)).toBe(true);
+  expect(shouldShowThreadRunningStatus("idle", true)).toBe(false);
+  expect(shouldShowThreadRunningStatus("error", true)).toBe(false);
+  expect(shouldShowThreadRunningStatus(undefined, true)).toBe(true);
+});
+
 test("resolveVisibleTaskRunningThreadId prefers task event identity across thread switches", async () => {
   const { resolveVisibleTaskRunningThreadId } =
     await import("@/core/threads/hooks");

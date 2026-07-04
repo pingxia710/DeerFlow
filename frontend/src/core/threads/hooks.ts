@@ -86,6 +86,9 @@ type ThreadActivitySnapshot = {
   finished: ReadonlySet<string>;
 };
 
+const ACTIVE_THREAD_STATUSES = new Set(["busy", "pending", "running"]);
+const INACTIVE_THREAD_STATUSES = new Set(["idle", "error", "interrupted"]);
+
 type QueuedMessageReleaseState = {
   isLoading: boolean;
   streamFinished: boolean;
@@ -155,6 +158,21 @@ export function clearThreadFinishedActivity(threadId: string) {
     ),
   };
   emitThreadActivity();
+}
+
+export function shouldShowThreadRunningStatus(
+  status: unknown,
+  locallyRunning: boolean,
+) {
+  if (typeof status === "string") {
+    if (ACTIVE_THREAD_STATUSES.has(status)) {
+      return true;
+    }
+    if (INACTIVE_THREAD_STATUSES.has(status)) {
+      return false;
+    }
+  }
+  return locallyRunning;
 }
 
 export function shouldReleaseQueuedThreadMessage({

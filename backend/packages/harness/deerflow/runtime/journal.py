@@ -103,6 +103,7 @@ class RunJournal(BaseCallbackHandler):
         # LLM request/response tracking
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
+        self._tool_runs: dict[str, dict[str, Any]] = {}
 
     # -- Lifecycle callbacks --
 
@@ -408,10 +409,18 @@ class RunJournal(BaseCallbackHandler):
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Handle tool start event, cache tool call ID for later correlation"""
         tool_call_id = str(run_id)
+        tool_name = serialized.get("name") if isinstance(serialized, dict) else None
+        node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
+        self._tool_runs[tool_call_id] = {
+            "caller": self._identify_caller(tags),
+            "source_tool": tool_name if isinstance(tool_name, str) and tool_name else None,
+            "source_node": node if isinstance(node, str) and node else None,
+        }
         logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
+        tool_call_id = str(run_id)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
@@ -419,6 +428,22 @@ class RunJournal(BaseCallbackHandler):
                 self._record_message_summary(msg)
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
+                artifacts = cmd.update.get("artifacts", [])
+                if isinstance(artifacts, list):
+                    artifact_refs = list(dict.fromkeys(ref for ref in artifacts if isinstance(ref, str) and ref))
+                    if artifact_refs:
+                        tool_info = self._tool_runs.get(tool_call_id, {})
+                        self._put(
+                            event_type="artifact.presented",
+                            category="artifact",
+                            content={"artifact_refs": artifact_refs},
+                            metadata={
+                                "caller": tool_info.get("caller") or "tool",
+                                "source_tool": tool_info.get("source_tool"),
+                                "source_node": tool_info.get("source_node"),
+                                "tool_run_id": tool_call_id,
+                            },
+                        )
                 messages = cmd.update.get("messages", [])
                 for message in messages:
                     if isinstance(message, BaseMessage):
@@ -429,6 +454,7 @@ class RunJournal(BaseCallbackHandler):
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
+            self._tool_runs.pop(tool_call_id, None)
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --

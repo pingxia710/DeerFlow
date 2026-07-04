@@ -28,6 +28,7 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.runtime.artifacts import build_artifact_index
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,19 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 HIDDEN_CONTROL_MESSAGE_NAMES = frozenset({"summary", "loop_warning", "todo_reminder", "todo_completion_reminder"})
 INTERNAL_CONTEXT_TAG_RE = re.compile(r"<(uploaded_files|slash_skill_activation)>[\s\S]*?</\1>")
 _CANCEL_WAIT_TIMEOUT_SECONDS = 10.0
+_RUN_TERMINAL_REASON_ALIASES = {
+    "boundary_blocked": "boundary_stopped",
+    "lease_expired_recovered": "worker_lost",
+    "polling_timed_out": "timeout",
+    "rollback_failed_owner_lost": "rollback_failed",
+    "timed_out": "timeout",
+    "user_cancelled": "cancelled",
+}
+_WORKER_LOST_ERROR_MARKERS = (
+    "gateway restarted before this run reached a durable final state",
+    "worker lost",
+    "owner lost",
+)
 
 
 async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
@@ -109,6 +123,7 @@ class RunResponse(BaseModel):
     thread_id: str
     assistant_id: str | None = None
     status: str
+    terminal_reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     multitask_strategy: str = "reject"
@@ -197,12 +212,39 @@ async def _resolve_thread_run_for_user(thread_id: str, run_id: str, request: Req
     return record
 
 
+def _normalize_run_terminal_reason(reason: str | None) -> str | None:
+    if not reason:
+        return None
+    return _RUN_TERMINAL_REASON_ALIASES.get(reason, reason)
+
+
+def _run_terminal_reason(record: RunRecord) -> str | None:
+    stored_reason = _normalize_run_terminal_reason(record.terminal_reason)
+    if stored_reason is not None:
+        return stored_reason
+    if record.status == RunStatus.success:
+        return "success"
+    if record.status == RunStatus.timeout:
+        return "timeout"
+    if record.status == RunStatus.interrupted:
+        return "cancelled"
+    if record.status == RunStatus.error:
+        error = (record.error or "").strip().lower()
+        if "rolled back by user" in error:
+            return "rolled_back"
+        if any(marker in error for marker in _WORKER_LOST_ERROR_MARKERS):
+            return "worker_lost"
+        return "failed"
+    return None
+
+
 def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
         status=record.status.value,
+        terminal_reason=_run_terminal_reason(record),
         metadata=record.metadata,
         kwargs=record.kwargs,
         multitask_strategy=record.multitask_strategy,
@@ -666,12 +708,14 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     """Join an existing run's SSE stream."""
     run_mgr = get_run_manager(request)
     record = await resolve_thread_run(thread_id, run_id, request)
-    if record.store_only:
+    if record.store_only and record.status in (RunStatus.pending, RunStatus.running):
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     bridge = get_stream_bridge(request)
+    event_store = get_run_event_store(request)
+    user_id = get_request_storage_user_id(request)
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(bridge, record, request, run_mgr, event_store=event_store, user_id=user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -704,7 +748,7 @@ async def stream_existing_run(
     """
     run_mgr = get_run_manager(request)
     record = await resolve_thread_run(thread_id, run_id, request)
-    if record.store_only and action is None:
+    if record.store_only and action is None and record.status in (RunStatus.pending, RunStatus.running):
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
@@ -720,8 +764,10 @@ async def stream_existing_run(
             return Response(status_code=204)
 
     bridge = get_stream_bridge(request)
+    event_store = get_run_event_store(request)
+    user_id = get_request_storage_user_id(request)
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(bridge, record, request, run_mgr, event_store=event_store, user_id=user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -871,6 +917,26 @@ async def list_run_events(
     if _supports_user_id_keyword(event_store.list_events):
         list_events_kwargs["user_id"] = user_id
     return await event_store.list_events(thread_id, run_id, **list_events_kwargs)
+
+
+@router.get("/{thread_id}/runs/{run_id}/artifacts")
+@require_permission("runs", "read", owner_check=True)
+async def list_run_artifacts(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=500, le=2000),
+) -> list[dict[str, Any]]:
+    """Return runtime-observed artifacts for a run."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    event_store = get_run_event_store(request)
+    event_types = ["artifact.presented", "task_completed", "task_failed", "task_cancelled", "task_timed_out"]
+    list_events_kwargs: dict[str, Any] = {"event_types": event_types, "limit": limit}
+    if _supports_user_id_keyword(event_store.list_events):
+        list_events_kwargs["user_id"] = user_id
+    events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
+    return build_artifact_index(events)
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

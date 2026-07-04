@@ -157,8 +157,6 @@ export default function ChatPage() {
     },
   });
 
-  const hasThreadMessages = thread.messages.length > 0;
-
   useEffect(() => {
     const agentName = threadMetadata.data?.metadata?.agent_name;
     if (
@@ -175,31 +173,6 @@ export default function ChatPage() {
       router.replace(agentPath);
     }
   }, [isMock, isNewThread, router, threadId, threadMetadata.data]);
-
-  useEffect(() => {
-    if (
-      !isNewThread &&
-      !isMock &&
-      threadMetadata.data === null &&
-      !threadMetadata.isLoading &&
-      !threadMetadata.isFetching &&
-      !isHistoryLoading &&
-      !hasMoreHistory &&
-      !hasThreadMessages
-    ) {
-      router.replace("/workspace/chats/new");
-    }
-  }, [
-    hasMoreHistory,
-    hasThreadMessages,
-    isHistoryLoading,
-    isMock,
-    isNewThread,
-    router,
-    threadMetadata.data,
-    threadMetadata.isFetching,
-    threadMetadata.isLoading,
-  ]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {

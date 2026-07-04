@@ -7,7 +7,6 @@ import { userSchema, type User } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
 import {
-  OFFLINE_BANNER_RETRY_INTERVAL_MS,
   classifyProbe,
   decideProbeAction,
   shouldShowOfflineBanner,
@@ -26,19 +25,14 @@ export function GatewayOfflineBanner({
   gatewayUnavailable,
 }: GatewayOfflineBannerProps) {
   const { t } = useI18n();
-  const { user, applyUser, refreshUser, logout } = useAuth();
+  const { user, applyUser, logout } = useAuth();
   // Guard against piling up probe calls while the gateway is still slow.
   const inFlightRef = useRef(false);
-  // Count consecutive 401s so we can distinguish "transient warm-up 401"
-  // from "session actually expired" and avoid lying with the banner.
-  const authFailuresRef = useRef(0);
 
   useEffect(() => {
     if (!gatewayUnavailable) return;
-    // Once AuthProvider has a user again the banner has served its
-    // purpose; tear down the polling so we don't keep probing every 10s
-    // for the entire lifetime of the page (gatewayUnavailable is a
-    // server-rendered prop and stays true until a full reload).
+    // Once AuthProvider has a user again the banner has served its purpose.
+    // gatewayUnavailable is a server-rendered prop and stays true until a full reload.
     if (user !== null) return;
 
     const probe = async () => {
@@ -52,9 +46,8 @@ export function GatewayOfflineBanner({
           credentials: "include",
           cache: "no-store",
         });
-        // Reuse the probe's own response body instead of triggering a
-        // second /auth/me request via refreshUser() — halves the recovery
-        // burst against an already-struggling gateway.
+        // Reuse the probe's own response body instead of triggering another
+        // /auth/me request.
         if (res.ok) {
           try {
             const data = await res.json();
@@ -74,33 +67,15 @@ export function GatewayOfflineBanner({
         inFlightRef.current = false;
       }
 
-      const action = decideProbeAction(
-        authFailuresRef.current,
-        classifyProbe(res, errored, parsedUser),
-      );
+      const action = decideProbeAction(classifyProbe(res, errored, parsedUser));
 
       if (action.type === "apply-user") {
-        authFailuresRef.current = 0;
         applyUser(action.user);
-        return;
       }
-      if (action.type === "delegate-refresh") {
-        // Hand off to AuthProvider, which on 401 will /login-redirect.
-        authFailuresRef.current = 0;
-        await refreshUser();
-        return;
-      }
-      authFailuresRef.current = action.nextFailureCount;
     };
 
     void probe();
-    const handle = window.setInterval(() => {
-      void probe();
-    }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
-    return () => {
-      window.clearInterval(handle);
-    };
-  }, [gatewayUnavailable, user, applyUser, refreshUser]);
+  }, [gatewayUnavailable, user, applyUser]);
 
   if (!shouldShowOfflineBanner(user, gatewayUnavailable)) {
     return null;
@@ -113,8 +88,7 @@ export function GatewayOfflineBanner({
       className="bg-muted text-muted-foreground flex items-center justify-between gap-3 border-b px-4 py-2 text-sm"
     >
       <span>
-        {t.workspace.gatewayUnavailable}{" "}
-        {t.workspace.gatewayUnavailableRetrying}
+        {t.workspace.gatewayUnavailable} {t.workspace.gatewayUnavailableHelp}
       </span>
       <button
         type="button"

@@ -27,7 +27,7 @@ export default async function AuthLayout({
     case "gateway_unavailable":
       // Auth pages have no banner of their own, so render one here. The
       // fallback's AuthProvider replaces the bare-HTML branch that
-      // previously locked users out without any logout/retry capability.
+      // previously locked users out without any logout capability.
       return (
         <GatewayOfflineFallback renderBanner>
           <div className="flex h-screen flex-col items-center justify-center gap-4">

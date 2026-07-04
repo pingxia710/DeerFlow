@@ -197,7 +197,7 @@ export interface Translations {
     about: string;
     logout: string;
     gatewayUnavailable: string;
-    gatewayUnavailableRetrying: string;
+    gatewayUnavailableHelp: string;
   };
 
   // Conversation

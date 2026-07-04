@@ -18,10 +18,10 @@ interface GatewayOfflineFallbackProps {
 /**
  * Shared fallback shown by both the workspace and (auth) layouts when the
  * server-side auth probe could not reach the gateway. Wraps the children
- * with an AuthProvider so the banner's probe / logout / refresh hooks work
+ * with an AuthProvider so the banner's probe / logout hooks work
  * — fixing the `(auth)/layout.tsx` lockup where the bare static HTML had
  * no AuthProvider / QueryClientProvider and the user could not recover
- * without a manual reload.
+ * without a full app shell.
  */
 export function GatewayOfflineFallback({
   renderBanner = false,

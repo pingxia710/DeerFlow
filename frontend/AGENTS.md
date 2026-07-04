@@ -98,6 +98,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   runs.
 - Thread list and auth refreshes should also avoid interval or focus polling;
   prefer explicit user actions, route changes, or recovery probes.
+- Generic API fetch helpers should throw on 401 instead of performing global
+  browser redirects; route guards and AuthProvider own login navigation.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

@@ -157,8 +157,6 @@ export default function AgentChatPage() {
     },
   });
 
-  const hasThreadMessages = thread.messages.length > 0;
-
   useEffect(() => {
     const metadataAgentName = threadMetadata.data?.metadata?.agent_name;
     if (
@@ -173,32 +171,6 @@ export default function AgentChatPage() {
 
     router.replace(pathOfThread(threadId, { agent_name: metadataAgentName }));
   }, [agent_name, isMock, isNewThread, router, threadId, threadMetadata.data]);
-
-  useEffect(() => {
-    if (
-      !isNewThread &&
-      !isMock &&
-      threadMetadata.data === null &&
-      !threadMetadata.isLoading &&
-      !threadMetadata.isFetching &&
-      !isHistoryLoading &&
-      !hasMoreHistory &&
-      !hasThreadMessages
-    ) {
-      router.replace(`/workspace/agents/${agent_name}/chats/new`);
-    }
-  }, [
-    agent_name,
-    hasMoreHistory,
-    hasThreadMessages,
-    isHistoryLoading,
-    isMock,
-    isNewThread,
-    router,
-    threadMetadata.data,
-    threadMetadata.isFetching,
-    threadMetadata.isLoading,
-  ]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {

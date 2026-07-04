@@ -269,7 +269,7 @@ export const enUS: Translations = {
     about: "About DeerFlow",
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
-    gatewayUnavailableRetrying: "Retrying in the background…",
+    gatewayUnavailableHelp: "Log out if this persists.",
   },
 
   // Conversation

@@ -215,6 +215,63 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_replays_only_current_owner_task_events():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-owner-replay"
+    run_id = "run-owner-replay"
+    user_id = "user-a"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    for owner, task_id in [("user-a", "task-a"), ("user-b", "task-b")]:
+        await event_store.put(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="task_started",
+            category="message",
+            content={
+                "schema_version": "deerflow.task-event/v1",
+                "type": "task_started",
+                "event_type": "task_started",
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "task_id": task_id,
+                "status": "running",
+            },
+            metadata={"caller": "task_event"},
+            user_id=owner,
+        )
+
+    await bridge.publish(run_id, "values", {"old": True})
+    last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"missed": True})
+    await bridge.publish(run_id, "values", {"live": True})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        bridge,
+        record,
+        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    payloads = [json.loads(_parse_sse_frame(frame)["data"]) for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    assert [payload["task_id"] for payload in payloads] == ["task-a"]
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay():
     from app.gateway.services import sse_consumer
 

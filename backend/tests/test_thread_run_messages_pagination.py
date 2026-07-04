@@ -56,9 +56,10 @@ def _make_app(event_store=None, run_manager=None, *, user_id: UUID = _TEST_USER_
 
 
 def _make_event_store(rows: list[dict]):
-    """Return an AsyncMock event store whose list_messages_by_run() returns rows."""
+    """Return an AsyncMock event store whose message listing methods return rows."""
     store = MagicMock()
     store.list_messages_by_run = AsyncMock(return_value=rows)
+    store.list_messages = AsyncMock(return_value=rows)
     return store
 
 
@@ -712,3 +713,109 @@ def test_list_thread_messages_scopes_events_to_current_user():
     )
     feedback_repo.list_by_thread_grouped.assert_awaited_once_with(thread_id, user_id=str(user_a))
     run_manager.list_by_thread.assert_awaited_once_with(thread_id, user_id=str(user_a))
+
+
+def test_list_thread_messages_run_id_filters_to_requested_run():
+    thread_id = "thread-shared"
+    run_a = "run-a"
+    run_b = "run-b"
+    rows_all = [
+        {"seq": 1, "run_id": run_a, "event_type": "llm.ai.response", "category": "message", "content": {"type": "ai", "content": "a"}},
+        {"seq": 2, "run_id": run_b, "event_type": "llm.ai.response", "category": "message", "content": {"type": "ai", "content": "b"}},
+    ]
+    rows_a = [rows_all[0]]
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows_all)
+    event_store.list_messages_by_run = AsyncMock(return_value=rows_a)
+
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_a,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(_TEST_USER_ID),
+    )
+    run_manager.list_by_thread.return_value = [
+        RunRecord(run_id=run_a, thread_id=thread_id, assistant_id=None, status=RunStatus.success, on_disconnect="cancel"),
+        RunRecord(run_id=run_b, thread_id=thread_id, assistant_id=None, status=RunStatus.success, on_disconnect="cancel"),
+    ]
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = AsyncMock()
+    app.state.feedback_repo.list_by_thread_grouped.return_value = {}
+
+    with TestClient(app) as client:
+        scoped = client.get(f"/api/threads/{thread_id}/messages?run_id={run_a}")
+        unscoped = client.get(f"/api/threads/{thread_id}/messages")
+
+    assert scoped.status_code == 200
+    assert [row["run_id"] for row in scoped.json()] == [run_a]
+    event_store.list_messages_by_run.assert_awaited_once_with(
+        thread_id,
+        run_a,
+        limit=50,
+        before_seq=None,
+        after_seq=None,
+        user_id=str(_TEST_USER_ID),
+    )
+    assert unscoped.status_code == 200
+    assert [row["run_id"] for row in unscoped.json()] == [run_a, run_b]
+    event_store.list_messages.assert_awaited_once_with(
+        thread_id,
+        limit=50,
+        before_seq=None,
+        after_seq=None,
+        user_id=str(_TEST_USER_ID),
+    )
+
+
+def test_list_thread_messages_run_id_thread_mismatch_returns_404_without_reading_messages():
+    event_store = _make_event_store([])
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id="run-a",
+        thread_id="thread-other",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(_TEST_USER_ID),
+    )
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-a/messages?run_id=run-a")
+
+    assert response.status_code == 404
+    event_store.list_messages_by_run.assert_not_awaited()
+    event_store.list_messages.assert_not_awaited()
+
+
+def test_list_thread_messages_run_id_preserves_after_seq_forwarding():
+    rows = [{"seq": 6, "run_id": "run-6", "event_type": "llm.ai.response", "category": "message", "content": "msg-6"}]
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id="run-6",
+        thread_id="thread-6",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(_TEST_USER_ID),
+    )
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = AsyncMock()
+    app.state.feedback_repo.list_by_thread_grouped.return_value = {}
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-6/messages?run_id=run-6&after_seq=5&limit=10")
+
+    assert response.status_code == 200
+    event_store.list_messages_by_run.assert_awaited_once_with(
+        "thread-6",
+        "run-6",
+        limit=10,
+        before_seq=None,
+        after_seq=5,
+        user_id=str(_TEST_USER_ID),
+    )

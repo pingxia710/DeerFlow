@@ -790,14 +790,23 @@ async def list_thread_messages(
     limit: int = Query(default=50, le=200),
     before_seq: int | None = Query(default=None),
     after_seq: int | None = Query(default=None),
+    run_id: str | None = Query(default=None),
 ) -> list[dict]:
-    """Return displayable messages for a thread (across all runs), with feedback attached."""
+    """Return displayable messages for a thread, optionally scoped to a single run, with feedback attached."""
     event_store = get_run_event_store(request)
     user_id = get_request_storage_user_id(request)
-    list_messages_kwargs: dict[str, Any] = {"limit": limit, "before_seq": before_seq, "after_seq": after_seq}
-    if _supports_user_id_keyword(event_store.list_messages):
-        list_messages_kwargs["user_id"] = user_id
-    messages = await event_store.list_messages(thread_id, **list_messages_kwargs)
+    scoped_run: RunRecord | None = None
+    if run_id is not None:
+        scoped_run = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+        list_messages_kwargs: dict[str, Any] = {"limit": limit, "before_seq": before_seq, "after_seq": after_seq}
+        if _supports_user_id_keyword(event_store.list_messages_by_run):
+            list_messages_kwargs["user_id"] = user_id
+        messages = await event_store.list_messages_by_run(thread_id, run_id, **list_messages_kwargs)
+    else:
+        list_messages_kwargs = {"limit": limit, "before_seq": before_seq, "after_seq": after_seq}
+        if _supports_user_id_keyword(event_store.list_messages):
+            list_messages_kwargs["user_id"] = user_id
+        messages = await event_store.list_messages(thread_id, **list_messages_kwargs)
     attach_message_display(messages)
 
     # Find the last AI message per run_id. AI messages are persisted by
@@ -833,8 +842,11 @@ async def list_thread_messages(
         else:
             msg["feedback"] = None
 
-    run_mgr = get_run_manager(request)
-    runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    if scoped_run is not None:
+        runs = [scoped_run]
+    else:
+        run_mgr = get_run_manager(request)
+        runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     run_durations = compute_run_durations(runs)
 
     if run_durations:

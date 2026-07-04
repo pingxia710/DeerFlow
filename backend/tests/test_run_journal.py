@@ -227,6 +227,22 @@ class TestLifecycleCallbacks:
         assert not any(e["event_type"] == "run.start" for e in events)
         assert not any(e["event_type"] == "run.end" for e in events)
 
+    @pytest.mark.anyio
+    async def test_run_terminal_event_records_status_and_reason(self, journal_setup):
+        j, store = journal_setup
+
+        j.record_run_terminal(status="error", terminal_reason="failed")
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["run.terminal"])
+        assert len(events) == 1
+        assert events[0]["category"] == "lifecycle"
+        assert events[0]["content"] == {
+            "status": "error",
+            "terminal_reason": "failed",
+        }
+        assert events[0]["metadata"] == {"caller": "runtime"}
+
 
 class TestToolCallbacks:
     @pytest.mark.anyio

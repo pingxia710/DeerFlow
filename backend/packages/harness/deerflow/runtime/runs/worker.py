@@ -347,8 +347,7 @@ async def run_agent(
         if record.abort_event.is_set():
             action = record.abort_action
             if action == "rollback":
-                await _flush_journal_before_terminal_status(journal, run_id)
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user")
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         checkpointer=checkpointer,
@@ -362,15 +361,13 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await _flush_journal_before_terminal_status(journal, run_id)
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+                await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled")
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await _flush_journal_before_terminal_status(journal, run_id)
-            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg)
         else:
             if record.assistant_id == "command-room":
                 await _record_command_room_round_from_worker(
@@ -380,14 +377,12 @@ async def run_agent(
                     final_text=latest_command_room_ai_text,
                     model_name=record.model_name,
                 )
-            await _flush_journal_before_terminal_status(journal, run_id)
-            await run_manager.set_status(run_id, RunStatus.success)
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success")
 
     except asyncio.CancelledError:
         action = record.abort_action
         if action == "rollback":
-            await _flush_journal_before_terminal_status(journal, run_id)
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user")
             try:
                 await _rollback_to_pre_run_checkpoint(
                     checkpointer=checkpointer,
@@ -401,15 +396,13 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await _flush_journal_before_terminal_status(journal, run_id)
-            await run_manager.set_status(run_id, RunStatus.interrupted)
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled")
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await _flush_journal_before_terminal_status(journal, run_id)
-        await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+        await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg)
         await bridge.publish(
             run_id,
             "error",
@@ -465,6 +458,21 @@ async def _flush_journal_before_terminal_status(journal: Any | None, run_id: str
         await journal.flush()
     except Exception:
         logger.warning("Failed to flush journal before terminal status for run %s", run_id, exc_info=True)
+
+
+async def _set_terminal_status(
+    run_manager: RunManager,
+    journal: Any | None,
+    run_id: str,
+    status: RunStatus,
+    *,
+    terminal_reason: str,
+    error: str | None = None,
+) -> None:
+    if journal is not None:
+        journal.record_run_terminal(status=status.value, terminal_reason=terminal_reason)
+    await _flush_journal_before_terminal_status(journal, run_id)
+    await run_manager.set_status(run_id, status, error=error)
 
 
 async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:

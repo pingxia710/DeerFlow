@@ -670,6 +670,16 @@ class RunJournal(BaseCallbackHandler):
         )
         self._flush_sync()
 
+    def record_run_terminal(self, *, status: str, terminal_reason: str) -> None:
+        """Persist the user-visible terminal status for replay/timeline clients."""
+        self._put(
+            event_type="run.terminal",
+            category="lifecycle",
+            content={"status": status, "terminal_reason": terminal_reason},
+            metadata={"caller": "runtime"},
+        )
+        self._flush_sync()
+
     def _jsonable(self, value: Any) -> Any:
         if isinstance(value, dict):
             return {str(key): self._jsonable(item) for key, item in value.items()}

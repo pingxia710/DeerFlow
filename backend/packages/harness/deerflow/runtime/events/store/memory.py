@@ -183,9 +183,11 @@ class MemoryRunEventStore(RunEventStore):
         remaining = [e for e in all_events if not (e["run_id"] == run_id and self._matches_user(e, user_id))]
         removed = len(all_events) - len(remaining)
         self._events[thread_id] = remaining
-        # Keep the message projection in lockstep (same surviving dict objects).
         self._messages[thread_id] = [e for e in remaining if e["category"] == "message"]
-        # Drop the deleted run from the run-keyed projections.
-        self._events_by_run.get(thread_id, {}).pop(run_id, None)
-        self._messages_by_run.get(thread_id, {}).pop(run_id, None)
+        self._events_by_run[thread_id] = {}
+        self._messages_by_run[thread_id] = {}
+        for e in remaining:
+            self._events_by_run[thread_id].setdefault(e["run_id"], []).append(e)
+            if e["category"] == "message":
+                self._messages_by_run[thread_id].setdefault(e["run_id"], []).append(e)
         return removed

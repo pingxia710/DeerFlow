@@ -290,6 +290,17 @@ class TestDelete:
         assert messages[0]["run_id"] == "r1"
 
     @pytest.mark.anyio
+    async def test_delete_by_run_for_user_preserves_other_user_run_index(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="a", user_id="u1")
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="b", user_id="u2")
+
+        count = await store.delete_by_run("t1", "r1", user_id="u1")
+
+        assert count == 1
+        assert [m["content"] for m in await store.list_messages_by_run("t1", "r1", user_id="u2")] == ["b"]
+        assert [e["content"] for e in await store.list_events("t1", "r1", user_id=None)] == ["b"]
+
+    @pytest.mark.anyio
     async def test_delete_nonexistent_thread_returns_zero(self, store):
         assert await store.delete_by_thread("nope") == 0
 
@@ -378,6 +389,23 @@ class TestDbRunEventStore:
 
         count = await s.count_messages("t1")
         assert count == 2
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_put_accepts_explicit_user_id(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="a", user_id="u1")
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="b", user_id="u2")
+
+        assert [m["content"] for m in await s.list_messages("t1", user_id="u1")] == ["a"]
+        assert [m["content"] for m in await s.list_messages("t1", user_id="u2")] == ["b"]
 
         await close_engine()
 

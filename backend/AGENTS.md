@@ -350,6 +350,8 @@ through to the run store instead of aggregating every row with the same
   `{base_dir}/users/{user_id}/threads/{thread_id}/runs/{run_id}.jsonl`;
   ownerless legacy events remain under `{base_dir}/threads/...`, and
   user-scoped reads include matching legacy owner rows for compatibility.
+- Explicit event writes should pass `user_id` when the owner is known; all
+  RunEventStore backends accept it on `put()` and `put_batch()` rows.
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.

@@ -36,6 +36,7 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         """Write an event, auto-assign seq, return the complete record."""
 

@@ -111,7 +111,18 @@ class DbRunEventStore(RunEventStore):
 
         return await session.scalar(stmt.with_for_update())
 
-    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
+    async def put(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+        user_id=None,
+    ):  # noqa: D401
         """Write a single event — low-frequency path only.
 
         This opens a dedicated transaction with a FOR UPDATE lock to
@@ -122,7 +133,7 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        resolved_user_id = str(user_id) if user_id is not None else self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
                 max_seq = await self._max_seq_for_thread(session, thread_id)
@@ -130,7 +141,7 @@ class DbRunEventStore(RunEventStore):
                 row = RunEventRow(
                     thread_id=thread_id,
                     run_id=run_id,
-                    user_id=user_id,
+                    user_id=resolved_user_id,
                     event_type=event_type,
                     category=category,
                     content=db_content,

@@ -321,10 +321,11 @@ counts, tool schema count). Do not put raw prompt/message/tool-schema content
 in these snapshots; raw event inspection already exists via
 `GET /runs/{rid}/events`. Persistent event replay uses the RunEventStore
 `seq` cursor (`GET /threads/{id}/runs/{rid}/events?after_seq=N`); live SSE
-`Last-Event-ID` remains a StreamBridge buffer cursor. Thread-scoped join/stream
-routes may pass `RunEventStore` context into `sse_consumer`, but it must not be
-used as durable SSE replay until the SSE id and event-store `seq` cursor spaces
-are explicitly reconciled.
+`Last-Event-ID` remains a StreamBridge buffer cursor. When the StreamBridge
+reports an evicted buffer, `sse_consumer` may replay persisted task events as
+`custom` SSE frames so subtask cards recover, but it must not replay arbitrary
+RunEventStore rows as LangGraph `values`/`updates` chunks until the SSE id and
+event-store `seq` cursor spaces are explicitly reconciled.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`

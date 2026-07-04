@@ -44,7 +44,8 @@ def test_sse_error_format():
 
 
 class _NeverDisconnectedRequest:
-    headers: dict[str, str] = {}
+    def __init__(self, headers: dict[str, str] | None = None) -> None:
+        self.headers = headers or {}
 
     async def is_disconnected(self) -> bool:
         return False
@@ -142,6 +143,74 @@ async def test_sse_consumer_forwards_task_custom_event_without_extra_data_wrappe
     end_fields = _parse_sse_frame(frames[1])
     assert end_fields["event"] == "end"
     assert json.loads(end_fields["data"]) is None
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_recovery():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-replay"
+    run_id = "run-replay"
+    user_id = "user-replay"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    task_event = {
+        "schema_version": "deerflow.task-event/v1",
+        "type": "task_started",
+        "event_type": "task_started",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "task_id": "task-1",
+        "status": "running",
+    }
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_started",
+        category="message",
+        content=task_event,
+        metadata={"caller": "task_event"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="llm.ai.response",
+        category="message",
+        content={"type": "ai", "content": "not a task event"},
+        user_id=user_id,
+    )
+
+    await bridge.publish(run_id, "values", {"old": True})
+    last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"live": True})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    request = _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id})
+    frames = []
+    async for frame in sse_consumer(
+        bridge,
+        record,
+        request,
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["custom", "values", "end"]
+    assert "stream_recovery_required" not in "\n".join(frames)
+    assert json.loads(_parse_sse_frame(frames[0])["data"]) == task_event
+    assert json.loads(_parse_sse_frame(frames[1])["data"]) == {"live": True}
 
 
 @pytest.mark.asyncio

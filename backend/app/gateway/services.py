@@ -41,6 +41,16 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
+_STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
+_TASK_EVENT_REPLAY_TYPES = [
+    "task_started",
+    "task_running",
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+    "task_timed_out",
+]
+
 
 async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
     """Resolve a run through one thread/user boundary check before use."""
@@ -80,6 +90,36 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
     parts.append("")
     parts.append("")
     return "\n".join(parts)
+
+
+def _is_task_event_payload(payload: Any, *, thread_id: str, run_id: str) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    event_type = payload.get("event_type") or payload.get("type")
+    return event_type in _TASK_EVENT_REPLAY_TYPES and payload.get("thread_id") == thread_id and payload.get("run_id") == run_id and isinstance(payload.get("task_id"), str)
+
+
+async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord, *, user_id: str | None) -> list[str] | None:
+    if event_store is None:
+        return None
+    try:
+        rows = await event_store.list_events(
+            record.thread_id,
+            record.run_id,
+            event_types=_TASK_EVENT_REPLAY_TYPES,
+            limit=2000,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.warning("Failed to replay persisted task events for run %s", sanitize_log_param(record.run_id), exc_info=True)
+        return None
+
+    frames = []
+    for row in rows:
+        payload = row.get("content") if isinstance(row, Mapping) else None
+        if _is_task_event_payload(payload, thread_id=record.thread_id, run_id=record.run_id):
+            frames.append(format_sse("custom", payload))
+    return frames
 
 
 # ---------------------------------------------------------------------------
@@ -539,10 +579,6 @@ async def sse_consumer(
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
     """
-    # ponytail: durable replay stays on /events?after_seq until SSE ids and
-    # RunEventStore seq share one cursor.
-    del event_store, user_id
-
     if record.status not in (RunStatus.pending, RunStatus.running):
         yield format_sse("end", None)
         return
@@ -560,6 +596,15 @@ async def sse_consumer(
             if entry is END_SENTINEL:
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
+
+            if entry.event == _STREAM_RECOVERY_REQUIRED_EVENT:
+                replay_frames = await _durable_task_replay_frames(event_store, record, user_id=user_id)
+                if replay_frames is None:
+                    yield format_sse(entry.event, entry.data, event_id=entry.id or None)
+                    continue
+                for frame in replay_frames:
+                    yield frame
+                continue
 
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 

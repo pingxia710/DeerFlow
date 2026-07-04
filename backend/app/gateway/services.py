@@ -529,6 +529,9 @@ async def sse_consumer(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
+    *,
+    event_store: Any | None = None,
+    user_id: str | None = None,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -536,6 +539,10 @@ async def sse_consumer(
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
     """
+    # ponytail: durable replay stays on /events?after_seq until SSE ids and
+    # RunEventStore seq share one cursor.
+    del event_store, user_id
+
     if record.status not in (RunStatus.pending, RunStatus.running):
         yield format_sse("end", None)
         return

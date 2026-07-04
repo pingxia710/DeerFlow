@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager, RunRecord, RunStatus
+from deerflow.runtime import MemoryStreamBridge, RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -503,6 +503,29 @@ def test_join_store_only_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_join_local_terminal_run_streams_end():
+    """join should accept the thread route's durable replay context kwargs."""
+    thread_id = "thread-join"
+    run_id = "run-join"
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="continue",
+        user_id=str(_TEST_USER_ID),
+    )
+    app = _make_app(event_store=MagicMock(), run_manager=run_manager)
+    app.state.stream_bridge = MemoryStreamBridge()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/join")
+
+    assert response.status_code == 200
+    assert response.text.startswith("event: end\n")
 
 
 def test_stream_store_only_run_returns_409():

@@ -12,6 +12,7 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import re
@@ -25,8 +26,9 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.path_utils import get_request_storage_user_id
+from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -50,6 +52,7 @@ _WORKER_LOST_ERROR_MARKERS = (
     "worker lost",
     "owner lost",
 )
+_ARTIFACT_HASH_CHUNK_BYTES = 1024 * 1024
 _SENSITIVE_RUN_ERROR_MARKERS = (
     "secret",
     "stack trace",
@@ -254,6 +257,34 @@ def run_error_for_response(error: str | None) -> str | None:
     if len(text) > _MAX_PUBLIC_RUN_ERROR_CHARS or "\n" in text or any(marker in text.lower() for marker in _SENSITIVE_RUN_ERROR_MARKERS):
         return "Run failed"
     return text
+
+
+def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str | None) -> dict[str, Any]:
+    if ".skill/" in virtual_path:
+        return {}
+    actual_path = resolve_thread_virtual_path(thread_id, virtual_path, user_id=user_id)
+    if not actual_path.is_file():
+        return {}
+
+    digest = hashlib.sha256()
+    size = 0
+    with actual_path.open("rb") as file:
+        while chunk := file.read(_ARTIFACT_HASH_CHUNK_BYTES):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+
+def _attach_artifact_file_metadata(entries: list[dict[str, Any]], thread_id: str, *, user_id: str | None) -> list[dict[str, Any]]:
+    for entry in entries:
+        virtual_path = entry.get("virtual_path")
+        if not isinstance(virtual_path, str) or not virtual_path:
+            continue
+        try:
+            entry.update(_artifact_file_metadata(thread_id, virtual_path, user_id=user_id))
+        except Exception:
+            logger.debug("Could not fingerprint artifact %s for thread %s", virtual_path, sanitize_log_param(thread_id), exc_info=True)
+    return entries
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -966,7 +997,8 @@ async def list_run_artifacts(
     if _supports_user_id_keyword(event_store.list_events):
         list_events_kwargs["user_id"] = user_id
     events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
-    return build_artifact_index(events)
+    index = build_artifact_index(events)
+    return await asyncio.to_thread(_attach_artifact_file_metadata, index, thread_id, user_id=user_id)
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

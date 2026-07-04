@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -99,7 +100,12 @@ def test_run_journal_records_presented_artifacts_from_command() -> None:
     assert index[0]["user_id"] == "user-1"
 
 
-def test_list_run_artifacts_endpoint_returns_runtime_observed_index() -> None:
+def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "report.md"
+    artifact_payload = b"runtime observed report"
+    artifact_path.write_bytes(artifact_payload)
+    monkeypatch.setattr(thread_runs, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
+
     app = make_authed_test_app(
         user_factory=lambda: User(
             id=_USER_ID,
@@ -134,7 +140,10 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index() -> None:
         response = client.get("/api/threads/thread-1/runs/run-1/artifacts")
 
     assert response.status_code == 200
-    assert response.json()[0]["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    artifact = response.json()[0]
+    assert artifact["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    assert artifact["sha256"] == hashlib.sha256(artifact_payload).hexdigest()
+    assert artifact["size_bytes"] == len(artifact_payload)
     event_store.list_events.assert_awaited_once_with(
         "thread-1",
         "run-1",

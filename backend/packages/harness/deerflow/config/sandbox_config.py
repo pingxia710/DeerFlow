@@ -87,6 +87,10 @@ class SandboxConfig(BaseModel):
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
+    seccomp_unconfined: bool = Field(
+        default=False,
+        description="Pass --security-opt seccomp=unconfined to Docker-based AIO sandbox containers. Dangerous; keep disabled unless a custom sandbox image explicitly requires it.",
+    )
 
     bash_output_max_chars: int = Field(
         default=20000,

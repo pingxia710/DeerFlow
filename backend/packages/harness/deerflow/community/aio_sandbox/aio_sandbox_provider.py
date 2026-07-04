@@ -192,6 +192,7 @@ class AioSandboxProvider(SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            seccomp_unconfined=self._config["seccomp_unconfined"],
         )
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -212,6 +213,7 @@ class AioSandboxProvider(SandboxProvider):
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "seccomp_unconfined": bool(getattr(sandbox_config, "seccomp_unconfined", False)),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
         }

@@ -980,6 +980,11 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Disable Docker's default seccomp profile for AIO sandbox
+#   # containers. Dangerous; keep false unless a custom sandbox image explicitly
+#   # requires it.
+#   # seccomp_unconfined: false
+#
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
 #   # mounts:

@@ -192,6 +192,36 @@ def test_start_container_binds_local_docker_port_to_loopback_by_default(monkeypa
     assert captured_cmd[captured_cmd.index("-p") + 1] == "127.0.0.1:18080:8080"
 
 
+def test_start_container_keeps_docker_seccomp_profile_by_default(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--security-opt" not in captured_cmd
+    assert "seccomp=unconfined" not in captured_cmd
+
+
+def test_start_container_allows_explicit_seccomp_unconfined(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+        seccomp_unconfined=True,
+    )
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--security-opt") + 1] == "seccomp=unconfined"
+
+
 def test_start_container_keeps_broad_bind_for_dood_sandbox_host(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",

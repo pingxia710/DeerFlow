@@ -304,6 +304,10 @@ When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` val
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
 
+Docker-based AIO sandbox containers keep Docker's default seccomp profile by
+default. Set `sandbox.seccomp_unconfined: true` only when a custom sandbox image
+explicitly requires `--security-opt seccomp=unconfined`.
+
 ### Building a Custom AIO Sandbox Image
 
 `AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.

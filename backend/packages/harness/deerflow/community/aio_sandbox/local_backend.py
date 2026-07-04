@@ -208,6 +208,7 @@ class LocalContainerBackend(SandboxBackend):
         container_prefix: str,
         config_mounts: list,
         environment: dict[str, str],
+        seccomp_unconfined: bool = False,
     ):
         """Initialize the local container backend.
 
@@ -217,12 +218,14 @@ class LocalContainerBackend(SandboxBackend):
             container_prefix: Prefix for container names (e.g., "deer-flow-sandbox").
             config_mounts: Volume mount configurations from config (list of VolumeMountConfig).
             environment: Environment variables to inject into containers.
+            seccomp_unconfined: Whether to disable Docker's seccomp profile.
         """
         self._image = image
         self._base_port = base_port
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._seccomp_unconfined = seccomp_unconfined
         self._runtime = self._detect_runtime()
 
     @property
@@ -541,8 +544,7 @@ class LocalContainerBackend(SandboxBackend):
         """
         cmd = [self._runtime, "run"]
 
-        # Docker-specific security options
-        if self._runtime == "docker":
+        if self._runtime == "docker" and self._seccomp_unconfined:
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
         if self._runtime == "docker":

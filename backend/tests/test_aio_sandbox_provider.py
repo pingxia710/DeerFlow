@@ -56,6 +56,47 @@ def _make_provider(tmp_path):
     return provider
 
 
+def test_load_config_defaults_seccomp_unconfined_to_false(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    sandbox_config = SimpleNamespace(
+        image=None,
+        port=None,
+        container_prefix=None,
+        idle_timeout=None,
+        replicas=None,
+        mounts=[],
+        environment={},
+        provisioner_url=None,
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: SimpleNamespace(sandbox=sandbox_config))
+
+    loaded = provider._load_config()
+
+    assert loaded["seccomp_unconfined"] is False
+
+
+def test_load_config_allows_explicit_seccomp_unconfined(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    sandbox_config = SimpleNamespace(
+        image=None,
+        port=None,
+        container_prefix=None,
+        idle_timeout=None,
+        replicas=None,
+        mounts=[],
+        environment={},
+        provisioner_url=None,
+        seccomp_unconfined=True,
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: SimpleNamespace(sandbox=sandbox_config))
+
+    loaded = provider._load_config()
+
+    assert loaded["seccomp_unconfined"] is True
+
+
 def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")

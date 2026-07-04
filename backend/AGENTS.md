@@ -360,6 +360,7 @@ metadata.
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.
 - Thread-run list/read service paths must scope by the storage owner, not just the browser login user, so trusted internal owner headers and browser/API calls see the same owner-bound run history.
+- Shared run resolvers such as `resolve_thread_run()` must use `get_request_storage_user_id(request)` for owner checks; do not duplicate browser-user-only logic there.
 - Feedback create/list/delete/stats routes are owner-bound user data; resolve the owner with `get_request_storage_user_id(request)` so trusted internal channel calls do not read or write feedback under the synthetic internal/default user.
 - Custom-agent management routes that read/write `users/{user_id}/agents/...` must resolve `user_id` from `get_request_storage_user_id(request)`; the global `USER.md` profile remains a shared resource unless that storage model is explicitly changed.
 - Background worker updates to `threads_meta` (title/status) must pass `RunRecord.user_id` explicitly; do not rely on ambient user ContextVars after the request handler returns.

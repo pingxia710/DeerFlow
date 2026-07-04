@@ -22,6 +22,7 @@ from langgraph.types import Command
 
 from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
+from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -59,7 +60,7 @@ async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> R
     record = await run_mgr.get(run_id, user_id=None)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    user_id = get_trusted_internal_owner_user_id(request) or _request_user_id(request)
+    user_id = get_request_storage_user_id(request)
     if user_id is not None and record.user_id is not None and str(record.user_id) != user_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return record

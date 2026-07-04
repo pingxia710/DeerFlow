@@ -1,6 +1,6 @@
 import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -934,3 +934,70 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
     assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
     assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path):
+    from app.gateway.routers.threads import delete_thread_data
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class AppState:
+        pass
+
+    class App:
+        pass
+
+    class Request:
+        pass
+
+    request = Request()
+    request.app = App()
+    request.app.state = AppState()
+    request.app.state.run_store = MemoryRunStore()
+    request.app.state.run_event_store = MemoryRunEventStore()
+    request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
+    request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
+
+    await request.app.state.run_store.put("run-a", thread_id="thread-x", user_id="user-a")
+    await request.app.state.run_store.put("run-b", thread_id="thread-x", user_id="user-b")
+    await request.app.state.run_event_store.put(thread_id="thread-x", run_id="run-a", event_type="message", category="message", content="a", user_id="user-a")
+    await request.app.state.run_event_store.put(thread_id="thread-x", run_id="run-b", event_type="message", category="message", content="b", user_id="user-b")
+
+    response = await delete_thread_data.__wrapped__("thread-x", request)
+
+    assert response.success is True
+    assert await request.app.state.run_store.list_by_thread("thread-x", user_id="user-a") == []
+    assert len(await request.app.state.run_event_store.list_messages("thread-x", user_id="user-a")) == 0
+    assert [r["run_id"] for r in await request.app.state.run_store.list_by_thread("thread-x", user_id="user-b")] == ["run-b"]
+    assert len(await request.app.state.run_event_store.list_messages("thread-x", user_id="user-b")) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_without_runs_or_events_is_idempotent():
+    from app.gateway.routers.threads import delete_thread_data
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class AppState:
+        pass
+
+    class App:
+        pass
+
+    class Request:
+        pass
+
+    request = Request()
+    request.app = App()
+    request.app.state = AppState()
+    request.app.state.run_store = MemoryRunStore()
+    request.app.state.run_event_store = MemoryRunEventStore()
+    request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
+    request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
+
+    first = await delete_thread_data.__wrapped__("missing-thread", request)
+    second = await delete_thread_data.__wrapped__("missing-thread", request)
+
+    assert first.success is True
+    assert second.success is True

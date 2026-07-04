@@ -102,6 +102,12 @@ class RunStore(abc.ABC):
     async def delete(self, run_id: str) -> None:
         pass
 
+    async def delete_by_thread(self, thread_id: str, *, user_id: str | None = None) -> int:
+        runs = await self.list_by_thread(thread_id, user_id=user_id, limit=100000)
+        for run in runs:
+            await self.delete(run["run_id"])
+        return len(runs)
+
     @abc.abstractmethod
     async def update_model_name(
         self,

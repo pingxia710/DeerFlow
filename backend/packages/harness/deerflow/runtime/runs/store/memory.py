@@ -137,6 +137,17 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
+    async def delete_by_thread(self, thread_id, *, user_id=None):
+        run_ids = list(self._runs_by_thread.get(thread_id, {}))
+        deleted = 0
+        for run_id in run_ids:
+            run = self._runs.get(run_id)
+            if run is None or (user_id is not None and run.get("user_id") != user_id):
+                continue
+            await self.delete(run_id)
+            deleted += 1
+        return deleted
+
     async def update_run_completion(self, run_id, *, status, **kwargs):
         if run_id in self._runs:
             self._runs[run_id]["status"] = status

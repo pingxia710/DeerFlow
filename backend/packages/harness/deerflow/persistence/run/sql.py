@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
@@ -240,6 +240,21 @@ class RunRepository(RunStore):
                 return
             await session.delete(row)
             await session.commit()
+
+    async def delete_by_thread(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.delete_by_thread")
+        stmt = delete(RunRow).where(RunRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0
 
     async def list_pending(self, *, before=None):
         if before is None:

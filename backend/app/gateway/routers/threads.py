@@ -236,7 +236,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
-    from app.gateway.deps import get_thread_store
+    from app.gateway.deps import get_run_event_store, get_run_store, get_thread_store
 
     # Clean local filesystem
     storage_user_id = get_request_storage_user_id(request)
@@ -250,6 +250,20 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
                 await checkpointer.adelete_thread(thread_id)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove run events and run records for this owner/thread (best-effort) so
+    # recreating the same thread_id cannot surface stale run history.
+    try:
+        event_store = get_run_event_store(request)
+        await event_store.delete_by_thread(thread_id, user_id=storage_user_id)
+    except Exception:
+        logger.debug("Could not delete run_events for %s (not critical)", sanitize_log_param(thread_id))
+
+    try:
+        run_store = get_run_store(request)
+        await run_store.delete_by_thread(thread_id, user_id=storage_user_id)
+    except Exception:
+        logger.debug("Could not delete runs for %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,12 +30,16 @@ from deerflow.runtime.user_context import get_effective_user_id
 pytestmark = pytest.mark.asyncio
 
 
+def _request_for_current_user():
+    return SimpleNamespace(headers={}, state=SimpleNamespace(user=SimpleNamespace(id=get_effective_user_id(), system_role="user")))
+
+
 async def test_create_agent_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     load_agents_api_config_from_dict({"enabled": True})
     try:
-        response = await create_agent_endpoint(AgentCreateRequest(name="loop-make-agent", soul="You are a test agent."))
+        response = await create_agent_endpoint(AgentCreateRequest(name="loop-make-agent", soul="You are a test agent."), _request_for_current_user())
         assert response is not None
 
         user_id = get_effective_user_id()
@@ -57,7 +62,7 @@ async def test_delete_agent_does_not_block_event_loop(tmp_path: Path, monkeypatc
         await asyncio.to_thread(agent_dir.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread((agent_dir / "config.yaml").write_text, "name: loop-test-agent\n", encoding="utf-8")
 
-        await delete_agent("loop-test-agent")
+        await delete_agent("loop-test-agent", _request_for_current_user())
 
         assert not await asyncio.to_thread(agent_dir.exists)
     finally:

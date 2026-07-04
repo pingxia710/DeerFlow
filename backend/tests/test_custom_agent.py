@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -637,6 +639,35 @@ class TestAgentsAPI:
 
         response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
         assert response.status_code == 409
+
+    def test_create_agent_uses_internal_owner_header(self, tmp_path):
+        import app.gateway.routers.agents as agents_router
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+        paths_instance = _make_paths(tmp_path)
+        previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-agent"},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        )
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+            set_agents_api_config(AgentsApiConfig(enabled=True))
+            try:
+                response = asyncio.run(
+                    agents_router.create_agent_endpoint(
+                        agents_router.AgentCreateRequest(name="internal-agent", soul="owner soul"),
+                        request,
+                    )
+                )
+            finally:
+                set_agents_api_config(previous_config)
+
+        assert response.name == "internal-agent"
+        owner_dir = tmp_path / "users" / "owner-agent" / "agents" / "internal-agent"
+        default_dir = tmp_path / "users" / "default" / "agents" / "internal-agent"
+        assert (owner_dir / "SOUL.md").read_text(encoding="utf-8") == "owner soul"
+        assert not default_dir.exists()
 
 
 # ===========================================================================

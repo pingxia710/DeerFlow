@@ -6,13 +6,13 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.path_utils import get_request_storage_user_id
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -88,6 +88,10 @@ def _require_agents_api_enabled() -> None:
         )
 
 
+def _resolve_agent_user_id(request: Request) -> str:
+    return get_request_storage_user_id(request)
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -110,7 +114,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     summary="List Custom Agents",
     description="List all custom agents available in the agents directory, including their soul content.",
 )
-async def list_agents() -> AgentsListResponse:
+async def list_agents(request: Request) -> AgentsListResponse:
     """List all custom agents.
 
     Returns:
@@ -118,7 +122,7 @@ async def list_agents() -> AgentsListResponse:
     """
     _require_agents_api_enabled()
 
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(request)
     try:
         agents = list_custom_agents(user_id=user_id)
         return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
@@ -132,7 +136,7 @@ async def list_agents() -> AgentsListResponse:
     summary="Check Agent Name",
     description="Validate an agent name and check if it is available (case-insensitive).",
 )
-async def check_agent_name(name: str) -> dict:
+async def check_agent_name(name: str, request: Request) -> dict:
     """Check whether an agent name is valid and not yet taken.
 
     Args:
@@ -147,7 +151,7 @@ async def check_agent_name(name: str) -> dict:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(request)
     paths = get_paths()
     # Treat the name as taken if either the per-user path or the legacy shared
     # path holds an agent — picking a name that collides with an unmigrated
@@ -162,7 +166,7 @@ async def check_agent_name(name: str) -> dict:
     summary="Get Custom Agent",
     description="Retrieve details and SOUL.md content for a specific custom agent.",
 )
-async def get_agent(name: str) -> AgentResponse:
+async def get_agent(name: str, request: Request) -> AgentResponse:
     """Get a specific custom agent by name.
 
     Args:
@@ -177,7 +181,7 @@ async def get_agent(name: str) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(request)
 
     try:
         agent_cfg = load_agent_config(name, user_id=user_id)
@@ -196,7 +200,7 @@ async def get_agent(name: str) -> AgentResponse:
     summary="Create Custom Agent",
     description="Create a new custom agent with its config and SOUL.md.",
 )
-async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
+async def create_agent_endpoint(request: AgentCreateRequest, http_request: Request) -> AgentResponse:
     """Create a new custom agent.
 
     Args:
@@ -211,7 +215,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(http_request)
     paths = get_paths()
 
     def _create_agent() -> AgentResponse | None:
@@ -276,7 +280,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     summary="Update Custom Agent",
     description="Update an existing custom agent's config and/or SOUL.md.",
 )
-async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
+async def update_agent(name: str, request: AgentUpdateRequest, http_request: Request) -> AgentResponse:
     """Update an existing custom agent.
 
     Args:
@@ -292,7 +296,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(http_request)
 
     try:
         agent_cfg = load_agent_config(name, user_id=user_id)
@@ -427,7 +431,7 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     summary="Delete Custom Agent",
     description="Delete a custom agent and all its files (config, SOUL.md, memory).",
 )
-async def delete_agent(name: str) -> None:
+async def delete_agent(name: str, request: Request) -> None:
     """Delete a custom agent.
 
     Args:
@@ -440,7 +444,7 @@ async def delete_agent(name: str) -> None:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
-    user_id = get_effective_user_id()
+    user_id = _resolve_agent_user_id(request)
     paths = get_paths()
 
     def _remove_agent_dir() -> tuple[str, str]:

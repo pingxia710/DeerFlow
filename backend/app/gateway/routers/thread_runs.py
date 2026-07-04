@@ -22,7 +22,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
@@ -105,6 +105,15 @@ def compute_run_durations(runs) -> dict[str, int]:
 
 
 class RunCreateRequest(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _default_resumable_disconnect(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("stream_resumable", data.get("streamResumable")) is True and "on_disconnect" not in data and "onDisconnect" not in data:
+            return {**data, "on_disconnect": "continue"}
+        return data
+
     assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
     input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
@@ -118,8 +127,16 @@ class RunCreateRequest(BaseModel):
     interrupt_after: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt after")
     stream_mode: list[str] | str | None = Field(default=None, description="Stream mode(s)")
     stream_subgraphs: bool = Field(default=False, description="Include subgraph events")
-    stream_resumable: bool | None = Field(default=None, description="SSE resumable mode")
-    on_disconnect: Literal["cancel", "continue"] = Field(default="cancel", description="Behaviour on SSE disconnect")
+    stream_resumable: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("stream_resumable", "streamResumable"),
+        description="SSE resumable mode",
+    )
+    on_disconnect: Literal["cancel", "continue"] = Field(
+        default="cancel",
+        validation_alias=AliasChoices("on_disconnect", "onDisconnect"),
+        description="Behaviour on SSE disconnect",
+    )
     on_completion: Literal["delete", "keep"] = Field(default="keep", description="Delete temp thread on completion")
     multitask_strategy: Literal["reject", "rollback", "interrupt", "enqueue"] = Field(default="reject", description="Concurrency strategy")
     after_seconds: float | None = Field(default=None, description="Delayed execution")

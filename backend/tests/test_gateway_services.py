@@ -78,6 +78,24 @@ def test_normalize_stream_modes_empty_list():
     assert normalize_stream_modes([]) == ["values"]
 
 
+def test_run_create_request_stream_resumable_defaults_disconnect_continue():
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(stream_resumable=True)
+
+    assert body.stream_resumable is True
+    assert body.on_disconnect == "continue"
+
+
+def test_run_create_request_resumable_accepts_camel_case_and_explicit_disconnect_wins():
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest.model_validate({"streamResumable": True, "onDisconnect": "cancel"})
+
+    assert body.stream_resumable is True
+    assert body.on_disconnect == "cancel"
+
+
 def test_normalize_input_none():
     from app.gateway.services import normalize_input
 

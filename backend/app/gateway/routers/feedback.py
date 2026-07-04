@@ -150,8 +150,9 @@ async def list_feedback(
     request: Request,
 ) -> list[dict[str, Any]]:
     """List all feedback for a run."""
+    user_id = await get_current_user(request)
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(thread_id, run_id)
+    return await feedback_repo.list_by_run(thread_id, run_id, user_id=user_id)
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback/stats", response_model=FeedbackStatsResponse)
@@ -175,14 +176,15 @@ async def delete_feedback(
     request: Request,
 ) -> dict[str, bool]:
     """Delete a feedback record."""
+    user_id = await get_current_user(request)
     feedback_repo = get_feedback_repo(request)
     # Verify feedback belongs to the specified thread/run before deleting
-    existing = await feedback_repo.get(feedback_id)
+    existing = await feedback_repo.get(feedback_id, user_id=user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found")
     if existing.get("thread_id") != thread_id or existing.get("run_id") != run_id:
         raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found in run {run_id}")
-    deleted = await feedback_repo.delete(feedback_id)
+    deleted = await feedback_repo.delete(feedback_id, user_id=user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found")
     return {"success": True}

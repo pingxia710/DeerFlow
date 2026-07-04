@@ -915,6 +915,33 @@ def test_resolve_thread_run_denies_foreign_run_owner():
     assert asyncio.run(_scenario()) == 404
 
 
+def test_resolve_thread_run_uses_internal_owner_header():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from app.gateway.services import resolve_thread_run
+    from deerflow.runtime import RunManager
+
+    async def _scenario():
+        run_manager = RunManager()
+        record = await run_manager.create("thread-owned", user_id="owner-1")
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            app=SimpleNamespace(state=SimpleNamespace(run_manager=run_manager)),
+            state=SimpleNamespace(
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+                auth_source=AUTH_SOURCE_INTERNAL,
+            ),
+        )
+        return await resolve_thread_run("thread-owned", record.run_id, request)
+
+    resolved = asyncio.run(_scenario())
+
+    assert resolved.user_id == "owner-1"
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

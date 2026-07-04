@@ -20,7 +20,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.deps import get_checkpointer, get_current_user, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
@@ -59,15 +59,15 @@ async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> R
     record = await run_mgr.get(run_id, user_id=None)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-
-    user_id = await get_current_user(request)
+    user_id = get_trusted_internal_owner_user_id(request) or _request_user_id(request)
     if user_id is not None and record.user_id is not None and str(record.user_id) != user_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return record
 
 
 def _request_user_id(request: Request) -> str | None:
-    user = getattr(getattr(request, "state", None), "user", None)
+    state = getattr(request, "state", None)
+    user = getattr(getattr(state, "auth", None), "user", None) or getattr(state, "user", None)
     user_id = getattr(user, "id", None)
     return str(user_id) if user_id else None
 

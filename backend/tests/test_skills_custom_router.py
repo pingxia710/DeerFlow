@@ -5,11 +5,14 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
@@ -41,12 +44,37 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def _make_test_app(config) -> FastAPI:
-    app = FastAPI()
+def _admin_user() -> User:
+    return User(
+        id=UUID("11111111-2222-3333-4444-555555555555"),
+        email="admin@example.com",
+        password_hash="x",
+        system_role="admin",
+    )
+
+
+def _non_admin_user() -> User:
+    return User(
+        id=UUID("99999999-8888-7777-6666-555555555555"),
+        email="user@example.com",
+        password_hash="x",
+        system_role="user",
+    )
+
+
+def _make_test_app(config, *, user_factory=_admin_user) -> FastAPI:
+    app = make_authed_test_app(user_factory=user_factory)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
     return app
+
+
+def _authenticate_require_auth_as(monkeypatch, user_factory) -> None:
+    async def _get_optional_user_from_request(_request):
+        return user_factory()
+
+    monkeypatch.setattr("app.gateway.deps.get_optional_user_from_request", _get_optional_user_from_request)
 
 
 def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -> Path:
@@ -64,6 +92,115 @@ def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
         zf.writestr(f"{name}/SKILL.md", skill_content)
         zf.writestr(f"{name}/references/guide.md", "# Guide\n")
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    "method, path, json_body",
+    [
+        ("POST", "/api/skills/install", {"thread_id": "thread-1", "path": "mnt/user-data/outputs/demo.skill"}),
+        ("GET", "/api/skills/custom", None),
+        ("GET", "/api/skills/custom/demo-skill", None),
+        ("PUT", "/api/skills/custom/demo-skill", {"content": _skill_content("demo-skill")}),
+        ("DELETE", "/api/skills/custom/demo-skill", None),
+        ("GET", "/api/skills/custom/demo-skill/history", None),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}),
+        ("PUT", "/api/skills/demo-skill", {"enabled": False}),
+    ],
+)
+def test_global_skill_management_requires_admin(monkeypatch, method: str, path: str, json_body: dict | None):
+    calls = {"resolved": 0}
+    config = SimpleNamespace()
+    app = _make_test_app(config, user_factory=_non_admin_user)
+    monkeypatch.setattr(
+        skills_router,
+        "resolve_thread_virtual_path",
+        lambda *args, **kwargs: calls.__setitem__("resolved", calls["resolved"] + 1),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=json_body)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin privileges required to manage global skills."
+    assert calls["resolved"] == 0
+
+
+@pytest.mark.parametrize(
+    "method, path, json_body",
+    [
+        ("POST", "/api/skills/install", {"thread_id": "thread-1", "path": "mnt/user-data/outputs/demo.skill"}),
+        ("GET", "/api/skills/custom", None),
+        ("GET", "/api/skills/custom/demo-skill", None),
+        ("PUT", "/api/skills/custom/demo-skill", {"content": _skill_content("demo-skill")}),
+        ("DELETE", "/api/skills/custom/demo-skill", None),
+        ("GET", "/api/skills/custom/demo-skill/history", None),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}),
+        ("PUT", "/api/skills/demo-skill", {"enabled": False}),
+    ],
+)
+def test_global_skill_management_fails_closed_without_auth(method: str, path: str, json_body: dict | None):
+    app = FastAPI()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=json_body)
+
+    assert response.status_code == 401
+
+
+def test_skills_summary_requires_auth_without_global_middleware():
+    app = FastAPI()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/skills")
+
+    assert response.status_code == 401
+
+
+def test_skills_detail_requires_auth_without_global_middleware():
+    app = FastAPI()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.include_router(skills_router.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/skills/demo-skill")
+
+    assert response.status_code == 401
+
+
+def test_authenticated_user_can_read_safe_skills_summary_and_detail(monkeypatch):
+    mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("demo-skill", enabled=True)])
+    monkeypatch.setattr("app.gateway.routers.skills.get_or_new_skill_storage", lambda **kwargs: mock_storage)
+    _authenticate_require_auth_as(monkeypatch, _non_admin_user)
+    app = _make_test_app(SimpleNamespace(), user_factory=_non_admin_user)
+
+    with TestClient(app) as client:
+        summary_response = client.get("/api/skills")
+        detail_response = client.get("/api/skills/demo-skill")
+
+    assert summary_response.status_code == 200
+    assert summary_response.json() == {
+        "skills": [
+            {
+                "name": "demo-skill",
+                "description": "Description for demo-skill",
+                "license": "MIT",
+                "category": "public",
+                "enabled": True,
+            }
+        ]
+    }
+    assert detail_response.status_code == 200
+    assert detail_response.json() == {
+        "name": "demo-skill",
+        "description": "Description for demo-skill",
+        "license": "MIT",
+        "category": "public",
+        "enabled": True,
+    }
 
 
 def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
@@ -91,7 +228,12 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
-    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    resolve_calls = []
+    monkeypatch.setattr(
+        skills_router,
+        "resolve_thread_virtual_path",
+        lambda thread_id, path, *, user_id=None: resolve_calls.append((thread_id, path, user_id)) or archive,
+    )
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
@@ -103,6 +245,13 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["skill_name"] == "archive-skill"
+    assert resolve_calls == [
+        (
+            "thread-1",
+            "mnt/user-data/outputs/archive-skill.skill",
+            "11111111-2222-3333-4444-555555555555",
+        )
+    ]
     assert (skills_root / "custom" / "archive-skill" / "SKILL.md").exists()
     assert scan_calls == [
         {
@@ -141,7 +290,7 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=_admin_user)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(uploads_router.router)
@@ -196,7 +345,7 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
-    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path, *, user_id=None: archive)
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
@@ -258,6 +407,40 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert rollback_response.json()["description"] == "Demo skill"
         assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
         assert refresh_calls == ["refresh", "refresh"]
+
+
+def test_custom_skill_rollback_strips_newlines_like_other_custom_routes(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    custom_dir = skills_root / "custom" / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    original_content = _skill_content("demo-skill")
+    edited_content = _skill_content("demo-skill", "Edited skill")
+    (custom_dir / "SKILL.md").write_text(edited_content, encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    async def _refresh():
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+    history_file = get_or_new_skill_storage(app_config=config).get_skill_history_file("demo-skill")
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_text(
+        '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
+        encoding="utf-8",
+    )
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        rollback_response = client.post("/api/skills/custom/demo-skill%0A/rollback", json={"history_index": -1})
+
+    assert rollback_response.status_code == 200
+    assert rollback_response.json()["description"] == "Demo skill"
 
 
 def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):

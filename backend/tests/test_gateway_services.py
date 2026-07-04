@@ -226,6 +226,19 @@ def test_build_run_config_with_overrides():
     assert config["metadata"]["user"] == "alice"
 
 
+def test_build_run_config_path_thread_id_overrides_stale_configurable_thread_id():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-path",
+        {"configurable": {"thread_id": "thread-stale", "model_name": "gpt-4"}},
+        None,
+    )
+
+    assert config["configurable"]["thread_id"] == "thread-path"
+    assert config["configurable"]["model_name"] == "gpt-4"
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for issue #1644:
 # assistant_id not mapped to agent_name → custom agent SOUL.md never loaded

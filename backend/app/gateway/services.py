@@ -329,8 +329,8 @@ def build_run_config(
             context["thread_id"] = thread_id
             config["context"] = context
         else:
-            configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable", {}))
+            configurable = dict(request_config.get("configurable", {}))
+            configurable["thread_id"] = thread_id
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):

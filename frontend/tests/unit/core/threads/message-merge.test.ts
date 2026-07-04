@@ -994,6 +994,27 @@ test("buildVisibleHistoryMessages preserves run message created_at for elapsed t
   );
 });
 
+test("buildVisibleHistoryMessages tolerates legacy rows without metadata", () => {
+  const messages = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "legacy-run",
+        seq: 1,
+        content: {
+          id: "legacy-ai",
+          type: "ai",
+          content: "legacy answer",
+        } as Message,
+        created_at: "2026-06-18T00:00:01Z",
+      } as RunMessage,
+    ],
+    new Set(),
+    [],
+  );
+
+  expect(messages.map((message) => message.content)).toEqual(["legacy answer"]);
+});
+
 test("mergeMessages preserves history created_at when live message replaces history", () => {
   const history = {
     id: "same",

@@ -29,7 +29,6 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.runs.schemas import is_inflight_status
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
@@ -535,7 +534,7 @@ async def get_latest_command_room_round(thread_id: str, request: Request) -> Com
     from deerflow.command_room.round_record import latest_command_room_round
 
     try:
-        record = latest_command_room_round(thread_id=thread_id, user_id=get_effective_user_id())
+        record = latest_command_room_round(thread_id=thread_id, user_id=get_request_storage_user_id(request))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

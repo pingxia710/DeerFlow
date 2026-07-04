@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
-from _router_auth_helpers import make_authed_test_app
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
@@ -860,7 +860,7 @@ SECRET_FINAL_TEXT_SHOULD_NOT_APPEAR
         )
 
         with (
-            patch("app.gateway.routers.threads.get_effective_user_id", return_value="alice"),
+            patch("app.gateway.routers.threads.get_request_storage_user_id", return_value="alice"),
             TestClient(app) as client,
         ):
             response = client.get("/api/threads/round-thread/command-room/rounds/latest")
@@ -887,7 +887,7 @@ def test_get_latest_command_room_round_returns_404_when_missing(tmp_path):
 
     with (
         patch("deerflow.command_room.round_record.get_paths", return_value=paths),
-        patch("app.gateway.routers.threads.get_effective_user_id", return_value="alice"),
+        patch("app.gateway.routers.threads.get_request_storage_user_id", return_value="alice"),
         TestClient(app) as client,
     ):
         response = client.get("/api/threads/missing-round/command-room/rounds/latest")
@@ -925,12 +925,51 @@ def test_get_latest_command_room_round_is_user_scoped(tmp_path):
         )
 
         with (
-            patch("app.gateway.routers.threads.get_effective_user_id", return_value="bob"),
+            patch("app.gateway.routers.threads.get_request_storage_user_id", return_value="bob"),
             TestClient(app) as client,
         ):
             response = client.get("/api/threads/shared-thread-id/command-room/rounds/latest")
 
     assert response.status_code == 404
+
+
+def test_get_latest_command_room_round_uses_internal_owner_header(tmp_path):
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from deerflow.command_room.round_record import record_command_room_round
+
+    paths = Paths(tmp_path)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+    )
+
+    with patch("deerflow.command_room.round_record.get_paths", return_value=paths):
+        record_command_room_round(
+            thread_id="channel-round-thread",
+            agent_name="command-room",
+            user_id="owner-1",
+            user_message="intent",
+            final_text=(
+                "Round Card\n"
+                "Evidence: command output\n"
+                "Opposition:\n"
+                "Not dispatched because: low risk\n"
+                "Risk class: low\n"
+                "Evidence basis: deterministic\n"
+                "No permission expansion: true\n"
+                "No PASS from worker self-claim: true\n"
+                "Verdict: PASS\n"
+                "Next: done\n"
+            ),
+            audit_records=[],
+        )
+
+        response = asyncio.run(call_unwrapped(threads.get_latest_command_room_round, "channel-round-thread", request))
+
+    assert response.round["threadId"] == "channel-round-thread"
+    assert response.round["verdict"]["decision"] == "PASS"
 
 
 def test_get_latest_command_room_round_rejects_invalid_thread_id(tmp_path):
@@ -940,7 +979,7 @@ def test_get_latest_command_room_round_rejects_invalid_thread_id(tmp_path):
 
     with (
         patch("deerflow.command_room.round_record.get_paths", return_value=paths),
-        patch("app.gateway.routers.threads.get_effective_user_id", return_value="alice"),
+        patch("app.gateway.routers.threads.get_request_storage_user_id", return_value="alice"),
         TestClient(app) as client,
     ):
         response = client.get("/api/threads/thread.with.dot/command-room/rounds/latest")

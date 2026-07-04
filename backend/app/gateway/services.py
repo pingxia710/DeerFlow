@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
 _TASK_EVENT_REPLAY_PAGE_SIZE = 500
+_RUN_TERMINAL_EVENT_TYPE = "run.terminal"
 _TASK_EVENT_REPLAY_TYPES = [
     "task_started",
     "task_running",
@@ -52,6 +53,7 @@ _TASK_EVENT_REPLAY_TYPES = [
     "task_cancelled",
     "task_timed_out",
 ]
+_CUSTOM_REPLAY_TYPES = [*_TASK_EVENT_REPLAY_TYPES, _RUN_TERMINAL_EVENT_TYPE]
 
 
 async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
@@ -101,7 +103,7 @@ def _is_task_event_payload(payload: Any, *, thread_id: str, run_id: str) -> bool
     return event_type in _TASK_EVENT_REPLAY_TYPES and payload.get("thread_id") == thread_id and payload.get("run_id") == run_id and isinstance(payload.get("task_id"), str)
 
 
-async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord, *, user_id: str | None) -> list[str] | None:
+async def _durable_custom_replay_frames(event_store: Any | None, record: RunRecord, *, user_id: str | None) -> list[str] | None:
     if event_store is None:
         return None
     rows: list[Any] = []
@@ -111,7 +113,7 @@ async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord
             page = await event_store.list_events(
                 record.thread_id,
                 record.run_id,
-                event_types=_TASK_EVENT_REPLAY_TYPES,
+                event_types=_CUSTOM_REPLAY_TYPES,
                 limit=_TASK_EVENT_REPLAY_PAGE_SIZE,
                 after_seq=after_seq,
                 user_id=user_id,
@@ -131,6 +133,29 @@ async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord
         payload = row.get("content") if isinstance(row, Mapping) else None
         if _is_task_event_payload(payload, thread_id=record.thread_id, run_id=record.run_id):
             frames.append(format_sse("custom", payload))
+            continue
+        if (
+            isinstance(row, Mapping)
+            and row.get("event_type") == _RUN_TERMINAL_EVENT_TYPE
+            and row.get("thread_id") == record.thread_id
+            and row.get("run_id") == record.run_id
+            and isinstance(payload, Mapping)
+            and isinstance(payload.get("status"), str)
+            and isinstance(payload.get("terminal_reason"), str)
+        ):
+            frames.append(
+                format_sse(
+                    "custom",
+                    {
+                        "type": _RUN_TERMINAL_EVENT_TYPE,
+                        "event_type": _RUN_TERMINAL_EVENT_TYPE,
+                        "thread_id": record.thread_id,
+                        "run_id": record.run_id,
+                        "status": payload["status"],
+                        "terminal_reason": payload["terminal_reason"],
+                    },
+                )
+            )
     return frames or None
 
 
@@ -595,7 +620,7 @@ async def sse_consumer(
     - ``continue``: let the task run; events are discarded.
     """
     if not is_inflight_status(record.status):
-        replay_frames = await _durable_task_replay_frames(event_store, record, user_id=user_id)
+        replay_frames = await _durable_custom_replay_frames(event_store, record, user_id=user_id)
         if replay_frames is not None:
             for frame in replay_frames:
                 yield frame
@@ -617,7 +642,7 @@ async def sse_consumer(
                 return
 
             if entry.event == _STREAM_RECOVERY_REQUIRED_EVENT:
-                replay_frames = await _durable_task_replay_frames(event_store, record, user_id=user_id)
+                replay_frames = await _durable_custom_replay_frames(event_store, record, user_id=user_id)
                 if replay_frames is None:
                     yield format_sse(entry.event, entry.data, event_id=entry.id or None)
                     continue

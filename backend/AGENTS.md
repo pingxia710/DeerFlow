@@ -330,7 +330,8 @@ event-store `seq` cursor spaces are explicitly reconciled. If there are no
 replayable task events for a bridge gap, keep forwarding
 `stream_recovery_required`; silently swallowing the recovery signal hides data
 loss from the frontend. Late reconnects to terminal runs may replay persisted
-task events before `end` without subscribing to the cleaned in-memory bridge.
+task events and `run.terminal` before `end` without subscribing to the cleaned
+in-memory bridge.
 Every SSE route that creates or joins a run must pass
 the current `RunEventStore` and storage `user_id` into `sse_consumer` so replay
 uses the same owner scope as persisted events. Task-event replay must page with
@@ -374,7 +375,7 @@ metadata. The run artifact index is current-state oriented: duplicate
 - Custom-agent management routes that read/write `users/{user_id}/agents/...` must resolve `user_id` from `get_request_storage_user_id(request)`; the global `USER.md` profile remains a shared resource unless that storage model is explicitly changed.
 - Background worker updates to `threads_meta` (title/status) must pass `RunRecord.user_id` explicitly; do not rely on ambient user ContextVars after the request handler returns.
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
-- Terminal transitions must persist `terminal_reason` through `RunStore.update_status()` and expose the same reason through store-only hydration; `run.terminal` events are the replay anchor, not a replacement for the run row field.
+- Terminal transitions must persist `terminal_reason` through `RunStore.update_status()` and expose the same reason through store-only hydration; `run.terminal` events are the replay anchor, not a replacement for the run row field. SSE durable custom replay must include owner-scoped `run.terminal` alongside task events.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - Runtime recovery reasons such as `boundary_stopped` and `worker_lost` are terminal statuses for store predicates and frontend recovery; store-only hydrated `RunRecord.status` may be a string, so response/serialization code should use `run_status_value()` instead of direct `.value`.

@@ -371,6 +371,24 @@ async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscrip
         metadata={"caller": "task_event"},
         user_id="foreign-owner",
     )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="run.terminal",
+        category="lifecycle",
+        content={"status": "success", "terminal_reason": "success"},
+        metadata={"caller": "runtime"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="run.terminal",
+        category="lifecycle",
+        content={"status": "error", "terminal_reason": "failed"},
+        metadata={"caller": "runtime"},
+        user_id="foreign-owner",
+    )
 
     class _CleanedBridge:
         async def subscribe(self, *_args, **_kwargs):
@@ -397,8 +415,17 @@ async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscrip
         frames.append(frame)
 
     events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events == ["custom", "end"]
+    assert events == ["custom", "custom", "end"]
     assert json.loads(_parse_sse_frame(frames[0])["data"])["task_id"] == "task-terminal"
+    terminal_payload = json.loads(_parse_sse_frame(frames[1])["data"])
+    assert terminal_payload == {
+        "type": "run.terminal",
+        "event_type": "run.terminal",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "success",
+        "terminal_reason": "success",
+    }
 
 
 @pytest.mark.asyncio

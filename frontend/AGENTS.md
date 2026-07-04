@@ -17,18 +17,18 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 ## Commands
 
-| Command          | Purpose                                           |
-| ---------------- | ------------------------------------------------- |
+| Command          | Purpose                                                                                                        |
+| ---------------- | -------------------------------------------------------------------------------------------------------------- |
 | `pnpm dev`       | Dev server with Turbopack (http://localhost:3000 by default; root `make dev` may set `PORT` when 3000 is busy) |
-| `pnpm build`     | Production build                                  |
-| `pnpm check`     | Lint + type check (run before committing)         |
-| `pnpm lint`      | ESLint only                                       |
-| `pnpm lint:fix`  | ESLint with auto-fix                              |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply)     |
-| `pnpm test`      | Run unit tests with Rstest                        |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
-| `pnpm start`     | Start production server                           |
+| `pnpm build`     | Production build                                                                                               |
+| `pnpm check`     | Lint + type check (run before committing)                                                                      |
+| `pnpm lint`      | ESLint only                                                                                                    |
+| `pnpm lint:fix`  | ESLint with auto-fix                                                                                           |
+| `pnpm format`    | Prettier check (`pnpm format:write` to apply)                                                                  |
+| `pnpm test`      | Run unit tests with Rstest                                                                                     |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)                                                                       |
+| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)                                                                         |
+| `pnpm start`     | Start production server                                                                                        |
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
@@ -89,7 +89,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Persisted `task_event` run messages are control rows: thread history should
   use them to restore subtask state, then keep them out of visible chat bubbles.
   `RunMessage.content` may be either a chat `Message` or a structured control
-  event; only real chat messages should enter visible history merging.
+  event; only real chat messages should enter visible history merging. Legacy
+  rows without `metadata.caller` may still be treated as task events when their
+  content matches the pinned task-event schema.
 - History run messages should honor backend `display.visible_in_chat` when
   present; only fall back to local `caller`/`name`/`hide_from_ui` checks for
   older rows without the display contract.

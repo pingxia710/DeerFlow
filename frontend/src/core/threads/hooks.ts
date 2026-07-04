@@ -670,7 +670,10 @@ function taskEventStartedAt(value?: string) {
 }
 
 export function isTaskEventRunMessage(message: RunMessage) {
-  return message.metadata?.caller === TASK_EVENT_CALLER;
+  return (
+    message.metadata?.caller === TASK_EVENT_CALLER ||
+    asTaskEvent(message.content) !== null
+  );
 }
 
 export function taskEventRunMessageKey(message: RunMessage) {

@@ -459,6 +459,38 @@ test("task event run messages update subtask state without entering visible hist
   ).toEqual(["ai-1"]);
 });
 
+test("legacy task event run messages without metadata still restore subtask state", () => {
+  const taskEventRow = {
+    run_id: "run-legacy",
+    seq: 1,
+    content: {
+      type: "task_completed",
+      task_id: "call-legacy",
+      thread_id: "thread-1",
+      run_id: "run-legacy",
+      result: "legacy done",
+    },
+    created_at: "2026-05-22T00:00:00Z",
+  } as unknown as RunMessage;
+  const updates: unknown[] = [];
+
+  expect(isTaskEventRunMessage(taskEventRow)).toBe(true);
+  applyTaskEventRunMessages([taskEventRow], (update) => updates.push(update));
+
+  expect(updates).toEqual([
+    {
+      id: "call-legacy",
+      threadId: "thread-1",
+      notify: true,
+      status: "completed",
+      result: "legacy done",
+    },
+  ]);
+  expect(buildVisibleHistoryMessages([taskEventRow], new Set(), [])).toEqual(
+    [],
+  );
+});
+
 test("visible history run messages fall back to local rules for old rows without display", () => {
   const middlewareAiRow = {
     run_id: "run-1",

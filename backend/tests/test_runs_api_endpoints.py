@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.routers import runs
+
+_TEST_USER_ID = UUID("44444444-4444-4444-4444-444444444444")
+
+
+def _make_user(user_id: UUID = _TEST_USER_ID) -> User:
+    return User(id=user_id, email=f"{user_id}@example.com", password_hash="x", system_role="user")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_app(run_store=None, event_store=None, feedback_repo=None):
+def _make_app(run_store=None, event_store=None, feedback_repo=None, *, user_id: UUID = _TEST_USER_ID):
     """Build a test FastAPI app with stub auth and mocked state."""
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: _make_user(user_id))
     app.include_router(runs.router)
 
     if run_store is not None:
@@ -189,6 +198,7 @@ def test_run_messages_passes_after_seq_to_event_store():
         limit=51,  # default limit(50) + 1
         before_seq=None,
         after_seq=5,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -210,6 +220,7 @@ def test_run_messages_respects_custom_limit():
         limit=11,  # 10 + 1
         before_seq=None,
         after_seq=None,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -231,6 +242,7 @@ def test_run_messages_passes_before_seq_to_event_store():
         limit=51,
         before_seq=10,
         after_seq=None,
+        user_id=str(_TEST_USER_ID),
     )
 
 
@@ -247,6 +259,53 @@ def test_run_messages_empty_data():
     body = response.json()
     assert body["data"] == []
     assert body["has_more"] is False
+
+
+def test_run_messages_scopes_run_and_events_to_current_user():
+    user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    run_id = "shared-run-id"
+
+    run_store = MagicMock()
+
+    async def get_run(run_id_arg, *, user_id=None):
+        assert run_id_arg == run_id
+        if user_id == str(user_a):
+            return {"run_id": run_id, "thread_id": "thread-a"}
+        if user_id == str(user_b):
+            return {"run_id": run_id, "thread_id": "thread-b"}
+        return {"run_id": run_id, "thread_id": "thread-b"}
+
+    run_store.get = AsyncMock(side_effect=get_run)
+
+    event_store = MagicMock()
+
+    async def list_messages_by_run(thread_id, run_id_arg, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        assert run_id_arg == run_id
+        assert limit == 51
+        assert before_seq is None
+        assert after_seq is None
+        if thread_id == "thread-a" and user_id == str(user_a):
+            return [{"seq": 1, "event_type": "llm.ai.response", "category": "message", "content": "owner-a"}]
+        return [{"seq": 1, "event_type": "llm.ai.response", "category": "message", "content": "owner-b"}]
+
+    event_store.list_messages_by_run = AsyncMock(side_effect=list_messages_by_run)
+    app = _make_app(run_store=run_store, event_store=event_store, user_id=user_a)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/runs/{run_id}/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["content"] == "owner-a"
+    run_store.get.assert_awaited_once_with(run_id, user_id=str(user_a))
+    event_store.list_messages_by_run.assert_awaited_once_with(
+        "thread-a",
+        run_id,
+        limit=51,
+        before_seq=None,
+        after_seq=None,
+        user_id=str(user_a),
+    )
 
 
 def _make_feedback_repo(rows: list[dict]):
@@ -303,6 +362,42 @@ class TestRunFeedback:
             response = client.get("/api/runs/run-fb-2/feedback")
         assert response.status_code == 200
         assert response.json() == []
+
+    def test_scopes_feedback_to_current_user(self):
+        user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+        run_id = "shared-feedback-run"
+
+        run_store = MagicMock()
+
+        async def get_run(run_id_arg, *, user_id=None):
+            assert run_id_arg == run_id
+            if user_id == str(user_a):
+                return {"run_id": run_id, "thread_id": "thread-a"}
+            if user_id == str(user_b):
+                return {"run_id": run_id, "thread_id": "thread-b"}
+            return {"run_id": run_id, "thread_id": "thread-b"}
+
+        run_store.get = AsyncMock(side_effect=get_run)
+        feedback_repo = MagicMock()
+
+        async def list_by_run(thread_id, run_id_arg, *, limit=100, user_id=None):
+            assert run_id_arg == run_id
+            assert limit == 100
+            if thread_id == "thread-a" and user_id == str(user_a):
+                return [{"feedback_id": "fb-a", "run_id": run_id}]
+            return [{"feedback_id": "fb-b", "run_id": run_id}]
+
+        feedback_repo.list_by_run = AsyncMock(side_effect=list_by_run)
+        app = _make_app(run_store=run_store, feedback_repo=feedback_repo, user_id=user_a)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/runs/{run_id}/feedback")
+
+        assert response.status_code == 200
+        assert response.json() == [{"feedback_id": "fb-a", "run_id": run_id}]
+        run_store.get.assert_awaited_once_with(run_id, user_id=str(user_a))
+        feedback_repo.list_by_run.assert_awaited_once_with("thread-a", run_id, user_id=str(user_a))
 
     def test_503_when_feedback_repo_not_configured(self):
         """Returns 503 when feedback_repo is None (no DB configured)."""

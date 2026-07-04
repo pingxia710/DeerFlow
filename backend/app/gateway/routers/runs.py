@@ -7,6 +7,7 @@ is reused so that conversation history is preserved across calls.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 
@@ -16,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.routers.thread_runs import RunCreateRequest, attach_message_display
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunStatus, serialize_channel_values_for_api
@@ -30,6 +32,15 @@ def _resolve_thread_id(body: RunCreateRequest) -> str:
     if thread_id:
         return str(thread_id)
     return str(uuid.uuid4())
+
+
+def _supports_user_id_keyword(callable_obj) -> bool:
+    """Return True when a store method can accept ``user_id=...``."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return "user_id" in parameters or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
 
 
 @router.post("/stream")
@@ -98,10 +109,10 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_run(run_id: str, request: Request) -> dict:
+async def _resolve_run(run_id: str, request: Request, *, user_id: str | None) -> dict:
     """Fetch run by run_id with user ownership check. Raises 404 if not found."""
     run_store = get_run_store(request)
-    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
+    record = await run_store.get(run_id, user_id=user_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return record
@@ -125,14 +136,20 @@ async def run_messages(
 
     Response: { data: [...], has_more: bool }
     """
-    run = await _resolve_run(run_id, request)
+    user_id = get_request_storage_user_id(request)
+    run = await _resolve_run(run_id, request, user_id=user_id)
     event_store = get_run_event_store(request)
+    list_kwargs = {
+        "limit": limit + 1,
+        "before_seq": before_seq,
+        "after_seq": after_seq,
+    }
+    if _supports_user_id_keyword(event_store.list_messages_by_run):
+        list_kwargs["user_id"] = user_id
     rows = await event_store.list_messages_by_run(
         run["thread_id"],
         run_id,
-        limit=limit + 1,
-        before_seq=before_seq,
-        after_seq=after_seq,
+        **list_kwargs,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
     attach_message_display(data)
@@ -143,6 +160,7 @@ async def run_messages(
 @require_permission("runs", "read")
 async def run_feedback(run_id: str, request: Request) -> list[dict]:
     """Return all feedback for a run."""
-    run = await _resolve_run(run_id, request)
+    user_id = get_request_storage_user_id(request)
+    run = await _resolve_run(run_id, request, user_id=user_id)
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(run["thread_id"], run_id)
+    return await feedback_repo.list_by_run(run["thread_id"], run_id, user_id=user_id)

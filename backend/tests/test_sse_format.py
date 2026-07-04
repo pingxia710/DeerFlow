@@ -12,7 +12,7 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
-from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunContext, RunManager, run_agent
+from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunContext, RunManager, RunRecord, RunStatus, run_agent
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 
@@ -50,6 +50,14 @@ class _NeverDisconnectedRequest:
         return False
 
 
+class _CancelRecorder:
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
+
+
 class _FinalAnswerAgent:
     metadata: dict = {}
     checkpointer = None
@@ -73,6 +81,67 @@ def _parse_sse_frame(frame: str) -> dict[str, str]:
         name, value = line.split(": ", 1)
         fields[name] = value
     return fields
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_forwards_task_custom_event_without_extra_data_wrapper():
+    """Task custom events must reach frontend onCustomEvent as the raw payload."""
+    from app.gateway.services import sse_consumer
+
+    bridge = MemoryStreamBridge()
+    run_id = "run-task-sse"
+    task_event = {
+        "schema_version": "deerflow.task-event/v1",
+        "type": "task_started",
+        "event_type": "task_started",
+        "thread_id": "thread-1",
+        "run_id": run_id,
+        "task_id": "task-1",
+        "status": "running",
+        "redacted": True,
+        "started_at": "2026-07-04T00:00:00Z",
+        "completed_at": None,
+        "duration_ms": None,
+        "result_preview": None,
+        "error_preview": None,
+        "artifact_refs": [],
+        "action_result": None,
+        "usage": None,
+    }
+    await bridge.publish(run_id, "custom", task_event)
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id="thread-1",
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+    )
+
+    frames = []
+    async for frame in sse_consumer(bridge, record, _NeverDisconnectedRequest(), _CancelRecorder()):
+        frames.append(frame)
+
+    assert len(frames) == 2
+    fields = _parse_sse_frame(frames[0])
+    assert fields["event"] == "custom"
+    assert fields["id"]
+
+    payload = json.loads(fields["data"])
+    assert payload == task_event
+    assert payload["schema_version"] == "deerflow.task-event/v1"
+    assert payload["type"] == "task_started"
+    assert payload["event_type"] == "task_started"
+    assert payload["run_id"] == run_id
+    assert payload["task_id"] == "task-1"
+    assert payload["status"] == "running"
+    assert "data" not in payload
+    assert "event" not in payload
+
+    end_fields = _parse_sse_frame(frames[1])
+    assert end_fields["event"] == "end"
+    assert json.loads(end_fields["data"]) is None
 
 
 @pytest.mark.asyncio
@@ -128,3 +197,27 @@ async def test_sse_end_waits_until_run_messages_are_durable():
         assert data[-1]["content"]["content"] == "durable final answer"
     finally:
         await run_task
+
+
+def test_format_sse_custom_task_event_data_shape_matches_frontend_contract():
+    """Formatting alone must not nest task event payload under data/event."""
+    task_event = {
+        "schema_version": "deerflow.task-event/v1",
+        "type": "task_completed",
+        "event_type": "task_completed",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "status": "completed",
+    }
+
+    frame = _format_sse("custom", task_event, event_id="42-0")
+    fields = _parse_sse_frame(frame)
+
+    assert fields["event"] == "custom"
+    assert fields["id"] == "42-0"
+    payload = json.loads(fields["data"])
+    assert payload == task_event
+    assert payload["event_type"] == payload["type"] == "task_completed"
+    assert "data" not in payload
+    assert "event" not in payload

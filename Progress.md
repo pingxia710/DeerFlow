@@ -415,6 +415,25 @@
 - Validation: `cd frontend && pnpm typecheck` passed; upload API unit tests passed; targeted frontend Prettier passed; `cd backend && uv run pytest tests/test_deployment_exposure_defaults.py tests/test_stateless_runs_owner_isolation.py tests/test_task_tool_core_logic.py tests/test_command_room_round_context.py tests/test_command_room_task_action_result.py tests/test_memory_router_auth.py -q` passed in targeted runs; targeted backend `ruff check` passed.
 - Deliberately skipped: no Skills API admin/user-tenancy change, no Target Role auto-chain implementation, no cross-process active-run lease, no run creation lock rewrite, and no rollback state-machine redesign in this mechanical follow-up slice.
 
+## 2026-07-03 — Skills API admin-only governance landing
+
+- Short-term model landed: global skills are admin-managed resources. `skills/custom`, `extensions_config.json` skill enablement, and the skills prompt cache remain global in this round.
+- Made Gateway global skill management fail closed: install from thread artifact, custom skill list/raw content/edit/delete/history/rollback, and enable/disable all require admin.
+- Kept authenticated user reads limited to safe skills summaries through `GET /api/skills` and `GET /api/skills/{name}`; raw custom skill content and history are not ordinary-user readable.
+- Scoped install-from-thread artifact resolution through the request storage user after the admin check, avoiding default-user/anonymous source path fallback.
+- Added regressions for ordinary-user 403, bare-mounted unauthenticated 401, admin lifecycle behavior, admin install source path resolution, and safe summary reads.
+- Validation: `cd backend && uv run pytest tests/test_skills_custom_router.py -q` passed with 29 tests; `cd backend && uv run ruff check app/gateway/routers/skills.py tests/test_skills_custom_router.py` passed; `git diff --check` passed.
+- Deliberately skipped: no per-user skills tenancy, no skills storage migration, no Target Role auto-chain change, no RunManager active-run lease/rollback state-machine work, and no frontend UI changes.
+- Future SaaS/multi-tenant design must tenant-scope skills storage, `extensions_config`, prompt cache, MCP/skills activation, install source ownership, and audit/history together instead of adding a route-only `user_id`.
+
+## 2026-07-03 — Command Room Target Role advisory hardening
+
+- Tightened `task()` completion semantics: worker `Target Role` output is returned as `Suggested next receiver (advisory only)` for Chair/main AI, not resolved into an available subagent route.
+- Removed built-in Command Room role prompts' fixed Planner -> Boundary -> Evidence -> Opposition -> Chair next-role defaults; roles now suggest a next receiver only when Chair/main AI asks or another AI angle is truly needed.
+- Added regressions proving `Target Role: planner/boundary/evidence/opposition/chair` does not create a second task event, does not redispatch, and does not use routed/dispatched wording.
+- Validation: `cd backend && uv run pytest tests/test_task_tool_core_logic.py tests/test_subagent_skills_config.py -q` passed with 94 tests; targeted `ruff check` passed.
+- Deliberately skipped: no automatic Target Role handoff, no fixed PM/Dev/QA/Reviewer pipeline, no Gateway permission changes, no RunManager/run store/stream/checkpoint/rollback/lease changes, and no skill loading policy work.
+
 ## 2026-07-04 — Task event/action_result contract convergence
 
 - Pinned `deerflow.task-event/v1` around task terminal events and compact `action_result` metadata so completed, failed, cancelled, and timed_out preserve both status and terminal_reason across backend and frontend.
@@ -423,3 +442,5 @@
 - Added backend/frontend regressions for schema v1 terminal cases, unknown future terminal states failing safe instead of staying in progress, cancelled staying `user_cancelled`, and timed_out staying `timed_out`.
 - Validation: targeted backend pytest, frontend hooks/subtask-result tests, `pnpm typecheck`, targeted ruff/prettier, and `git diff --check` passed.
 - Deliberately skipped: no RunManager/run store/stream persistence/checkpoint/rollback/lease/permission-model/Target Role auto-chain/skill-loading-policy changes.
+
+- 2026-07-04: 整理 artifact URL encoding/base URL fallback 测试，合并重复 artifacts-utils 覆盖；验证 `npm test -- tests/unit/core/artifacts/utils.test.ts` 9/9 通过，`pnpm exec prettier --check tests/unit/core/artifacts/utils.test.ts src/core/artifacts/utils.ts` 通过。

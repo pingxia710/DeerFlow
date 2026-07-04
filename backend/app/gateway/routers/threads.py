@@ -29,6 +29,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.runs.schemas import is_inflight_status
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
@@ -345,7 +346,10 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     if existing_record is None and (requested_thread_id or trusted_owner_user_id):
         unscoped_record = await thread_store.get(thread_id, user_id=None)
     if existing_record is None and trusted_owner_user_id and unscoped_record is not None:
-        if unscoped_record.get("user_id") != storage_user_id:
+        current_owner = unscoped_record.get("user_id")
+        if current_owner not in (None, DEFAULT_USER_ID, storage_user_id):
+            raise HTTPException(status_code=409, detail="Thread ID is already in use")
+        if current_owner != storage_user_id:
             await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
         existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and unscoped_record is not None:

@@ -38,7 +38,7 @@ from deerflow.runtime import (
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.schemas import is_inflight_status
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -516,7 +516,10 @@ async def start_run(
             if existing is None and owner_user_id:
                 unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
                 if unscoped_existing is not None:
-                    if unscoped_existing.get("user_id") != owner_user_id:
+                    current_owner = unscoped_existing.get("user_id")
+                    if current_owner not in (None, DEFAULT_USER_ID, owner_user_id):
+                        raise HTTPException(status_code=409, detail="Thread ID is already in use")
+                    if current_owner != owner_user_id:
                         await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
                     existing = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
             if existing is None:

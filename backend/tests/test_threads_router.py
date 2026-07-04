@@ -430,6 +430,39 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     assert internal_row is None
 
 
+def test_internal_owner_header_cannot_reassign_real_owner_thread() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+
+    async def _scenario():
+        await thread_store.create("existing-thread", user_id="victim-owner")
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source="internal"),
+            app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await threads.create_thread(
+                threads.ThreadCreateRequest(thread_id="existing-thread", metadata={}),
+                request=request,
+            )
+        victim_row = await thread_store.get("existing-thread", user_id="victim-owner")
+        owner_row = await thread_store.get("existing-thread", user_id="owner-1")
+        return exc_info.value, victim_row, owner_row
+
+    exc, victim_row, owner_row = asyncio.run(_scenario())
+
+    assert exc.status_code == 409
+    assert victim_row is not None
+    assert victim_row["user_id"] == "victim-owner"
+    assert owner_row is None
+
+
 def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
     """A thread record written by older versions stores ``time.time()``
     floats. ``get_thread`` must transparently surface them as ISO so the

@@ -348,6 +348,9 @@ metadata.
   can own the same `thread_id` without an explicit migration design.
 - Browser/API thread creation is idempotent only for the current owner; a
   requested `thread_id` already held by another owner returns HTTP 409.
+- Trusted internal owner-header flows may claim only ownerless or synthetic
+  `default` legacy threads; they must not reassign a thread already stamped with
+  another real owner.
 - Legacy NULL-owner thread rows are permissive for `check_access()`, but
   user-filtered metadata/event reads require an explicit owner match.
 - `JsonlRunEventStore` writes owner-scoped events to

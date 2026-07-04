@@ -126,6 +126,10 @@ def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
+def _needs_upload_permission_adjustment(sandbox_provider: SandboxProvider) -> bool:
+    return bool(getattr(sandbox_provider, "needs_upload_permission_adjustment", True))
+
+
 def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
     """Read a value from the uploads config, supporting dict and attribute access."""
     uploads_cfg = getattr(app_config, "uploads", None)
@@ -249,6 +253,7 @@ async def upload_files(
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
+    adjust_upload_permissions = _needs_upload_permission_adjustment(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
         sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
@@ -341,18 +346,16 @@ async def upload_files(
             raise HTTPException(status_code=500, detail="Failed to upload file")
 
     # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    for file_path in written_paths:
-        _make_file_sandbox_readable(file_path)
+    # Only providers that cross a host/container user boundary need broader
+    # read bits; local per-thread sandboxes keep the stricter mode.
+    if adjust_upload_permissions:
+        for file_path in written_paths:
+            _make_file_sandbox_readable(file_path)
 
     if sync_to_sandbox:
         for file_path, virtual_path in sandbox_sync_targets:
-            _make_file_sandbox_writable(file_path)
+            if adjust_upload_permissions:
+                _make_file_sandbox_writable(file_path)
             sandbox.update_file(virtual_path, file_path.read_bytes())
 
     message = f"Successfully uploaded {len(uploaded_files)} file(s)"

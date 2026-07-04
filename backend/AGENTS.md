@@ -801,6 +801,7 @@ Multi-file upload with automatic document conversion:
 - Reuses one conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
+- Upload chmod broadening is provider-gated: local per-thread sandboxes keep owner-only upload permissions; only providers with `needs_upload_permission_adjustment=true` may add group/other read/write bits for container user compatibility.
 - Agent receives uploaded file list via `UploadsMiddleware`
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.

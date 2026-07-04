@@ -50,6 +50,15 @@ _WORKER_LOST_ERROR_MARKERS = (
     "worker lost",
     "owner lost",
 )
+_SENSITIVE_RUN_ERROR_MARKERS = (
+    "secret",
+    "stack trace",
+    "traceback",
+    "token",
+    "api key",
+    "password",
+)
+_MAX_PUBLIC_RUN_ERROR_CHARS = 200
 
 
 async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
@@ -236,6 +245,15 @@ def _run_terminal_reason(record: RunRecord) -> str | None:
             return "worker_lost"
         return "failed"
     return None
+
+
+def run_error_for_response(error: str | None) -> str | None:
+    if not error:
+        return None
+    text = error.strip()
+    if len(text) > _MAX_PUBLIC_RUN_ERROR_CHARS or "\n" in text or any(marker in text.lower() for marker in _SENSITIVE_RUN_ERROR_MARKERS):
+        return "Run failed"
+    return text
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -648,7 +666,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    return {"status": record.status.value, "error": record.error}
+    return {"status": record.status.value, "error": run_error_for_response(record.error)}
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])

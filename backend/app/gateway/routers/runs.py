@@ -18,7 +18,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id
-from app.gateway.routers.thread_runs import RunCreateRequest, attach_message_display
+from app.gateway.routers.thread_runs import RunCreateRequest, attach_message_display, run_error_for_response
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunStatus, serialize_channel_values_for_api
 
@@ -103,7 +103,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 
     response = {"status": record.status.value}
     if record.error:
-        response["error"] = "Run failed"
+        response["error"] = run_error_for_response(record.error)
     return response
 
 

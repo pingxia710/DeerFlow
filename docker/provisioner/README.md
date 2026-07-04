@@ -40,6 +40,12 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, minikube, kind, etc.)
 
+## Exposure and network safety
+
+The provisioner listens on the Docker-internal `8002` service for backend containers. Do not publish `8002` directly to untrusted networks. Docker nginx binds externally to `127.0.0.1` by default; set `DEER_FLOW_BIND_HOST=0.0.0.0` only for intentional external exposure. API docs stay off unless the Gateway enables them with `GATEWAY_ENABLE_DOCS=true` and nginx exposes them with `DEER_FLOW_EXPOSE_API_DOCS=true`. The sandbox API remains off at the nginx entrypoint unless explicitly enabled with `DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+
+The nginx gate protects only the external entrypoint. Containers attached to the internal Docker network can still reach internal services, so do not join untrusted containers to that network.
+
 ### Enable Kubernetes in Docker Desktop
 1. Open Docker Desktop settings
 2. Go to "Kubernetes" tab

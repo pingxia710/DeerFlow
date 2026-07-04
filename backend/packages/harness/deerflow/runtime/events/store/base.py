@@ -55,6 +55,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
@@ -72,6 +73,7 @@ class RunEventStore(abc.ABC):
         *,
         event_types: list[str] | None = None,
         limit: int = 500,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -87,6 +89,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -97,13 +100,13 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def count_messages(self, thread_id: str) -> int:
+    async def count_messages(self, thread_id: str, *, user_id: str | None = None) -> int:
         """Count displayable messages (category=message) in a thread."""
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
+    async def delete_by_thread(self, thread_id: str, *, user_id: str | None = None) -> int:
         """Delete all events for a thread. Return the number of deleted events."""
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
+    async def delete_by_run(self, thread_id: str, run_id: str, *, user_id: str | None = None) -> int:
         """Delete all events for a specific run. Return the number of deleted events."""

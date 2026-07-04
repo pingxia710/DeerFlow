@@ -460,21 +460,22 @@ async def start_run(
         # even for threads that were never explicitly created via POST /threads
         # (e.g. stateless runs).
         try:
-            existing = await run_ctx.thread_store.get(thread_id)
+            existing = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
             if existing is None and owner_user_id:
                 unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
                 if unscoped_existing is not None:
                     if unscoped_existing.get("user_id") != owner_user_id:
                         await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id)
+                    existing = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
             if existing is None:
                 await run_ctx.thread_store.create(
                     thread_id,
                     assistant_id=body.assistant_id,
                     metadata=body.metadata,
+                    user_id=owner_user_id,
                 )
             else:
-                await run_ctx.thread_store.update_status(thread_id, "running")
+                await run_ctx.thread_store.update_status(thread_id, "running", user_id=owner_user_id)
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 

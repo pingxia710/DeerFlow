@@ -97,10 +97,16 @@ class MemoryRunEventStore(RunEventStore):
             results.append(record)
         return results
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    @staticmethod
+    def _matches_user(event, user_id):
+        return user_id is None or event.get("user_id") == str(user_id)
+
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.
         messages = self._messages.get(thread_id, [])
+        if user_id is not None:
+            messages = [e for e in messages if self._matches_user(e, user_id)]
 
         if before_seq is not None:
             # Records with seq < before_seq, then the last `limit` of them.
@@ -114,19 +120,23 @@ class MemoryRunEventStore(RunEventStore):
             # Return the latest `limit` records, ascending.
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500):
+    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500, user_id=None):
         # ``_events_by_run`` is already scoped to this run and seq-ordered, so we
         # touch only this run's events instead of scanning the whole thread.
         run_events = self._events_by_run.get(thread_id, {}).get(run_id, [])
+        if user_id is not None:
+            run_events = [e for e in run_events if self._matches_user(e, user_id)]
         if event_types is not None:
             run_events = [e for e in run_events if e["event_type"] in event_types]
         return run_events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's
         # messages, instead of re-scanning the whole thread's event log.
         messages = self._messages_by_run.get(thread_id, {}).get(run_id, [])
+        if user_id is not None:
+            messages = [e for e in messages if self._matches_user(e, user_id)]
         lo = 0 if after_seq is None else bisect.bisect_right(messages, after_seq, key=lambda e: e["seq"])
         hi = len(messages) if before_seq is None else bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
         window = messages[lo:hi]
@@ -137,22 +147,38 @@ class MemoryRunEventStore(RunEventStore):
             return window[:limit]
         return window[-limit:]
 
-    async def count_messages(self, thread_id):
-        return len(self._messages.get(thread_id, []))
+    async def count_messages(self, thread_id, *, user_id=None):
+        messages = self._messages.get(thread_id, [])
+        if user_id is not None:
+            messages = [e for e in messages if self._matches_user(e, user_id)]
+        return len(messages)
 
-    async def delete_by_thread(self, thread_id):
-        events = self._events.pop(thread_id, [])
-        self._messages.pop(thread_id, None)
-        self._events_by_run.pop(thread_id, None)
-        self._messages_by_run.pop(thread_id, None)
-        self._seq_counters.pop(thread_id, None)
-        return len(events)
+    async def delete_by_thread(self, thread_id, *, user_id=None):
+        events = self._events.get(thread_id, [])
+        if user_id is None:
+            events = self._events.pop(thread_id, [])
+            self._messages.pop(thread_id, None)
+            self._events_by_run.pop(thread_id, None)
+            self._messages_by_run.pop(thread_id, None)
+            self._seq_counters.pop(thread_id, None)
+            return len(events)
+        remaining = [e for e in events if not self._matches_user(e, user_id)]
+        removed = len(events) - len(remaining)
+        self._events[thread_id] = remaining
+        self._messages[thread_id] = [e for e in remaining if e["category"] == "message"]
+        self._events_by_run[thread_id] = {}
+        self._messages_by_run[thread_id] = {}
+        for e in remaining:
+            self._events_by_run[thread_id].setdefault(e["run_id"], []).append(e)
+            if e["category"] == "message":
+                self._messages_by_run[thread_id].setdefault(e["run_id"], []).append(e)
+        return removed
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id=None):
         all_events = self._events.get(thread_id, [])
         if not all_events:
             return 0
-        remaining = [e for e in all_events if e["run_id"] != run_id]
+        remaining = [e for e in all_events if not (e["run_id"] == run_id and self._matches_user(e, user_id))]
         removed = len(all_events) - len(remaining)
         self._events[thread_id] = remaining
         # Keep the message projection in lockstep (same surviving dict objects).

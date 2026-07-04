@@ -384,19 +384,20 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
-    record = await thread_store.get(thread_id)
+    storage_user_id = get_request_storage_user_id(request)
+    record = await thread_store.get(thread_id, user_id=storage_user_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
     try:
-        await thread_store.update_metadata(thread_id, body.metadata)
+        await thread_store.update_metadata(thread_id, body.metadata, user_id=storage_user_id)
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
 
     # Re-read to get the merged metadata + refreshed updated_at
-    record = await thread_store.get(thread_id) or record
+    record = await thread_store.get(thread_id, user_id=storage_user_id) or record
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
@@ -420,7 +421,8 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
 
-    record: dict | None = await thread_store.get(thread_id)
+    storage_user_id = get_request_storage_user_id(request)
+    record: dict | None = await thread_store.get(thread_id, user_id=storage_user_id)
 
     # Derive accurate status from the checkpointer
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -625,7 +627,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         new_title = body.values["title"]
         if new_title:  # Skip empty strings and None
             try:
-                await thread_store.update_display_name(thread_id, new_title)
+                await thread_store.update_display_name(thread_id, new_title, user_id=get_request_storage_user_id(request))
             except Exception:
                 logger.debug("Failed to sync title to thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 

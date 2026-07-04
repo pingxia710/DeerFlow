@@ -123,3 +123,24 @@ async def test_list_messages_by_run_empty_run(base_store):
     store = base_store
     msgs = await store.list_messages_by_run("t1", "nonexistent")
     assert msgs == []
+
+
+@pytest.mark.asyncio
+async def test_memory_event_store_filters_same_thread_messages_by_user():
+    store = MemoryRunEventStore()
+    await store.put(thread_id="same-thread", run_id="run-a", event_type="message", category="message", content="a", user_id="user-a")
+    await store.put(thread_id="same-thread", run_id="run-b", event_type="message", category="message", content="b", user_id="user-b")
+
+    assert [m["content"] for m in await store.list_messages("same-thread", user_id="user-a")] == ["a"]
+    assert [m["content"] for m in await store.list_messages("same-thread", user_id="user-b")] == ["b"]
+    assert await store.count_messages("same-thread", user_id="user-a") == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_event_store_filters_same_thread_run_events_by_user():
+    store = MemoryRunEventStore()
+    await store.put(thread_id="same-thread", run_id="shared-run", event_type="debug", category="trace", content="a", user_id="user-a")
+    await store.put(thread_id="same-thread", run_id="shared-run", event_type="debug", category="trace", content="b", user_id="user-b")
+
+    assert [e["content"] for e in await store.list_events("same-thread", "shared-run", user_id="user-a")] == ["a"]
+    assert [e["content"] for e in await store.list_events("same-thread", "shared-run", user_id="user-b")] == ["b"]

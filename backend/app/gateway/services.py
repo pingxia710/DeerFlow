@@ -119,7 +119,7 @@ async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord
         payload = row.get("content") if isinstance(row, Mapping) else None
         if _is_task_event_payload(payload, thread_id=record.thread_id, run_id=record.run_id):
             frames.append(format_sse("custom", payload))
-    return frames
+    return frames or None
 
 
 # ---------------------------------------------------------------------------

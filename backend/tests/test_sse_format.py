@@ -215,6 +215,55 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-empty-replay"
+    run_id = "run-empty-replay"
+    user_id = "user-empty-replay"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="llm.ai.response",
+        category="message",
+        content={"type": "ai", "content": "not replayable as SSE"},
+        user_id=user_id,
+    )
+
+    await bridge.publish(run_id, "values", {"old": True})
+    last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"missed": True})
+    await bridge.publish(run_id, "values", {"live": True})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    request = _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id})
+    frames = []
+    async for frame in sse_consumer(
+        bridge,
+        record,
+        request,
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["stream_recovery_required", "values", "end"]
+    assert json.loads(_parse_sse_frame(frames[1])["data"]) == {"live": True}
+
+
+@pytest.mark.asyncio
 async def test_sse_end_waits_until_run_messages_are_durable():
     from app.gateway.services import sse_consumer
 

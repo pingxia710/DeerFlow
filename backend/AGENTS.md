@@ -307,7 +307,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
-| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens; `GET /../context-usage` - latest lightweight model-context snapshots |
+| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream with optional `after_seq` replay cursor; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens; `GET /../context-usage` - latest lightweight model-context snapshots |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 
@@ -319,7 +319,17 @@ instead of guessing from `caller`, `name`, or `hide_from_ui` when present.
 context size metrics (`estimated_tokens`, chars, message count, caller, role
 counts, tool schema count). Do not put raw prompt/message/tool-schema content
 in these snapshots; raw event inspection already exists via
-`GET /runs/{rid}/events`.
+`GET /runs/{rid}/events`. Persistent event replay uses the RunEventStore
+`seq` cursor (`GET /threads/{id}/runs/{rid}/events?after_seq=N`); live SSE
+`Last-Event-ID` remains a StreamBridge buffer cursor.
+
+**Checkpoint / owner contract**:
+- Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`
+  belongs to runs/events and must not be added to checkpoint lookup keys.
+- Current SQL `threads_meta` uses `thread_id` as its primary key, and
+  `run_events` uses thread-scoped `seq` uniqueness. `user_id` is an ownership
+  filter/stamp, not a duplicate-`thread_id` tenant key. Do not assume two users
+  can own the same `thread_id` without an explicit migration design.
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.

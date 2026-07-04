@@ -91,6 +91,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - History run messages should honor backend `display.visible_in_chat` when
   present; only fall back to local `caller`/`name`/`hide_from_ui` checks for
   older rows without the display contract.
+- History message ordering must treat run-message `seq` as run-local. Rebuild
+  history by run list order first, then by `seq` within each run.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

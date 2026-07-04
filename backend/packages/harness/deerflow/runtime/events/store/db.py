@@ -216,6 +216,7 @@ class DbRunEventStore(RunEventStore):
         *,
         event_types=None,
         limit=500,
+        after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
@@ -224,6 +225,8 @@ class DbRunEventStore(RunEventStore):
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
+        if after_seq is not None:
+            stmt = stmt.where(RunEventRow.seq > after_seq)
         stmt = stmt.order_by(RunEventRow.seq.asc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)

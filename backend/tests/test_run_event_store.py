@@ -165,6 +165,13 @@ class TestListEvents:
         assert events[0]["event_type"] == "llm_end"
 
     @pytest.mark.anyio
+    async def test_after_seq_pagination(self, store):
+        for i in range(5):
+            await store.put(thread_id="t1", run_id="r1", event_type=f"event-{i}", category="trace")
+        events = await store.list_events("t1", "r1", after_seq=2, limit=2)
+        assert [event["seq"] for event in events] == [3, 4]
+
+    @pytest.mark.anyio
     async def test_only_returns_specified_run(self, store):
         await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
         await store.put(thread_id="t1", run_id="r2", event_type="llm_end", category="trace")
@@ -443,6 +450,23 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_list_events_after_seq(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        for i in range(5):
+            await s.put(thread_id="t1", run_id="r1", event_type=f"event-{i}", category="trace")
+
+        events = await s.list_events("t1", "r1", after_seq=2, limit=2)
+        assert [event["seq"] for event in events] == [3, 4]
+
+        await close_engine()
+
+    @pytest.mark.anyio
     async def test_delete(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
@@ -641,6 +665,17 @@ class TestJsonlRunEventStore:
         messages = await s.list_messages("t1")
         assert len(messages) == 2
         assert [m["seq"] for m in messages] == [1, 2]
+
+    @pytest.mark.anyio
+    async def test_list_events_after_seq(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        for i in range(5):
+            await s.put(thread_id="t1", run_id="r1", event_type=f"event-{i}", category="trace")
+
+        events = await s.list_events("t1", "r1", after_seq=2, limit=2)
+        assert [event["seq"] for event in events] == [3, 4]
 
     @pytest.mark.anyio
     async def test_delete_by_run(self, tmp_path):

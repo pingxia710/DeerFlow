@@ -26,10 +26,12 @@ def _ref_messages_by_run(records, thread_id, run_id, *, limit=50, before_seq=Non
     return filtered[-limit:] if len(filtered) > limit else filtered
 
 
-def _ref_events(records, thread_id, run_id, *, event_types=None, limit=500):
+def _ref_events(records, thread_id, run_id, *, event_types=None, limit=500, after_seq=None):
     filtered = [e for e in records if e["thread_id"] == thread_id and e["run_id"] == run_id]
     if event_types is not None:
         filtered = [e for e in filtered if e["event_type"] in event_types]
+    if after_seq is not None:
+        filtered = [e for e in filtered if e["seq"] > after_seq]
     return filtered[:limit]
 
 
@@ -77,11 +79,30 @@ async def test_list_events_matches_reference_with_filters():
     store = MemoryRunEventStore()
     records = await _seed(store)
     all_types = sorted({r["event_type"] for r in records})
+    cursors = [None, 0, *[r["seq"] for r in records], max(r["seq"] for r in records) + 1]
     for run_id in ("run-a", "run-b", "run-missing"):
-        assert await store.list_events("t1", run_id) == _ref_events(records, "t1", run_id)
-        assert await store.list_events("t1", run_id, limit=2) == _ref_events(records, "t1", run_id, limit=2)
-        for et in all_types:
-            assert await store.list_events("t1", run_id, event_types=[et]) == _ref_events(records, "t1", run_id, event_types=[et])
+        for after_seq in cursors:
+            assert await store.list_events("t1", run_id, after_seq=after_seq) == _ref_events(
+                records,
+                "t1",
+                run_id,
+                after_seq=after_seq,
+            )
+            assert await store.list_events("t1", run_id, limit=2, after_seq=after_seq) == _ref_events(
+                records,
+                "t1",
+                run_id,
+                limit=2,
+                after_seq=after_seq,
+            )
+            for et in all_types:
+                assert await store.list_events("t1", run_id, event_types=[et], after_seq=after_seq) == _ref_events(
+                    records,
+                    "t1",
+                    run_id,
+                    event_types=[et],
+                    after_seq=after_seq,
+                )
 
 
 @pytest.mark.anyio

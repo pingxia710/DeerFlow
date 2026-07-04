@@ -377,11 +377,12 @@ def test_list_run_events_scopes_events_to_current_user():
 
     event_store = MagicMock()
 
-    async def list_events(thread_id_arg, run_id_arg, *, event_types=None, limit=500, user_id=None):
+    async def list_events(thread_id_arg, run_id_arg, *, event_types=None, limit=500, after_seq=None, user_id=None):
         assert thread_id_arg == thread_id
         assert run_id_arg == run_id
         assert event_types == ["llm.context"]
         assert limit == 7
+        assert after_seq is None
         if user_id == str(user_a):
             return [{"seq": 1, "run_id": run_id, "event_type": "llm.context", "content": {"owner": "a"}}]
         if user_id == str(user_b):
@@ -413,7 +414,39 @@ def test_list_run_events_scopes_events_to_current_user():
         run_id,
         event_types=["llm.context"],
         limit=7,
+        after_seq=None,
         user_id=str(user_a),
+    )
+
+
+def test_list_run_events_passes_after_seq_to_event_store():
+    thread_id = "thread-7"
+    run_id = "run-7"
+    event_store = MagicMock()
+    event_store.list_events = AsyncMock(return_value=[{"seq": 8, "run_id": run_id, "event_type": "run.end"}])
+
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(_TEST_USER_ID),
+    )
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/events?after_seq=5&limit=9")
+
+    assert response.status_code == 200
+    event_store.list_events.assert_awaited_once_with(
+        thread_id,
+        run_id,
+        event_types=None,
+        limit=9,
+        after_seq=5,
+        user_id=str(_TEST_USER_ID),
     )
 
 

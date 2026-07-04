@@ -860,13 +860,14 @@ async def list_run_events(
     request: Request,
     event_types: str | None = Query(default=None),
     limit: int = Query(default=500, le=2000),
+    after_seq: int | None = Query(default=None),
 ) -> list[dict]:
     """Return the full event stream for a run (debug/audit)."""
     user_id = get_request_storage_user_id(request)
     await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    list_events_kwargs: dict[str, Any] = {"event_types": types, "limit": limit}
+    list_events_kwargs: dict[str, Any] = {"event_types": types, "limit": limit, "after_seq": after_seq}
     if _supports_user_id_keyword(event_store.list_events):
         list_events_kwargs["user_id"] = user_id
     return await event_store.list_events(thread_id, run_id, **list_events_kwargs)

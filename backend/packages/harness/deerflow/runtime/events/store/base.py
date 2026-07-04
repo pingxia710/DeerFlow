@@ -73,11 +73,13 @@ class RunEventStore(abc.ABC):
         *,
         event_types: list[str] | None = None,
         limit: int = 500,
+        after_seq: int | None = None,
         user_id: str | None = None,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
         Optionally filter by event_types.
+        after_seq returns events with seq > after_seq, for replay cursors.
         """
 
     @abc.abstractmethod

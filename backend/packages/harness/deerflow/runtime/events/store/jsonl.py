@@ -239,12 +239,14 @@ class JsonlRunEventStore(RunEventStore):
         else:
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500, user_id=None):
+    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500, after_seq=None, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_events")
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         events = self._filter_user(events, resolved_user_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
+        if after_seq is not None:
+            events = [e for e in events if e.get("seq", 0) > after_seq]
         return events[:limit]
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):

@@ -1,6 +1,7 @@
 """Tests for RunManager."""
 
 import asyncio
+import contextlib
 import logging
 import re
 import sqlite3
@@ -29,12 +30,12 @@ class FlakyStatusRunStore(MemoryRunStore):
         self.status_failures = status_failures
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
         self.status_update_attempts += 1
         if self.status_failures > 0:
             self.status_failures -= 1
             raise sqlite3.OperationalError("database is locked")
-        return await super().update_status(run_id, status, error=error)
+        return await super().update_status(run_id, status, error=error, terminal_reason=terminal_reason)
 
 
 class FlakyProgressRunStore(MemoryRunStore):
@@ -56,8 +57,8 @@ class FlakyProgressRunStore(MemoryRunStore):
 class MissingRowStatusRunStore(MemoryRunStore):
     """Memory run store that reports a missing row for status updates."""
 
-    async def update_status(self, run_id, status, *, error=None):
-        await super().update_status(run_id, status, error=error)
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
+        await super().update_status(run_id, status, error=error, terminal_reason=terminal_reason)
         return False
 
 
@@ -68,7 +69,7 @@ class PermanentStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
         self.status_update_attempts += 1
         raise SQLAlchemyDatabaseError(
             "UPDATE runs SET status = :status WHERE run_id = :run_id",
@@ -84,7 +85,7 @@ class FailingStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
         self.status_update_attempts += 1
         raise sqlite3.OperationalError("database is locked")
 
@@ -543,6 +544,58 @@ async def test_set_status_with_error(manager: RunManager):
     await manager.set_status(record.run_id, RunStatus.error, error="Something went wrong")
     assert record.status == RunStatus.error
     assert record.error == "Something went wrong"
+
+
+@pytest.mark.anyio
+async def test_set_status_persists_terminal_reason():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+
+    await manager.set_status(record.run_id, RunStatus.error, terminal_reason="failed")
+    hydrated = await RunManager(store=store).get(record.run_id)
+
+    assert record.terminal_reason == "failed"
+    assert hydrated is not None
+    assert hydrated.store_only is True
+    assert hydrated.terminal_reason == "failed"
+
+
+@pytest.mark.anyio
+async def test_late_terminal_reason_cannot_overwrite_existing_reason():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+
+    await manager.set_status(record.run_id, RunStatus.error, error="first", terminal_reason="failed")
+    await manager.set_status(record.run_id, RunStatus.error, error="late", terminal_reason="worker_lost")
+    hydrated = await RunManager(store=store).get(record.run_id)
+
+    assert record.error == "first"
+    assert record.terminal_reason == "failed"
+    assert hydrated is not None
+    assert hydrated.error == "first"
+    assert hydrated.terminal_reason == "failed"
+
+
+@pytest.mark.anyio
+async def test_rollback_cancel_leaves_terminal_reason_for_worker_completion():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(60))
+
+    assert await manager.cancel(record.run_id, action="rollback") is True
+    await manager.set_status(record.run_id, RunStatus.error, error="Rolled back by user", terminal_reason="rolled_back")
+    hydrated = await RunManager(store=store).get(record.run_id)
+
+    assert record.status == RunStatus.error
+    assert record.terminal_reason == "rolled_back"
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.error
+    assert hydrated.terminal_reason == "rolled_back"
+    with contextlib.suppress(asyncio.CancelledError):
+        await record.task
 
 
 @pytest.mark.anyio

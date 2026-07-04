@@ -472,7 +472,7 @@ async def _set_terminal_status(
     if journal is not None:
         journal.record_run_terminal(status=status.value, terminal_reason=terminal_reason)
     await _flush_journal_before_terminal_status(journal, run_id)
-    await run_manager.set_status(run_id, status, error=error)
+    await run_manager.set_status(run_id, status, error=error, terminal_reason=terminal_reason)
 
 
 async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:

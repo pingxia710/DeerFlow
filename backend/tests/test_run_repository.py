@@ -123,6 +123,18 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_status_with_terminal_reason(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+
+        await repo.update_status("r1", "error", terminal_reason="failed")
+
+        row = await repo.get("r1")
+        assert row["status"] == "error"
+        assert row["metadata"]["terminal_reason"] == "failed"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")

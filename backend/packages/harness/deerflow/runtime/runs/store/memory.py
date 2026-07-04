@@ -118,9 +118,10 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return results[:limit]
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
         if run_id in self._runs:
             self._runs[run_id]["status"] = status
+            self._set_terminal_reason(self._runs[run_id], terminal_reason)
             if error is not None:
                 self._runs[run_id]["error"] = error
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()

@@ -90,6 +90,7 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
+        terminal_reason: str | None = None,
     ) -> bool | None:
         """Update a run status.
 

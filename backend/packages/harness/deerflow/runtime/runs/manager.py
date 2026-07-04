@@ -172,12 +172,15 @@ class RunManager:
 
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
+        metadata = dict(record.metadata or {})
+        if record.terminal_reason is not None:
+            metadata["terminal_reason"] = record.terminal_reason
         payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
             "status": run_status_value(record.status),
             "multitask_strategy": record.multitask_strategy,
-            "metadata": record.metadata or {},
+            "metadata": metadata,
             "kwargs": record.kwargs or {},
             "error": error if error is not None else record.error,
             "created_at": record.created_at,
@@ -256,7 +259,7 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
-    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None) -> bool:
+    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, terminal_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
             return True
@@ -265,7 +268,7 @@ class RunManager:
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error),
+                lambda: self._store.update_status(record.run_id, status.value, error=error, terminal_reason=terminal_reason),
             )
             if updated is False:
                 return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
@@ -287,6 +290,7 @@ class RunManager:
         except ValueError:
             record_status = status
 
+        metadata = row.get("metadata") or {}
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
@@ -294,12 +298,13 @@ class RunManager:
             status=record_status,
             on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
             multitask_strategy=row.get("multitask_strategy") or "reject",
-            metadata=row.get("metadata") or {},
+            metadata=metadata,
             kwargs=row.get("kwargs") or {},
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
             user_id=row.get("user_id"),
             error=row.get("error"),
+            terminal_reason=row.get("terminal_reason") or metadata.get("terminal_reason"),
             model_name=row.get("model_name"),
             store_only=True,
             total_input_tokens=row.get("total_input_tokens") or 0,
@@ -497,7 +502,7 @@ class RunManager:
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, terminal_reason: str | None = None) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -508,11 +513,16 @@ class RunManager:
             if is_terminal_status(record.status) and record.status != status and not rollback_completion:
                 logger.info("Ignoring late status transition for terminal run %s: %s -> %s", run_id, run_status_value(record.status), status.value)
                 return
+            if is_terminal_status(record.status) and record.terminal_reason is not None and terminal_reason not in {None, record.terminal_reason}:
+                logger.info("Ignoring late terminal_reason overwrite for terminal run %s: %s -> %s", run_id, record.terminal_reason, terminal_reason)
+                return
             record.status = status
             record.updated_at = _now_iso()
+            if terminal_reason is not None:
+                record.terminal_reason = terminal_reason
             if error is not None:
                 record.error = error
-        await self._persist_status(record, status, error=error)
+        await self._persist_status(record, status, error=error, terminal_reason=terminal_reason)
         if is_terminal_status(status):
             self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s -> %s", run_id, status.value)
@@ -568,8 +578,11 @@ class RunManager:
             if record.task is not None and not record.task.done():
                 record.task.cancel()
             record.status = RunStatus.interrupted
+            terminal_reason = "cancelled" if action != "rollback" else None
+            if terminal_reason is not None:
+                record.terminal_reason = terminal_reason
             record.updated_at = _now_iso()
-        await self._persist_status(record, RunStatus.interrupted)
+        await self._persist_status(record, RunStatus.interrupted, terminal_reason=terminal_reason)
         self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True

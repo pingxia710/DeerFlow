@@ -10,10 +10,10 @@ from deerflow.runtime.runs.worker import _set_terminal_status
 
 class _RunManager:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, RunStatus, str | None]] = []
+        self.calls: list[tuple[str, RunStatus, str | None, str | None]] = []
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
-        self.calls.append((run_id, status, error))
+    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, terminal_reason: str | None = None) -> None:
+        self.calls.append((run_id, status, error, terminal_reason))
 
 
 @pytest.mark.anyio
@@ -28,4 +28,4 @@ async def test_set_terminal_status_persists_replay_event_before_status() -> None
     assert [event["content"] for event in events] == [
         {"status": "error", "terminal_reason": "failed"},
     ]
-    assert manager.calls == [("run-1", RunStatus.error, "boom")]
+    assert manager.calls == [("run-1", RunStatus.error, "boom", "failed")]

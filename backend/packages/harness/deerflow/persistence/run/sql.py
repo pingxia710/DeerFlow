@@ -211,10 +211,22 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, terminal_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
+        if terminal_reason is not None:
+            async with self._sf() as session:
+                row = await session.get(RunRow, run_id)
+                if row is None:
+                    return False
+                row.status = status
+                row.metadata_json = self._with_metadata(row, terminal_reason=terminal_reason)
+                if error is not None:
+                    row.error = error
+                row.updated_at = values["updated_at"]
+                await session.commit()
+                return True
         async with self._sf() as session:
             result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()

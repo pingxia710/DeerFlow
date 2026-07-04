@@ -70,6 +70,14 @@ _SENSITIVE_RUN_ERROR_MARKERS = (
     "password",
 )
 _MAX_PUBLIC_RUN_ERROR_CHARS = 200
+_RUN_ERROR_EXCEPTION_RE = re.compile(r"^[A-Za-z_][\w.]*?(?:Error|Exception):\s*(?P<message>.+)$")
+_RUN_ERROR_TRACEBACK_FRAME_PREFIXES = (
+    "Traceback ",
+    "File ",
+    "During handling of the above exception",
+    "The above exception was the direct cause",
+    "^",
+)
 
 
 async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
@@ -282,9 +290,35 @@ def run_error_for_response(error: str | None) -> str | None:
     if not error:
         return None
     text = error.strip()
-    if len(text) > _MAX_PUBLIC_RUN_ERROR_CHARS or "\n" in text or any(marker in text.lower() for marker in _SENSITIVE_RUN_ERROR_MARKERS):
+    if "\n" in text:
+        return _public_run_error_from_multiline(text) or "Run failed"
+    if not _is_public_run_error_text(text):
         return "Run failed"
     return text
+
+
+def _is_public_run_error_text(text: str) -> bool:
+    if not text or len(text) > _MAX_PUBLIC_RUN_ERROR_CHARS:
+        return False
+    lowered = text.lower()
+    return not any(marker in lowered for marker in _SENSITIVE_RUN_ERROR_MARKERS)
+
+
+def _public_run_error_from_multiline(text: str) -> str | None:
+    for raw_line in reversed(text.splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(_RUN_ERROR_TRACEBACK_FRAME_PREFIXES):
+            continue
+        match = _RUN_ERROR_EXCEPTION_RE.match(line)
+        if not match:
+            continue
+        message = match.group("message").strip()
+        if _is_public_run_error_text(message):
+            return message
+        return None
+    return None
 
 
 def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str | None) -> dict[str, Any]:

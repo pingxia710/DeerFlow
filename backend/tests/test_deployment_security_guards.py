@@ -5,6 +5,7 @@ from starlette.datastructures import Headers
 from app.gateway.app import _assert_safe_sandbox_config_for_environment
 from app.gateway.routers.auth import InitializeAdminRequest, _validate_first_boot_setup_access
 from app.gateway.routers.runs import stateless_wait
+from app.gateway.routers.thread_runs import run_error_for_response
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -94,6 +95,22 @@ async def test_stateless_wait_sanitizes_failed_run_error(monkeypatch):
     result = await stateless_wait.__wrapped__(SimpleNamespace(config={}), object())
 
     assert result == {"status": "error", "error": "Run failed"}
+
+
+def test_run_error_response_extracts_traceback_message():
+    error = """Traceback (most recent call last):
+  File "/private/app.py", line 1, in <module>
+RuntimeError: boom"""
+
+    assert run_error_for_response(error) == "boom"
+
+
+def test_run_error_response_hides_traceback_without_public_message():
+    error = """Traceback (most recent call last):
+  File "/private/app.py", line 1, in <module>
+    raise RuntimeError("hidden")"""
+
+    assert run_error_for_response(error) == "Run failed"
 
 
 def test_dangerous_sandbox_settings_allowed_in_development(monkeypatch: pytest.MonkeyPatch) -> None:

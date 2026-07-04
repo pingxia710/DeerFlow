@@ -370,7 +370,7 @@ metadata. The run artifact index is current-state oriented: duplicate
 - Thread-run list/read service paths must scope by the storage owner, not just the browser login user, so trusted internal owner headers and browser/API calls see the same owner-bound run history.
 - Thread-scoped run creation treats the request path `thread_id` as authoritative; stale client `config.configurable.thread_id` must not redirect a run into another thread.
 - Stateless `/api/runs/*` creation may select an existing thread from either `config.configurable.thread_id` or `config.context.thread_id`; both selectors must go through the same owner check before any run is created.
-- Run creation may tolerate ordinary thread_meta write failures as non-fatal, but owner conflicts discovered during thread_meta upsert must surface as HTTP errors before the agent task starts.
+- Run creation may tolerate ordinary thread_meta write failures as non-fatal, but owner conflicts discovered during thread_meta preflight/upsert must surface as HTTP errors before creating a run record or starting the agent task.
 - Shared run resolvers such as `resolve_thread_run()` must use `get_request_storage_user_id(request)` for owner checks; do not duplicate browser-user-only logic there.
 - Feedback create/list/delete/stats routes are owner-bound user data; resolve the owner with `get_request_storage_user_id(request)` so trusted internal channel calls do not read or write feedback under the synthetic internal/default user.
 - Custom-agent management routes that read/write `users/{user_id}/agents/...` must resolve `user_id` from `get_request_storage_user_id(request)`; the global `USER.md` profile remains a shared resource unless that storage model is explicitly changed.

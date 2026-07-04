@@ -951,9 +951,10 @@ def test_start_run_owner_conflict_during_thread_meta_upsert_aborts(_stub_app_con
 
     async def _scenario():
         thread_store = RacingThreadStore()
+        run_manager = RunManager(store=MemoryRunStore())
         state = SimpleNamespace(
             stream_bridge=SimpleNamespace(),
-            run_manager=RunManager(store=MemoryRunStore()),
+            run_manager=run_manager,
             checkpointer=InMemorySaver(),
             store=InMemoryStore(),
             run_event_store=SimpleNamespace(),
@@ -982,11 +983,13 @@ def test_start_run_owner_conflict_during_thread_meta_upsert_aborts(_stub_app_con
         with patch("app.gateway.services.run_agent") as run_agent:
             with pytest.raises(HTTPException) as exc:
                 await start_run(body, "race-thread", request)
-        return exc.value, run_agent, thread_store
+        runs = await run_manager.list_by_thread("race-thread", user_id=None)
+        return exc.value, run_agent, thread_store, runs
 
-    exc, run_agent, thread_store = asyncio.run(_scenario())
+    exc, run_agent, thread_store, runs = asyncio.run(_scenario())
 
     assert exc.status_code == 409
+    assert runs == []
     run_agent.assert_not_called()
     thread_store.create.assert_not_awaited()
     thread_store.update_owner.assert_not_awaited()

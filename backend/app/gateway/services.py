@@ -515,6 +515,19 @@ async def start_run(
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    try:
+        existing_owner_record = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
+        if existing_owner_record is None and owner_user_id:
+            unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
+            if unscoped_existing is not None:
+                current_owner = unscoped_existing.get("user_id")
+                if current_owner not in (None, DEFAULT_USER_ID, owner_user_id):
+                    raise HTTPException(status_code=409, detail="Thread ID is already in use")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Could not preflight thread_meta owner for %s (non-fatal)", sanitize_log_param(thread_id))
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         try:

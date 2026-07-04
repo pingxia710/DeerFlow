@@ -211,7 +211,7 @@ def test_wait_routes_return_terminal_error_without_serializing_checkpoint(
 
     assert response.status_code == 200
     assert response.json() == {"status": "error", "error": "boom"}
-    run_manager.get.assert_awaited_once_with(start_record.run_id)
+    run_manager.get.assert_awaited_once_with(start_record.run_id, user_id=str(USER_A.id))
     checkpointer.aget_tuple.assert_not_awaited()
 
 

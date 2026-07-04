@@ -724,6 +724,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
     """Create a run and block until it completes, returning the final state."""
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
+    user_id = get_request_storage_user_id(request)
     record = await start_run(body, thread_id, request)
 
     completed = True
@@ -731,7 +732,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed:
-        record = await run_mgr.get(record.run_id) or record
+        record = await run_mgr.get(record.run_id, user_id=user_id) or record
     if completed and record.status == RunStatus.success:
         checkpointer = get_checkpointer(request)
         config = {"configurable": {"thread_id": thread_id}}

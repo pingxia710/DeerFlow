@@ -69,15 +69,19 @@ def _is_shared_environment() -> bool:
 
 def _assert_single_gateway_worker() -> None:
     """Fail fast outside development when in-process runtime would be split."""
-    raw = os.getenv("GATEWAY_WORKERS") or os.getenv("WEB_CONCURRENCY") or os.getenv("UVICORN_WORKERS")
-    if not raw:
+    worker_settings = []
+    for key in ("GATEWAY_WORKERS", "WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.getenv(key)
+        if not raw:
+            continue
+        try:
+            worker_settings.append((key, int(raw)))
+        except ValueError:
+            logger.warning("Ignoring non-integer gateway worker setting %s=%r", key, raw)
+
+    if not worker_settings:
         return
-    try:
-        workers = int(raw)
-    except ValueError:
-        logger.warning("Ignoring non-integer gateway worker setting: %r", raw)
-        return
-    if workers <= 1:
+    if all(workers <= 1 for _, workers in worker_settings):
         return
 
     if not _is_development_environment():

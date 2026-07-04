@@ -28,6 +28,24 @@ def test_gateway_worker_guard_allows_one_worker_without_env(monkeypatch):
     _assert_single_gateway_worker()
 
 
+def test_gateway_worker_guard_checks_all_worker_env_vars(monkeypatch):
+    _clear_worker_env(monkeypatch)
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    with pytest.raises(RuntimeError, match="process-local"):
+        _assert_single_gateway_worker()
+
+
+def test_gateway_worker_guard_ignores_bad_worker_value_but_checks_others(monkeypatch):
+    _clear_worker_env(monkeypatch)
+    monkeypatch.setenv("GATEWAY_WORKERS", "not-an-int")
+    monkeypatch.setenv("UVICORN_WORKERS", "2")
+
+    with pytest.raises(RuntimeError, match="process-local"):
+        _assert_single_gateway_worker()
+
+
 def test_gateway_worker_guard_allows_explicit_dev_env(monkeypatch):
     _clear_worker_env(monkeypatch)
     monkeypatch.setenv("NODE_ENV", "development")

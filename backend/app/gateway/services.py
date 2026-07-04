@@ -556,6 +556,8 @@ async def start_run(
                 )
             else:
                 await run_ctx.thread_store.update_status(thread_id, "running", user_id=owner_user_id)
+        except HTTPException:
+            raise
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 

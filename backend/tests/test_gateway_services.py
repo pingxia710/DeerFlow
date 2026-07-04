@@ -919,6 +919,80 @@ def test_start_run_uses_authenticated_user_for_persistence(_stub_app_config):
     assert task_context["user_id"] == "owner-browser"
 
 
+def test_start_run_owner_conflict_during_thread_meta_upsert_aborts(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    import pytest
+    from fastapi import HTTPException
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class RacingThreadStore:
+        def __init__(self) -> None:
+            self.create = AsyncMock()
+            self.update_owner = AsyncMock()
+            self.update_status = AsyncMock()
+
+        async def check_access(self, thread_id, user_id, *, require_existing=False):
+            return True
+
+        async def get(self, thread_id, *, user_id=None):
+            if user_id == "owner-browser":
+                return None
+            if user_id is None:
+                return {"thread_id": thread_id, "user_id": "other-user"}
+            return None
+
+    async def _scenario():
+        thread_store = RacingThreadStore()
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=RunManager(store=MemoryRunStore()),
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(user=SimpleNamespace(id="owner-browser", system_role="user")),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+
+        with patch("app.gateway.services.run_agent") as run_agent:
+            with pytest.raises(HTTPException) as exc:
+                await start_run(body, "race-thread", request)
+        return exc.value, run_agent, thread_store
+
+    exc, run_agent, thread_store = asyncio.run(_scenario())
+
+    assert exc.status_code == 409
+    run_agent.assert_not_called()
+    thread_store.create.assert_not_awaited()
+    thread_store.update_owner.assert_not_awaited()
+    thread_store.update_status.assert_not_awaited()
+
+
 def test_resolve_thread_run_denies_foreign_run_owner():
     import asyncio
     from types import SimpleNamespace

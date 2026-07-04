@@ -31,9 +31,6 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/api/v1/auth/oauth/",
     "/api/v1/auth/callback/",
 )

@@ -489,8 +489,34 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    setup_token: str | None = None
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+
+
+def _is_loopback_request(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return host in {"localhost", "testclient"}
+
+
+def _validate_first_boot_setup_access(request: Request, body: InitializeAdminRequest) -> None:
+    expected = os.getenv("DEER_FLOW_SETUP_TOKEN", "").strip()
+    if expected:
+        supplied = body.setup_token or request.headers.get("x-deer-flow-setup-token", "")
+        if secrets.compare_digest(supplied, expected):
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid setup token")
+
+    if _is_loopback_request(request):
+        return
+
+    if os.getenv("DEER_FLOW_ALLOW_REMOTE_INITIALIZE", "").strip().lower() in {"1", "true", "yes"}:
+        return
+
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="First-boot initialization requires a setup token or localhost access")
 
 
 @router.post("/initialize", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -503,6 +529,8 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
+    _validate_first_boot_setup_access(request, body)
+
     admin_count = await get_local_provider().count_admin_users()
     if admin_count > 0:
         raise HTTPException(

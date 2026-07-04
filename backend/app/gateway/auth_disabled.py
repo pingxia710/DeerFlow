@@ -17,24 +17,40 @@ AUTH_SOURCE_INTERNAL = "internal"
 AUTH_SOURCE_AUTH_DISABLED = "auth_disabled"
 
 _PRODUCTION_ENV_VARS: tuple[str, ...] = ("DEER_FLOW_ENV", "ENVIRONMENT")
-_PRODUCTION_ENV_VALUES: frozenset[str] = frozenset({"prod", "production"})
+_SHARED_ENV_VALUES: frozenset[str] = frozenset({"prod", "production", "staging", "stage", "shared"})
+_UNSAFE_ACK_ENV_VAR = "DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK"
+_UNSAFE_ACK_VALUE = "I_UNDERSTAND_AUTH_IS_DISABLED"
 
 logger = logging.getLogger(__name__)
 
 
+def is_explicit_shared_environment() -> bool:
+    return any(os.environ.get(name, "").strip().lower() in _SHARED_ENV_VALUES for name in _PRODUCTION_ENV_VARS)
+
+
 def is_explicit_production_environment() -> bool:
-    return any(os.environ.get(name, "").strip().lower() in _PRODUCTION_ENV_VALUES for name in _PRODUCTION_ENV_VARS)
+    return is_explicit_shared_environment()
 
 
 def is_auth_disabled_requested() -> bool:
     return os.environ.get(AUTH_DISABLED_ENV_VAR) == "1"
 
 
+def has_auth_disabled_unsafe_ack() -> bool:
+    return os.environ.get(_UNSAFE_ACK_ENV_VAR) == _UNSAFE_ACK_VALUE
+
+
+def assert_auth_disabled_safe() -> None:
+    if is_auth_disabled_requested() and is_explicit_shared_environment() and not has_auth_disabled_unsafe_ack():
+        raise RuntimeError(f"{AUTH_DISABLED_ENV_VAR}=1 is forbidden in staging/shared/production environments without {_UNSAFE_ACK_ENV_VAR}={_UNSAFE_ACK_VALUE!r}.")
+
+
 def is_auth_disabled() -> bool:
-    return is_auth_disabled_requested() and not is_explicit_production_environment()
+    return is_auth_disabled_requested() and (not is_explicit_shared_environment() or has_auth_disabled_unsafe_ack())
 
 
 def warn_if_auth_disabled_enabled() -> None:
+    assert_auth_disabled_safe()
     if not is_auth_disabled():
         return
 

@@ -335,10 +335,10 @@ async def upload_files(
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
             skipped_files.append(safe_filename)
             continue
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
+        except Exception:
+            logger.exception("Failed to upload file %r", file.filename)
             _cleanup_uploaded_paths(written_paths)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to upload file")
 
     # Uploaded files are created with 0o600 permissions (owner read/write only).
     # In Docker sandbox deployments the gateway writes as root but the sandbox
@@ -413,6 +413,6 @@ async def delete_uploaded_file(thread_id: str, filename: str, request: Request) 
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:
         raise HTTPException(status_code=400, detail="Invalid path")
-    except Exception as e:
-        logger.error(f"Failed to delete {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")
+    except Exception:
+        logger.exception("Failed to delete uploaded file %r", filename)
+        raise HTTPException(status_code=500, detail="Failed to delete file")

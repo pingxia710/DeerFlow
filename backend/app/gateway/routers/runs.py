@@ -101,7 +101,10 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    return {"status": record.status.value, "error": record.error}
+    response = {"status": record.status.value}
+    if record.error:
+        response["error"] = "Run failed"
+    return response
 
 
 # ---------------------------------------------------------------------------

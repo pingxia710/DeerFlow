@@ -14,10 +14,6 @@ from app.gateway.csrf_middleware import CSRFMiddleware
     [
         "/health",
         "/health/",
-        "/docs",
-        "/docs/",
-        "/redoc",
-        "/openapi.json",
         "/api/v1/auth/login/local",
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
@@ -31,6 +27,9 @@ def test_public_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
+        "/docs",
+        "/redoc",
+        "/openapi.json",
         "/api/models",
         "/api/mcp/config",
         "/api/mcp/cache/reset",
@@ -315,14 +314,26 @@ def test_auth_disabled_skips_csrf_for_state_changing_requests(monkeypatch):
     assert res.json() == {"ok": True}
 
 
-def test_auth_disabled_is_ignored_in_explicit_production_env(monkeypatch):
+def test_auth_disabled_hard_fails_in_shared_env_without_ack(monkeypatch):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("DEER_FLOW_ENV", "staging")
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", raising=False)
+
+    with pytest.raises(RuntimeError, match="forbidden"):
+        warn_if_auth_disabled_enabled()
+
+
+def test_auth_disabled_allowed_in_shared_env_with_explicit_ack(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setenv("DEER_FLOW_ENV", "production")
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", "I_UNDERSTAND_AUTH_IS_DISABLED")
     client = TestClient(_make_app())
 
     res = client.get("/api/models")
 
-    assert res.status_code == 401
+    assert res.status_code == 200
 
 
 def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
@@ -339,16 +350,17 @@ def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
     assert "default" in caplog.text
 
 
-def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(monkeypatch, caplog):
+def test_auth_disabled_startup_warning_in_shared_env_with_ack(monkeypatch, caplog):
     from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", "I_UNDERSTAND_AUTH_IS_DISABLED")
 
     with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
         warn_if_auth_disabled_enabled()
 
-    assert "authentication is bypassed" not in caplog.text
+    assert "authentication is bypassed" in caplog.text
 
 
 def test_protected_path_with_junk_cookie_rejected(client):

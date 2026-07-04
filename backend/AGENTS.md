@@ -334,6 +334,9 @@ uses the same owner scope as persisted events.
 Thread token usage aggregation is also owner-scoped; pass the storage `user_id`
 through to the run store instead of aggregating every row with the same
 `thread_id`.
+Run artifact indexes are derived from owner-scoped runtime events and must mark
+missing files with `available: false` instead of silently omitting availability
+metadata.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`

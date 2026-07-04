@@ -271,7 +271,7 @@ def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str |
         return {}
     actual_path = resolve_thread_virtual_path(thread_id, virtual_path, user_id=user_id)
     if not actual_path.is_file():
-        return {}
+        return {"available": False}
 
     mime_type, _ = mimetypes.guess_type(actual_path)
     digest = hashlib.sha256()
@@ -289,6 +289,7 @@ def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str |
         display_policy = "attachment"
 
     metadata: dict[str, Any] = {
+        "available": True,
         "display_policy": display_policy,
         "sha256": digest.hexdigest(),
         "size_bytes": size,

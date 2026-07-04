@@ -123,7 +123,7 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
         "/mnt/user-data/outputs/report.md": artifact_path,
         "/mnt/user-data/outputs/page.html": active_path,
     }
-    monkeypatch.setattr(thread_runs, "resolve_thread_virtual_path", lambda _thread_id, path, **_kwargs: paths[path])
+    monkeypatch.setattr(thread_runs, "resolve_thread_virtual_path", lambda _thread_id, path, **_kwargs: paths.get(path, tmp_path / "missing.bin"))
 
     app = make_authed_test_app(
         user_factory=lambda: User(
@@ -145,7 +145,13 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
                         "event_type": "artifact.presented",
                         "category": "artifact",
                         "seq": 3,
-                        "content": {"artifact_refs": ["/mnt/user-data/outputs/report.md", "/mnt/user-data/outputs/page.html"]},
+                        "content": {
+                            "artifact_refs": [
+                                "/mnt/user-data/outputs/report.md",
+                                "/mnt/user-data/outputs/page.html",
+                                "/mnt/user-data/outputs/missing.bin",
+                            ]
+                        },
                         "metadata": {"caller": "lead_agent", "source_tool": "present_files"},
                     }
                 ]
@@ -161,14 +167,20 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
     assert response.status_code == 200
     artifact = response.json()[0]
     assert artifact["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    assert artifact["available"] is True
     assert artifact["display_policy"] == "inline"
     assert artifact["sha256"] == hashlib.sha256(artifact_payload).hexdigest()
     assert artifact["size_bytes"] == len(artifact_payload)
     active_artifact = response.json()[1]
     assert active_artifact["virtual_path"] == "/mnt/user-data/outputs/page.html"
+    assert active_artifact["available"] is True
     assert active_artifact["display_policy"] == "attachment"
     assert active_artifact["sha256"] == hashlib.sha256(active_payload).hexdigest()
     assert active_artifact["size_bytes"] == len(active_payload)
+    missing_artifact = response.json()[2]
+    assert missing_artifact["virtual_path"] == "/mnt/user-data/outputs/missing.bin"
+    assert missing_artifact["available"] is False
+    assert "sha256" not in missing_artifact
     event_store.list_events.assert_awaited_once_with(
         "thread-1",
         "run-1",

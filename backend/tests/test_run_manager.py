@@ -189,6 +189,110 @@ async def test_cancel_persists_interrupted_status_to_store():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("late_status", [RunStatus.running, RunStatus.success, RunStatus.error])
+async def test_late_success_cannot_overwrite_cancelled_terminal_status(late_status: RunStatus):
+    """Cancel terminal status should win over late worker status writes."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    assert await manager.cancel(record.run_id) is True
+    original_updated_at = record.updated_at
+    original_stored = await store.get(record.run_id)
+    assert original_stored is not None
+    original_stored_updated_at = original_stored["updated_at"]
+    await manager.set_status(record.run_id, late_status, error="late boom" if late_status == RunStatus.error else None)
+
+    stored = await store.get(record.run_id)
+    assert record.status == RunStatus.interrupted
+    assert record.error is None
+    assert record.updated_at == original_updated_at
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+    assert stored["error"] is None
+    assert stored["updated_at"] == original_stored_updated_at
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("terminal_status", "terminal_error", "late_status", "late_error"),
+    [
+        (RunStatus.success, None, RunStatus.error, "late boom"),
+        (RunStatus.success, None, RunStatus.running, None),
+        (RunStatus.error, "boom", RunStatus.success, None),
+        (RunStatus.error, "boom", RunStatus.running, None),
+    ],
+)
+async def test_terminal_status_blocks_late_different_status(terminal_status: RunStatus, terminal_error: str | None, late_status: RunStatus, late_error: str | None):
+    """Once a run is terminal, a later different status must not replace it."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, terminal_status, error=terminal_error)
+    original_updated_at = record.updated_at
+    original_stored = await store.get(record.run_id)
+    assert original_stored is not None
+    original_stored_updated_at = original_stored["updated_at"]
+
+    await manager.set_status(record.run_id, late_status, error=late_error)
+
+    stored = await store.get(record.run_id)
+    assert record.status == terminal_status
+    assert record.error == terminal_error
+    assert record.updated_at == original_updated_at
+    assert stored is not None
+    assert stored["status"] == terminal_status.value
+    assert stored.get("error") == terminal_error
+    assert stored["updated_at"] == original_stored_updated_at
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("terminal_status", "terminal_error"), [(RunStatus.success, None), (RunStatus.error, "boom")])
+async def test_same_terminal_status_write_is_idempotent(terminal_status: RunStatus, terminal_error: str | None):
+    """Repeating the same terminal status is allowed for idempotent retries."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, terminal_status, error=terminal_error)
+
+    await manager.set_status(record.run_id, terminal_status, error=terminal_error)
+
+    stored = await store.get(record.run_id)
+    assert record.status == terminal_status
+    assert record.error == terminal_error
+    assert stored is not None
+    assert stored["status"] == terminal_status.value
+    assert stored.get("error") == terminal_error
+
+
+@pytest.mark.anyio
+async def test_rollback_cancel_allows_worker_error_terminal_status():
+    """Rollback cancellation keeps the existing interrupted -> error completion path."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    assert await manager.cancel(record.run_id, action="rollback") is True
+    stored = await store.get(record.run_id)
+    assert record.status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+
+    await manager.set_status(record.run_id, RunStatus.error, error="Rolled back by user")
+
+    stored = await store.get(record.run_id)
+    assert record.status == RunStatus.error
+    assert record.error == "Rolled back by user"
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert stored["error"] == "Rolled back by user"
+
+
+@pytest.mark.anyio
 async def test_status_persistence_retries_transient_sqlite_lock():
     """Transient SQLite lock errors should not leave a final status stale."""
     store = FlakyStatusRunStore(status_failures=2)

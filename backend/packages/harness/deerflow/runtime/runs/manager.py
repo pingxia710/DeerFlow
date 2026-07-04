@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus
+from .schemas import DisconnectMode, RunStatus, is_terminal_status
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
@@ -486,6 +486,10 @@ class RunManager:
             record = self._runs.get(run_id)
             if record is None:
                 logger.warning("set_status called for unknown run %s", run_id)
+                return
+            rollback_completion = record.status == RunStatus.interrupted and record.abort_action == "rollback" and status == RunStatus.error and error == "Rolled back by user"
+            if is_terminal_status(record.status) and record.status != status and not rollback_completion:
+                logger.info("Ignoring late status transition for terminal run %s: %s -> %s", run_id, record.status.value, status.value)
                 return
             record.status = status
             record.updated_at = _now_iso()

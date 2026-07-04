@@ -26,6 +26,7 @@ import {
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
   taskEventRunMessageKey,
+  threadRunsQueryKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
@@ -56,6 +57,14 @@ test("mergeMessages removes duplicate messages already present in history", () =
   } as Message;
 
   expect(mergeMessages([human, ai, human, ai], [], [])).toEqual([human, ai]);
+});
+
+test("threadRunsQueryKey keeps run lists separate from thread metadata", () => {
+  expect(threadRunsQueryKey("thread-a")).toEqual([
+    "thread",
+    "thread-a",
+    "runs",
+  ]);
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {

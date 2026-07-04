@@ -1450,7 +1450,7 @@ export function useThreadStream({
       handleStreamStart(meta.thread_id, meta.run_id);
       markThreadBusyInCaches(queryClient, meta.thread_id);
       void queryClient.invalidateQueries({
-        queryKey: ["thread", meta.thread_id],
+        queryKey: threadRunsQueryKey(meta.thread_id),
       });
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -1668,7 +1668,7 @@ export function useThreadStream({
       });
       if (streamThreadId && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: ["thread", streamThreadId],
+          queryKey: threadRunsQueryKey(streamThreadId),
         });
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(streamThreadId),
@@ -2131,7 +2131,9 @@ export function useThreadStream({
           },
           context: buildThreadRunContext(context, threadId),
         });
-        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+        void queryClient.invalidateQueries({
+          queryKey: threadRunsQueryKey(threadId),
+        });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -2595,13 +2597,17 @@ export function useInfiniteThreads(
   });
 }
 
+export function threadRunsQueryKey(threadId?: string | null) {
+  return ["thread", threadId, "runs"] as const;
+}
+
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<Run[]>({
-    queryKey: ["thread", threadId],
+    queryKey: threadRunsQueryKey(threadId),
     queryFn: async () => {
       if (!threadId) {
         return [];

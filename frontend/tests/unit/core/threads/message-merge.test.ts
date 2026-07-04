@@ -18,6 +18,7 @@ import {
   isAbortError,
   isTaskEventRunMessage,
   isTaskEventRunMessageForRequest,
+  isVisibleHistoryRunMessage,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   readRunMessagesPageResponse,
@@ -25,7 +26,6 @@ import {
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
-  shouldKeepActiveEmptyRunPending,
   taskEventRunMessageKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -440,6 +440,67 @@ test("task event run messages update subtask state without entering visible hist
       [],
     ).map((message) => message.id),
   ).toEqual(["ai-1"]);
+});
+
+test("visible history run messages keep middleware chat but filter task events and hidden UI", () => {
+  const middlewareAiRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      id: "ai-middleware-1",
+      type: "ai",
+      content: "middleware summary",
+    } as Message,
+    metadata: { caller: "middleware:summarize" },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+  const middlewareHumanRow = {
+    run_id: "run-1",
+    seq: 2,
+    content: {
+      id: "human-middleware-1",
+      type: "human",
+      content: "middleware title",
+    } as Message,
+    metadata: { caller: "middleware:title" },
+    created_at: "2026-05-22T00:00:01Z",
+  } as RunMessage;
+  const taskEventRow = {
+    run_id: "run-1",
+    seq: 3,
+    content: {
+      type: "task_running",
+      task_id: "call-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+    },
+    metadata: { caller: "task_event" },
+    created_at: "2026-05-22T00:00:02Z",
+  } as unknown as RunMessage;
+  const hiddenRow = {
+    run_id: "run-1",
+    seq: 4,
+    content: {
+      id: "hidden-1",
+      type: "ai",
+      content: "hidden",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message,
+    metadata: { caller: "middleware:summarize" },
+    created_at: "2026-05-22T00:00:03Z",
+  } as RunMessage;
+
+  expect(isVisibleHistoryRunMessage(middlewareAiRow)).toBe(true);
+  expect(isVisibleHistoryRunMessage(middlewareHumanRow)).toBe(true);
+  expect(isVisibleHistoryRunMessage(taskEventRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(hiddenRow)).toBe(false);
+  expect(
+    buildVisibleHistoryMessages(
+      [middlewareAiRow, middlewareHumanRow, taskEventRow, hiddenRow],
+      new Set(),
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["ai-middleware-1", "human-middleware-1"]);
 });
 
 test("task event run messages are idempotent and scoped to the requested thread and run", () => {
@@ -859,21 +920,6 @@ test("shouldAutoContinueOnEmptyRun input must use the post-filter visible count,
   const rawPageSize = 3; // pretend the raw page had 3 middleware-only entries
   expect(shouldAutoContinueOnEmptyRun(filteredVisibleCount, 0)).toBe(true);
   expect(shouldAutoContinueOnEmptyRun(rawPageSize, 0)).toBe(false);
-});
-
-test("shouldKeepActiveEmptyRunPending keeps active empty runs reloadable", () => {
-  expect(
-    shouldKeepActiveEmptyRunPending({ status: "running" } as unknown as Run, 0),
-  ).toBe(true);
-  expect(
-    shouldKeepActiveEmptyRunPending({ status: "pending" } as unknown as Run, 0),
-  ).toBe(true);
-  expect(
-    shouldKeepActiveEmptyRunPending({ status: "success" } as unknown as Run, 0),
-  ).toBe(false);
-  expect(
-    shouldKeepActiveEmptyRunPending({ status: "running" } as unknown as Run, 1),
-  ).toBe(false);
 });
 
 test("shouldAutoLoadLatestRun only auto-loads a new latest run", () => {

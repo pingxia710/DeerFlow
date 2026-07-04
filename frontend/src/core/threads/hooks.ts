@@ -671,6 +671,12 @@ export function applyTaskEventRunMessages(
   }
 }
 
+export function isVisibleHistoryRunMessage(message: RunMessage) {
+  return (
+    !isTaskEventRunMessage(message) && !isHiddenFromUIMessage(message.content)
+  );
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
@@ -678,7 +684,8 @@ export function buildVisibleHistoryMessages(
 ) {
   const visibleRows = messageRows.filter(
     (message) =>
-      !supersededRunIds.has(message.run_id) && !isTaskEventRunMessage(message),
+      !supersededRunIds.has(message.run_id) &&
+      isVisibleHistoryRunMessage(message),
   );
   return dedupeMessagesByIdentity([
     ...visibleRows.map((message) => ({
@@ -759,13 +766,6 @@ export function shouldAutoContinueOnEmptyRun(
     fetchedMessageCount === 0 &&
     consecutiveEmptyLoads < maxConsecutiveEmptyLoads
   );
-}
-
-export function shouldKeepActiveEmptyRunPending(
-  run: Pick<Run, "status"> | undefined,
-  visibleMessageCount: number,
-): boolean {
-  return visibleMessageCount === 0 && isActiveRunStatus(run?.status);
 }
 
 export function shouldAutoLoadLatestRun(
@@ -2239,11 +2239,7 @@ export function useThreadHistory(
           requestThreadId,
           appliedTaskEventKeysRef.current,
         );
-        const _messages = result.data.filter(
-          (m) =>
-            !m.metadata.caller?.startsWith("middleware:") &&
-            !isTaskEventRunMessage(m),
-        );
+        const _messages = result.data.filter(isVisibleHistoryRunMessage);
         setMessageRows((prev) =>
           dedupeRunMessagesByIdentity([..._messages, ...prev]),
         );
@@ -2257,10 +2253,6 @@ export function useThreadHistory(
           );
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
-          if (shouldKeepActiveEmptyRunPending(run, _messages.length)) {
-            consecutiveEmptyLoads = 0;
-            continue;
-          }
           loadedRunIdsRef.current.add(run.run_id);
           if (
             shouldAutoContinueOnEmptyRun(

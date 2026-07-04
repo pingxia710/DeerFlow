@@ -19,6 +19,7 @@ import {
   isTaskEventRunMessageForRequest,
   isVisibleHistoryRunMessage,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+  mergeFetchedRunMessages,
   mergeMessages,
   readRunMessagesPageResponse,
   removeSetItems,
@@ -1016,6 +1017,75 @@ test("buildVisibleHistoryMessages groups repeated run-local seq by run order", (
       (message) => message.content,
     ),
   ).toEqual(["old first", "old second", "new first", "new second"]);
+});
+
+test("mergeFetchedRunMessages replaces stale rows for refreshed run first page", () => {
+  const previous = [
+    {
+      run_id: "run-old",
+      seq: 1,
+      content: { id: "old-ai", type: "ai", content: "stale" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-new",
+      seq: 1,
+      content: { id: "new-ai", type: "ai", content: "new" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:01:01Z",
+    },
+  ] satisfies RunMessage[];
+  const fetched = [
+    {
+      run_id: "run-old",
+      seq: 1,
+      content: { id: "old-ai-final", type: "ai", content: "final" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+  ] satisfies RunMessage[];
+  const runs = [
+    { run_id: "run-new" },
+    { run_id: "run-old" },
+  ] as unknown as Run[];
+
+  const merged = mergeFetchedRunMessages(previous, fetched, "run-old", true);
+
+  expect(
+    buildVisibleHistoryMessages(merged, new Set(), [], runs).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["final", "new"]);
+});
+
+test("mergeFetchedRunMessages keeps existing rows when loading an older page", () => {
+  const previous = [
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: { id: "ai-2", type: "ai", content: "second" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+  ] satisfies RunMessage[];
+  const fetched = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: { id: "ai-1", type: "ai", content: "first" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+  ] satisfies RunMessage[];
+
+  const merged = mergeFetchedRunMessages(previous, fetched, "run-1", false);
+
+  expect(
+    buildVisibleHistoryMessages(merged, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["first", "second"]);
 });
 
 test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {

@@ -100,6 +100,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
+- Run-specific history refreshes should replace existing rows for that run on
+  the refreshed first page; do not append stale same-run rows that disappeared
+  from the backend response.
 - SSE `run.terminal` custom events should trigger run-specific history refresh;
   do not turn them into task cards or visible chat messages.
 - Background completion recovery may probe only known `thread_id` + `run_id`

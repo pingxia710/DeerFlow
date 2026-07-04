@@ -490,6 +490,20 @@ function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   });
 }
 
+export function mergeFetchedRunMessages(
+  previous: RunMessage[],
+  fetched: RunMessage[],
+  runId: string,
+  replaceRun: boolean,
+) {
+  const base = replaceRun
+    ? previous.filter((message) => message.run_id !== runId)
+    : previous;
+  return dedupeRunMessagesByIdentity(
+    replaceRun ? [...base, ...fetched] : [...fetched, ...base],
+  );
+}
+
 export function getSupersededRunIds(
   runs: Run[] | undefined,
   pendingSupersededRunIds?: ReadonlySet<string>,
@@ -2597,7 +2611,12 @@ export function useThreadHistory(
         );
         const _messages = result.data.filter(isVisibleHistoryRunMessage);
         setMessageRows((prev) =>
-          dedupeRunMessagesByIdentity([..._messages, ...prev]),
+          mergeFetchedRunMessages(
+            prev,
+            _messages,
+            run.run_id,
+            beforeSeq === undefined,
+          ),
         );
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {

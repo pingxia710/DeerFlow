@@ -504,6 +504,20 @@ export function mergeFetchedRunMessages(
   );
 }
 
+export function partitionKnownRunIds(runIds: Iterable<string>, runs: Run[]) {
+  const knownRunIds = new Set(runs.map((run) => run.run_id));
+  const known: string[] = [];
+  const pending: string[] = [];
+  for (const runId of runIds) {
+    if (knownRunIds.has(runId)) {
+      known.push(runId);
+    } else {
+      pending.push(runId);
+    }
+  }
+  return { known, pending };
+}
+
 export function getSupersededRunIds(
   runs: Run[] | undefined,
   pendingSupersededRunIds?: ReadonlySet<string>,
@@ -2512,6 +2526,7 @@ export function useThreadHistory(
   const historyLoadAbortRef = useRef<AbortController | null>(null);
   const autoLoadedLatestRunIdRef = useRef<string | null>(null);
   const activeRunIdsRef = useRef<Set<string>>(new Set());
+  const pendingRefreshRunIdsRef = useRef<Set<string>>(new Set());
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
   const updateSubtask = useUpdateSubtask();
   const updateSubtaskRef = useRef(updateSubtask);
@@ -2678,6 +2693,7 @@ export function useThreadHistory(
       runBeforeSeqRef.current = new Map();
       autoLoadedLatestRunIdRef.current = null;
       activeRunIdsRef.current = new Set();
+      pendingRefreshRunIdsRef.current = new Set();
       appliedTaskEventKeysRef.current = new Set();
       loadingRef.current = false;
       setLoading(false);
@@ -2725,9 +2741,13 @@ export function useThreadHistory(
       if (!enabled) {
         return;
       }
-      const ids = Array.from(runIds ?? []).filter((runId) =>
-        runsRef.current.some((run) => run.run_id === runId),
+      const { known: ids, pending } = partitionKnownRunIds(
+        runIds ?? [],
+        runsRef.current,
       );
+      for (const runId of pending) {
+        pendingRefreshRunIdsRef.current.add(runId);
+      }
       if (ids.length === 0) {
         return;
       }
@@ -2755,13 +2775,24 @@ export function useThreadHistory(
       activeRunIdsRef.current,
       runs.data,
     );
+    const { known: pendingRefreshRunIds } = partitionKnownRunIds(
+      pendingRefreshRunIdsRef.current,
+      runs.data,
+    );
+    for (const runId of pendingRefreshRunIds) {
+      pendingRefreshRunIdsRef.current.delete(runId);
+    }
     activeRunIdsRef.current = new Set(
       runs.data
         .filter((run) => isActiveRunStatus(run.status))
         .map((run) => run.run_id),
     );
-    if (terminalTransitionRunIds.length > 0) {
-      refreshRuns(terminalTransitionRunIds);
+    const refreshRunIds = [
+      ...terminalTransitionRunIds,
+      ...pendingRefreshRunIds,
+    ];
+    if (refreshRunIds.length > 0) {
+      refreshRuns(refreshRunIds);
     }
   }, [enabled, refreshRuns, runs.data]);
 

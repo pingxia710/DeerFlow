@@ -21,6 +21,7 @@ import {
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeFetchedRunMessages,
   mergeMessages,
+  partitionKnownRunIds,
   readRunMessagesPageResponse,
   removeSetItems,
   runMessagesPageHasMore,
@@ -1086,6 +1087,26 @@ test("mergeFetchedRunMessages keeps existing rows when loading an older page", (
       (message) => message.content,
     ),
   ).toEqual(["first", "second"]);
+});
+
+test("partitionKnownRunIds keeps unknown refresh ids pending until run list catches up", () => {
+  const runs = [
+    { run_id: "run-known" },
+    { run_id: "run-other" },
+  ] as unknown as Run[];
+
+  expect(partitionKnownRunIds(["run-missing", "run-known"], runs)).toEqual({
+    known: ["run-known"],
+    pending: ["run-missing"],
+  });
+  expect(
+    partitionKnownRunIds(["run-missing"], [
+      { run_id: "run-missing" },
+    ] as unknown as Run[]),
+  ).toEqual({
+    known: ["run-missing"],
+    pending: [],
+  });
 });
 
 test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {

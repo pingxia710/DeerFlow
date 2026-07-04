@@ -276,6 +276,24 @@ def test_in_memory_checkpointer_keeps_root_and_non_root_namespaces_isolated():
     )
 
 
+def test_in_memory_checkpointer_does_not_key_by_run_id():
+    """Current contract: run_id belongs to runs/events, not checkpoint identity."""
+    checkpointer = InMemorySaver()
+
+    root_config = _put_marker_checkpoint(checkpointer, thread_id="thread-1", checkpoint_ns="", marker="root")
+    with_run_id = {
+        "configurable": {
+            **root_config["configurable"],
+            "run_id": "unrelated-run",
+        }
+    }
+
+    checkpoint = checkpointer.get_tuple(with_run_id)
+
+    assert checkpoint is not None
+    assert checkpoint.checkpoint["channel_values"]["marker"] == "root"
+
+
 # ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------

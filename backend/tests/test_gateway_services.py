@@ -414,6 +414,48 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
     assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
 
 
+def test_apply_checkpoint_to_run_config_does_not_treat_run_id_as_checkpoint_key():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    checkpointer = FakeCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    body = SimpleNamespace(
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "run_id": "run-that-produced-the-checkpoint",
+        },
+        checkpoint_id=None,
+    )
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert checkpointer.seen_config == {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+        }
+    }
+    assert config["configurable"] == {
+        "thread_id": "thread-1",
+        "checkpoint_ns": "",
+        "checkpoint_id": "ckpt-1",
+    }
+
+
 def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
     import asyncio
     from types import SimpleNamespace

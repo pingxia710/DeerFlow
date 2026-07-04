@@ -42,8 +42,11 @@ async def test_default_base_dir_uses_deer_flow_home_not_cwd(monkeypatch, tmp_pat
     store = JsonlRunEventStore()
     await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
 
-    assert (home / "threads" / "t1" / "runs" / "r1.jsonl").exists()
-    assert not (cwd / ".deer-flow" / "threads" / "t1" / "runs" / "r1.jsonl").exists()
+    home_files = list(home.glob("users/*/threads/t1/runs/r1.jsonl"))
+    if (home / "threads" / "t1" / "runs" / "r1.jsonl").exists():
+        home_files.append(home / "threads" / "t1" / "runs" / "r1.jsonl")
+    assert home_files
+    assert not list((cwd / ".deer-flow").glob("**/r1.jsonl"))
 
 
 @pytest.mark.anyio
@@ -75,6 +78,13 @@ async def test_user_id_filter_excludes_legacy_rows_from_user_scoped_queries_and_
         content="legacy",
     )
 
+    user_a_file = tmp_path / "users" / "user-a" / "threads" / "t1" / "runs" / "r1.jsonl"
+    user_b_file = tmp_path / "users" / "user-b" / "threads" / "t1" / "runs" / "r1.jsonl"
+    legacy_file = tmp_path / "threads" / "t1" / "runs" / "r1.jsonl"
+    assert user_a_file.exists()
+    assert user_b_file.exists()
+    assert legacy_file.exists()
+
     messages_a = await store.list_messages("t1", user_id="user-a")
     assert [m["content"] for m in messages_a] == ["a"]
 
@@ -89,6 +99,25 @@ async def test_user_id_filter_excludes_legacy_rows_from_user_scoped_queries_and_
     removed = await store.delete_by_run("t1", "r1", user_id="user-a")
     assert removed == 1
     assert [m["content"] for m in await store.list_messages("t1")] == ["b", "legacy"]
+    assert not user_a_file.exists()
+    assert user_b_file.exists()
+    assert legacy_file.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_user_scoped_reads_include_legacy_jsonl_owner_rows(tmp_path):
+    legacy_file = tmp_path / "threads" / "t1" / "runs" / "r1.jsonl"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_text(
+        '{"thread_id":"t1","run_id":"r1","event_type":"human_message","category":"message","content":"legacy-owned","seq":1,"user_id":"user-a"}\n',
+        encoding="utf-8",
+    )
+    store = _make_store(tmp_path)
+
+    events = await store.list_events("t1", "r1", user_id="user-a")
+
+    assert [event["content"] for event in events] == ["legacy-owned"]
 
 
 # ---------------------------------------------------------------------------

@@ -39,10 +39,11 @@ def test_run_event_seq_unique_constraint_is_thread_scoped_not_owner_scoped() -> 
     assert ("user_id", "thread_id", "seq") not in unique_columns
 
 
-def test_jsonl_run_event_path_is_legacy_thread_scoped(tmp_path) -> None:
+def test_jsonl_run_event_path_is_owner_scoped_when_user_id_is_present(tmp_path) -> None:
     store = JsonlRunEventStore(base_dir=tmp_path)
 
     assert store._run_file("thread-1", "run-1") == tmp_path / "threads" / "thread-1" / "runs" / "run-1.jsonl"
+    assert store._run_file("thread-1", "run-1", user_id="user-1") == tmp_path / "users" / "user-1" / "threads" / "thread-1" / "runs" / "run-1.jsonl"
 
 
 @pytest.mark.anyio

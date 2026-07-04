@@ -1,7 +1,9 @@
 """JSONL file-backed RunEventStore implementation.
 
 Each run's events are stored in a single file under DeerFlow's runtime
-home:
+home. Owner-scoped writes use:
+``{base_dir}/users/{user_id}/threads/{thread_id}/runs/{run_id}.jsonl``
+Legacy ownerless writes still use:
 ``{base_dir}/threads/{thread_id}/runs/{run_id}.jsonl``
 
 All categories (message, trace, lifecycle) are in the same file.
@@ -18,7 +20,7 @@ writes within a single process to prevent interleaved JSONL lines.
 
 Known trade-off: ``list_messages()`` must scan all run files for a
 thread since messages from multiple runs need unified seq ordering.
-``list_events()`` reads only one file -- the fast path.
+``list_events()`` reads only the matching run file(s).
 """
 
 from __future__ import annotations
@@ -59,13 +61,34 @@ class JsonlRunEventStore(RunEventStore):
             raise ValueError(f"Invalid {label}: must be alphanumeric/dash/underscore, got {value!r}")
         return value
 
-    def _thread_dir(self, thread_id: str) -> Path:
+    def _thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         self._validate_id(thread_id, "thread_id")
+        if user_id is not None:
+            self._validate_id(user_id, "user_id")
+            return self._base_dir / "users" / user_id / "threads" / thread_id / "runs"
         return self._base_dir / "threads" / thread_id / "runs"
 
-    def _run_file(self, thread_id: str, run_id: str) -> Path:
+    def _thread_dirs(self, thread_id: str, *, user_id: str | None = None) -> list[Path]:
+        if user_id is not None:
+            return [self._thread_dir(thread_id, user_id=user_id), self._thread_dir(thread_id)]
+
+        dirs = [self._thread_dir(thread_id)]
+        users_dir = self._base_dir / "users"
+        if users_dir.exists():
+            for user_dir in sorted(path for path in users_dir.iterdir() if path.is_dir()):
+                try:
+                    dirs.append(self._thread_dir(thread_id, user_id=user_dir.name))
+                except ValueError:
+                    logger.debug("Skipping invalid user directory under JSONL store: %s", user_dir)
+        return dirs
+
+    def _run_file(self, thread_id: str, run_id: str, *, user_id: str | None = None) -> Path:
         self._validate_id(run_id, "run_id")
-        return self._thread_dir(thread_id) / f"{run_id}.jsonl"
+        return self._thread_dir(thread_id, user_id=user_id) / f"{run_id}.jsonl"
+
+    def _run_files(self, thread_id: str, run_id: str, *, user_id: str | None = None) -> list[Path]:
+        self._validate_id(run_id, "run_id")
+        return [thread_dir / f"{run_id}.jsonl" for thread_dir in self._thread_dirs(thread_id, user_id=user_id)]
 
     @staticmethod
     def _user_id_from_context() -> str | None:
@@ -100,8 +123,9 @@ class JsonlRunEventStore(RunEventStore):
     def _compute_max_seq(self, thread_id: str) -> int:
         """Scan all run files for a thread and return the current max seq (blocking I/O)."""
         max_seq = 0
-        thread_dir = self._thread_dir(thread_id)
-        if thread_dir.exists():
+        for thread_dir in self._thread_dirs(thread_id):
+            if not thread_dir.exists():
+                continue
             for f in thread_dir.glob("*.jsonl"):
                 for line in f.read_text(encoding="utf-8").strip().splitlines():
                     try:
@@ -119,34 +143,16 @@ class JsonlRunEventStore(RunEventStore):
         self._seq_counters[thread_id] = max_seq
 
     def _write_record(self, record: dict) -> None:
-        path = self._run_file(record["thread_id"], record["run_id"])
+        path = self._run_file(record["thread_id"], record["run_id"], user_id=record.get("user_id"))
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
 
-    def _read_thread_events(self, thread_id: str) -> list[dict]:
-        """Read all events for a thread, sorted by seq (blocking I/O)."""
+    @staticmethod
+    def _read_events_file(path: Path) -> list[dict]:
         events = []
-        thread_dir = self._thread_dir(thread_id)
-        if not thread_dir.exists():
-            return events
-        for f in sorted(thread_dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").strip().splitlines():
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.debug("Skipping malformed JSONL line in %s", f)
-        events.sort(key=lambda e: e.get("seq", 0))
-        return events
-
-    def _read_run_events(self, thread_id: str, run_id: str) -> list[dict]:
-        """Read events for a specific run file (blocking I/O)."""
-        path = self._run_file(thread_id, run_id)
         if not path.exists():
-            return []
-        events = []
+            return events
         for line in path.read_text(encoding="utf-8").strip().splitlines():
             if not line:
                 continue
@@ -154,11 +160,10 @@ class JsonlRunEventStore(RunEventStore):
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 logger.debug("Skipping malformed JSONL line in %s", path)
-        events.sort(key=lambda e: e.get("seq", 0))
         return events
 
-    def _rewrite_run_events(self, thread_id: str, run_id: str, events: list[dict]) -> None:
-        path = self._run_file(thread_id, run_id)
+    @staticmethod
+    def _rewrite_events_file(path: Path, events: list[dict]) -> None:
         if not events:
             if path.exists():
                 path.unlink()
@@ -168,32 +173,65 @@ class JsonlRunEventStore(RunEventStore):
             for event in events:
                 f.write(json.dumps(event, default=str, ensure_ascii=False) + "\n")
 
+    def _read_thread_events(self, thread_id: str, user_id: str | None = None) -> list[dict]:
+        """Read all events for a thread, sorted by seq (blocking I/O)."""
+        events = []
+        for thread_dir in self._thread_dirs(thread_id, user_id=user_id):
+            if not thread_dir.exists():
+                continue
+            for f in sorted(thread_dir.glob("*.jsonl")):
+                events.extend(self._read_events_file(f))
+        events.sort(key=lambda e: e.get("seq", 0))
+        return events
+
+    def _read_run_events(self, thread_id: str, run_id: str, user_id: str | None = None) -> list[dict]:
+        """Read events for a specific run file (blocking I/O)."""
+        events = []
+        for path in self._run_files(thread_id, run_id, user_id=user_id):
+            events.extend(self._read_events_file(path))
+        events.sort(key=lambda e: e.get("seq", 0))
+        return events
+
     def _delete_thread_files(self, thread_id: str) -> None:
-        thread_dir = self._thread_dir(thread_id)
-        if thread_dir.exists():
+        for thread_dir in self._thread_dirs(thread_id):
+            if not thread_dir.exists():
+                continue
             for f in thread_dir.glob("*.jsonl"):
                 f.unlink()
 
     def _delete_thread_events_for_user(self, thread_id: str, user_id: str) -> int:
         count = 0
-        thread_dir = self._thread_dir(thread_id)
-        if not thread_dir.exists():
-            return count
-        for f in thread_dir.glob("*.jsonl"):
-            events = self._read_run_events(thread_id, f.stem)
+        for thread_dir in self._thread_dirs(thread_id, user_id=user_id):
+            if not thread_dir.exists():
+                continue
+            for f in thread_dir.glob("*.jsonl"):
+                events = self._read_events_file(f)
+                remaining = []
+                for event in events:
+                    if self._matches_user(event, user_id):
+                        count += 1
+                    else:
+                        remaining.append(event)
+                self._rewrite_events_file(f, remaining)
+        return count
+
+    def _delete_run_events_for_user(self, thread_id: str, run_id: str, user_id: str) -> int:
+        count = 0
+        for path in self._run_files(thread_id, run_id, user_id=user_id):
+            events = self._read_events_file(path)
             remaining = []
             for event in events:
                 if self._matches_user(event, user_id):
                     count += 1
                 else:
                     remaining.append(event)
-            self._rewrite_run_events(thread_id, f.stem, remaining)
+            self._rewrite_events_file(path, remaining)
         return count
 
     def _delete_run_file(self, thread_id: str, run_id: str) -> None:
-        path = self._run_file(thread_id, run_id)
-        if path.exists():
-            path.unlink()
+        for path in self._run_files(thread_id, run_id):
+            if path.exists():
+                path.unlink()
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None, user_id=None):
         async with self._get_write_lock(thread_id):
@@ -226,7 +264,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_messages")
-        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id, resolved_user_id)
         all_events = self._filter_user(all_events, resolved_user_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
@@ -241,7 +279,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_events(self, thread_id, run_id, *, event_types=None, limit=500, after_seq=None, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_events")
-        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id, resolved_user_id)
         events = self._filter_user(events, resolved_user_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
@@ -251,7 +289,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.list_messages_by_run")
-        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id, resolved_user_id)
         events = self._filter_user(events, resolved_user_id)
         filtered = [e for e in events if e.get("category") == "message"]
         if before_seq is not None:
@@ -265,14 +303,14 @@ class JsonlRunEventStore(RunEventStore):
 
     async def count_messages(self, thread_id, *, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.count_messages")
-        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id, resolved_user_id)
         all_events = self._filter_user(all_events, resolved_user_id)
         return sum(1 for e in all_events if e.get("category") == "message")
 
     async def delete_by_thread(self, thread_id, *, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.delete_by_thread")
         async with self._get_write_lock(thread_id):
-            all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+            all_events = await asyncio.to_thread(self._read_thread_events, thread_id, resolved_user_id)
             if resolved_user_id is None:
                 count = len(all_events)
                 await asyncio.to_thread(self._delete_thread_files, thread_id)
@@ -290,12 +328,11 @@ class JsonlRunEventStore(RunEventStore):
     async def delete_by_run(self, thread_id, run_id, *, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.delete_by_run")
         async with self._get_write_lock(thread_id):
-            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id, resolved_user_id)
             if resolved_user_id is None:
                 count = len(events)
                 await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
             else:
                 count = sum(1 for event in events if self._matches_user(event, resolved_user_id))
-                remaining = [event for event in events if not self._matches_user(event, resolved_user_id)]
-                await asyncio.to_thread(self._rewrite_run_events, thread_id, run_id, remaining)
+                await asyncio.to_thread(self._delete_run_events_for_user, thread_id, run_id, resolved_user_id)
             return count

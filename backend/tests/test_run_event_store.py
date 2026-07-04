@@ -652,8 +652,8 @@ class TestJsonlRunEventStore:
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
         s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
-        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        assert (tmp_path / "jsonl" / "threads" / "t1" / "runs" / "r1.jsonl").exists()
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", user_id="user-a")
+        assert (tmp_path / "jsonl" / "users" / "user-a" / "threads" / "t1" / "runs" / "r1.jsonl").exists()
 
     @pytest.mark.anyio
     async def test_cross_run_messages(self, tmp_path):

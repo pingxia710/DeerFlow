@@ -337,8 +337,10 @@ are explicitly reconciled.
   requested `thread_id` already held by another owner returns HTTP 409.
 - Legacy NULL-owner thread rows are permissive for `check_access()`, but
   user-filtered metadata/event reads require an explicit owner match.
-- `JsonlRunEventStore` still uses the legacy unscoped
-  `{base_dir}/threads/{thread_id}/runs/{run_id}.jsonl` path.
+- `JsonlRunEventStore` writes owner-scoped events to
+  `{base_dir}/users/{user_id}/threads/{thread_id}/runs/{run_id}.jsonl`;
+  ownerless legacy events remain under `{base_dir}/threads/...`, and
+  user-scoped reads include matching legacy owner rows for compatibility.
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.

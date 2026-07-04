@@ -26,6 +26,7 @@ import {
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
+  shouldLoadNextRunMessagesPage,
   taskEventRunMessageKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -367,6 +368,14 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
   expect(
     getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: false }),
   ).toBeNull();
+});
+
+test("shouldLoadNextRunMessagesPage continues normal history pagination", () => {
+  expect(shouldLoadNextRunMessagesPage(42)).toBe(true);
+});
+
+test("shouldLoadNextRunMessagesPage stops active run revalidation after the latest page", () => {
+  expect(shouldLoadNextRunMessagesPage(42, false)).toBe(false);
 });
 
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {

@@ -1,4 +1,4 @@
-import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
@@ -831,6 +831,13 @@ export function getNextRunMessagesBeforeSeq(
     return null;
   }
   return getOldestRunMessageSeq(result.data) ?? undefined;
+}
+
+export function shouldLoadNextRunMessagesPage(
+  nextBeforeSeq: number | null | undefined,
+  loadAllPages = true,
+) {
+  return typeof nextBeforeSeq === "number" && loadAllPages;
 }
 
 export function buildRunMessagesUrl(
@@ -2169,6 +2176,7 @@ export function useThreadHistory(
   const autoLoadedLatestRunIdRef = useRef<string | null>(null);
   const activeRunIdsRef = useRef<Set<string>>(new Set());
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
+  const loadAllPagesRef = useRef(true);
   const refetchRunsRef = useRef(runs.refetch);
   const updateSubtask = useUpdateSubtask();
   const updateSubtaskRef = useRef(updateSubtask);
@@ -2194,6 +2202,8 @@ export function useThreadHistory(
     if (!enabled) {
       return;
     }
+    const loadAllPages = loadAllPagesRef.current;
+    loadAllPagesRef.current = true;
     const loadGeneration = loadGenerationRef.current;
     if (loadingRef.current) {
       const pendingRunIndex = findLatestUnloadedRunIndex(
@@ -2273,7 +2283,10 @@ export function useThreadHistory(
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
-          pendingLoadRef.current = true;
+          pendingLoadRef.current = shouldLoadNextRunMessagesPage(
+            nextBeforeSeq,
+            loadAllPages,
+          );
         } else if (nextBeforeSeq === undefined) {
           console.warn(
             `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
@@ -2331,6 +2344,7 @@ export function useThreadHistory(
       autoLoadedLatestRunIdRef.current = null;
       activeRunIdsRef.current = new Set();
       appliedTaskEventKeysRef.current = new Set();
+      loadAllPagesRef.current = true;
       loadingRef.current = false;
       setLoading(false);
       setMessageRows([]);
@@ -2373,7 +2387,7 @@ export function useThreadHistory(
   }, []);
 
   const refreshRuns = useCallback(
-    (runIds?: Iterable<string>) => {
+    (runIds?: Iterable<string>, loadAllPages = true) => {
       if (!enabled) {
         return;
       }
@@ -2391,6 +2405,7 @@ export function useThreadHistory(
         runsRef.current,
         loadedRunIdsRef.current,
       );
+      loadAllPagesRef.current = loadAllPages;
       loadMessages().catch(() => {
         toast.error("Failed to load thread history.");
       });
@@ -2423,7 +2438,7 @@ export function useThreadHistory(
     }
     const refreshThreadRuns = () => {
       void refetchRunsRef.current();
-      refreshRuns();
+      refreshRuns(undefined, false);
     };
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === "visible") {

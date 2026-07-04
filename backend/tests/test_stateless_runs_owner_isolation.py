@@ -98,6 +98,10 @@ def _body(thread_id: str | None = None) -> dict:
     return {"config": {"configurable": {"thread_id": thread_id}}}
 
 
+def _context_body(thread_id: str) -> dict:
+    return {"config": {"context": {"thread_id": thread_id}}}
+
+
 @pytest.mark.parametrize("path", ["/api/runs/stream", "/api/runs/wait"])
 def test_stateless_run_routes_require_route_auth_without_global_middleware(path: str):
     """The stateless run routes fail closed even if mounted without AuthMiddleware."""
@@ -120,6 +124,15 @@ def test_stream_cross_user_returns_404():
     """User B cannot start a run on user A's thread via /api/runs/stream."""
     with _client(USER_B) as (client, create_or_reject):
         response = client.post("/api/runs/stream", json=_body(THREAD_A))
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"Thread {THREAD_A} not found"
+    create_or_reject.assert_not_awaited()
+
+
+def test_stream_cross_user_context_thread_id_returns_404():
+    """config.context.thread_id is a thread selector too, so it gets the same owner check."""
+    with _client(USER_B) as (client, create_or_reject):
+        response = client.post("/api/runs/stream", json=_context_body(THREAD_A))
     assert response.status_code == 404
     assert response.json()["detail"] == f"Thread {THREAD_A} not found"
     create_or_reject.assert_not_awaited()

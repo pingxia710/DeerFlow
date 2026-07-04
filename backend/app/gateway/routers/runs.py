@@ -29,7 +29,10 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
-    thread_id = (body.config or {}).get("configurable", {}).get("thread_id")
+    config = body.config or {}
+    thread_id = (config.get("configurable") or {}).get("thread_id")
+    if not thread_id:
+        thread_id = (config.get("context") or {}).get("thread_id")
     if thread_id:
         return str(thread_id)
     return str(uuid.uuid4())
@@ -49,7 +52,7 @@ def _supports_user_id_keyword(callable_obj) -> bool:
 async def stateless_stream(body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
-    If ``config.configurable.thread_id`` is provided, the run is created
+    If ``config.configurable.thread_id`` or ``config.context.thread_id`` is provided, the run is created
     on the given thread so that conversation history is preserved.
     Otherwise a new temporary thread is created.
     """
@@ -77,7 +80,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
 async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until completion.
 
-    If ``config.configurable.thread_id`` is provided, the run is created
+    If ``config.configurable.thread_id`` or ``config.context.thread_id`` is provided, the run is created
     on the given thread so that conversation history is preserved.
     Otherwise a new temporary thread is created.
     """

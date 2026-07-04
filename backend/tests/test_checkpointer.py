@@ -8,6 +8,8 @@ from threading import Barrier, Event, Lock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.memory import InMemorySaver
 
 import deerflow.config.app_config as app_config_module
 from deerflow.config.checkpointer_config import (
@@ -210,6 +212,68 @@ class TestHarnessPackaging:
         assert "deerflow-harness[postgres]" in POSTGRES_STORE_INSTALL
         assert "uv sync --all-packages --extra postgres" in POSTGRES_INSTALL
         assert "uv sync --all-packages --extra postgres" in POSTGRES_STORE_INSTALL
+
+
+# ---------------------------------------------------------------------------
+# Namespace contract tests
+# ---------------------------------------------------------------------------
+
+
+def _put_marker_checkpoint(checkpointer: InMemorySaver, *, thread_id: str, checkpoint_ns: str, marker: str) -> dict:
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"marker": marker}
+    checkpoint["channel_versions"] = {"marker": 1}
+    return checkpointer.put(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}},
+        checkpoint,
+        {"source": "test", "step": 0, "writes": {}},
+        {"marker": 1},
+    )
+
+
+def test_in_memory_checkpointer_keeps_root_and_non_root_namespaces_isolated():
+    """Current contract: checkpoints are keyed by thread_id + checkpoint_ns + checkpoint_id."""
+    checkpointer = InMemorySaver()
+
+    root_config = _put_marker_checkpoint(checkpointer, thread_id="thread-1", checkpoint_ns="", marker="root")
+    branch_config = _put_marker_checkpoint(checkpointer, thread_id="thread-1", checkpoint_ns="branch-a", marker="branch")
+
+    root_latest = checkpointer.get_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}})
+    branch_latest = checkpointer.get_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "branch-a"}})
+
+    assert root_latest is not None
+    assert branch_latest is not None
+    assert root_latest.config == root_config
+    assert branch_latest.config == branch_config
+    assert root_latest.checkpoint["channel_values"]["marker"] == "root"
+    assert branch_latest.checkpoint["channel_values"]["marker"] == "branch"
+
+    assert checkpointer.get_tuple(branch_config).checkpoint["channel_values"]["marker"] == "branch"
+    assert checkpointer.get_tuple(root_config).checkpoint["channel_values"]["marker"] == "root"
+    assert (
+        checkpointer.get_tuple(
+            {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "branch-a",
+                    "checkpoint_id": root_config["configurable"]["checkpoint_id"],
+                }
+            }
+        )
+        is None
+    )
+    assert (
+        checkpointer.get_tuple(
+            {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": branch_config["configurable"]["checkpoint_id"],
+                }
+            }
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

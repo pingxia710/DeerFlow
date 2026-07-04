@@ -59,4 +59,4 @@ This contract slice does not change:
 
 ## Next contract decisions
 
-Before introducing child conversations or cross-run sharing, define the owner model for child thread/run creation, checkpoint namespace strategy, artifact provenance schema, and display rules for AI-AI collaboration surfaces.
+Before introducing child conversations or cross-run sharing, define the owner model for child thread/run creation, checkpoint namespace strategy, artifact provenance schema, and display rules for AI-AI collaboration surfaces. Before introducing any non-root checkpoint namespace, define how list/latest/title/regenerate/rollback aggregate or select across root and non-root namespaces.

@@ -1,0 +1,19 @@
+{
+  "schema_version": "deerflow.task-event/v1",
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "started_at": "2026-07-03T00:00:00Z",
+  "completed_at": null,
+  "duration_ms": null,
+  "result_preview": null,
+  "error_preview": null,
+  "artifact_refs": [],
+  "usage": null,
+  "type": "task_started",
+  "event_type": "task_started",
+  "task_id": "task-started",
+  "status": "in_progress",
+  "description": "Example task",
+  "subagent_type": "researcher",
+  "action_result": null
+}

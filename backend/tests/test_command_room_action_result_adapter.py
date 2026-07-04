@@ -92,3 +92,21 @@ def test_terminal_reason_distinguishes_cancelled_timeout_and_boundary_blocked():
     assert cancelled.terminal_reason == "user_cancelled"
     assert timed_out.terminal_reason == "timed_out"
     assert blocked.terminal_reason == "boundary_blocked"
+
+
+def test_unknown_explicit_status_fails_safe_and_preserves_risk_context():
+    result = action_result_from_value(
+        {
+            "action_id": "subagent-x",
+            "status": "mystery",
+            "summary": "无法判定",
+            "risks": ["needs review"],
+            "unresolved": ["missing terminal proof"],
+        }
+    )
+
+    assert result.status == RoundItemStatus.FAILED
+    assert result.terminal_reason == "unknown_status"
+    assert result.risks == ["needs review"]
+    assert "missing terminal proof" in result.open_questions
+    assert "Unknown action_result status: mystery" in result.open_questions

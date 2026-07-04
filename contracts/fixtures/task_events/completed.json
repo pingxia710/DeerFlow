@@ -1,0 +1,21 @@
+{
+  "schema_version": "deerflow.task-event/v1",
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "started_at": "2026-07-03T00:00:00Z",
+  "completed_at": "2026-07-03T00:00:02Z",
+  "duration_ms": 2000,
+  "result_preview": "completed summary",
+  "error_preview": null,
+  "artifact_refs": [],
+  "usage": null,
+  "type": "task_completed",
+  "event_type": "task_completed",
+  "task_id": "task-completed",
+  "status": "completed",
+  "action_result": {
+    "status": "completed",
+    "summary": "completed summary",
+    "terminal_reason": null
+  }
+}

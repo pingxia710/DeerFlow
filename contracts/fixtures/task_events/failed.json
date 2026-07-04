@@ -1,0 +1,21 @@
+{
+  "schema_version": "deerflow.task-event/v1",
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "started_at": "2026-07-03T00:00:00Z",
+  "completed_at": "2026-07-03T00:00:02Z",
+  "duration_ms": 2000,
+  "result_preview": null,
+  "error_preview": "failed detail",
+  "artifact_refs": [],
+  "usage": null,
+  "type": "task_failed",
+  "event_type": "task_failed",
+  "task_id": "task-failed",
+  "status": "failed",
+  "action_result": {
+    "status": "failed",
+    "error": "failed detail",
+    "terminal_reason": "failed"
+  }
+}

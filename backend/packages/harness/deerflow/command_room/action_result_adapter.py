@@ -68,9 +68,16 @@ def action_result_from_value(value: Any, *, default_action_id: str = "") -> Acti
 
 
 def _from_mapping(value: Mapping[str, Any], *, default_action_id: str) -> ActionResult:
-    status = _normalize_status(value.get("status"))
+    raw_status = value.get("status")
+    status = _normalize_status(raw_status)
     error = _optional_str(value.get("error"))
     terminal_reason = _optional_str(value.get("terminal_reason"))
+    unresolved = _string_list(value.get("unresolved"))
+    risks = _string_list(value.get("risks"))
+    if raw_status is not None and status is None:
+        status = RoundItemStatus.FAILED
+        terminal_reason = terminal_reason or "unknown_status"
+        unresolved.append(f"Unknown action_result status: {raw_status}")
     if error and status is None:
         status = RoundItemStatus.FAILED
         terminal_reason = terminal_reason or "failed"
@@ -85,9 +92,9 @@ def _from_mapping(value: Mapping[str, Any], *, default_action_id: str) -> Action
         summary=_optional_str(value.get("summary")) or "",
         evidence_refs=_string_list(value.get("evidence_refs")),
         output_ref=_optional_str(value.get("output_ref")),
-        risks=_string_list(value.get("risks")),
+        risks=risks,
         conflicts=_string_list(value.get("conflicts")),
-        open_questions=_string_list(value.get("open_questions")),
+        open_questions=[*_string_list(value.get("open_questions")), *unresolved],
         error=error,
     )
 

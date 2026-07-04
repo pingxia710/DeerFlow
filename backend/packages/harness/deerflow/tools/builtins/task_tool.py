@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _TARGET_ROLE_RE = re.compile(r"^\s*(?:[-*+]\s+)?(?:\*\*)?(?:Target Role|Target|Receiver|To)(?:\*\*)?\s*[:：]\s*(.*?)\s*$", re.IGNORECASE | re.MULTILINE)
-_CHAIR_TARGETS = {"chair", "command-room", "command room", "指挥室"}
 _TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1"
 _EVENT_PREVIEW_MAX_CHARS = 240
 _SAFE_ACTION_RESULT_EVENT_KEYS = {
@@ -390,22 +389,14 @@ def _with_ai_handoff_envelope(prompt: str, *, description: str, subagent_type: s
     return f"{envelope}\n\nTask Prompt\n{prompt}"
 
 
-def _normalize_handoff_target(value: str) -> str:
-    return value.strip().lower().replace("_", "-").replace(" ", "-")
-
-
-def _next_handoff_target(result: str | None, available_subagent_names: list[str]) -> tuple[str | None, str, dict[str, Any]]:
+def _suggested_handoff_receiver(result: str | None) -> str | None:
+    """Extract advisory Target Role text without resolving or dispatching it."""
     match = _TARGET_ROLE_RE.search(result or "")
     if not match:
-        return None, "", {}
+        return None
     packet = extract_handoff_packet(result, description="", subagent_type="")
     target_role = str(packet.get("targetRole") or match.group(1)).strip()
-    normalized = _normalize_handoff_target(target_role)
-    if normalized in {_normalize_handoff_target(item) for item in _CHAIR_TARGETS}:
-        return None, "chair", packet
-
-    available = {_normalize_handoff_target(name): name for name in available_subagent_names}
-    return available.get(normalized), target_role, packet
+    return target_role or None
 
 
 @tool("task", parse_docstring=True)
@@ -706,14 +697,11 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
-                next_subagent_type, target_role, _packet = _next_handoff_target(result.result, available_subagent_names)
                 result_text = _redacted_tool_text(result.result)
-                if target_role == "chair":
-                    return f"Task Succeeded. Handoff returned to Chair. Result: {result_text}"
-                if target_role and next_subagent_type is not None:
-                    return f"Task Succeeded. Handoff returned to Chair for target role '{target_role}'. Result: {result_text}"
-                if target_role and next_subagent_type is None:
-                    return f"Task Succeeded. Handoff returned to Chair because target role '{target_role}' is not available. Result: {result_text}"
+                suggested_receiver = _suggested_handoff_receiver(result.result)
+                if suggested_receiver:
+                    # Target Role is advisory metadata for the Chair/main AI. Do not redispatch here.
+                    return f"Task Succeeded. Suggested next receiver (advisory only): {suggested_receiver}. Chair/main AI decides. Result: {result_text}"
                 return f"Task Succeeded. Result: {result_text}"
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -929,8 +917,50 @@ async def task_tool(
 
         # Report whatever the subagent collected (even if we timed out).
         final_result = terminal_result or get_background_task_result(task_id)
+        usage = _summarize_usage(getattr(final_result, "token_usage_records", None)) if final_result is not None else None
         if final_result is not None:
             _report_subagent_usage(runtime, final_result)
+        action_result = task_action_result_from_terminal_event(
+            task_id=task_id,
+            status="cancelled",
+            description=description,
+            error=getattr(final_result, "error", None) if final_result is not None else "Parent run cancelled",
+            terminal_reason="user_cancelled",
+        )
+        record_subagent_handoff(
+            thread_id=thread_id,
+            run_id=run_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            subagent_type=subagent_type,
+            description=description,
+            prompt=handoff_prompt,
+            status="cancelled",
+            error=getattr(final_result, "error", None) if final_result is not None else "Parent run cancelled",
+            usage=usage,
+            action_result=task_action_result_event(action_result)["action_result"],
+        )
+        _emit_task_event(
+            writer,
+            runtime,
+            {
+                **_terminal_task_event_base(
+                    "task_cancelled",
+                    task_id,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    started_at=started_at,
+                    started_monotonic=started_monotonic,
+                ),
+                "status": "cancelled",
+                "summary": "Task cancelled",
+                "error_preview": _redacted_preview(getattr(final_result, "error", None), fallback="Task cancelled"),
+                "usage": usage,
+                "artifact_refs": _artifact_refs(action_result),
+                "action_result": _compact_action_result_event(action_result),
+            },
+        )
         if final_result is not None and _is_subagent_terminal(final_result):
             cleanup_background_task(task_id)
         else:

@@ -434,7 +434,9 @@ Planner Raw Judgment:
         tool_call_id="tc-chain",
     )
 
-    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'opposition'.")
+    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): opposition. Chair/main AI decides.")
+    assert "routed" not in output.lower()
+    assert "dispatched" not in output.lower()
     assert [item[0] for item in captured_prompts] == ["general-purpose"]
     assert captured_prompts[0][2] == "tc-chain"
     assert "Task Prompt\ndraft plan" in captured_prompts[0][1]
@@ -443,7 +445,8 @@ Planner Raw Judgment:
     assert len(handoff_records) == 2
 
 
-def test_task_tool_returns_command_room_role_handoff_to_chair(monkeypatch):
+@pytest.mark.parametrize("target_role", ["planner", "boundary", "evidence", "opposition", "chair"])
+def test_task_tool_treats_command_room_target_role_as_advisory_signal_without_redispatch(monkeypatch, target_role):
     runtime = _make_runtime()
     events = []
     captured_prompts = []
@@ -458,7 +461,7 @@ def test_task_tool_returns_command_room_role_handoff_to_chair(monkeypatch):
 
     result = _make_result(
         FakeSubagentStatus.COMPLETED,
-        result="AI Handoff Envelope\nTarget Role: boundary\nTask/Question: check redlines\nRecommended Next Decision: NEEDS_MORE\n",
+        result=f"AI Handoff Envelope\nTarget Role: {target_role}\nTask/Question: check redlines\nRecommended Next Decision: NEEDS_MORE\n",
     )
 
     role_names = ["planner", "boundary", "evidence", "opposition", "recorder"]
@@ -481,9 +484,12 @@ def test_task_tool_returns_command_room_role_handoff_to_chair(monkeypatch):
         tool_call_id="tc-roles",
     )
 
-    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'boundary'.")
+    assert output.startswith(f"Task Succeeded. Suggested next receiver (advisory only): {target_role}. Chair/main AI decides.")
+    assert "routed" not in output.lower()
+    assert "dispatched" not in output.lower()
     assert [item[0] for item in captured_prompts] == ["planner"]
     assert [item[2] for item in captured_prompts] == ["tc-roles"]
+    assert [event["type"] for event in events] == ["task_started", "task_completed"]
     assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
 
 
@@ -525,7 +531,7 @@ def test_task_tool_smoke_uses_real_command_room_role_registry(monkeypatch):
     finally:
         load_subagents_config_from_dict({})
 
-    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'boundary'.")
+    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): boundary. Chair/main AI decides.")
     assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
         ("planner", ["command-room-planner"]),
     ]
@@ -574,7 +580,7 @@ def test_task_tool_smoke_uses_real_command_room_angle_role_registry(monkeypatch)
     finally:
         load_subagents_config_from_dict({})
 
-    assert output.startswith("Task Succeeded. Handoff returned to Chair for target role 'capability-governor'.")
+    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): capability-governor. Chair/main AI decides.")
     assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
         ("planner", ["command-room-planner"]),
     ]
@@ -582,7 +588,7 @@ def test_task_tool_smoke_uses_real_command_room_angle_role_registry(monkeypatch)
     assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
 
 
-def test_task_tool_returns_to_chair_when_handoff_target_unavailable(monkeypatch):
+def test_task_tool_returns_unavailable_handoff_target_as_advisory_signal(monkeypatch):
     config = _make_subagent_config()
     runtime = _make_runtime()
     events = []
@@ -624,7 +630,8 @@ Recommended Next Decision: NEEDS_MORE
         tool_call_id="tc-chain",
     )
 
-    assert "Handoff returned to Chair because target role 'boundary' is not available" in output
+    assert "Suggested next receiver (advisory only): boundary" in output
+    assert "not available" not in output
     assert [event["type"] for event in events] == ["task_started", "task_completed"]
 
 
@@ -1582,6 +1589,7 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
     events = []
     report_calls = []
     cleanup_calls = []
+    handoff_records = []
 
     # Terminal result with token usage collected after cancellation processing
     cancel_result = _make_result(FakeSubagentStatus.CANCELLED, error="Cancelled by user")
@@ -1624,6 +1632,7 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_third_sleep)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: handoff_records.append(kwargs))
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda _: None)
     monkeypatch.setattr(
@@ -1646,6 +1655,11 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
     assert len(report_calls) == 1
     assert report_calls[0][1] is cancel_result
     assert cleanup_calls == ["tc-cancel-report"]
+    assert [record["status"] for record in handoff_records] == ["started", "cancelled"]
+    cancelled_events = [event for event in events if event.get("type") == "task_cancelled"]
+    assert len(cancelled_events) == 1
+    assert cancelled_events[0]["action_result"]["status"] == "cancelled"
+    assert cancelled_events[0]["action_result"]["terminal_reason"] == "user_cancelled"
 
 
 @pytest.mark.parametrize(

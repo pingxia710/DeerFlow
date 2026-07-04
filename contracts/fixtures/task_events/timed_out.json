@@ -1,0 +1,21 @@
+{
+  "schema_version": "deerflow.task-event/v1",
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "started_at": "2026-07-03T00:00:00Z",
+  "completed_at": "2026-07-03T00:00:02Z",
+  "duration_ms": 2000,
+  "result_preview": null,
+  "error_preview": "timed out detail",
+  "artifact_refs": [],
+  "usage": null,
+  "type": "task_timed_out",
+  "event_type": "task_timed_out",
+  "task_id": "task-timed-out",
+  "status": "timed_out",
+  "action_result": {
+    "status": "timed_out",
+    "error": "timed out detail",
+    "terminal_reason": "timed_out"
+  }
+}

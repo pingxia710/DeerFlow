@@ -1,0 +1,20 @@
+{
+  "schema_version": "deerflow.task-event/v1",
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "started_at": "2026-07-03T00:00:00Z",
+  "completed_at": null,
+  "duration_ms": null,
+  "result_preview": null,
+  "error_preview": null,
+  "artifact_refs": [],
+  "usage": null,
+  "type": "task_unknown_vnext",
+  "event_type": "task_unknown_vnext",
+  "task_id": "task-unknown",
+  "status": "renamed_terminal",
+  "action_result": {
+    "status": "renamed_terminal",
+    "terminal_reason": "renamed_terminal"
+  }
+}

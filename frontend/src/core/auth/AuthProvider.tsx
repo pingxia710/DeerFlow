@@ -10,6 +10,7 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { fetch as fetcher } from "../api/fetcher";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { type User, buildLoginUrl } from "./types";
@@ -30,6 +31,20 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+function clearStreamReconnectKeys(
+  storage: Storage | undefined = typeof window !== "undefined"
+    ? window.sessionStorage
+    : undefined,
+): void {
+  if (!storage) return;
+  const keys: string[] = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (key?.startsWith("lg:stream:")) keys.push(key);
+  }
+  for (const key of keys) storage.removeItem(key);
+}
 
 interface AuthProviderProps {
   children: ReactNode;
@@ -59,7 +74,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * so consumers don't reach into React internals.
    */
   const applyUser = useCallback((next: User | null) => {
-    setUser(next);
+    setUser((prev) => {
+      if (prev?.id !== next?.id || prev?.email !== next?.email) {
+        clearStreamReconnectKeys();
+      }
+      return next;
+    });
   }, []);
 
   /**
@@ -71,9 +91,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     try {
       setIsLoading(true);
-      const res = await fetch("/api/v1/auth/me", {
-        credentials: "include",
-      });
+      const res = await fetcher("/api/v1/auth/me");
 
       if (res.ok) {
         const data = await res.json();
@@ -106,7 +124,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * logout used to.
    */
   const logout = useCallback(async () => {
-    // Immediately clear local state to prevent UI flicker
+    // Immediately clear local state and reconnect cursors to prevent UI flicker
+    clearStreamReconnectKeys();
     setUser(null);
 
     if (staticMode) {
@@ -116,9 +135,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     let logoutFailed = false;
     try {
-      const res = await fetch("/api/v1/auth/logout", {
+      const res = await fetcher("/api/v1/auth/logout", {
         method: "POST",
-        credentials: "include",
       });
       if (!res.ok) logoutFailed = true;
     } catch (err) {

@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
+import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
@@ -43,7 +43,6 @@ export function AccountSettingsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...getCsrfHeaders(),
         },
         body: JSON.stringify({
           current_password: currentPassword,

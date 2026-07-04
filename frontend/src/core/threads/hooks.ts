@@ -383,6 +383,14 @@ function historyMessageFromRunMessage(message: RunMessage): Message {
     ...message.content,
     additional_kwargs: {
       ...message.content.additional_kwargs,
+      deerflow_run_id: message.run_id,
+      ...(typeof message.seq === "number"
+        ? { deerflow_run_seq: message.seq }
+        : {}),
+      ...(typeof message.metadata?.caller === "string" &&
+      message.metadata.caller.length > 0
+        ? { deerflow_caller: message.metadata.caller }
+        : {}),
       [HISTORY_CREATED_AT_KEY]: message.created_at,
     },
   } as MessageWithHistoryIdentity;
@@ -1263,7 +1271,7 @@ function getHttpStatus(error: unknown): number | undefined {
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
-  // exists; callers redirect stale/inaccessible URLs back to a blank chat.
+  // exists; callers render an empty state without changing the browser route.
   return status === 403 || status === 404;
 }
 

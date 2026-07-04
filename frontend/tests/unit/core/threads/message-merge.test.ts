@@ -800,12 +800,16 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
     {
       ...newHuman,
       additional_kwargs: {
+        deerflow_run_id: "run-new",
+        deerflow_caller: "lead_agent",
         [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:02Z",
       },
     },
     {
       ...newAi,
       additional_kwargs: {
+        deerflow_run_id: "run-new",
+        deerflow_caller: "lead_agent",
         [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:03Z",
       },
     },
@@ -843,6 +847,10 @@ test("buildVisibleHistoryMessages preserves same message id across different run
   expect(history.map((message) => message.content)).toEqual([
     "first run",
     "second run",
+  ]);
+  expect(history.map((message) => message.additional_kwargs)).toMatchObject([
+    { deerflow_run_id: "run-1", deerflow_run_seq: 1 },
+    { deerflow_run_id: "run-2", deerflow_run_seq: 2 },
   ]);
   expect(
     mergeMessages(history, [], []).map((message) => message.content),
@@ -1118,4 +1126,36 @@ test("shouldAutoLoadLatestRun only auto-loads a new latest run", () => {
   expect(shouldAutoLoadLatestRun("run-2", "run-1")).toBe(true);
   expect(shouldAutoLoadLatestRun("run-2", "run-2")).toBe(false);
   expect(shouldAutoLoadLatestRun(null, "run-2")).toBe(false);
+});
+
+test("buildVisibleHistoryMessages preserves run origin without overwriting additional kwargs", () => {
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-with-provider-kwargs",
+        seq: 7,
+        content: {
+          id: "ai-provider",
+          type: "ai",
+          content: "provider fields stay",
+          additional_kwargs: {
+            provider_field: "keep-me",
+            deerflow_run_id: "provider-owned-value",
+          },
+        } as Message,
+        metadata: { caller: "research_agent" },
+        created_at: "2026-06-18T00:00:07Z",
+      },
+    ],
+    new Set(),
+    [],
+  );
+
+  expect(history[0]?.additional_kwargs).toMatchObject({
+    provider_field: "keep-me",
+    deerflow_run_id: "run-with-provider-kwargs",
+    deerflow_run_seq: 7,
+    deerflow_caller: "research_agent",
+    [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:07Z",
+  });
 });

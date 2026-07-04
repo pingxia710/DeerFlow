@@ -25,7 +25,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
@@ -735,7 +735,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = get_request_storage_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 

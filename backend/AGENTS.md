@@ -359,6 +359,7 @@ metadata.
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.
+- Thread-run list/read routes must scope by `get_request_storage_user_id(request)`, not just the browser login user, so trusted internal owner headers and browser/API calls see the same owner-bound run history.
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.

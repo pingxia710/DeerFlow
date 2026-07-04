@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
-from _router_auth_helpers import make_authed_test_app
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
@@ -746,6 +747,36 @@ def test_list_thread_messages_scopes_events_to_current_user():
     )
     feedback_repo.list_by_thread_grouped.assert_awaited_once_with(thread_id, user_id=str(user_a))
     run_manager.list_by_thread.assert_awaited_once_with(thread_id, user_id=str(user_a))
+
+
+def test_list_runs_uses_trusted_internal_owner_header():
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(
+        return_value=[
+            RunRecord(
+                run_id="run-owner",
+                thread_id="thread-1",
+                assistant_id=None,
+                status=RunStatus.success,
+                on_disconnect="cancel",
+            )
+        ]
+    )
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(run_manager=run_manager)),
+    )
+
+    async def _scenario():
+        return await call_unwrapped(thread_runs.list_runs, "thread-1", request)
+
+    response = asyncio.run(_scenario())
+
+    run_manager.list_by_thread.assert_awaited_once_with("thread-1", user_id="owner-1")
+    assert response[0].run_id == "run-owner"
 
 
 def test_list_thread_messages_run_id_filters_to_requested_run():

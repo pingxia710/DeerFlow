@@ -268,7 +268,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
-    from app.gateway.deps import get_run_event_store, get_run_store, get_thread_store
+    from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store, get_thread_store
 
     storage_user_id = get_request_storage_user_id(request)
     await _cleanup_thread_runtime_state(thread_id, request, user_id=storage_user_id)
@@ -298,6 +298,12 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         await run_store.delete_by_thread(thread_id, user_id=storage_user_id)
     except Exception:
         logger.debug("Could not delete runs for %s (not critical)", sanitize_log_param(thread_id))
+
+    try:
+        feedback_repo = get_feedback_repo(request)
+        await feedback_repo.delete_by_thread(thread_id, user_id=storage_user_id)
+    except Exception:
+        logger.debug("Could not delete feedback for %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.

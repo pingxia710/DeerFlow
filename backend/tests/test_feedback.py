@@ -208,6 +208,22 @@ class TestFeedbackRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_delete_by_thread_owner_scoped(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        await repo.create(run_id="r2", thread_id="t1", rating=-1, user_id="u1")
+        await repo.create(run_id="r3", thread_id="t1", rating=1, user_id="u2")
+        await repo.create(run_id="r4", thread_id="t2", rating=1, user_id="u1")
+
+        deleted = await repo.delete_by_thread("t1", user_id="u1")
+
+        assert deleted == 2
+        assert await repo.list_by_thread("t1", user_id="u1") == []
+        assert [row["run_id"] for row in await repo.list_by_thread("t1", user_id="u2")] == ["r3"]
+        assert [row["run_id"] for row in await repo.list_by_thread("t2", user_id="u1")] == ["r4"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_grouped(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
         await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")

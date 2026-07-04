@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
@@ -186,6 +186,22 @@ class FeedbackRepository:
             await session.delete(row)
             await session.commit()
             return True
+
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete feedback rows for a thread within the current owner scope."""
+        resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.delete_by_thread")
+        stmt = delete(FeedbackRow).where(FeedbackRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0
 
     async def list_by_thread_grouped(
         self,

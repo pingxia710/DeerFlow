@@ -1018,6 +1018,7 @@ async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path
     request.app.state = AppState()
     request.app.state.run_store = MemoryRunStore()
     request.app.state.run_event_store = MemoryRunEventStore()
+    request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=1))
     request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
     request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
 
@@ -1029,6 +1030,7 @@ async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path
     response = await delete_thread_data.__wrapped__("thread-x", request)
 
     assert response.success is True
+    request.app.state.feedback_repo.delete_by_thread.assert_awaited_once_with("thread-x", user_id="user-a")
     assert await request.app.state.run_store.list_by_thread("thread-x", user_id="user-a") == []
     assert len(await request.app.state.run_event_store.list_messages("thread-x", user_id="user-a")) == 0
     assert [r["run_id"] for r in await request.app.state.run_store.list_by_thread("thread-x", user_id="user-b")] == ["run-b"]
@@ -1075,6 +1077,7 @@ async def test_delete_thread_cancels_active_runs_and_cleans_streams(tmp_path):
     request.app.state.stream_bridge = SimpleNamespace(cleanup=AsyncMock())
     request.app.state.run_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
     request.app.state.run_event_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
+    request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
     request.app.state.thread_store = SimpleNamespace(delete=AsyncMock())
     request.app.state.checkpointer = None
     request.state = SimpleNamespace(user=SimpleNamespace(id="user-a"))
@@ -1111,6 +1114,7 @@ async def test_delete_thread_without_runs_or_events_is_idempotent():
     request.app.state = AppState()
     request.app.state.run_store = MemoryRunStore()
     request.app.state.run_event_store = MemoryRunEventStore()
+    request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=0))
     request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
     request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
 

@@ -672,10 +672,21 @@ export function isTaskEventRunMessage(message: RunMessage) {
 }
 
 export function taskEventRunMessageKey(message: RunMessage) {
-  if (!isTaskEventRunMessage(message) || typeof message.seq !== "number") {
+  if (!isTaskEventRunMessage(message)) {
     return null;
   }
-  return `${message.run_id}:${message.seq}`;
+  if (typeof message.seq === "number") {
+    return `${message.run_id}:${message.seq}`;
+  }
+  const taskEvent = asTaskEvent(message.content);
+  const taskId = stringValue(taskEvent?.task_id);
+  const eventType = taskEventType(taskEvent);
+  const eventRunId = stringValue(taskEvent?.run_id) ?? message.run_id;
+  const eventThreadId = stringValue(taskEvent?.thread_id) ?? "";
+  if (!taskId || !eventType || !eventRunId || !message.created_at) {
+    return null;
+  }
+  return `${eventRunId}:${eventThreadId}:${taskId}:${eventType}:${message.created_at}`;
 }
 
 export function isTaskEventRunMessageForRequest(

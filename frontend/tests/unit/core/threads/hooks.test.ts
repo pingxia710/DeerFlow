@@ -649,6 +649,44 @@ test("applyTaskEventRunMessages replays persisted task events with run seq dedup
   ]);
 });
 
+test("applyTaskEventRunMessages dedupes legacy task events without seq", async () => {
+  const { applyTaskEventRunMessages } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+  const applied = new Set<string>();
+  const message = {
+    run_id: "run-legacy",
+    created_at: "2024-01-01T00:00:00.000Z",
+    metadata: { caller: "task_event" },
+    content: {
+      event_type: "task_completed",
+      schema_version: TASK_EVENT_CONTRACT.schema_version,
+      task_id: "task-legacy",
+      thread_id: "thread-1",
+      run_id: "run-legacy",
+      result_preview: "done",
+    },
+  };
+
+  applyTaskEventRunMessages(
+    [message, message] as never,
+    (task) => updates.push(task),
+    "thread-1",
+    applied,
+  );
+
+  expect(updates).toEqual([
+    expect.objectContaining({
+      id: "task-legacy",
+      threadId: "thread-1",
+      status: "completed",
+      result: "done",
+    }),
+  ]);
+  expect([...applied]).toEqual([
+    "run-legacy:thread-1:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
+  ]);
+});
+
 test("buildVisibleHistoryMessages excludes task_event run messages", async () => {
   const { buildVisibleHistoryMessages, isTaskEventRunMessage } =
     await import("@/core/threads/hooks");

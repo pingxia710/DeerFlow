@@ -413,8 +413,26 @@ async def test_last_event_id_miss_emits_recovery_event_after_eviction():
     await bridge.publish("run-evicted", "messages", {"n": 1})
     first_id = bridge._streams["run-evicted"].events[0].id
     await bridge.publish("run-evicted", "messages", {"n": 2})
+    await bridge.publish("run-evicted", "messages", {"n": 3})
 
     sub = bridge.subscribe("run-evicted", last_event_id=first_id)
     event = await anext(sub)
     assert event.event == "stream_recovery_required"
     await sub.aclose()
+
+
+@pytest.mark.asyncio
+async def test_last_event_id_immediately_before_retained_window_replays_without_recovery():
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    await bridge.publish("run-contiguous", "messages", {"n": 1})
+    first_id = bridge._streams["run-contiguous"].events[0].id
+    await bridge.publish("run-contiguous", "messages", {"n": 2})
+    await bridge.publish_end("run-contiguous")
+
+    received = []
+    async for entry in bridge.subscribe("run-contiguous", last_event_id=first_id):
+        received.append(entry)
+
+    assert [entry.event for entry in received[:-1]] == ["messages"]
+    assert received[0].data == {"n": 2}
+    assert received[-1] is END_SENTINEL

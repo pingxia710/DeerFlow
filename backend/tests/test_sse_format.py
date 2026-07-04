@@ -183,6 +183,7 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
 
     await bridge.publish(run_id, "values", {"old": True})
     last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"missed": True})
     await bridge.publish(run_id, "values", {"live": True})
     await bridge.publish_end(run_id)
 

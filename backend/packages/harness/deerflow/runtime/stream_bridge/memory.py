@@ -86,10 +86,9 @@ class MemoryStreamBridge(StreamBridge):
                 "last_event_id=%s not found in retained buffer; replaying from earliest retained event",
                 last_event_id,
             )
-        # Only signal recovery when the requested sequence is behind the retained
-        # window. Malformed/foreign IDs and IDs immediately before the retained
-        # window can still replay all currently retained events without a gap.
-        recovery_required = seq is not None and seq < stream.start_offset and len(stream.events) == 1
+        # Only signal recovery when at least one event between the client's last
+        # seen sequence and the retained window has been evicted.
+        recovery_required = seq is not None and seq < stream.start_offset - 1
         return stream.start_offset, recovery_required
 
     # -- StreamBridge API ------------------------------------------------------

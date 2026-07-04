@@ -215,6 +215,64 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_replays_persisted_task_events_across_pages(monkeypatch):
+    import app.gateway.services as gateway_services
+
+    thread_id = "thread-replay-pages"
+    run_id = "run-replay-pages"
+    user_id = "user-replay-pages"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    monkeypatch.setattr(gateway_services, "_TASK_EVENT_REPLAY_PAGE_SIZE", 2)
+    for index in range(3):
+        await event_store.put(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="task_started",
+            category="message",
+            content={
+                "schema_version": "deerflow.task-event/v1",
+                "type": "task_started",
+                "event_type": "task_started",
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "task_id": f"task-{index}",
+                "status": "running",
+            },
+            metadata={"caller": "task_event"},
+            user_id=user_id,
+        )
+
+    await bridge.publish(run_id, "values", {"old": True})
+    last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"missed": True})
+    await bridge.publish(run_id, "values", {"live": True})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in gateway_services.sse_consumer(
+        bridge,
+        record,
+        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    task_ids = [json.loads(_parse_sse_frame(frame)["data"])["task_id"] for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    assert task_ids == ["task-0", "task-1", "task-2"]
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_replays_only_current_owner_task_events():
     from app.gateway.services import sse_consumer
 

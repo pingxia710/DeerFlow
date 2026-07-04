@@ -330,7 +330,8 @@ replayable task events for a bridge gap, keep forwarding
 `stream_recovery_required`; silently swallowing the recovery signal hides data
 loss from the frontend. Every SSE route that creates or joins a run must pass
 the current `RunEventStore` and storage `user_id` into `sse_consumer` so replay
-uses the same owner scope as persisted events.
+uses the same owner scope as persisted events. Task-event replay must page with
+`after_seq`; do not reintroduce a single fixed-size first-page read.
 Thread token usage aggregation is also owner-scoped; pass the storage `user_id`
 through to the run store instead of aggregating every row with the same
 `thread_id`.

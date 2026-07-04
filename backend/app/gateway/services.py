@@ -42,6 +42,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 logger = logging.getLogger(__name__)
 
 _STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
+_TASK_EVENT_REPLAY_PAGE_SIZE = 500
 _TASK_EVENT_REPLAY_TYPES = [
     "task_started",
     "task_running",
@@ -102,14 +103,24 @@ def _is_task_event_payload(payload: Any, *, thread_id: str, run_id: str) -> bool
 async def _durable_task_replay_frames(event_store: Any | None, record: RunRecord, *, user_id: str | None) -> list[str] | None:
     if event_store is None:
         return None
+    rows: list[Any] = []
+    after_seq: int | None = None
     try:
-        rows = await event_store.list_events(
-            record.thread_id,
-            record.run_id,
-            event_types=_TASK_EVENT_REPLAY_TYPES,
-            limit=2000,
-            user_id=user_id,
-        )
+        while True:
+            page = await event_store.list_events(
+                record.thread_id,
+                record.run_id,
+                event_types=_TASK_EVENT_REPLAY_TYPES,
+                limit=_TASK_EVENT_REPLAY_PAGE_SIZE,
+                after_seq=after_seq,
+                user_id=user_id,
+            )
+            if not page:
+                break
+            rows.extend(page)
+            after_seq = page[-1].get("seq") if isinstance(page[-1], Mapping) else None
+            if after_seq is None or len(page) < _TASK_EVENT_REPLAY_PAGE_SIZE:
+                break
     except Exception:
         logger.warning("Failed to replay persisted task events for run %s", sanitize_log_param(record.run_id), exc_info=True)
         return None

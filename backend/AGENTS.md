@@ -311,6 +311,10 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 
+Message rows returned by messages endpoints carry `display.visible_in_chat`
+and `display.reason`; frontend chat visibility should consume that contract
+instead of guessing from `caller`, `name`, or `hide_from_ui` when present.
+
 `RunJournal.on_chat_model_start` emits `llm.context` trace events with only
 context size metrics (`estimated_tokens`, chars, message count, caller, role
 counts, tool schema count). Do not put raw prompt/message/tool-schema content

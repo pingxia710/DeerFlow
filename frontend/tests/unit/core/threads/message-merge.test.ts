@@ -503,6 +503,25 @@ test("visible history run messages keep middleware chat but filter task events a
   ).toEqual(["ai-middleware-1", "human-middleware-1"]);
 });
 
+test("visible history run messages honor backend display contract", () => {
+  const visibleContentHiddenByContract = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      id: "ai-1",
+      type: "ai",
+      content: "normal content",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    display: { visible_in_chat: false, reason: "control" },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+
+  expect(isVisibleHistoryRunMessage(visibleContentHiddenByContract)).toBe(
+    false,
+  );
+});
+
 test("task event run messages are idempotent and scoped to the requested thread and run", () => {
   const taskEventRow = {
     run_id: "run-1",

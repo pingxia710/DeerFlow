@@ -71,6 +71,31 @@ def test_run_messages_returns_envelope():
     assert len(body["data"]) == 3
 
 
+def test_run_messages_returns_display_contract():
+    rows = [
+        {
+            "seq": 1,
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "answer"},
+            "metadata": {"caller": "lead_agent"},
+        }
+    ]
+    run_record = {"run_id": "run-1", "thread_id": "thread-1"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-1/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["display"] == {
+        "visible_in_chat": True,
+        "reason": "assistant_message",
+    }
+
+
 def test_run_messages_404_when_run_not_found():
     """Returns 404 when the run store returns None."""
     app = _make_app(

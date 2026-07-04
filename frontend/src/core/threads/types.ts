@@ -39,6 +39,10 @@ export interface RunMessage {
     caller: string;
     [key: string]: unknown;
   };
+  display?: {
+    visible_in_chat: boolean;
+    reason: string;
+  };
   created_at: string;
 }
 

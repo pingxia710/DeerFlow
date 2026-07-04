@@ -88,6 +88,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   currently visible route id; users can switch chats while a run is still alive.
 - Persisted `task_event` run messages are control rows: thread history should
   use them to restore subtask state, then keep them out of visible chat bubbles.
+- History run messages should honor backend `display.visible_in_chat` when
+  present; only fall back to local `caller`/`name`/`hide_from_ui` checks for
+  older rows without the display contract.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
 

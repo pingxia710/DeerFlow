@@ -672,6 +672,9 @@ export function applyTaskEventRunMessages(
 }
 
 export function isVisibleHistoryRunMessage(message: RunMessage) {
+  if (typeof message.display?.visible_in_chat === "boolean") {
+    return message.display.visible_in_chat;
+  }
   return (
     !isTaskEventRunMessage(message) && !isHiddenFromUIMessage(message.content)
   );

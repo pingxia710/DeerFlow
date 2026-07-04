@@ -241,6 +241,37 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
+def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    if metadata.get("caller") == "task_event":
+        return {"visible_in_chat": False, "reason": "task_event"}
+    additional_kwargs = _message_additional_kwargs(content)
+    if additional_kwargs.get("hide_from_ui") is True:
+        return {"visible_in_chat": False, "reason": "hidden"}
+    if _message_type(content) == "remove" or _message_name(content) == "summary":
+        return {"visible_in_chat": False, "reason": "control"}
+
+    message_type = _message_type(content)
+    if message_type == "human":
+        reason = "user_message"
+    elif message_type == "ai":
+        reason = "assistant_message"
+    elif message_type == "tool":
+        reason = "tool_message"
+    else:
+        reason = "message"
+    return {"visible_in_chat": True, "reason": reason}
+
+
+def attach_message_display(rows: list[dict]) -> list[dict]:
+    for row in rows:
+        metadata = row.get("metadata")
+        row["display"] = _message_display(
+            row.get("content"),
+            metadata if isinstance(metadata, dict) else {},
+        )
+    return rows
+
+
 def _context_usage_snapshot_from_event(event: dict[str, Any]) -> ThreadContextUsageSnapshot | None:
     content = event.get("content")
     if not isinstance(content, dict):
@@ -663,6 +694,7 @@ async def list_thread_messages(
     """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+    attach_message_display(messages)
 
     # Resolve the caller once; it is needed both to scope the feedback query
     # below and to list the thread's runs for turn-duration injection.
@@ -742,6 +774,7 @@ async def list_run_messages(
         after_seq=after_seq,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+    attach_message_display(data)
 
     if data:
         durations = compute_run_durations([record])

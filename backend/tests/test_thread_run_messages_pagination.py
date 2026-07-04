@@ -110,7 +110,12 @@ def test_returns_middleware_message_rows():
         response = client.get("/api/threads/thread-1/runs/run-1/messages")
 
     assert response.status_code == 200
-    assert response.json()["data"] == rows
+    data = response.json()["data"]
+    assert data[0]["content"] == {"type": "ai", "content": "generated title"}
+    assert data[0]["display"] == {
+        "visible_in_chat": True,
+        "reason": "assistant_message",
+    }
 
 
 def test_has_more_true_when_extra_row_returned():

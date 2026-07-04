@@ -124,6 +124,30 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
 
+test("clears stale reconnect metadata when stream recovery is required", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-1", "run-1");
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(async () => {
+      return new Response(
+        'event: stream_recovery_required\ndata: {"reason":"last_event_id_not_retained"}\n\n',
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    }),
+  );
+
+  await expect(
+    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+  ).resolves.toMatchObject({ done: true });
+
+  expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
 test("rethrows unrelated streaming errors", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");

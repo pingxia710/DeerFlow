@@ -18,6 +18,8 @@ import {
 } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
 
+const STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required";
+
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
  * live ``csrf_token`` cookie just before each outbound fetch.
@@ -110,11 +112,17 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   client.runs.joinStream = async function* (threadId, runId, options) {
     try {
-      yield* originalJoinStream(
+      for await (const event of originalJoinStream(
         threadId,
         runId,
         sanitizeRunStreamOptions(options),
-      );
+      )) {
+        if (event.event === STREAM_RECOVERY_REQUIRED_EVENT) {
+          clearReconnectRun(threadId, runId);
+          return;
+        }
+        yield event;
+      }
     } catch (error) {
       if (isInactiveRunStreamError(error)) {
         clearReconnectRun(threadId, runId);

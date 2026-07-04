@@ -330,6 +330,10 @@ in these snapshots; raw event inspection already exists via
   `run_events` uses thread-scoped `seq` uniqueness. `user_id` is an ownership
   filter/stamp, not a duplicate-`thread_id` tenant key. Do not assume two users
   can own the same `thread_id` without an explicit migration design.
+- Legacy NULL-owner thread rows are permissive for `check_access()`, but
+  user-filtered metadata/event reads require an explicit owner match.
+- `JsonlRunEventStore` still uses the legacy unscoped
+  `{base_dir}/threads/{thread_id}/runs/{run_id}.jsonl` path.
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.

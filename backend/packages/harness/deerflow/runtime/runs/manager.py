@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus, is_terminal_status
+from .schemas import DisconnectMode, RunStatus, is_terminal_status, run_status_value
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
@@ -84,7 +84,7 @@ class RunRecord:
     run_id: str
     thread_id: str
     assistant_id: str | None
-    status: RunStatus
+    status: RunStatus | str
     on_disconnect: DisconnectMode
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
@@ -175,7 +175,7 @@ class RunManager:
         payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
-            "status": record.status.value,
+            "status": run_status_value(record.status),
             "multitask_strategy": record.multitask_strategy,
             "metadata": record.metadata or {},
             "kwargs": record.kwargs or {},
@@ -281,11 +281,17 @@ class RunManager:
         NULL status/on_disconnect columns (e.g. from rows written before those
         columns were added) default to ``pending`` and ``cancel`` respectively.
         """
+        status = run_status_value(row.get("status")) or RunStatus.pending.value
+        try:
+            record_status: RunStatus | str = RunStatus(status)
+        except ValueError:
+            record_status = status
+
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
             assistant_id=row.get("assistant_id"),
-            status=RunStatus(row.get("status") or RunStatus.pending.value),
+            status=record_status,
             on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
             multitask_strategy=row.get("multitask_strategy") or "reject",
             metadata=row.get("metadata") or {},
@@ -500,7 +506,7 @@ class RunManager:
                 return
             rollback_completion = record.status == RunStatus.interrupted and record.abort_action == "rollback" and status == RunStatus.error and error == "Rolled back by user"
             if is_terminal_status(record.status) and record.status != status and not rollback_completion:
-                logger.info("Ignoring late status transition for terminal run %s: %s -> %s", run_id, record.status.value, status.value)
+                logger.info("Ignoring late status transition for terminal run %s: %s -> %s", run_id, run_status_value(record.status), status.value)
                 return
             record.status = status
             record.updated_at = _now_iso()

@@ -32,18 +32,19 @@ TERMINAL_RUN_STATUS_VALUES = frozenset(
 )
 
 
-def _status_value(status: Any) -> str | None:
+def run_status_value(status: Any) -> str | None:
     if status is None:
         return None
-    return getattr(status, "value", status)
+    value = getattr(status, "value", status)
+    return value if isinstance(value, str) else str(value)
 
 
 def is_active_status(status: Any) -> bool:
-    return _status_value(status) in ACTIVE_RUN_STATUS_VALUES
+    return run_status_value(status) in ACTIVE_RUN_STATUS_VALUES
 
 
 def is_terminal_status(status: Any) -> bool:
-    return _status_value(status) in TERMINAL_RUN_STATUS_VALUES
+    return run_status_value(status) in TERMINAL_RUN_STATUS_VALUES
 
 
 class DisconnectMode(StrEnum):

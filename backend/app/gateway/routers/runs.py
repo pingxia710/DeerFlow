@@ -21,6 +21,7 @@ from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.routers.thread_runs import RunCreateRequest, attach_message_display, run_error_for_response
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunStatus, serialize_channel_values_for_api
+from deerflow.runtime.runs.schemas import run_status_value
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -103,7 +104,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    response = {"status": record.status.value}
+    response = {"status": run_status_value(record.status)}
     if record.error:
         response["error"] = run_error_for_response(record.error)
     return response

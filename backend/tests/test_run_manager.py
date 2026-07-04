@@ -147,6 +147,21 @@ async def test_create_and_get(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_hydrates_store_only_recovery_status() -> None:
+    """Store-only recovery statuses should stay readable as historical runs."""
+    store = MemoryRunStore()
+    await store.put("lost-run", thread_id="thread-1", status="worker_lost")
+    manager = RunManager(store=store)
+
+    fetched = await manager.get("lost-run")
+    rows = await manager.list_by_thread("thread-1")
+
+    assert fetched is not None
+    assert fetched.status == "worker_lost"
+    assert [row.status for row in rows] == ["worker_lost"]
+
+
+@pytest.mark.anyio
 async def test_status_transitions(manager: RunManager):
     """Status should transition pending -> running -> success."""
     record = await manager.create("thread-1")

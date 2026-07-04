@@ -32,6 +32,7 @@ from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wa
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
+from deerflow.runtime.runs.schemas import run_status_value
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,7 @@ def _supports_user_id_keyword(callable_obj: Any) -> bool:
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     if record.status in (RunStatus.pending, RunStatus.running):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
-    return f"Run {run_id} is not cancellable (status: {record.status.value})"
+    return f"Run {run_id} is not cancellable (status: {run_status_value(record.status)})"
 
 
 async def _resolve_thread_run_for_user(thread_id: str, run_id: str, request: Request, *, user_id: str) -> RunRecord:
@@ -241,13 +242,16 @@ def _run_terminal_reason(record: RunRecord) -> str | None:
     stored_reason = _normalize_run_terminal_reason(getattr(record, "terminal_reason", None))
     if stored_reason is not None:
         return stored_reason
-    if record.status == RunStatus.success:
+    status = run_status_value(record.status)
+    if status == RunStatus.success.value:
         return "success"
-    if record.status == RunStatus.timeout:
+    if status in {RunStatus.timeout.value, "timed_out"}:
         return "timeout"
-    if record.status == RunStatus.interrupted:
+    if status in {RunStatus.interrupted.value, "cancelled"}:
         return "cancelled"
-    if record.status == RunStatus.error:
+    if status in {"worker_lost", "boundary_stopped", "rolled_back", "rollback_failed"}:
+        return status
+    if status == RunStatus.error.value:
         error = (record.error or "").strip().lower()
         if "rolled back by user" in error:
             return "rolled_back"
@@ -316,7 +320,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         run_id=record.run_id,
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
-        status=record.status.value,
+        status=run_status_value(record.status) or RunStatus.error.value,
         terminal_reason=_run_terminal_reason(record),
         metadata=record.metadata,
         kwargs=record.kwargs,
@@ -723,7 +727,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    return {"status": record.status.value, "error": run_error_for_response(record.error)}
+    return {"status": run_status_value(record.status), "error": run_error_for_response(record.error)}
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])

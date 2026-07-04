@@ -35,7 +35,7 @@ from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
-from .schemas import RunStatus
+from .schemas import RunStatus, run_status_value
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +430,7 @@ async def run_agent(
             try:
                 # Persist token usage + convenience fields to RunStore
                 completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+                await run_manager.update_run_completion(run_id, status=run_status_value(record.status) or RunStatus.error.value, **completion)
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
@@ -444,7 +444,7 @@ async def run_agent(
         # Update threads_meta status based on run outcome
         if thread_store is not None:
             try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
+                final_status = "idle" if record.status == RunStatus.success else run_status_value(record.status) or RunStatus.error.value
                 await thread_store.update_status(thread_id, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)

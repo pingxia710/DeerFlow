@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -48,6 +49,23 @@ logger = logging.getLogger(__name__)
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
+
+
+def _assert_single_gateway_worker() -> None:
+    """Fail fast outside development when in-process runtime would be split."""
+    env = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("NODE_ENV") or "development").lower()
+    if env in {"dev", "development", "local", "test", "testing"}:
+        return
+    raw = os.getenv("GATEWAY_WORKERS") or os.getenv("WEB_CONCURRENCY") or os.getenv("UVICORN_WORKERS")
+    if not raw:
+        return
+    try:
+        workers = int(raw)
+    except ValueError:
+        logger.warning("Ignoring non-integer gateway worker setting: %r", raw)
+        return
+    if workers > 1:
+        raise RuntimeError("DeerFlow gateway runtime is process-local; production/non-development deployments must run exactly one gateway worker until shared runtime is enabled.")
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -162,6 +180,8 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+
+    _assert_single_gateway_worker()
 
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap

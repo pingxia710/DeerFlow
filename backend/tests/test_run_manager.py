@@ -1174,3 +1174,14 @@ async def test_failed_create_or_reject_unindexes_run():
         await manager.create_or_reject("thread-a", multitask_strategy="reject")
     assert manager._runs == {}
     assert "thread-a" not in manager._runs_by_thread
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_schedules_memory_cleanup_quickly():
+    manager = RunManager(terminal_cleanup_delay=0)
+    record = await manager.create("cleanup-thread")
+    await manager.set_status(record.run_id, RunStatus.success)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert record.run_id not in manager._runs
+    assert "cleanup-thread" not in manager._runs_by_thread

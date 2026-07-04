@@ -384,7 +384,8 @@ async def test_resolve_start_offset_matches_linear_scan():
 
     candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids]
     for eid in candidates:
-        assert bridge._resolve_start_offset(stream, eid) == _linear_resolve(stream, eid), eid
+        start_offset, _recovery_required = bridge._resolve_start_offset(stream, eid)
+        assert start_offset == _linear_resolve(stream, eid), eid
 
 
 @pytest.mark.anyio
@@ -404,3 +405,16 @@ async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
 
     assert [entry.event for entry in received[:-1]] == ["first", "second"]
     assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_last_event_id_miss_emits_recovery_event_after_eviction():
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    await bridge.publish("run-evicted", "messages", {"n": 1})
+    first_id = bridge._streams["run-evicted"].events[0].id
+    await bridge.publish("run-evicted", "messages", {"n": 2})
+
+    sub = bridge.subscribe("run-evicted", last_event_id=first_id)
+    event = await anext(sub)
+    assert event.event == "stream_recovery_required"
+    await sub.aclose()

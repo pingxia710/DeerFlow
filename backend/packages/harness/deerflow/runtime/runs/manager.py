@@ -125,6 +125,7 @@ class RunManager:
         store: RunStore | None = None,
         *,
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
+        terminal_cleanup_delay: float = 300,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -135,6 +136,8 @@ class RunManager:
         self._lock = asyncio.Lock()
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
+        self._terminal_cleanup_delay = terminal_cleanup_delay
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -480,6 +483,13 @@ class RunManager:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
+    def _schedule_terminal_cleanup(self, run_id: str) -> None:
+        if self._terminal_cleanup_delay < 0:
+            return
+        task = asyncio.create_task(self.cleanup(run_id, delay=self._terminal_cleanup_delay))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
         async with self._lock:
@@ -496,6 +506,8 @@ class RunManager:
             if error is not None:
                 record.error = error
         await self._persist_status(record, status, error=error)
+        if is_terminal_status(status):
+            self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
@@ -551,6 +563,7 @@ class RunManager:
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
         await self._persist_status(record, RunStatus.interrupted)
+        self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
@@ -639,6 +652,7 @@ class RunManager:
 
         for interrupted_record in interrupted_records:
             await self._persist_status(interrupted_record, RunStatus.interrupted)
+            self._schedule_terminal_cleanup(interrupted_record.run_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 

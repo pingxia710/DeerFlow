@@ -35,6 +35,16 @@ router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 HIDDEN_CONTROL_MESSAGE_NAMES = frozenset({"summary", "loop_warning", "todo_reminder", "todo_completion_reminder"})
 INTERNAL_CONTEXT_TAG_RE = re.compile(r"<(uploaded_files|slash_skill_activation)>[\s\S]*?</\1>")
+_CANCEL_WAIT_TIMEOUT_SECONDS = 10.0
+
+
+async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_CANCEL_WAIT_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise HTTPException(status_code=202, detail="Cancel requested; run did not settle before wait timeout")
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -642,9 +652,9 @@ async def cancel_run(
 
     if wait and record.task is not None:
         try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
+            await _bounded_wait_for_cancelled_task(record.task)
+        except HTTPException:
+            raise
         return Response(status_code=204)
 
     return Response(status_code=202)
@@ -704,9 +714,9 @@ async def stream_existing_run(
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
         if wait and record.task is not None:
             try:
-                await record.task
-            except (asyncio.CancelledError, Exception):
-                pass
+                await _bounded_wait_for_cancelled_task(record.task)
+            except HTTPException:
+                raise
             return Response(status_code=204)
 
     bridge = get_stream_bridge(request)

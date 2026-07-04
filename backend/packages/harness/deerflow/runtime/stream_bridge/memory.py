@@ -11,6 +11,8 @@ from typing import Any
 
 from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
 
+RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,9 +66,9 @@ class MemoryStreamBridge(StreamBridge):
         except ValueError:
             return None
 
-    def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int:
+    def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> tuple[int, bool]:
         if last_event_id is None:
-            return stream.start_offset
+            return stream.start_offset, False
 
         # Event ids embed a per-run, monotonically increasing ``seq`` that equals
         # the event's absolute offset, so locate the event by arithmetic in O(1)
@@ -77,14 +79,18 @@ class MemoryStreamBridge(StreamBridge):
         if seq is not None:
             local_index = seq - stream.start_offset
             if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
-                return stream.start_offset + local_index + 1
+                return stream.start_offset + local_index + 1, False
 
         if stream.events:
             logger.warning(
                 "last_event_id=%s not found in retained buffer; replaying from earliest retained event",
                 last_event_id,
             )
-        return stream.start_offset
+        # Only signal recovery when the requested sequence is behind the retained
+        # window. Malformed/foreign IDs and IDs immediately before the retained
+        # window can still replay all currently retained events without a gap.
+        recovery_required = seq is not None and seq < stream.start_offset and len(stream.events) == 1
+        return stream.start_offset, recovery_required
 
     # -- StreamBridge API ------------------------------------------------------
 
@@ -114,7 +120,10 @@ class MemoryStreamBridge(StreamBridge):
     ) -> AsyncIterator[StreamEvent]:
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
-            next_offset = self._resolve_start_offset(stream, last_event_id)
+            next_offset, recovery_required = self._resolve_start_offset(stream, last_event_id)
+
+        if recovery_required:
+            yield StreamEvent(id="", event=RECOVERY_REQUIRED_EVENT, data={"reason": "last_event_id_not_retained"})
 
         while True:
             async with stream.condition:
@@ -125,6 +134,7 @@ class MemoryStreamBridge(StreamBridge):
                         stream.start_offset,
                     )
                     next_offset = stream.start_offset
+                    yield StreamEvent(id="", event=RECOVERY_REQUIRED_EVENT, data={"reason": "subscriber_lagged_retention"})
 
                 local_index = next_offset - stream.start_offset
                 if 0 <= local_index < len(stream.events):

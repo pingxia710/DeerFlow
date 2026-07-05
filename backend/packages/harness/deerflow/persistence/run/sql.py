@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.schemas import ACTIVE_RUN_STATUS_VALUES, INFLIGHT_RUN_STATUS_VALUES, is_active_status, is_terminal_status
 from deerflow.runtime.runs.store.base import CancelIntent, CancelRequestResult, RunLease, RunStore
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
 _DEFAULT_LEASE_TTL = timedelta(seconds=30)
@@ -265,6 +265,13 @@ class RunRepository(RunStore):
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        """Claim ownerless/default-owned runs for a legacy thread."""
+        async with self._sf() as session:
+            result = await session.execute(update(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id.is_(None) | (RunRow.user_id == DEFAULT_USER_ID)).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
             await session.commit()
             return result.rowcount or 0
 

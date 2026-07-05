@@ -255,6 +255,32 @@ async def _cleanup_thread_runtime_state(thread_id: str, request: Request, *, use
             logger.debug("Could not cleanup stream for run %s before thread delete (not critical)", sanitize_log_param(run.run_id))
 
 
+async def _claim_legacy_thread_related_data(thread_id: str, owner_user_id: str, request: Request) -> None:
+    """Best-effort claim of ownerless/default-owned rows tied to a legacy thread.
+
+    Only repositories that expose ``claim_legacy_by_thread`` participate; JSONL
+    run-events intentionally remain conservative unless such an API is added.
+    """
+    from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store
+
+    repos = []
+    for getter in (get_run_store, get_run_event_store, get_feedback_repo):
+        try:
+            repos.append(getter(request))
+        except Exception:
+            logger.debug("Could not access repo for legacy claim of %s", sanitize_log_param(thread_id))
+    repos.append(getattr(request.app.state, "artifact_provenance_repo", None))
+
+    for repo in repos:
+        claim = getattr(repo, "claim_legacy_by_thread", None)
+        if claim is None:
+            continue
+        try:
+            await claim(thread_id, owner_user_id)
+        except Exception:
+            logger.debug("Could not claim legacy related data for %s", sanitize_log_param(thread_id), exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -351,6 +377,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             raise HTTPException(status_code=409, detail="Thread ID is already in use")
         if current_owner != storage_user_id:
             await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
+            await _claim_legacy_thread_related_data(thread_id, storage_user_id, request)
         existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and unscoped_record is not None:
         if unscoped_record.get("user_id") == storage_user_id:

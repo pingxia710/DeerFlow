@@ -102,6 +102,10 @@ class RunEventStore(abc.ABC):
         - neither: return the latest ``limit`` records (ascending)
         """
 
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        """Claim ownerless/default-owned events for a legacy thread when supported."""
+        return 0
+
     @abc.abstractmethod
     async def count_messages(self, thread_id: str, *, user_id: str | None = None) -> int:
         """Count displayable messages (category=message) in a thread."""

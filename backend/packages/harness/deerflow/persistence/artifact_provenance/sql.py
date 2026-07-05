@@ -6,11 +6,11 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.artifact_provenance.model import ArtifactProvenanceRow
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
 
@@ -127,3 +127,18 @@ class ArtifactProvenanceRepository:
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
+
+
+# Backwards-compatible method attached outside the class body for older imports.
+async def _claim_legacy_by_thread(self: ArtifactProvenanceRepository, thread_id: str, owner_user_id: str) -> int:
+    async with self._sf() as session:
+        result = await session.execute(
+            update(ArtifactProvenanceRow)
+            .where(ArtifactProvenanceRow.thread_id == thread_id, ArtifactProvenanceRow.user_id.is_(None) | (ArtifactProvenanceRow.user_id == DEFAULT_USER_ID))
+            .values(user_id=owner_user_id, updated_at=datetime.now(UTC))
+        )
+        await session.commit()
+        return result.rowcount or 0
+
+
+ArtifactProvenanceRepository.claim_legacy_by_thread = _claim_legacy_by_thread

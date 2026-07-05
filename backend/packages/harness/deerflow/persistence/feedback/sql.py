@@ -8,11 +8,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
 
@@ -200,6 +200,12 @@ class FeedbackRepository:
             stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        async with self._sf() as session:
+            result = await session.execute(update(FeedbackRow).where(FeedbackRow.thread_id == thread_id, FeedbackRow.user_id.is_(None) | (FeedbackRow.user_id == DEFAULT_USER_ID)).values(user_id=owner_user_id))
             await session.commit()
             return result.rowcount or 0
 

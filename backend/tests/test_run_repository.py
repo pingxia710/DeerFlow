@@ -661,3 +661,28 @@ class TestRunRepository:
         row = await repo.get(record.run_id)
         assert row["model_name"] == "model-2"
         await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_run_repository_claim_legacy_by_thread_only_ownerless_and_default(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'runs-claim.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    repo = RunRepository(get_session_factory())
+
+    await repo.put("r-null", thread_id="t-claim", user_id=None)
+    await repo.put("r-default", thread_id="t-claim", user_id=DEFAULT_USER_ID)
+    await repo.put("r-other", thread_id="t-claim", user_id="other-user")
+
+    assert await repo.list_by_thread("t-claim", user_id="new-owner") == []
+    claimed = await repo.claim_legacy_by_thread("t-claim", "new-owner")
+    assert claimed == 2
+    assert {r["run_id"] for r in await repo.list_by_thread("t-claim", user_id="new-owner")} == {"r-null", "r-default"}
+    assert {r["run_id"] for r in await repo.list_by_thread("t-claim", user_id="other-user")} == {"r-other"}
+    assert await repo.delete_by_thread("t-claim", user_id="new-owner") == 2
+    assert {r["run_id"] for r in await repo.list_by_thread("t-claim", user_id="other-user")} == {"r-other"}
+
+    await close_engine()

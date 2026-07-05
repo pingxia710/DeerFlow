@@ -716,3 +716,28 @@ class TestJsonlRunEventStore:
         assert c == 1
         assert not (tmp_path / "jsonl" / "threads" / "t1" / "runs" / "r2.jsonl").exists()
         assert await s.count_messages("t1") == 1
+
+
+@pytest.mark.anyio
+async def test_db_claim_legacy_by_thread_only_ownerless_and_default(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'claim.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    s = DbRunEventStore(get_session_factory())
+
+    await s.put(thread_id="t-claim", run_id="r-null", event_type="human_message", category="message", user_id=None)
+    await s.put(thread_id="t-claim", run_id="r-default", event_type="ai_message", category="message", user_id=DEFAULT_USER_ID)
+    await s.put(thread_id="t-claim", run_id="r-other", event_type="ai_message", category="message", user_id="other-user")
+
+    assert await s.count_messages("t-claim", user_id="new-owner") == 0
+    claimed = await s.claim_legacy_by_thread("t-claim", "new-owner")
+    assert claimed == 2
+    assert await s.count_messages("t-claim", user_id="new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="other-user") == 1
+    assert await s.delete_by_thread("t-claim", user_id="new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="other-user") == 1
+
+    await close_engine()

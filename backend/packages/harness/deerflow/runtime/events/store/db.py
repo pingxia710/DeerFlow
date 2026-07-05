@@ -11,12 +11,12 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
+from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        resolved_user_id = str(user_id) if user_id is not None else self._user_id_from_context()
+        resolved_user_id = user_id if user_id is None else str(user_id)
         async with self._sf() as session:
             async with session.begin():
                 max_seq = await self._max_seq_for_thread(session, thread_id)
@@ -277,6 +277,12 @@ class DbRunEventStore(RunEventStore):
                 result = await session.execute(stmt)
                 rows = list(result.scalars())
                 return [self._row_to_dict(r) for r in reversed(rows)]
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        async with self._sf() as session:
+            result = await session.execute(update(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.user_id.is_(None) | (RunEventRow.user_id == DEFAULT_USER_ID)).values(user_id=owner_user_id))
+            await session.commit()
+            return result.rowcount or 0
 
     async def count_messages(
         self,

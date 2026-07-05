@@ -1,4 +1,5 @@
 from deerflow.agents.middlewares.round_context_middleware import (
+    format_capability_snapshot_for_model,
     format_round_context_for_model,
     latest_round_context_for_thread,
 )
@@ -52,6 +53,28 @@ def test_no_round_signals_or_not_required_does_not_inject():
     assert format_round_context_for_model({"roundRequired": True}) is None
     assert format_round_context_for_model(_record(required=False)) is None
     assert format_round_context_for_model(None) is None
+
+
+def test_capability_snapshot_format_includes_tools_and_stop_before_risks():
+    text = format_capability_snapshot_for_model(
+        {
+            "tools": [{"name": "read_file"}, {"name": "bash"}],
+            "approval_policy": {"stop_before": ["credential disclosure", "production writes"]},
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                "host_bash_available": False,
+                "unrestricted_host_access": False,
+            },
+        }
+    )
+
+    assert text is not None
+    assert "Internal Capability Snapshot" in text
+    assert "enabled_tools: read_file, bash" in text
+    assert "stop_before: credential disclosure; production writes" in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
 
 
 def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):

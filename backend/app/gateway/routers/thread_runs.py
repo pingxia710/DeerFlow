@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 import mimetypes
 import re
@@ -39,6 +40,7 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
+from deerflow.command_room.evidence import normalize_evidence_ref
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
 from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
@@ -87,6 +89,20 @@ _RUN_ERROR_TRACEBACK_FRAME_PREFIXES = (
     "The above exception was the direct cause",
     "^",
 )
+_RUN_EVIDENCE_EVENT_TYPES = [
+    "artifact.presented",
+    "llm.tool.result",
+    "run.error",
+    "llm.error",
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+    "task_timed_out",
+    "task.completed",
+    "task.failed",
+    "task.cancelled",
+    "task.timed_out",
+]
 
 
 async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
@@ -222,6 +238,7 @@ class TaskLaneResponse(BaseModel):
     status: str
     result_ref: str | None = None
     evidence_ref: str | None = None
+    handoff: dict[str, Any] | None = None
     error: str | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -419,6 +436,290 @@ async def _persist_artifact_index(request: Request, entries: list[dict[str, Any]
         await repo.upsert_many(entries, user_id=user_id)
     except Exception:
         logger.warning("Failed to persist artifact provenance index", exc_info=True)
+
+
+def _event_content(event: dict[str, Any]) -> dict[str, Any]:
+    content = event.get("content")
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            decoded = json.loads(content)
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _event_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _event_round_id(event: dict[str, Any], fallback: str | None) -> str | None:
+    content = _event_content(event)
+    value = content.get("round_id") or _event_metadata(event).get("round_id") or fallback
+    return value if isinstance(value, str) and value else None
+
+
+def _event_task_id(event: dict[str, Any]) -> str | None:
+    content = _event_content(event)
+    value = content.get("task_id") or _event_metadata(event).get("task_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _event_produced_by(event: dict[str, Any]) -> str:
+    metadata = _event_metadata(event)
+    for key in ("source_tool", "caller", "source_node"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    event_type = event.get("event_type")
+    return event_type if isinstance(event_type, str) and event_type else "runtime"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _message_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        content = value.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            return "\n".join(parts)
+    return ""
+
+
+def _string_refs(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, dict):
+        refs: list[str] = []
+        for key in ("ref", "virtual_path", "path", "source_ref", "output_ref"):
+            refs.extend(_string_refs(value.get(key)))
+        return refs
+    if isinstance(value, list):
+        refs: list[str] = []
+        for item in value:
+            refs.extend(_string_refs(item))
+        return refs
+    return []
+
+
+def _append_evidence_ref(
+    refs: list[dict[str, Any]],
+    seen: set[tuple[str, str, str | None]],
+    raw_ref: str,
+    *,
+    thread_id: str,
+    run_id: str,
+    round_id: str | None,
+    task_id: str | None,
+    claim: str = "",
+    produced_by: str,
+    created_at: str | None,
+    source_kind: str | None = None,
+    excerpt: str | None = None,
+    content_sha256: str | None = None,
+) -> None:
+    normalized = normalize_evidence_ref(
+        raw_ref,
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=round_id,
+        task_id=task_id,
+        claim=claim,
+        produced_by=produced_by,
+        created_at=created_at,
+        source_kind=source_kind,
+        excerpt=excerpt,
+        sha256=content_sha256,
+    )
+    key = (normalized["ref"], normalized["source_kind"], normalized["task_id"])
+    if key in seen:
+        return
+    seen.add(key)
+    refs.append(normalized)
+
+
+def _append_action_result_evidence(
+    refs: list[dict[str, Any]],
+    seen: set[tuple[str, str, str | None]],
+    event: dict[str, Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    round_id: str | None,
+) -> None:
+    content = _event_content(event)
+    action_result = content.get("action_result")
+    if not isinstance(action_result, dict):
+        metadata_action_result = _event_metadata(event).get("action_result")
+        action_result = metadata_action_result if isinstance(metadata_action_result, dict) else None
+    if not isinstance(action_result, dict):
+        return
+
+    task_id = _event_task_id(event) or (action_result.get("action_id") if isinstance(action_result.get("action_id"), str) else None)
+    claim = _message_content_text(action_result.get("summary") or action_result.get("description") or "")
+    produced_by = _event_produced_by(event)
+    created_at = str(event.get("created_at") or "")
+    for evidence_ref in _string_refs(action_result.get("evidence_refs")):
+        _append_evidence_ref(
+            refs,
+            seen,
+            evidence_ref,
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=round_id,
+            task_id=task_id,
+            claim=claim,
+            produced_by=produced_by,
+            created_at=created_at,
+        )
+    output_ref = action_result.get("output_ref")
+    if isinstance(output_ref, str) and output_ref:
+        _append_evidence_ref(
+            refs,
+            seen,
+            f"output_ref: {output_ref}",
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=round_id,
+            task_id=task_id,
+            claim=claim,
+            produced_by=produced_by,
+            created_at=created_at,
+            source_kind="output_ref",
+        )
+
+
+def _append_tool_result_evidence(
+    refs: list[dict[str, Any]],
+    seen: set[tuple[str, str, str | None]],
+    event: dict[str, Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    round_id: str | None,
+) -> None:
+    if event.get("event_type") != "llm.tool.result":
+        return
+    content = _event_content(event)
+    tool_name = content.get("name")
+    text = _message_content_text(content)
+    if not text:
+        return
+    lower = text.lower()
+    looks_like_command_output = tool_name in {"bash", "bash_tool"} or any(marker in lower for marker in ("stdout", "stderr", "std error", "exit code", "exit_code", "returncode"))
+    if not looks_like_command_output:
+        return
+    _append_evidence_ref(
+        refs,
+        seen,
+        f"command output: {text}",
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=round_id,
+        task_id=_event_task_id(event),
+        claim="tool result output summary",
+        produced_by=str(tool_name or _event_produced_by(event)),
+        created_at=str(event.get("created_at") or ""),
+        source_kind="command_output",
+        excerpt=text,
+        content_sha256=_sha256_text(text),
+    )
+
+
+def _append_log_evidence(
+    refs: list[dict[str, Any]],
+    seen: set[tuple[str, str, str | None]],
+    event: dict[str, Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    round_id: str | None,
+) -> None:
+    if event.get("event_type") not in {"run.error", "llm.error"}:
+        return
+    text = _message_content_text(event.get("content"))
+    if not text:
+        text = str(event.get("content") or "")
+    if not text:
+        return
+    _append_evidence_ref(
+        refs,
+        seen,
+        f"log: {text}",
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=round_id,
+        task_id=_event_task_id(event),
+        claim="runtime error log summary",
+        produced_by=_event_produced_by(event),
+        created_at=str(event.get("created_at") or ""),
+        source_kind="log",
+        excerpt=text,
+        content_sha256=_sha256_text(text),
+    )
+
+
+def _run_evidence_summary(refs: list[dict[str, Any]]) -> dict[str, Any]:
+    by_source_kind: dict[str, int] = {}
+    by_strength = {"Strong": 0, "Weak": 0, "Unverified": 0}
+    for ref in refs:
+        source_kind = str(ref.get("source_kind") or "unknown")
+        strength = str(ref.get("strength") or "Unverified")
+        by_source_kind[source_kind] = by_source_kind.get(source_kind, 0) + 1
+        if strength in by_strength:
+            by_strength[strength] += 1
+    return {
+        "total": len(refs),
+        "by_source_kind": by_source_kind,
+        "by_strength": by_strength,
+        "quality_verdict": None,
+        "auto_rework": False,
+    }
+
+
+def _run_evidence_refs_from_events(events: list[dict[str, Any]], *, thread_id: str, run_id: str, round_id: str | None) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for event in events:
+        event_round_id = _event_round_id(event, round_id)
+        _append_action_result_evidence(refs, seen, event, thread_id=thread_id, run_id=run_id, round_id=event_round_id)
+        _append_tool_result_evidence(refs, seen, event, thread_id=thread_id, run_id=run_id, round_id=event_round_id)
+        _append_log_evidence(refs, seen, event, thread_id=thread_id, run_id=run_id, round_id=event_round_id)
+
+    for artifact in build_artifact_index(events):
+        virtual_path = artifact.get("virtual_path")
+        if not isinstance(virtual_path, str) or not virtual_path:
+            continue
+        provenance = artifact.get("provenance") if isinstance(artifact.get("provenance"), dict) else {}
+        _append_evidence_ref(
+            refs,
+            seen,
+            virtual_path,
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=round_id,
+            task_id=artifact.get("task_id") if isinstance(artifact.get("task_id"), str) else None,
+            claim="runtime artifact reference",
+            produced_by=str(artifact.get("source_tool") or provenance.get("caller") or "runtime"),
+            created_at=str(artifact.get("created_at") or ""),
+            source_kind="artifact",
+            content_sha256=artifact.get("sha256") if isinstance(artifact.get("sha256"), str) else None,
+        )
+    return refs
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -1144,6 +1445,32 @@ async def list_run_messages(
                     content["additional_kwargs"]["turn_duration"] = duration
 
     return {"data": data, "has_more": has_more}
+
+
+@router.get("/{thread_id}/runs/{run_id}/evidence")
+@require_permission("runs", "read", owner_check=True)
+async def list_run_evidence(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=500, le=2000),
+) -> dict[str, Any]:
+    """Return AI-readable, redacted evidence refs derived from run events."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    event_store = get_run_event_store(request)
+    list_events_kwargs: dict[str, Any] = {"event_types": _RUN_EVIDENCE_EVENT_TYPES, "limit": limit}
+    if _supports_user_id_keyword(event_store.list_events):
+        list_events_kwargs["user_id"] = user_id
+    events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
+    evidence_refs = _run_evidence_refs_from_events(events, thread_id=thread_id, run_id=run_id, round_id=record.round_id)
+    return {
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "round_id": record.round_id,
+        "evidence_refs": evidence_refs,
+        "summary": _run_evidence_summary(evidence_refs),
+    }
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

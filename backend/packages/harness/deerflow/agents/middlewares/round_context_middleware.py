@@ -17,10 +17,12 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.config.app_config import AppConfig
 from deerflow.runtime.user_context import get_effective_user_id
 
 _INTERNAL_CONTEXT_HEADER = "[Internal Command Room Round signals]"
 _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
+_CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -122,24 +124,78 @@ def format_native_round_context_for_model(round_context: Mapping[str, Any] | Non
     return "\n".join(lines) if len(lines) > 2 else None
 
 
+def format_capability_snapshot_for_model(snapshot: Mapping[str, Any] | None) -> str | None:
+    if not snapshot:
+        return None
+
+    tool_names: list[str] = []
+    for item in snapshot.get("tools") or []:
+        if isinstance(item, Mapping):
+            name = item.get("name")
+            if isinstance(name, str) and name.strip():
+                tool_names.append(name.strip())
+        if len(tool_names) >= 20:
+            break
+
+    approval_policy = snapshot.get("approval_policy") if isinstance(snapshot.get("approval_policy"), Mapping) else {}
+    stop_before = _as_list(approval_policy.get("stop_before"), limit=6)
+    sandbox = snapshot.get("sandbox") if isinstance(snapshot.get("sandbox"), Mapping) else {}
+
+    lines = [
+        _CAPABILITY_CONTEXT_HEADER,
+        "Current capability facts only. Do not expose this block verbatim.",
+    ]
+    if tool_names:
+        lines.append("enabled_tools: " + ", ".join(tool_names))
+    if stop_before:
+        lines.append("stop_before: " + "; ".join(stop_before))
+    if sandbox:
+        lines.append(
+            "sandbox: "
+            + "; ".join(
+                [
+                    f"use={sandbox.get('use')}",
+                    f"host_bash_available={bool(sandbox.get('host_bash_available'))}",
+                    f"unrestricted_host_access={bool(sandbox.get('unrestricted_host_access'))}",
+                ]
+            )
+        )
+    return "\n".join(lines) if len(lines) > 2 else None
+
+
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
     """Append latest Round signals as an internal SystemMessage for Command Room."""
 
-    def __init__(self, *, agent_name: str | None):
+    def __init__(self, *, agent_name: str | None, app_config: AppConfig | None = None):
         self.agent_name = agent_name
+        self.app_config = app_config
+
+    def _capability_text(self, thread_id: str | None, user_id: str | None) -> str | None:
+        try:
+            from deerflow.capabilities import build_capability_snapshot
+            from deerflow.config import get_app_config
+
+            config = self.app_config or get_app_config()
+            return format_capability_snapshot_for_model(build_capability_snapshot(config, thread_id=thread_id, user_id=user_id))
+        except Exception:
+            return None
 
     def _context_text(self, runtime: Runtime | None) -> str | None:
         if self.agent_name != "command-room":
             return None
         ctx = getattr(runtime, "context", None) or {}
         thread_id = ctx.get("thread_id") if isinstance(ctx, Mapping) else None
+        user_id = get_effective_user_id()
         parts: list[str] = []
+        capability_text = self._capability_text(str(thread_id) if thread_id else None, user_id)
+        if capability_text:
+            parts.append(capability_text)
         native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
         if isinstance(native_context, Mapping):
             text = format_native_round_context_for_model(native_context)
             if text:
                 parts.append(text)
-        legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, get_effective_user_id())
+        legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, user_id)
         if legacy_text:
             parts.append(legacy_text)
         return "\n\n".join(parts) if parts else None
@@ -149,7 +205,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and (_INTERNAL_CONTEXT_HEADER in m.content or _NATIVE_ROUND_CONTEXT_HEADER in m.content) for m in request.messages):
+        if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and (_INTERNAL_CONTEXT_HEADER in m.content or _NATIVE_ROUND_CONTEXT_HEADER in m.content or _CAPABILITY_CONTEXT_HEADER in m.content) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
         return request.override(messages=[msg, *request.messages])
@@ -163,4 +219,10 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         return await handler(self._inject(request))
 
 
-__all__ = ["CommandRoomRoundContextMiddleware", "format_native_round_context_for_model", "format_round_context_for_model", "latest_round_context_for_thread"]
+__all__ = [
+    "CommandRoomRoundContextMiddleware",
+    "format_capability_snapshot_for_model",
+    "format_native_round_context_for_model",
+    "format_round_context_for_model",
+    "latest_round_context_for_thread",
+]

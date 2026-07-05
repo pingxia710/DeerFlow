@@ -78,6 +78,11 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
     return None
 
 
+def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
+    handoff = event.get("handoff_envelope")
+    return dict(handoff) if isinstance(handoff, dict) and handoff else None
+
+
 def _assert_allowed_transition(previous: str, state: str) -> None:
     if state not in ROUND_STATES:
         raise ValueError(f"Unknown round state: {state}")
@@ -103,6 +108,7 @@ def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
 
 def _task_lane_to_dict(row: TaskLaneRow) -> dict[str, Any]:
     data = row.to_dict()
+    data["handoff"] = data.pop("handoff_json", None)
     for key in ("created_at", "updated_at"):
         if isinstance(data.get(key), datetime):
             data[key] = coerce_iso(data[key])
@@ -297,6 +303,7 @@ class RoundStateRepository:
                     lane.status = str(event.get("status") or lane.status)
                     lane.result_ref = _task_result_ref(event) or lane.result_ref
                     lane.evidence_ref = _task_evidence_ref(event) or lane.evidence_ref
+                    lane.handoff_json = _task_handoff(event) or lane.handoff_json
                     lane.error = _clip(event.get("error_preview"), 2000) or lane.error
                     lane.updated_at = _now()
                     await self._append_event(
@@ -312,6 +319,7 @@ class RoundStateRepository:
                             "role": lane.role,
                             "result_ref": lane.result_ref,
                             "evidence_ref": lane.evidence_ref,
+                            "handoff": lane.handoff_json,
                         },
                     )
 

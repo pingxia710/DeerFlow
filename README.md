@@ -614,6 +614,8 @@ Gateway-managed custom skills are global resources. Installing, editing, deletin
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 
+The Gateway also exposes masked AI-readable capability facts at `GET /api/capabilities` and `GET /api/threads/{thread_id}/capabilities` so agents can inspect current models, tools, skills, MCP, sandbox, permissions, middleware, and harness profiles without receiving program-owned next-step judgments.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 ```
@@ -670,6 +672,7 @@ For `command-room` runs, DeerFlow can keep compact internal audit records under 
 The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output.
 Sub-agent task progress is also persisted into run history, so switching conversations can restore task status without relying only on the live stream.
 DeerFlow also records native round state (`open`, `executing`, `validating`, `waiting_user`, `closed`, `blocked`) and task lanes for lifecycle visibility; this state machine only tracks run/task associations, artifact/evidence refs, and current intent, and does not make quality or PASS/FAIL decisions.
+Run evidence is exposed through `GET /api/threads/{thread_id}/runs/{run_id}/evidence` as redacted `EvidenceRef` records derived from run events, artifacts, logs, and command-output summaries; the API labels source kind and mechanical strength only.
 User-facing command-room replies stay natural by default; internal audit is not a visible product surface.
 
 ### Sandbox & File System

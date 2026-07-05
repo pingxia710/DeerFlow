@@ -395,7 +395,7 @@ def build_middlewares(
 
     from deerflow.agents.middlewares.round_context_middleware import CommandRoomRoundContextMiddleware
 
-    middlewares.append(CommandRoomRoundContextMiddleware(agent_name=agent_name))
+    middlewares.append(CommandRoomRoundContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)

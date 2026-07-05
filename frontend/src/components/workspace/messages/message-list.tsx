@@ -53,7 +53,10 @@ import {
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
 import { HISTORY_CREATED_AT_KEY } from "@/core/threads/hooks";
-import type { ThreadRunTerminalNotice } from "@/core/threads/hooks";
+import type {
+  ThreadRunTerminalNotice,
+  useThreadStream,
+} from "@/core/threads/hooks";
 import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +77,10 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+type ThreadRecoveryStatus = ReturnType<
+  typeof useThreadStream
+>["recoveryStatus"];
 
 function getMessageHistoryTime(message: Message) {
   const value = message.additional_kwargs?.[HISTORY_CREATED_AT_KEY];
@@ -175,6 +182,57 @@ function LoadMoreHistoryIndicator({
   );
 }
 
+function RunRecoveryNotice({
+  status,
+  onRetry,
+}: {
+  status: NonNullable<ThreadRecoveryStatus>;
+  onRetry?: () => void;
+}) {
+  const isRepairing = status.state === "repairing";
+  const isFailed = status.state === "failed";
+  const title = isRepairing
+    ? "正在恢复运行状态"
+    : isFailed
+      ? "恢复失败"
+      : "运行已终止";
+  const description = isRepairing
+    ? "正在从中断连接恢复运行状态，当前不会标记为业务成功。"
+    : isFailed
+      ? status.reason
+      : `终止原因：${status.reason ?? "unknown"}`;
+  return (
+    <div
+      role="status"
+      data-testid="run-recovery-notice"
+      className={cn(
+        "flex w-full items-start gap-2 rounded-md border px-3 py-2 text-sm",
+        isRepairing
+          ? "border-amber-300/70 bg-amber-50 text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/30 dark:text-amber-100"
+          : isFailed
+            ? "border-destructive/40 bg-destructive/10 text-destructive"
+            : "border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-200",
+      )}
+    >
+      {isRepairing ? (
+        <Loader2Icon className="mt-0.5 size-4 shrink-0 animate-spin" />
+      ) : (
+        <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">{title}</div>
+        <div className="mt-0.5 break-words">{description}</div>
+      </div>
+      {isFailed && onRetry ? (
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCcwIcon className="mr-1 size-3.5" />
+          重试恢复
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function RunTerminalNotice({ notice }: { notice: ThreadRunTerminalNotice }) {
   const { t } = useI18n();
   return (
@@ -212,6 +270,8 @@ export function MessageList({
   loadMoreHistory,
   isHistoryLoading,
   terminalNotice,
+  recoveryStatus,
+  onRetryRecovery,
   onRegenerateMessage,
   canRegenerate = false,
 }: {
@@ -227,6 +287,8 @@ export function MessageList({
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
   terminalNotice?: ThreadRunTerminalNotice | null;
+  recoveryStatus?: ThreadRecoveryStatus;
+  onRetryRecovery?: () => void;
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
@@ -739,7 +801,13 @@ export function MessageList({
               </Reasoning>
             </div>
           )}
-        {shouldShowTerminalNotice && terminalNotice && (
+        {recoveryStatus && (
+          <RunRecoveryNotice
+            status={recoveryStatus}
+            onRetry={onRetryRecovery}
+          />
+        )}
+        {!recoveryStatus && shouldShowTerminalNotice && terminalNotice && (
           <RunTerminalNotice notice={terminalNotice} />
         )}
         <div style={{ height: `${paddingBottom}px` }} />

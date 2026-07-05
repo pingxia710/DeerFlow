@@ -108,6 +108,8 @@ export default function AgentChatPage() {
     isUploading,
     isHistoryLoading,
     terminalNotice,
+    recoveryStatus,
+    retryRecovery,
     hasMoreHistory,
     loadMoreHistory,
   } = useThreadStream({
@@ -295,6 +297,8 @@ export default function AgentChatPage() {
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
                 terminalNotice={terminalNotice}
+                recoveryStatus={recoveryStatus}
+                onRetryRecovery={retryRecovery}
                 tokenUsageInlineMode={tokenUsageInlineMode}
                 canRegenerate={
                   !isNewThread &&

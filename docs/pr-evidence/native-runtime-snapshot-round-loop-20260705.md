@@ -8,7 +8,8 @@
 
 ## Commits
 
-- Final commit hash is reported in the Codex handoff after validation. This file is committed with the branch evidence, so embedding its own final hash here would make the hash stale.
+- `b613c098` - `fix runtime snapshot recovery loop`
+- Evidence-finalization commit hash is reported in the Codex handoff after this file update.
 
 ## What Changed
 

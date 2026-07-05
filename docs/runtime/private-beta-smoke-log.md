@@ -69,14 +69,17 @@ Use this file for the 1-2 day real-use smoke from
 
 - Seal evidence: archived in
   `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; latest observation
-  checkpoint is `d94c1a5b`.
+  checkpoint is `f4d786f7`.
 - Frontend targeted tests: covered by `message-merge.test.ts` and
   `thread-history.spec.ts`; latest recorded preflight passed `63` unit tests and
-  `16` E2E tests.
+  `16` E2E tests at `d0800a23`.
 - Private beta runbook: present in `docs/runtime/private-beta-runbook.md` with
-  startup config, known limits, preflight, and 1-2 day smoke steps.
+  startup config, known limits, preflight, migration dry-run caveats, and 1-2
+  day smoke steps.
 - Known limits/start config: recorded; current local smoke is explicitly
-  development-stack evidence, not a production-shaped boot.
+  development-stack evidence, not a production-shaped boot. Existing data
+  migration remains incomplete until the DB path mismatch in the dry-run path is
+  resolved or explicitly verified.
 - 1-2 day real-use smoke: not complete. Continue observing real sessions and
   keep provider stream failures as a separate blocker/fix line.
 

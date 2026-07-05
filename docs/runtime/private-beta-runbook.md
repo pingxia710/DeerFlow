@@ -123,6 +123,12 @@ Minimum daily flow:
 8. Restart Gateway once after a terminal run and confirm the terminal run can
    replay from persisted events.
 
+For browser refresh checks, use the canonical agent route
+`/workspace/agents/{agent_name}/chats/{thread_id}`. The legacy
+`/workspace/chats/{thread_id}` route redirects and may abort in-flight history
+requests during scripted checks; use the canonical load/reload result as the
+browser recovery signal.
+
 Stop and open a separate fix if any of these appears:
 
 - cross-thread messages, tasks, artifacts, or busy state

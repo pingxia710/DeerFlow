@@ -117,11 +117,12 @@ Use this file for the 1-2 day real-use smoke from
   records skip/xfail/external dependency boundaries so local pytest evidence is
   not overstated as full live/LLM/Docker/deployment validation.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
-  one API-driven Command Room/Codex confirmation run, two real Command Room
-  subagent-task runs that reached `success`, authenticated run detail/messages
-  replay including the latest run, authenticated browser load/reload recovery,
-  and a post-fix memory update success checkpoint, but the beta observation
-  window still needs continued real sessions.
+  one API-driven Command Room/Codex confirmation run, three real Command Room
+  subagent-task runs that reached `success` including the long multi-subagent
+  run `015b32d7-517a-4c64-b5d9-493c364f4399`, authenticated run detail/messages
+  replay including the latest run, authenticated canonical browser load/reload
+  recovery, and a post-fix memory update success checkpoint, but the beta
+  observation window still needs continued real sessions.
 
 ## Open Follow-Ups
 
@@ -152,7 +153,12 @@ handoffs.
   CST authenticated API replay for latest run
   `cf36bc84-f7c7-4326-ba52-70b706adcb99` returned `200` with `messages_count=9`,
   and authenticated browser load/reload restored the newer reply marker with
-  zero browser warning/error/pageerror entries.
+  zero browser warning/error/pageerror entries. A fourth post-fix real Command
+  Room run, `015b32d7-517a-4c64-b5d9-493c364f4399`, reached `success` at 13:28
+  CST after a long multi-subagent run; 13:29 CST authenticated run
+  detail/messages replay returned `200` with `messages_count=127`, and 13:32 CST
+  canonical browser load/reload restored final-answer markers with zero browser
+  warning/error/pageerror/requestfailed entries.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

@@ -85,6 +85,9 @@ Use this file for the 1-2 day real-use smoke from
 
 ## Open Follow-Ups
 
+See `docs/runtime/private-beta-open-fix-handoffs.md` for separate fix-line
+handoffs.
+
 - Provider stream reliability: real Command Room runs
   `0e582444-dee2-4190-a65b-e7ad68c754fa`,
   `54ee1cae-9cca-4be9-a637-5700d3598e22`,

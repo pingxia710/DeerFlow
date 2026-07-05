@@ -44,6 +44,95 @@ class _RunManagerForPaginationTests:
         )
 
 
+class _RoundStoreForSnapshotTests:
+    def __init__(self) -> None:
+        self.seen_user_id: str | None = None
+
+    async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 50):
+        self.seen_user_id = user_id
+        return [
+            {
+                "round_id": "round-1",
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "current_run_id": "run-2",
+                "state": "closed",
+            }
+        ][:limit]
+
+    async def list_task_lanes_by_round(self, *, thread_id: str, round_id: str, user_id=None, limit: int = 100):
+        self.seen_user_id = user_id
+        return [
+            {
+                "thread_id": thread_id,
+                "run_id": "run-2",
+                "task_id": "task-1",
+                "round_id": round_id,
+                "user_id": user_id,
+                "role": "evidence",
+                "status": "completed",
+            }
+        ][:limit]
+
+
+class _RepairableRoundStoreForSnapshotTests:
+    def __init__(self, *, user_id: str) -> None:
+        self.rounds = [
+            {
+                "round_id": "round-stale",
+                "thread_id": "thread-1",
+                "user_id": user_id,
+                "current_run_id": "run-terminal",
+                "state": "executing",
+            }
+        ]
+        self.task_lanes = [
+            {
+                "thread_id": "thread-1",
+                "run_id": "run-terminal",
+                "task_id": "task-stale",
+                "round_id": "round-stale",
+                "user_id": user_id,
+                "role": "evidence",
+                "status": "executing",
+            }
+        ]
+        self.set_run_state_calls: list[dict] = []
+        self.record_task_events_calls: list[list[dict]] = []
+
+    async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 50):
+        return [dict(row) for row in self.rounds if row["thread_id"] == thread_id and row.get("user_id") == user_id][:limit]
+
+    async def list_task_lanes_by_round(self, *, thread_id: str, round_id: str, user_id=None, limit: int = 100):
+        return [dict(row) for row in self.task_lanes if row["thread_id"] == thread_id and row["round_id"] == round_id and row.get("user_id") == user_id][:limit]
+
+    async def set_run_state(self, run_id: str, *, state: str, event_type: str, content: dict | None = None, next_action: str | None = None):
+        self.set_run_state_calls.append(
+            {
+                "run_id": run_id,
+                "state": state,
+                "event_type": event_type,
+                "content": content,
+                "next_action": next_action,
+            }
+        )
+        for row in self.rounds:
+            if row["current_run_id"] != run_id:
+                continue
+            row["state"] = state
+            row["closed_at"] = "2026-01-01T00:00:02+00:00"
+            return dict(row)
+        return None
+
+    async def record_task_events(self, events: list[dict]) -> None:
+        self.record_task_events_calls.append(events)
+        for event in events:
+            for lane in self.task_lanes:
+                if lane["run_id"] == event.get("run_id") and lane["task_id"] == event.get("task_id"):
+                    lane["status"] = event.get("status") or lane["status"]
+                    lane["error"] = event.get("error_preview") or lane.get("error")
+
+
 def _make_app(event_store=None, run_manager=None, *, user_id: UUID = _TEST_USER_ID):
     """Build a test FastAPI app with stub auth and mocked state."""
     app = make_authed_test_app(user_factory=lambda: _make_user(user_id))
@@ -106,8 +195,138 @@ def test_returns_paginated_envelope():
     assert len(body["data"]) == 3
 
 
-def test_returns_middleware_message_rows():
-    """Middleware LLM messages are persisted chat messages, not route-level control rows."""
+def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
+    """GET /api/threads/{tid}/runtime-snapshot returns one recovery envelope."""
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    round_store = _RoundStoreForSnapshotTests()
+    asyncio.run(
+        run_store.put(
+            "run-1",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="success",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    asyncio.run(
+        run_store.put(
+            "run-2",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="success",
+            created_at="2026-01-01T00:01:00+00:00",
+        )
+    )
+    asyncio.run(
+        run_store.put(
+            "run-other-user",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id="other-user",
+            status="success",
+            created_at="2026-01-01T00:02:00+00:00",
+        )
+    )
+    asyncio.run(
+        event_store.put_batch(
+            [
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "event_type": "llm.human.input",
+                    "category": "message",
+                    "content": {"type": "human", "content": "older question"},
+                    "metadata": {"caller": "lead_agent"},
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-2",
+                    "event_type": "llm.ai.response",
+                    "category": "message",
+                    "content": {"type": "ai", "content": "hidden title"},
+                    "metadata": {"caller": "middleware:title"},
+                    "created_at": "2026-01-01T00:01:01+00:00",
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-other-user",
+                    "event_type": "llm.human.input",
+                    "category": "message",
+                    "content": {"type": "human", "content": "wrong user"},
+                    "metadata": {"caller": "lead_agent"},
+                    "created_at": "2026-01-01T00:02:01+00:00",
+                    "user_id": "other-user",
+                },
+            ]
+        )
+    )
+    app = _make_app(event_store=event_store, run_manager=RunManager(store=run_store))
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runtime-snapshot")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["thread_id"] == "thread-1"
+    assert [run["run_id"] for run in body["runs"]] == ["run-2", "run-1"]
+    assert [page["run_id"] for page in body["run_messages"]] == ["run-2", "run-1"]
+    assert body["run_messages"][0]["data"][0]["display"] == {
+        "visible_in_chat": False,
+        "surface": "control",
+        "reason": "middleware_message",
+    }
+    assert body["run_messages"][1]["data"][0]["content"]["content"] == "older question"
+    assert body["rounds"][0]["round_id"] == "round-1"
+    assert body["task_lanes"][0]["task_id"] == "task-1"
+    assert round_store.seen_user_id == user_id
+
+
+def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
+    """Snapshot recovery closes stale native state when the run is already terminal."""
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    round_store = _RepairableRoundStoreForSnapshotTests(user_id=user_id)
+    asyncio.run(
+        run_store.put(
+            "run-terminal",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="error",
+            metadata={"round_id": "round-stale", "terminal_reason": "worker_lost"},
+            error="worker lost",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    app = _make_app(event_store=event_store, run_manager=RunManager(store=run_store))
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runtime-snapshot")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runs"][0]["status"] == "error"
+    assert body["runs"][0]["terminal_reason"] == "worker_lost"
+    assert body["rounds"][0]["state"] == "blocked"
+    assert body["task_lanes"][0]["status"] == "failed"
+    assert body["task_lanes"][0]["error"] == "Parent run ended before this task lane completed: worker_lost."
+    assert round_store.set_run_state_calls[0]["state"] == "blocked"
+    assert round_store.set_run_state_calls[0]["event_type"] == "round.blocked"
+    assert round_store.record_task_events_calls[0][0]["event_type"] == "task_failed"
+
+
+def test_returns_middleware_message_rows_as_control_rows():
+    """Middleware LLM messages stay persisted but are hidden from chat history."""
     rows = [
         {
             "seq": 1,
@@ -126,8 +345,8 @@ def test_returns_middleware_message_rows():
     data = response.json()["data"]
     assert data[0]["content"] == {"type": "ai", "content": "generated title"}
     assert data[0]["display"] == {
-        "visible_in_chat": True,
-        "surface": "chat",
+        "visible_in_chat": False,
+        "surface": "control",
         "reason": "middleware_message",
     }
 
@@ -169,13 +388,29 @@ def test_list_run_messages_attaches_display_visibility_contract():
         {
             "seq": 5,
             "run_id": "run-1",
+            "event_type": "llm.tool.result",
+            "category": "message",
+            "content": {"type": "tool", "content": "tool output", "tool_call_id": "call-1"},
+            "metadata": {"caller": "task"},
+        },
+        {
+            "seq": 6,
+            "run_id": "run-1",
+            "event_type": "llm.system",
+            "category": "message",
+            "content": {"type": "system", "content": "system prompt"},
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 7,
+            "run_id": "run-1",
             "event_type": "task_running",
             "category": "message",
             "content": {"type": "task_running", "task_id": "call-1", "thread_id": "thread-1", "run_id": "run-1"},
             "metadata": {"caller": "task_event"},
         },
         {
-            "seq": 6,
+            "seq": 8,
             "run_id": "run-1",
             "event_type": "llm.ai.response",
             "category": "message",
@@ -183,7 +418,7 @@ def test_list_run_messages_attaches_display_visibility_contract():
             "metadata": {"caller": "lead_agent"},
         },
         {
-            "seq": 7,
+            "seq": 9,
             "run_id": "run-1",
             "event_type": "llm.human.input",
             "category": "message",
@@ -200,8 +435,10 @@ def test_list_run_messages_attaches_display_visibility_contract():
     assert displays == [
         {"visible_in_chat": True, "surface": "chat", "reason": "human_message"},
         {"visible_in_chat": True, "surface": "chat", "reason": "lead_ai_response"},
-        {"visible_in_chat": True, "surface": "chat", "reason": "middleware_message"},
-        {"visible_in_chat": True, "surface": "chat", "reason": "middleware_message"},
+        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"},
+        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"},
+        {"visible_in_chat": False, "surface": "control", "reason": "tool_message"},
+        {"visible_in_chat": False, "surface": "control", "reason": "control_message"},
         {"visible_in_chat": False, "surface": "control", "reason": "task_event"},
         {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"},
         {"visible_in_chat": False, "surface": "control", "reason": "control_message"},
@@ -488,14 +725,17 @@ def test_get_run_hydrates_store_only_run():
     assert body["status"] == "running"
 
 
-def test_cancel_store_only_run_returns_409():
-    """Store-only runs are readable but not cancellable by this worker."""
-    app = _make_app(run_manager=_make_store_only_run_manager())
+def test_cancel_store_only_run_records_durable_cancel_intent():
+    """Store-only running runs accept a durable cancel intent for their owner worker."""
+    run_manager = _make_store_only_run_manager()
+    app = _make_app(run_manager=run_manager)
     with TestClient(app) as client:
         response = client.post("/api/threads/thread-store/runs/store-only-run/cancel")
 
-    assert response.status_code == 409
-    assert "not active on this worker" in response.json()["detail"]
+    assert response.status_code == 202
+    row = asyncio.run(run_manager._store.get("store-only-run"))  # type: ignore[union-attr]
+    assert row["cancel_action"] == "interrupt"
+    assert row["cancellation_requested_at"]
 
 
 def test_join_store_only_run_returns_409():
@@ -521,14 +761,18 @@ def test_join_local_terminal_run_streams_end():
         on_disconnect="continue",
         user_id=str(_TEST_USER_ID),
     )
-    app = _make_app(event_store=MagicMock(), run_manager=run_manager)
+    event_store = AsyncMock()
+    event_store.list_events.return_value = []
+    app = _make_app(event_store=event_store, run_manager=run_manager)
     app.state.stream_bridge = MemoryStreamBridge()
 
     with TestClient(app) as client:
         response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/join")
 
     assert response.status_code == 200
-    assert response.text.startswith("event: end\n")
+    assert response.text.startswith("event: custom\n")
+    assert '"event_type": "run.terminal"' in response.text
+    assert response.text.endswith("event: end\ndata: null\n\n")
 
 
 def test_stream_store_only_run_returns_409():

@@ -15,9 +15,9 @@ const here = dirname(fileURLToPath(import.meta.url));
  * final answer) reproduce deterministically.
  */
 // Register through the frontend origin (same-origin proxy) so the auth cookies
-// are stored for and sent to localhost:3000 — the gateway is reached via the
+// are stored for and sent to the frontend port — the gateway is reached via the
 // next.config rewrite, never cross-origin from the browser.
-const APP = "http://localhost:3000";
+const APP = `http://localhost:${process.env.PLAYWRIGHT_REAL_BACKEND_FRONTEND_PORT ?? "3100"}`;
 const fixture = JSON.parse(
   readFileSync(
     join(
@@ -109,18 +109,16 @@ test.describe("real backend render (replay, no API key)", () => {
       timeout: 30_000,
     });
 
-    // Visual regression is OS-sensitive (a macOS baseline won't match CI's
-    // Linux render), so it's a local dev gate only; in CI we capture the render
-    // as an artifact for human review instead of hard-asserting a cross-OS
-    // baseline. The DOM assertions above are the CI gate.
-    if (process.env.CI) {
-      await page.screenshot({
-        path: "test-results/real-backend-render.png",
+    // Visual regression is OS-sensitive, so the DOM assertions above are the
+    // default gate. Enable the local screenshot baseline explicitly when needed.
+    if (process.env.PLAYWRIGHT_REAL_BACKEND_VISUAL === "1") {
+      await expect(page).toHaveScreenshot("real-backend-render.png", {
+        maxDiffPixelRatio: 0.02,
         fullPage: true,
       });
     } else {
-      await expect(page).toHaveScreenshot("real-backend-render.png", {
-        maxDiffPixelRatio: 0.02,
+      await page.screenshot({
+        path: "test-results/real-backend-render.png",
         fullPage: true,
       });
     }

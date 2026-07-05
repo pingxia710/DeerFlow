@@ -438,6 +438,17 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_by_thread_tie_uses_updated_at(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        timestamp = "2024-01-01T00:00:00+00:00"
+        await repo.put("r1", thread_id="t1", created_at=timestamp)
+        await repo.put("r2", thread_id="t1", created_at=timestamp)
+        await repo.update_status("r2", "success")
+        rows = await repo.list_by_thread("t1")
+        assert [row["run_id"] for row in rows] == ["r2", "r1"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_limit(self, tmp_path):
         repo = await _make_repo(tmp_path)
         for i in range(5):

@@ -90,6 +90,11 @@ type ThreadActivitySnapshot = {
   finished: ReadonlySet<string>;
 };
 
+export type StreamErrorRecoveryRun = {
+  threadId: string;
+  runId: string;
+};
+
 const ACTIVE_THREAD_STATUSES = new Set([
   "busy",
   "pending",
@@ -518,9 +523,21 @@ export function mergeFetchedRunMessages(
   runId: string,
   replaceRun: boolean,
 ) {
-  const base = replaceRun
-    ? previous.filter((message) => message.run_id !== runId)
-    : previous;
+  let base = previous;
+  if (replaceRun) {
+    const fetchedSeqs = fetched
+      .map((message) => message.seq)
+      .filter((seq): seq is number => typeof seq === "number");
+    if (fetchedSeqs.length > 0) {
+      const minFetchedSeq = Math.min(...fetchedSeqs);
+      base = previous.filter(
+        (message) =>
+          message.run_id !== runId ||
+          typeof message.seq !== "number" ||
+          message.seq < minFetchedSeq,
+      );
+    }
+  }
   return dedupeRunMessagesByIdentity(
     replaceRun ? [...base, ...fetched] : [...fetched, ...base],
   );
@@ -538,6 +555,20 @@ export function partitionKnownRunIds(runIds: Iterable<string>, runs: Run[]) {
     }
   }
   return { known, pending };
+}
+
+export function resetLoadedRunStateForRefresh(
+  runIds: Iterable<string>,
+  runs: Run[],
+  loadedRunIds: Set<string>,
+  runBeforeSeq: Map<string, number>,
+) {
+  const result = partitionKnownRunIds(runIds, runs);
+  for (const runId of result.known) {
+    loadedRunIds.delete(runId);
+    runBeforeSeq.delete(runId);
+  }
+  return result;
 }
 
 export function getSupersededRunIds(
@@ -725,6 +756,48 @@ export function asRunTerminalEvent(value: unknown): RunTerminalEvent | null {
     status,
     terminal_reason: terminalReason,
   };
+}
+
+function taskLaneStatus(status: string): NonNullable<SubtaskUpdate["status"]> {
+  if (status === "completed") {
+    return "completed";
+  }
+  if (
+    status === "in_progress" ||
+    status === "running" ||
+    status === "pending"
+  ) {
+    return "in_progress";
+  }
+  return "failed";
+}
+
+export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
+  const status = taskLaneStatus(lane.status);
+  const description = lane.role ? `${lane.role} task` : lane.task_id;
+  const result = lane.result_ref ?? lane.evidence_ref ?? undefined;
+  const update: SubtaskUpdate = {
+    id: lane.task_id,
+    threadId: lane.thread_id,
+    runId: lane.run_id,
+    status,
+    subagent_type: lane.role ?? "task",
+    description,
+    prompt: description,
+    actionResultStatus: lane.status,
+    notify: true,
+  };
+  if (lane.created_at) {
+    update.startedAt = taskEventStartedAt(lane.created_at);
+  }
+  if (status === "completed" && result) {
+    update.result = result;
+  }
+  if (status === "failed") {
+    update.error = lane.error ?? lane.status;
+    update.terminalReason = lane.status;
+  }
+  return update;
 }
 
 function actionResultString(event: PersistedTaskEvent, field: string) {
@@ -919,8 +992,14 @@ export function isVisibleHistoryRunMessage(
   if (typeof message.display?.visible_in_chat === "boolean") {
     return message.display.visible_in_chat;
   }
+  const caller =
+    typeof message.metadata?.caller === "string" ? message.metadata.caller : "";
   return (
-    !isTaskEventRunMessage(message) && !isHiddenFromUIMessage(message.content)
+    (message.content.type === "human" || message.content.type === "ai") &&
+    !isTaskEventRunMessage(message) &&
+    !caller.startsWith("middleware:") &&
+    !caller.startsWith("subagent:") &&
+    !isHiddenFromUIMessage(message.content)
   );
 }
 
@@ -1018,6 +1097,38 @@ export function getTerminalTransitionRunIds(
     .map((run) => run.run_id);
 }
 
+type RunWithTerminalFields = Run & {
+  error?: unknown;
+  terminal_reason?: unknown;
+};
+
+export function getLatestRunTerminalNotice(
+  runs: Run[] | undefined,
+  messageRows: RunMessage[],
+): ThreadRunTerminalNotice | null {
+  const latestRun = runs?.[0] as RunWithTerminalFields | undefined;
+  const runId = typeof latestRun?.run_id === "string" ? latestRun.run_id : null;
+  const status = stringValue(latestRun?.status);
+  if (!runId || !status || !isTerminalRunStatus(status)) {
+    return null;
+  }
+  const hasVisibleAiForRun = messageRows.some(
+    (message) =>
+      message.run_id === runId &&
+      isVisibleHistoryRunMessage(message) &&
+      message.content.type === "ai",
+  );
+  if (hasVisibleAiForRun) {
+    return null;
+  }
+  return {
+    runId,
+    status,
+    terminalReason: stringValue(latestRun?.terminal_reason),
+    error: stringValue(latestRun?.error),
+  };
+}
+
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
 
 export function shouldAutoContinueOnEmptyRun(
@@ -1028,6 +1139,27 @@ export function shouldAutoContinueOnEmptyRun(
   return (
     fetchedMessageCount === 0 &&
     consecutiveEmptyLoads < maxConsecutiveEmptyLoads
+  );
+}
+
+export function shouldAutoContinueRunHistory({
+  hasMoreUnloadedRuns,
+  visibleMessageCount,
+  consecutiveEmptyLoads,
+}: {
+  hasMoreUnloadedRuns: boolean;
+  visibleMessageCount: number;
+  consecutiveEmptyLoads: number;
+}): boolean {
+  if (!hasMoreUnloadedRuns) {
+    return false;
+  }
+  if (visibleMessageCount > 0) {
+    return true;
+  }
+  return shouldAutoContinueOnEmptyRun(
+    visibleMessageCount,
+    consecutiveEmptyLoads,
   );
 }
 
@@ -1043,6 +1175,71 @@ type RunMessagesPageResponse = {
   has_more?: boolean;
   hasMore?: boolean;
 };
+
+export type TaskLaneSnapshot = {
+  thread_id: string;
+  run_id: string;
+  task_id: string;
+  role?: string | null;
+  status: string;
+  result_ref?: string | null;
+  evidence_ref?: string | null;
+  error?: string | null;
+  created_at?: string;
+};
+
+export type ThreadRunTerminalNotice = {
+  runId: string;
+  status: string;
+  terminalReason?: string;
+  error?: string;
+};
+
+type ThreadRuntimeSnapshotResponse = {
+  thread_id: string;
+  runs: Run[];
+  run_messages: Array<RunMessagesPageResponse & { run_id: string }>;
+  task_lanes?: TaskLaneSnapshot[];
+};
+
+type RuntimeSnapshotRunMessagesPage =
+  ThreadRuntimeSnapshotResponse["run_messages"][number];
+
+export function threadRuntimeSnapshotQueryKey(threadId?: string | null) {
+  return ["thread", threadId, "runtime-snapshot"] as const;
+}
+
+export function buildThreadRuntimeSnapshotUrl(
+  baseUrl: string,
+  threadId: string,
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const path = `/api/threads/${encodeURIComponent(threadId)}/runtime-snapshot`;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
+  return normalizedBaseUrl ? url.toString() : url.pathname;
+}
+
+export async function readThreadRuntimeSnapshotResponse(
+  response: Response,
+): Promise<ThreadRuntimeSnapshotResponse> {
+  const fallback = "Failed to load thread runtime snapshot.";
+  if (!response.ok) {
+    const error = new Error(await readResponseErrorMessage(response, fallback));
+    Object.defineProperty(error, "status", {
+      value: response.status,
+      enumerable: true,
+    });
+    throw error;
+  }
+  try {
+    return (await response.json()) as ThreadRuntimeSnapshotResponse;
+  } catch {
+    throw new Error(fallback);
+  }
+}
 
 export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
   return result.has_more ?? result.hasMore ?? false;
@@ -1067,6 +1264,21 @@ export function getNextRunMessagesBeforeSeq(
     return null;
   }
   return getOldestRunMessageSeq(result.data) ?? undefined;
+}
+
+export function applySnapshotRunMessagePageState(
+  pages: RuntimeSnapshotRunMessagesPage[],
+  loadedRunIds: Set<string>,
+  runBeforeSeq: Map<string, number>,
+) {
+  for (const page of pages) {
+    const nextBeforeSeq = getNextRunMessagesBeforeSeq(page);
+    if (typeof nextBeforeSeq === "number") {
+      runBeforeSeq.set(page.run_id, nextBeforeSeq);
+    } else if (nextBeforeSeq === null) {
+      loadedRunIds.add(page.run_id);
+    }
+  }
 }
 
 export function buildRunMessagesUrl(
@@ -1522,6 +1734,58 @@ export function applyBackgroundRunProbeResult(
   return true;
 }
 
+export function applyStreamErrorRecovery({
+  queryClient,
+  threadId,
+  runId,
+  isMock,
+}: {
+  queryClient: QueryClient;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+  isMock?: boolean;
+}): StreamErrorRecoveryRun | null {
+  if (!threadId || !runId) {
+    if (threadId) {
+      clearThreadActivity(threadId);
+    }
+    return null;
+  }
+  markThreadBusyInCaches(queryClient, threadId);
+  startBackgroundRunProbe({ queryClient, threadId, runId, isMock });
+  void queryClient.invalidateQueries({
+    queryKey: threadRunsQueryKey(threadId),
+  });
+  return { threadId, runId };
+}
+
+export function isThreadRecoveringFromStreamError(
+  recoveryRun: StreamErrorRecoveryRun | null,
+  threadId: string | null | undefined,
+) {
+  return Boolean(threadId && recoveryRun?.threadId === threadId);
+}
+
+export function hasTerminalStreamErrorRecoveryRun(
+  recoveryRun: StreamErrorRecoveryRun | null,
+  runs: Run[] | undefined,
+) {
+  return Boolean(
+    recoveryRun &&
+    runs?.some(
+      (run) =>
+        run.run_id === recoveryRun.runId && isTerminalRunStatus(run.status),
+    ),
+  );
+}
+
+export function getVisibleThreadError<T>(
+  error: T,
+  isStreamErrorRecovering: boolean,
+): T | undefined {
+  return isStreamErrorRecovering ? undefined : error;
+}
+
 type RefreshRuns = (runIds?: Iterable<string>) => void;
 
 export function reconcileTaskEventRunHistory(
@@ -1633,6 +1897,27 @@ export function getBackgroundRunProbeDelay(attempt: number): number {
   );
 }
 
+export function stopBackgroundRunProbeRecovery(
+  queryClient: QueryClient,
+  threadId: string,
+) {
+  clearThreadActivity(threadId);
+  void queryClient.invalidateQueries({
+    queryKey: threadRunsQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+}
+
+export function shouldKeepStreamErrorRecoveryRun(
+  recoveryRun: StreamErrorRecoveryRun | null,
+  activity: ThreadActivitySnapshot,
+) {
+  return Boolean(recoveryRun && activity.running.has(recoveryRun.threadId));
+}
+
 export function stopBackgroundRunProbe(
   threadId: string | null | undefined,
   runId: string | null | undefined,
@@ -1670,6 +1955,7 @@ export function startBackgroundRunProbe({
   const attempt = (backgroundRunProbeAttempts.get(key) ?? 0) + 1;
   if (shouldStopBackgroundRunProbe(attempt)) {
     backgroundRunProbeAttempts.delete(key);
+    stopBackgroundRunProbeRecovery(queryClient, threadId);
     return;
   }
   backgroundRunProbeAttempts.set(key, attempt);
@@ -1700,7 +1986,7 @@ export function startBackgroundRunProbe({
         backgroundRunProbeTimers.delete(key);
         if (shouldStopBackgroundRunProbe(attempt, error)) {
           backgroundRunProbeAttempts.delete(key);
-          clearThreadActivity(threadId);
+          stopBackgroundRunProbeRecovery(queryClient, threadId);
           return;
         }
       }
@@ -1803,6 +2089,7 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const threadActivity = useThreadActivity();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -1823,6 +2110,8 @@ export function useThreadStream({
   >(() => new Set());
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
+  const [streamErrorRecoveryRun, setStreamErrorRecoveryRunState] =
+    useState<StreamErrorRecoveryRun | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
@@ -1831,6 +2120,7 @@ export function useThreadStream({
   // continues in the background.
   const streamThreadIdRef = useRef<string | null>(threadId ?? null);
   const streamRunIdRef = useRef<string | null>(null);
+  const streamErrorRecoveryRunRef = useRef<StreamErrorRecoveryRun | null>(null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
@@ -1841,17 +2131,27 @@ export function useThreadStream({
   });
 
   const {
+    runs: historyRuns,
     messages: history,
     hasMore: hasMoreHistory,
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     error: historyError,
+    terminalNotice,
     appendMessages,
     refreshRuns: refreshHistoryRuns,
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: !isMock,
     pendingSupersededRunIds,
   });
+
+  const setStreamErrorRecoveryRun = useCallback(
+    (next: StreamErrorRecoveryRun | null) => {
+      streamErrorRecoveryRunRef.current = next;
+      setStreamErrorRecoveryRunState(next);
+    },
+    [],
+  );
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -1886,44 +2186,48 @@ export function useThreadStream({
     streamThreadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    streamThreadIdRef.current = _threadId;
-    streamRunIdRef.current = _runId;
-    const currentView = currentViewThreadIdRef.current;
-    const streamStillOwnsVisibleChat =
-      currentView === _threadId ||
-      optimisticThreadIdRef.current === currentView ||
-      liveMessagesThreadIdRef.current === currentView;
-    setOptimisticThreadId((currentOptimisticThreadId) => {
-      if (
-        currentOptimisticThreadId &&
-        (currentOptimisticThreadId === currentView ||
-          currentOptimisticThreadId === _threadId)
-      ) {
-        optimisticThreadIdRef.current = _threadId;
-        return _threadId;
+  const handleStreamStart = useCallback(
+    (_threadId: string, _runId: string) => {
+      streamThreadIdRef.current = _threadId;
+      streamRunIdRef.current = _runId;
+      setStreamErrorRecoveryRun(null);
+      const currentView = currentViewThreadIdRef.current;
+      const streamStillOwnsVisibleChat =
+        currentView === _threadId ||
+        optimisticThreadIdRef.current === currentView ||
+        liveMessagesThreadIdRef.current === currentView;
+      setOptimisticThreadId((currentOptimisticThreadId) => {
+        if (
+          currentOptimisticThreadId &&
+          (currentOptimisticThreadId === currentView ||
+            currentOptimisticThreadId === _threadId)
+        ) {
+          optimisticThreadIdRef.current = _threadId;
+          return _threadId;
+        }
+        optimisticThreadIdRef.current = currentOptimisticThreadId;
+        return currentOptimisticThreadId;
+      });
+      setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+        if (
+          currentLiveMessagesThreadId &&
+          (currentLiveMessagesThreadId === currentView ||
+            currentLiveMessagesThreadId === _threadId)
+        ) {
+          liveMessagesThreadIdRef.current = _threadId;
+          return _threadId;
+        }
+        liveMessagesThreadIdRef.current = currentLiveMessagesThreadId;
+        return currentLiveMessagesThreadId;
+      });
+      if (!startedRef.current && streamStillOwnsVisibleChat) {
+        listeners.current.onStart?.(_threadId, _runId);
+        startedRef.current = true;
       }
-      optimisticThreadIdRef.current = currentOptimisticThreadId;
-      return currentOptimisticThreadId;
-    });
-    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      if (
-        currentLiveMessagesThreadId &&
-        (currentLiveMessagesThreadId === currentView ||
-          currentLiveMessagesThreadId === _threadId)
-      ) {
-        liveMessagesThreadIdRef.current = _threadId;
-        return _threadId;
-      }
-      liveMessagesThreadIdRef.current = currentLiveMessagesThreadId;
-      return currentLiveMessagesThreadId;
-    });
-    if (!startedRef.current && streamStillOwnsVisibleChat) {
-      listeners.current.onStart?.(_threadId, _runId);
-      startedRef.current = true;
-    }
-    setOnStreamThreadId(_threadId);
-  }, []);
+      setOnStreamThreadId(_threadId);
+    },
+    [setStreamErrorRecoveryRun],
+  );
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
@@ -2097,14 +2401,19 @@ export function useThreadStream({
         return;
       }
 
+      const terminalEvent = asRunTerminalEvent(event);
       if (
+        terminalEvent &&
         reconcileTerminalRunHistory(
           queryClient,
-          event,
+          terminalEvent,
           refreshHistoryRuns,
           settleRunSubtasks,
         )
       ) {
+        if (streamErrorRecoveryRunRef.current?.runId === terminalEvent.run_id) {
+          setStreamErrorRecoveryRun(null);
+        }
         return;
       }
 
@@ -2124,19 +2433,21 @@ export function useThreadStream({
     onError(error, run) {
       const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
       const streamRunId = run?.run_id ?? streamRunIdRef.current;
-      if (streamRunId) {
-        clearReconnectRun(streamThreadId, streamRunId);
-        stopBackgroundRunProbe(streamThreadId, streamRunId);
+      const recoveryRun = applyStreamErrorRecovery({
+        queryClient,
+        threadId: streamThreadId,
+        runId: streamRunId,
+        isMock,
+      });
+      setStreamErrorRecoveryRun(recoveryRun);
+      streamFinishedRef.current = recoveryRun === null;
+      if (recoveryRun === null) {
+        setOptimisticMessages([]);
+        setOptimisticThreadTarget(null);
+        setLiveMessagesThreadTarget(null);
+        setPendingSupersededRunIds(new Set());
+        setPendingSupersededMessageIds(new Set());
       }
-      if (streamThreadId) {
-        clearThreadActivity(streamThreadId);
-      }
-      streamFinishedRef.current = true;
-      setOptimisticMessages([]);
-      setOptimisticThreadTarget(null);
-      setLiveMessagesThreadTarget(null);
-      setPendingSupersededRunIds(new Set());
-      setPendingSupersededMessageIds(new Set());
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -2159,6 +2470,7 @@ export function useThreadStream({
         clearReconnectRun(streamThreadId, streamRunId);
         stopBackgroundRunProbe(streamThreadId, streamRunId);
       }
+      setStreamErrorRecoveryRun(null);
       if (streamThreadId) {
         markThreadFinished(streamThreadId);
       }
@@ -2235,9 +2547,31 @@ export function useThreadStream({
     pendingUsageBaselineMessageIdsRef.current = new Set();
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
+    setStreamErrorRecoveryRun(null);
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-  }, [threadId]);
+  }, [setStreamErrorRecoveryRun, threadId]);
+
+  useEffect(() => {
+    if (
+      !hasTerminalStreamErrorRecoveryRun(streamErrorRecoveryRun, historyRuns)
+    ) {
+      return;
+    }
+    streamFinishedRef.current = true;
+    setStreamErrorRecoveryRun(null);
+  }, [historyRuns, setStreamErrorRecoveryRun, streamErrorRecoveryRun]);
+
+  useEffect(() => {
+    if (
+      !streamErrorRecoveryRun ||
+      shouldKeepStreamErrorRecoveryRun(streamErrorRecoveryRun, threadActivity)
+    ) {
+      return;
+    }
+    streamFinishedRef.current = true;
+    setStreamErrorRecoveryRun(null);
+  }, [setStreamErrorRecoveryRun, streamErrorRecoveryRun, threadActivity]);
 
   useEffect(() => {
     // Intentional: queued follow-ups are tied to the visible chat. On route
@@ -2321,7 +2655,11 @@ export function useThreadStream({
           new Error("Attachments require a saved thread before upload."),
         );
       }
-      if (thread.isLoading) {
+      const targetThreadRecovering = isThreadRecoveringFromStreamError(
+        streamErrorRecoveryRunRef.current,
+        threadId,
+      );
+      if (thread.isLoading || targetThreadRecovering) {
         if (message.files.length > 0) {
           sendInFlightRef.current = false;
           toast(t.inputBox.waitForCurrentResponse);
@@ -2552,7 +2890,7 @@ export function useThreadStream({
     const next = queuedMessagesRef.current[0];
     if (
       !shouldReleaseQueuedThreadMessage({
-        isLoading: thread.isLoading,
+        isLoading: thread.isLoading || streamErrorRecoveryRun !== null,
         streamFinished: streamFinishedRef.current,
         sendInFlight: sendInFlightRef.current,
         queuedThreadId: next?.threadId,
@@ -2571,7 +2909,12 @@ export function useThreadStream({
       next.extraContext,
       next.options,
     );
-  }, [currentViewThreadId, sendMessage, thread.isLoading]);
+  }, [
+    currentViewThreadId,
+    sendMessage,
+    streamErrorRecoveryRun,
+    thread.isLoading,
+  ]);
 
   const regenerateMessage = useCallback(
     async (
@@ -2691,6 +3034,10 @@ export function useThreadStream({
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
+  const hasVisibleStreamErrorRecovery = isThreadRecoveringFromStreamError(
+    streamErrorRecoveryRun,
+    currentViewThreadId,
+  );
 
   const mergedMessages = mergeMessages(
     visibleHistory,
@@ -2708,6 +3055,8 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    isLoading: thread.isLoading || hasVisibleStreamErrorRecovery,
+    error: getVisibleThreadError(thread.error, hasVisibleStreamErrorRecovery),
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;
@@ -2720,6 +3069,7 @@ export function useThreadStream({
     isUploading,
     isHistoryLoading,
     historyError,
+    terminalNotice,
     hasMoreHistory,
     loadMoreHistory,
   } as const;
@@ -2768,11 +3118,41 @@ export function resolveThreadHistoryReset({
   return "none";
 }
 
+function useThreadRuntimeSnapshot(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery<ThreadRuntimeSnapshotResponse>({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
+    queryFn: async () => {
+      if (!threadId) {
+        throw new Error("Missing thread id.");
+      }
+      const url = buildThreadRuntimeSnapshotUrl(getBackendBaseURL(), threadId);
+      return fetch(url, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+      }).then(readThreadRuntimeSnapshotResponse);
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadHistory(
   threadId: string,
   { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
 ) {
-  const runs = useThreadRuns(threadId, { enabled });
+  const snapshot = useThreadRuntimeSnapshot(threadId, { enabled });
+  const runs = useThreadRuns(threadId, {
+    enabled: enabled && (!snapshot.isLoading || snapshot.isError),
+  });
   const threadIdRef = useRef(threadId);
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
@@ -2796,19 +3176,24 @@ export function useThreadHistory(
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
   const { isError: runsIsError, refetch: refetchRuns } = runs;
   updateSubtaskRef.current = updateSubtask;
+  const runsData = runs.data ?? snapshot.data?.runs;
 
   const supersededRunIds = useMemo(() => {
-    return getSupersededRunIds(runs.data, pendingSupersededRunIds);
-  }, [pendingSupersededRunIds, runs.data]);
+    return getSupersededRunIds(runsData, pendingSupersededRunIds);
+  }, [pendingSupersededRunIds, runsData]);
 
   const messages = useMemo(() => {
     return buildVisibleHistoryMessages(
       messageRows,
       supersededRunIds,
       appendedMessages,
-      runs.data,
+      runsData,
     );
-  }, [appendedMessages, messageRows, runs.data, supersededRunIds]);
+  }, [appendedMessages, messageRows, runsData, supersededRunIds]);
+  const terminalNotice = useMemo(
+    () => getLatestRunTerminalNotice(runsData, messageRows),
+    [messageRows, runsData],
+  );
 
   const loadMessages = useCallback(async () => {
     if (!enabled) {
@@ -2841,6 +3226,18 @@ export function useThreadHistory(
       let consecutiveEmptyLoads = 0;
       do {
         pendingLoadRef.current = false;
+        const queuedRefreshRunIds = [...pendingRefreshRunIdsRef.current];
+        if (queuedRefreshRunIds.length > 0) {
+          const { known } = resetLoadedRunStateForRefresh(
+            queuedRefreshRunIds,
+            runsRef.current,
+            loadedRunIdsRef.current,
+            runBeforeSeqRef.current,
+          );
+          for (const runId of known) {
+            pendingRefreshRunIdsRef.current.delete(runId);
+          }
+        }
 
         const nextRunIndex = findLatestUnloadedRunIndex(
           runsRef.current,
@@ -2887,11 +3284,11 @@ export function useThreadHistory(
           requestThreadId,
           appliedTaskEventKeysRef.current,
         );
-        const _messages = result.data.filter(isVisibleHistoryRunMessage);
+        const visibleMessages = result.data.filter(isVisibleHistoryRunMessage);
         setMessageRows((prev) =>
           mergeFetchedRunMessages(
             prev,
-            _messages,
+            result.data,
             run.run_id,
             beforeSeq === undefined,
           ),
@@ -2907,13 +3304,20 @@ export function useThreadHistory(
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
           loadedRunIdsRef.current.add(run.run_id);
+          const hasMoreUnloadedRuns =
+            findLatestUnloadedRunIndex(
+              runsRef.current,
+              loadedRunIdsRef.current,
+            ) !== -1;
           if (
-            shouldAutoContinueOnEmptyRun(
-              _messages.length,
+            shouldAutoContinueRunHistory({
+              hasMoreUnloadedRuns,
+              visibleMessageCount: visibleMessages.length,
               consecutiveEmptyLoads,
-            )
+            })
           ) {
-            consecutiveEmptyLoads += 1;
+            consecutiveEmptyLoads =
+              visibleMessages.length === 0 ? consecutiveEmptyLoads + 1 : 0;
             pendingLoadRef.current = true;
           } else {
             consecutiveEmptyLoads = 0;
@@ -2941,9 +3345,63 @@ export function useThreadHistory(
       }
     }
   }, [enabled]);
+
+  useEffect(() => {
+    const data = snapshot.data;
+    if (!enabled || data?.thread_id !== threadId) {
+      return;
+    }
+
+    loadGenerationRef.current += 1;
+    historyLoadAbortRef.current?.abort();
+    historyLoadAbortRef.current = null;
+    threadIdRef.current = threadId;
+    runsRef.current = data.runs;
+    indexRef.current = -1;
+    pendingLoadRef.current = false;
+    loadingRunIdRef.current = null;
+    loadedRunIdsRef.current = new Set();
+    runBeforeSeqRef.current = new Map();
+    activeRunIdsRef.current = new Set(
+      data.runs
+        .filter((run) => isActiveRunStatus(run.status))
+        .map((run) => run.run_id),
+    );
+    appliedTaskEventKeysRef.current = new Set();
+
+    const rows = data.run_messages.flatMap((page) => page.data);
+    applyTaskEventRunMessages(
+      rows,
+      updateSubtaskRef.current,
+      threadId,
+      appliedTaskEventKeysRef.current,
+    );
+    for (const lane of data.task_lanes ?? []) {
+      updateSubtaskRef.current(taskLaneSubtaskUpdate(lane));
+    }
+    for (const page of data.run_messages) {
+      pendingRefreshRunIdsRef.current.delete(page.run_id);
+    }
+    applySnapshotRunMessagePageState(
+      data.run_messages,
+      loadedRunIdsRef.current,
+      runBeforeSeqRef.current,
+    );
+    latestRoundIdRef.current = roundIdOfRun(data.runs[0]);
+    autoLoadedLatestRunIdRef.current = data.runs[0]?.run_id ?? null;
+    indexRef.current = findLatestUnloadedRunIndex(
+      data.runs,
+      loadedRunIdsRef.current,
+    );
+    loadingRef.current = false;
+    setError(null);
+    setLoading(false);
+    setMessageRows(rows);
+  }, [enabled, snapshot.data, threadId]);
+
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
-    const latestRoundId = roundIdOfRun(runs.data?.[0]);
+    const latestRoundId = roundIdOfRun(runsData?.[0]);
     const resetMode = resolveThreadHistoryReset({
       enabled,
       threadChanged,
@@ -2984,14 +3442,14 @@ export function useThreadHistory(
       latestRoundIdRef.current = latestRoundId;
     }
 
-    if (runs.data && runs.data.length > 0) {
-      runsRef.current = runs.data ?? [];
+    if (runsData && runsData.length > 0) {
+      runsRef.current = runsData ?? [];
       indexRef.current = findLatestUnloadedRunIndex(
-        runs.data,
+        runsData,
         loadedRunIdsRef.current,
       );
     }
-    const latestRunId = runs.data?.[0]?.run_id ?? null;
+    const latestRunId = runsData?.[0]?.run_id ?? null;
     if (
       shouldAutoLoadLatestRun(latestRunId, autoLoadedLatestRunIdRef.current)
     ) {
@@ -3000,7 +3458,7 @@ export function useThreadHistory(
         toast.error("Failed to load thread history.");
       });
     }
-  }, [enabled, threadId, runs.data, loadMessages]);
+  }, [enabled, threadId, runsData, loadMessages]);
 
   useEffect(() => {
     return () => {
@@ -3030,10 +3488,19 @@ export function useThreadHistory(
       if (ids.length === 0) {
         return;
       }
-      for (const runId of ids) {
-        loadedRunIdsRef.current.delete(runId);
-        runBeforeSeqRef.current.delete(runId);
+      if (loadingRef.current) {
+        for (const runId of ids) {
+          pendingRefreshRunIdsRef.current.add(runId);
+        }
+        pendingLoadRef.current = true;
+        return;
       }
+      resetLoadedRunStateForRefresh(
+        ids,
+        runsRef.current,
+        loadedRunIdsRef.current,
+        runBeforeSeqRef.current,
+      );
       indexRef.current = findLatestUnloadedRunIndex(
         runsRef.current,
         loadedRunIdsRef.current,
@@ -3058,23 +3525,23 @@ export function useThreadHistory(
   }, [loadMessages, refetchRuns, runsIsError]);
 
   useEffect(() => {
-    if (!enabled || !runs.data) {
+    if (!enabled || !runsData) {
       activeRunIdsRef.current = new Set();
       return;
     }
     const terminalTransitionRunIds = getTerminalTransitionRunIds(
       activeRunIdsRef.current,
-      runs.data,
+      runsData,
     );
     const { known: pendingRefreshRunIds } = partitionKnownRunIds(
       pendingRefreshRunIdsRef.current,
-      runs.data,
+      runsData,
     );
     for (const runId of pendingRefreshRunIds) {
       pendingRefreshRunIdsRef.current.delete(runId);
     }
     activeRunIdsRef.current = new Set(
-      runs.data
+      runsData
         .filter((run) => isActiveRunStatus(run.status))
         .map((run) => run.run_id),
     );
@@ -3085,23 +3552,32 @@ export function useThreadHistory(
     if (refreshRunIds.length > 0) {
       refreshRuns(refreshRunIds);
     }
-  }, [enabled, refreshRuns, runs.data]);
+  }, [enabled, refreshRuns, runsData]);
 
   const hasThreadId = Boolean(threadId);
   const hasUnloadedRuns = Boolean(
-    runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
+    runsData?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
   );
+  const isSnapshotLoading =
+    enabled && hasThreadId && snapshot.isLoading && !snapshot.data;
   const isRunsLoading =
     enabled &&
     hasThreadId &&
-    (runs.isLoading || (runs.isFetching && !runs.data));
+    (isSnapshotLoading ||
+      runs.isLoading ||
+      (runs.isFetching && !runs.data && !snapshot.data));
   const isRunsUnresolved =
-    enabled && hasThreadId && !runs.data && !runs.isError;
+    enabled &&
+    hasThreadId &&
+    !runsData &&
+    !runs.isError &&
+    (!snapshot.isError || runs.isLoading || runs.isFetching);
   const hasMore =
     enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
   return {
-    runs: runs.data,
+    runs: runsData,
     messages,
+    terminalNotice,
     loading: loading || isRunsLoading || isRunsUnresolved,
     error: error ?? (runs.isError ? runs.error : null),
     appendMessages,

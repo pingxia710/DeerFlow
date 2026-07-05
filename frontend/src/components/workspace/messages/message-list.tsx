@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import {
+  AlertCircleIcon,
   BrainCircuitIcon,
   ChevronUpIcon,
   Loader2Icon,
@@ -52,6 +53,7 @@ import {
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
 import { HISTORY_CREATED_AT_KEY } from "@/core/threads/hooks";
+import type { ThreadRunTerminalNotice } from "@/core/threads/hooks";
 import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
@@ -173,6 +175,30 @@ function LoadMoreHistoryIndicator({
   );
 }
 
+function RunTerminalNotice({ notice }: { notice: ThreadRunTerminalNotice }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="status"
+      data-testid="run-terminal-notice"
+      className="border-border/70 bg-muted/40 text-muted-foreground flex w-full items-start gap-2 rounded-md border px-3 py-2 text-sm"
+    >
+      <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
+      <div className="min-w-0">
+        <div className="text-foreground font-medium">
+          {t.chats.runTerminalNoticeTitle}
+        </div>
+        <div className="mt-0.5 break-words">
+          {t.chats.runTerminalNoticeDescription(
+            notice.status,
+            notice.terminalReason ?? notice.error,
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MessageList({
   className,
   threadId,
@@ -185,6 +211,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  terminalNotice,
   onRegenerateMessage,
   canRegenerate = false,
 }: {
@@ -199,6 +226,7 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  terminalNotice?: ThreadRunTerminalNotice | null;
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
@@ -233,6 +261,9 @@ export function MessageList({
       .slice(lastHumanIndex)
       .some((g) => g.type === "assistant");
   }, [groupedMessages]);
+  const shouldShowTerminalNotice = Boolean(
+    terminalNotice && !thread.isLoading && !hasActiveAssistantText,
+  );
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
@@ -708,6 +739,9 @@ export function MessageList({
               </Reasoning>
             </div>
           )}
+        {shouldShowTerminalNotice && terminalNotice && (
+          <RunTerminalNotice notice={terminalNotice} />
+        )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>

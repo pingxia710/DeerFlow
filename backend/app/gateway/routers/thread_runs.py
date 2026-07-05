@@ -63,7 +63,7 @@ from deerflow.command_room.review import (
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
-from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
+from deerflow.runtime.runs.schemas import is_inflight_status, is_terminal_status, run_status_value
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,14 @@ _RUN_EVIDENCE_EVENT_TYPES = [
     "task.cancelled",
     "task.timed_out",
 ]
+_TERMINAL_ROUND_STATES = frozenset({"closed", "blocked"})
+_ACTIVE_TASK_LANE_STATUSES = frozenset({"in_progress", "running", "pending", "executing"})
+_TASK_LANE_TERMINAL_EVENT_BY_STATUS = {
+    "completed": "task_completed",
+    "failed": "task_failed",
+    "cancelled": "task_cancelled",
+    "timed_out": "task_timed_out",
+}
 
 
 async def _bounded_wait_for_cancelled_task(task: asyncio.Task) -> None:
@@ -262,6 +270,20 @@ class TaskLaneResponse(BaseModel):
     error: str | None = None
     created_at: str = ""
     updated_at: str = ""
+
+
+class RuntimeSnapshotRunMessages(BaseModel):
+    run_id: str
+    data: list[dict[str, Any]] = Field(default_factory=list)
+    has_more: bool = False
+
+
+class ThreadRuntimeSnapshotResponse(BaseModel):
+    thread_id: str
+    runs: list[RunResponse] = Field(default_factory=list)
+    run_messages: list[RuntimeSnapshotRunMessages] = Field(default_factory=list)
+    rounds: list[RoundResponse] = Field(default_factory=list)
+    task_lanes: list[TaskLaneResponse] = Field(default_factory=list)
 
 
 QualityRecommendation = Literal["continue", "needs_more_evidence", "needs_revision", "escalate", "stop"]
@@ -572,6 +594,186 @@ def _public_run_error_from_multiline(text: str) -> str | None:
             return message
         return None
     return None
+
+
+def _terminal_round_target(record: RunRecord) -> tuple[str, str] | None:
+    status = run_status_value(record.status)
+    if not is_terminal_status(status):
+        return None
+    if status == RunStatus.success.value:
+        return "closed", "round.closed"
+    return "blocked", "round.blocked"
+
+
+def _terminal_task_lane_status(record: RunRecord) -> str | None:
+    status = run_status_value(record.status)
+    if not is_terminal_status(status):
+        return None
+    reason = _run_terminal_reason(record)
+    if status == RunStatus.success.value:
+        return "completed"
+    if status in {RunStatus.timeout.value, "timed_out"} or reason == "timeout":
+        return "timed_out"
+    if status in {RunStatus.interrupted.value, "cancelled", "rolled_back"} or reason in {"cancelled", "rolled_back"}:
+        return "cancelled"
+    return "failed"
+
+
+def _terminal_task_lane_reason(record: RunRecord) -> str | None:
+    lane_status = _terminal_task_lane_status(record)
+    reason = _run_terminal_reason(record)
+    if lane_status == "timed_out":
+        return "timed_out"
+    if lane_status == "cancelled":
+        return "user_cancelled"
+    if reason == "boundary_stopped":
+        return "boundary_blocked"
+    if lane_status == "failed":
+        return "failed"
+    return None
+
+
+def _terminal_task_lane_error(record: RunRecord) -> str | None:
+    lane_status = _terminal_task_lane_status(record)
+    if lane_status == "completed":
+        return None
+    reason = _run_terminal_reason(record)
+    if lane_status == "timed_out":
+        return "Parent run timed out before this task lane completed."
+    if lane_status == "cancelled":
+        return "Parent run stopped before this task lane completed."
+    if reason:
+        return f"Parent run ended before this task lane completed: {reason}."
+    status = run_status_value(record.status) or "terminal"
+    return f"Parent run ended before this task lane completed with status {status}."
+
+
+async def _list_runtime_snapshot_task_lane_rows(
+    round_store: Any,
+    *,
+    thread_id: str,
+    round_rows: list[dict[str, Any]],
+    user_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not hasattr(round_store, "list_task_lanes_by_round"):
+        return []
+    task_lane_rows: list[dict[str, Any]] = []
+    remaining = limit
+    for round_row in round_rows:
+        if remaining <= 0:
+            break
+        round_id = round_row.get("round_id")
+        if not isinstance(round_id, str) or not round_id:
+            continue
+        rows = await round_store.list_task_lanes_by_round(
+            thread_id=thread_id,
+            round_id=round_id,
+            user_id=user_id,
+            limit=remaining,
+        )
+        task_lane_rows.extend(rows or [])
+        remaining -= len(rows or [])
+    return task_lane_rows
+
+
+async def _repair_terminal_runtime_snapshot_rows(
+    *,
+    round_store: Any,
+    records: list[RunRecord],
+    round_rows: list[dict[str, Any]],
+    task_lane_rows: list[dict[str, Any]],
+) -> bool:
+    terminal_records = {record.run_id: record for record in records if is_terminal_status(record.status)}
+    if not terminal_records:
+        return False
+
+    repaired = False
+    if hasattr(round_store, "set_run_state"):
+        for row in round_rows:
+            run_id = row.get("current_run_id")
+            if not isinstance(run_id, str):
+                continue
+            record = terminal_records.get(run_id)
+            if record is None:
+                continue
+            target = _terminal_round_target(record)
+            if target is None:
+                continue
+            state, event_type = target
+            if row.get("state") in _TERMINAL_ROUND_STATES:
+                continue
+            try:
+                updated = await round_store.set_run_state(
+                    run_id,
+                    state=state,
+                    event_type=event_type,
+                    content={
+                        "source": "runtime_snapshot_recovery",
+                        "run_status": run_status_value(record.status),
+                        "terminal_reason": _run_terminal_reason(record),
+                        "error": run_error_for_response(record.error),
+                    },
+                )
+            except ValueError:
+                logger.debug("Skipped terminal round snapshot repair for run %s", sanitize_log_param(run_id), exc_info=True)
+                continue
+            except Exception:
+                logger.warning("Failed to repair terminal round snapshot state for run %s", sanitize_log_param(run_id), exc_info=True)
+                continue
+            repaired = repaired or updated is not None
+
+    if not hasattr(round_store, "record_task_events"):
+        return repaired
+
+    task_events: list[dict[str, Any]] = []
+    for lane in task_lane_rows:
+        lane_status = lane.get("status")
+        if lane_status not in _ACTIVE_TASK_LANE_STATUSES:
+            continue
+        run_id = lane.get("run_id")
+        task_id = lane.get("task_id")
+        if not isinstance(run_id, str) or not isinstance(task_id, str):
+            continue
+        record = terminal_records.get(run_id)
+        if record is None:
+            continue
+        terminal_status = _terminal_task_lane_status(record)
+        if terminal_status is None:
+            continue
+        event_type = _TASK_LANE_TERMINAL_EVENT_BY_STATUS[terminal_status]
+        error_preview = _terminal_task_lane_error(record)
+        task_events.append(
+            {
+                "schema_version": "deerflow.task-event/v1",
+                "type": event_type,
+                "event_type": event_type,
+                "thread_id": lane.get("thread_id"),
+                "run_id": run_id,
+                "task_id": task_id,
+                "status": terminal_status,
+                "started_at": lane.get("created_at"),
+                "completed_at": lane.get("updated_at"),
+                "duration_ms": None,
+                "result_preview": None,
+                "error_preview": error_preview,
+                "artifact_refs": [],
+                "action_result": {
+                    "status": terminal_status,
+                    "terminal_reason": _terminal_task_lane_reason(record),
+                    "error": error_preview,
+                },
+                "usage": {},
+            }
+        )
+    if not task_events:
+        return repaired
+    try:
+        await round_store.record_task_events(task_events)
+    except Exception:
+        logger.warning("Failed to repair terminal task lane snapshot state", exc_info=True)
+        return repaired
+    return True
 
 
 def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str | None) -> dict[str, Any]:
@@ -1103,8 +1305,13 @@ def _is_slash_skill_activation_only(message: Any) -> bool:
 
 
 def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
-    if metadata.get("caller") == "task_event":
+    caller = str(metadata.get("caller") or "")
+    if caller == "task_event":
         return {"visible_in_chat": False, "surface": "control", "reason": "task_event"}
+    if caller.startswith("middleware:"):
+        return {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"}
+    if caller.startswith("subagent:"):
+        return {"visible_in_chat": False, "surface": "control", "reason": "subagent_message"}
     additional_kwargs = _message_additional_kwargs(content)
     if additional_kwargs.get("hide_from_ui") is True:
         return {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"}
@@ -1121,11 +1328,11 @@ def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     if message_type == "human":
         reason = "human_message"
     elif message_type == "ai":
-        reason = "middleware_message" if caller.startswith("middleware:") else "lead_ai_response"
+        reason = "lead_ai_response"
     elif message_type == "tool":
-        reason = "tool_message"
+        return {"visible_in_chat": False, "surface": "control", "reason": "tool_message"}
     else:
-        reason = "message"
+        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
     return {"visible_in_chat": True, "surface": "chat", "reason": reason}
 
 
@@ -1472,6 +1679,73 @@ async def list_round_tasks(
     return [TaskLaneResponse.model_validate(row) for row in rows]
 
 
+@router.get("/{thread_id}/runtime-snapshot", response_model=ThreadRuntimeSnapshotResponse)
+@require_permission("runs", "read", owner_check=True)
+async def get_thread_runtime_snapshot(
+    thread_id: str,
+    request: Request,
+    run_limit: int = Query(default=100, ge=1, le=200),
+    message_limit: int = Query(default=50, ge=1, le=200),
+    round_limit: int = Query(default=50, ge=1, le=200),
+    task_lane_limit: int = Query(default=100, ge=1, le=500),
+) -> ThreadRuntimeSnapshotResponse:
+    """Return one recovery snapshot for thread runtime state."""
+    user_id = get_request_storage_user_id(request)
+    run_mgr = get_run_manager(request)
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=run_limit)
+    await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
+
+    run_messages: list[RuntimeSnapshotRunMessages] = []
+    for record in records:
+        page = await _run_messages_page(
+            thread_id,
+            record.run_id,
+            record,
+            request,
+            user_id=user_id,
+            limit=message_limit,
+        )
+        run_messages.append(RuntimeSnapshotRunMessages(run_id=record.run_id, **page))
+
+    rounds: list[RoundResponse] = []
+    task_lanes: list[TaskLaneResponse] = []
+    round_store = get_round_state_store(request)
+    if round_store is not None and hasattr(round_store, "list_by_thread"):
+        round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
+        task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
+            round_store,
+            thread_id=thread_id,
+            round_rows=round_rows,
+            user_id=user_id,
+            limit=task_lane_limit,
+        )
+        repaired = await _repair_terminal_runtime_snapshot_rows(
+            round_store=round_store,
+            records=records,
+            round_rows=round_rows,
+            task_lane_rows=task_lane_rows,
+        )
+        if repaired:
+            round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
+            task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
+                round_store,
+                thread_id=thread_id,
+                round_rows=round_rows,
+                user_id=user_id,
+                limit=task_lane_limit,
+            )
+        rounds = [RoundResponse.model_validate(row) for row in round_rows]
+        task_lanes = [TaskLaneResponse.model_validate(row) for row in task_lane_rows]
+
+    return ThreadRuntimeSnapshotResponse(
+        thread_id=thread_id,
+        runs=[_record_to_response(record) for record in records],
+        run_messages=run_messages,
+        rounds=rounds,
+        task_lanes=task_lanes,
+    )
+
+
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
@@ -1673,22 +1947,17 @@ async def list_thread_messages(
     return messages
 
 
-@router.get("/{thread_id}/runs/{run_id}/messages")
-@require_permission("runs", "read", owner_check=True)
-async def list_run_messages(
+async def _run_messages_page(
     thread_id: str,
     run_id: str,
+    record: RunRecord,
     request: Request,
-    limit: int = Query(default=50, le=200, ge=1),
-    before_seq: int | None = Query(default=None),
-    after_seq: int | None = Query(default=None),
-) -> dict:
-    """Return paginated messages for a specific run.
-
-    Response: { data: [...], has_more: bool }
-    """
-    user_id = get_request_storage_user_id(request)
-    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    *,
+    user_id: str,
+    limit: int,
+    before_seq: int | None = None,
+    after_seq: int | None = None,
+) -> dict[str, Any]:
     event_store = get_run_event_store(request)
     list_messages_kwargs: dict[str, Any] = {
         "limit": limit + 1,
@@ -1719,6 +1988,34 @@ async def list_run_messages(
                     content["additional_kwargs"]["turn_duration"] = duration
 
     return {"data": data, "has_more": has_more}
+
+
+@router.get("/{thread_id}/runs/{run_id}/messages")
+@require_permission("runs", "read", owner_check=True)
+async def list_run_messages(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200, ge=1),
+    before_seq: int | None = Query(default=None),
+    after_seq: int | None = Query(default=None),
+) -> dict:
+    """Return paginated messages for a specific run.
+
+    Response: { data: [...], has_more: bool }
+    """
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    return await _run_messages_page(
+        thread_id,
+        run_id,
+        record,
+        request,
+        user_id=user_id,
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=after_seq,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}/evidence")

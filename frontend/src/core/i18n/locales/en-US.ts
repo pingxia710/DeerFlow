@@ -293,6 +293,9 @@ export const enUS: Translations = {
     historyLoadFailedTitle: "Could not load conversation",
     historyLoadFailedDescription:
       "Check your connection and retry loading this conversation.",
+    runTerminalNoticeTitle: "Run ended without a visible reply",
+    runTerminalNoticeDescription: (status, reason) =>
+      `Latest run ended as ${reason ?? status}. You can retry or continue from here.`,
   },
 
   // Channels

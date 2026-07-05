@@ -103,6 +103,7 @@ export default function ChatPage() {
     isUploading,
     isHistoryLoading,
     historyError,
+    terminalNotice,
     hasMoreHistory,
     loadMoreHistory,
   } = useThreadStream({
@@ -311,6 +312,7 @@ export default function ChatPage() {
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
+                  terminalNotice={terminalNotice}
                   tokenUsageInlineMode={tokenUsageInlineMode}
                   canRegenerate={
                     !isNewThread &&

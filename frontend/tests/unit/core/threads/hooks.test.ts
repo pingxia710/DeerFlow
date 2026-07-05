@@ -207,6 +207,14 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
   ).toBe(false);
 });
 
+test("getVisibleThreadError hides transient stream errors while recovery owns the run", async () => {
+  const { getVisibleThreadError } = await import("@/core/threads/hooks");
+  const error = new Error("network stream dropped");
+
+  expect(getVisibleThreadError(error, true)).toBeUndefined();
+  expect(getVisibleThreadError(error, false)).toBe(error);
+});
+
 test("keepQueuedMessagesForThread intentionally drops queued sends from other chats on view switch", async () => {
   const { keepQueuedMessagesForThread } = await import("@/core/threads/hooks");
 

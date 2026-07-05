@@ -604,14 +604,14 @@ async def test_list_by_thread(manager: RunManager):
 
 @pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Ordering should be stable (insertion order) even when timestamps tie."""
+    """Ordering should keep the later-created run first even when timestamps tie."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
 
     runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r1.run_id, r2.run_id]
+    assert [run.run_id for run in runs] == [r2.run_id, r1.run_id]
 
 
 @pytest.mark.anyio
@@ -1239,6 +1239,28 @@ async def test_list_by_thread_merges_in_memory_and_store(manager_with_store: Run
     # r2 should be the in-memory record (has live state)
     r2_record = next(r for r in runs if r.run_id == r2.run_id)
     assert r2_record is r2  # same object reference
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_does_not_hide_store_only_runs_behind_memory_limit(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+    monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
+    first = await mgr.create("thread-1")
+    second = await mgr.create("thread-1")
+    await mgr.set_status(first.run_id, RunStatus.success)
+    await mgr.set_status(second.run_id, RunStatus.success)
+    await store.put(
+        "store-new",
+        thread_id="thread-1",
+        status="success",
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+
+    runs = await mgr.list_by_thread("thread-1", limit=2)
+
+    assert runs[0].run_id == "store-new"
+    assert len(runs) == 2
 
 
 @pytest.mark.anyio

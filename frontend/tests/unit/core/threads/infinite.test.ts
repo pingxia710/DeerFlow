@@ -1,13 +1,16 @@
+import type { Run } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 
 import {
   applyBackgroundRunProbeResult,
+  applyStreamErrorRecovery,
   clearDeletedThreadClientState,
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   getManualThreadTitleLock,
   getThreadActivitySnapshot,
+  hasTerminalStreamErrorRecoveryRun,
   INFINITE_THREADS_PAGE_SIZE,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
   invalidateTerminalRunQueries,
@@ -16,10 +19,13 @@ import {
   markThreadFinished,
   clearThreadActivity,
   clearThreadFinishedActivity,
+  isThreadRecoveringFromStreamError,
   reconcileTaskEventRunHistory,
   reconcileTerminalRunHistory,
   setManualThreadTitleLock,
+  shouldKeepStreamErrorRecoveryRun,
   threadRunsQueryKey,
+  stopBackgroundRunProbeRecovery,
   upsertThreadInInfiniteCache,
   upsertThreadInSearchCache,
   getBackgroundRunProbeDelay,
@@ -336,6 +342,83 @@ describe("applyBackgroundRunProbeResult", () => {
   });
 });
 
+describe("stream error recovery", () => {
+  test("keeps known stream-error runs busy and invalidates the run list", () => {
+    const client = new QueryClient();
+    const threadId = "stream-error-thread";
+    const runId = "stream-error-run";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    client.setQueryData(threadRunsQueryKey(threadId), "cached");
+
+    const recovery = applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId,
+      isMock: true,
+    });
+
+    expect(recovery).toEqual({ threadId, runId });
+    expect(isThreadRecoveringFromStreamError(recovery, threadId)).toBe(true);
+    expect(
+      client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
+    ).toBe("busy");
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(
+      client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+    ).toBe(true);
+
+    clearThreadActivity(threadId);
+  });
+
+  test("clears local activity when a stream error has no known run id", () => {
+    const client = new QueryClient();
+    const threadId = "stream-error-missing-run-thread";
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      applyStreamErrorRecovery({
+        queryClient: client,
+        threadId,
+        runId: null,
+        isMock: true,
+      }),
+    ).toBeNull();
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  });
+
+  test("detects when a recovering stream-error run reaches terminal history", () => {
+    const recovery = { threadId: "thread-1", runId: "run-1" };
+
+    expect(
+      hasTerminalStreamErrorRecoveryRun(recovery, [
+        { run_id: "run-1", status: "running" },
+      ] as unknown as Run[]),
+    ).toBe(false);
+    expect(
+      hasTerminalStreamErrorRecoveryRun(recovery, [
+        { run_id: "run-1", status: "success" },
+      ] as unknown as Run[]),
+    ).toBe(true);
+  });
+
+  test("releases recovery ownership when local running activity is gone", () => {
+    const recovery = { threadId: "thread-1", runId: "run-1" };
+
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, {
+        running: new Set(["thread-1"]),
+        finished: new Set(),
+      }),
+    ).toBe(true);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, {
+        running: new Set(),
+        finished: new Set(),
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("invalidateTerminalRunQueries", () => {
   test("invalidates run-list and usage queries for the terminal run thread", () => {
     const client = new QueryClient();
@@ -594,5 +677,23 @@ describe("background run probe policy", () => {
     expect(shouldStopBackgroundRunProbe(1, { statusCode: 403 })).toBe(true);
     expect(shouldStopBackgroundRunProbe(1, { status: 404 })).toBe(true);
     expect(shouldStopBackgroundRunProbe(1, { status: 500 })).toBe(false);
+  });
+
+  test("clears local recovery state and refreshes lists when probing gives up", () => {
+    const client = new QueryClient();
+    const threadId = "probe-exhausted-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    client.setQueryData(threadRunsQueryKey(threadId), "cached");
+    markThreadBusyInCaches(client, threadId);
+
+    stopBackgroundRunProbeRecovery(client, threadId);
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(
+      client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+    ).toBe(true);
+    expect(client.getQueryState(["threads", "search"])?.isInvalidated).toBe(
+      true,
+    );
   });
 });

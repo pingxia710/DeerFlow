@@ -32,7 +32,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; it starts its own frontend on port `6100` by default (`PLAYWRIGHT_PORT` overrides), forces auth-disabled test mode for SSR workspace routes, and does not reuse an existing server unless `PLAYWRIGHT_REUSE_EXISTING_SERVER=1`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; it starts its own frontend on port `6100` by default (`PLAYWRIGHT_PORT` overrides), forces auth-disabled test mode for SSR workspace routes, and does not reuse an existing server unless `PLAYWRIGHT_REUSE_EXISTING_SERVER=1`. Cross-stack replay tests live under `tests/e2e-real-backend/` and use `playwright.real-backend.config.ts` to run the real frontend against a deterministic replay Gateway; default ports are frontend `3100` and Gateway `8011`, with reuse disabled unless `PLAYWRIGHT_REUSE_EXISTING_SERVER=1`. Use this suite when frontend history behavior depends on real run/message endpoints; set `PLAYWRIGHT_REAL_BACKEND_VISUAL=1` only when intentionally checking the local screenshot baseline.
 
 ## Architecture
 
@@ -86,39 +86,64 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   treat backend task/tool-call ids as globally unique across chat sessions.
   Prefer task-event `thread_id`/`run_id` and SDK run callback metadata over the
   currently visible route id; users can switch chats while a run is still alive.
-- Persisted `task_event` run messages are control rows: thread history should
-  use them to restore subtask state, then keep them out of visible chat bubbles.
-  `RunMessage.content` may be either a chat `Message` or a structured control
-  event; only real chat messages should enter visible history merging. Legacy
-  rows without `metadata.caller` may still be treated as task events when their
-  content matches the pinned task-event schema.
+- Persisted `task_event`, raw tool, middleware, and subagent run messages are
+  control rows: thread history should use task events to restore subtask state,
+  then keep internal rows out of visible chat bubbles. `RunMessage.content` may
+  be either a chat `Message` or a structured control event; only user messages
+  and lead-agent user-facing AI responses should enter visible history merging.
+  Legacy rows without `metadata.caller` may still be treated as task events when
+  their content matches the pinned task-event schema.
 - History run messages should honor backend `display.visible_in_chat` when
-  present; only fall back to local `caller`/`name`/`hide_from_ui` checks for
-  older rows without the display contract.
+  present; only fall back to local `caller`/`name`/`type`/`hide_from_ui` checks
+  for older rows without the display contract.
+- Initial thread reload should hydrate from
+  `/api/threads/{thread_id}/runtime-snapshot` before falling back to individual
+  run-list/message endpoints. Snapshot rows use the same `display` contract and
+  should seed both visible history and control-row task recovery; snapshot
+  `task_lanes` should also settle existing subtask cards when task-event rows
+  are missing or paged out.
 - History message ordering must treat run-message `seq` as run-local. Rebuild
   history by run list order first, then by `seq` within each run.
 - Run responses may include `round_id`/`round_state`. When the latest run's
   `round_id` changes, default history should reset to the current round/current
-  run; older runs are explicit load-more/manual history, not automatic context.
+  run.
+- Initial history rebuild should continue through older runs while visible
+  messages are being restored; only consecutive empty/control-only runs should
+  stop at the bounded empty-run safety cap.
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
-- Automatic history loads, run refreshes, and user-triggered load-more should
-  fetch one run-message page at a time; do not recursively drain every
-  `has_more` page while switching chats or scrolling history.
+- Per-run pagination should still fetch one run-message page at a time; do not
+  recursively drain every `has_more` page while switching chats or scrolling
+  history.
 - Explicit run refresh requests that arrive before the run list contains that
   run should stay pending until the run list catches up; do not fall back to
   broad thread polling.
-- Run-specific history refreshes should replace existing rows for that run on
-  the refreshed first page; do not append stale same-run rows that disappeared
-  from the backend response.
+- Explicit run refresh requests that arrive while a history page is in flight
+  should queue and reset that run's loaded/cursor state before the next page
+  selection, so an old in-flight page cannot swallow a terminal refresh.
+- Run-specific history refreshes should replace existing rows for the returned
+  `seq` window, while preserving already-loaded older pages for that run; do not
+  append stale same-run rows from the refreshed window.
 - SSE `run.terminal` custom events should trigger run-specific history refresh;
   they should also invalidate thread run-list and usage queries so pending run
   refreshes can resolve. Do not turn them into task cards or visible chat
   messages.
+- A terminal latest run with no visible AI row, including `success`, should show
+  the non-message terminal notice instead of leaving the chat silently blank.
 - Background completion recovery may probe only known `thread_id` + `run_id`
   pairs that the current frontend session started or resumed; do not add broad
   thread-list polling to compensate for missing run lifecycle events.
+- A stream error for a known `thread_id` + `run_id` is not terminal when runs
+  use resumable `onDisconnect=continue`; keep the thread busy, keep current
+  visible/optimistic rows, and let the background probe or run list terminal
+  state settle it. While that recovery owns the visible run, do not expose the
+  transient stream error as the chat/input error state; the UI should keep
+  showing streaming until terminal evidence arrives.
+- If known-run background probing exhausts its bounded attempts or hits a
+  permanent auth/not-found response, clear the local recovery ownership and
+  invalidate run/thread lists; do not leave the visible chat/input in indefinite
+  fake streaming without terminal evidence.
 - Thread-list running indicators should treat backend `busy`/`pending`/`running`
   plus run-recovery statuses such as `cancelling`/`rolling_back` as active, but
   backend terminal statuses such as `idle`/`error`/`timeout`/`interrupted`,

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -197,6 +197,21 @@ class RunManager:
         if not run_ids:
             return []
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
+
+    @staticmethod
+    def _sort_newest_first(records: Iterable[RunRecord], tie_rank: dict[str, int] | None = None) -> list[RunRecord]:
+        ranks = tie_rank or {}
+        return sorted(
+            records,
+            key=lambda record: (
+                record.created_at or "",
+                record.updated_at or "",
+                record.lease_generation or 0,
+                ranks.get(record.run_id, -1),
+                record.run_id,
+            ),
+            reverse=True,
+        )
 
     def _store_put_payload(self, record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
         metadata = dict(record.metadata or {})
@@ -766,16 +781,17 @@ class RunManager:
         """
         await self.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
         async with self._lock:
-            memory_records = [record for record in self._thread_records_locked(thread_id) if _record_matches_user_id(record, user_id)]
+            thread_memory_records = self._thread_records_locked(thread_id)
+            memory_tie_rank = {record.run_id: index for index, record in enumerate(thread_memory_records)}
+            memory_records = [record for record in thread_memory_records if _record_matches_user_id(record, user_id)]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return self._sort_newest_first(memory_records, memory_tie_rank)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
-        store_limit = max(0, limit - len(memory_records))
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=limit)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return self._sort_newest_first(memory_records, memory_tie_rank)[:limit]
         for row in rows:
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
@@ -783,7 +799,7 @@ class RunManager:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
+        return self._sort_newest_first(records_by_id.values(), memory_tie_rank)[:limit]
 
     def _schedule_terminal_cleanup(self, run_id: str) -> None:
         if self._terminal_cleanup_delay < 0:

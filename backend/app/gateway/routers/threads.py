@@ -28,7 +28,7 @@ from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
-from deerflow.runtime.runs.schemas import is_inflight_status
+from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -43,6 +43,8 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
+_ACTIVE_THREAD_SEARCH_STATUSES = frozenset({"busy", "pending", "running", "cancelling", "rolling_back"})
+_WORKER_LOST_TERMINAL_REASONS = frozenset({"worker_lost", "lease_expired_recovered"})
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -50,6 +52,47 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not metadata:
         return metadata or {}
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
+
+
+async def _sync_recovered_thread_search_statuses(
+    rows: list[dict[str, Any]],
+    request: Request,
+    *,
+    user_id: str | None,
+) -> list[dict[str, Any]]:
+    if not any(row.get("status") in _ACTIVE_THREAD_SEARCH_STATUSES for row in rows):
+        return rows
+
+    from app.gateway.deps import get_run_manager, get_thread_store
+
+    run_manager = get_run_manager(request)
+    thread_store = get_thread_store(request)
+    synced: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("status") not in _ACTIVE_THREAD_SEARCH_STATUSES:
+            synced.append(row)
+            continue
+        thread_id = row.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            synced.append(row)
+            continue
+        try:
+            latest_runs = await run_manager.list_by_thread(thread_id, user_id=user_id, limit=1)
+        except Exception:
+            logger.debug("Failed to sync recovered run status for thread %s", sanitize_log_param(thread_id), exc_info=True)
+            synced.append(row)
+            continue
+        latest = latest_runs[0] if latest_runs else None
+        terminal_reason = getattr(latest, "terminal_reason", None)
+        if latest is None or run_status_value(latest.status) != "error" or terminal_reason not in _WORKER_LOST_TERMINAL_REASONS:
+            synced.append(row)
+            continue
+        try:
+            await thread_store.update_status(thread_id, "error", user_id=user_id)
+        except Exception:
+            logger.debug("Failed to persist recovered thread status for %s", sanitize_log_param(thread_id), exc_info=True)
+        synced.append({**row, "status": "error"})
+    return synced
 
 
 def _supports_user_id_keyword(callable_obj: Any) -> bool:
@@ -450,16 +493,20 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
     repo = get_thread_store(request)
+    user_id = get_request_storage_user_id(request)
     try:
         rows = await repo.search(
             metadata=body.metadata or None,
             status=body.status,
             limit=body.limit,
             offset=body.offset,
-            user_id=get_request_storage_user_id(request),
+            user_id=user_id,
         )
     except InvalidMetadataFilterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rows = await _sync_recovered_thread_search_statuses(rows, request, user_id=user_id)
+    if body.status is not None:
+        rows = [row for row in rows if row.get("status", "idle") == body.status]
     return [
         ThreadResponse(
             thread_id=r["thread_id"],

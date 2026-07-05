@@ -276,6 +276,9 @@ export const zhCN: Translations = {
     historyForbiddenDescription: "当前账号没有权限访问这个对话。",
     historyLoadFailedTitle: "对话加载失败",
     historyLoadFailedDescription: "请检查网络或后端连接后重试。",
+    runTerminalNoticeTitle: "运行已结束，但没有可见回复",
+    runTerminalNoticeDescription: (status, reason) =>
+      `最近一次运行结束状态：${reason ?? status}。可以重试，或从这里继续。`,
   },
 
   // Channels

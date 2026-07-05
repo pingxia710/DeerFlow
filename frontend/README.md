@@ -93,6 +93,7 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 tests/
 ├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
+├── e2e-real-backend/       # Replay Gateway + real frontend cross-stack tests; visual baseline is opt-in
 └── unit/                   # Unit tests (mirrors src/ layout)
 src/
 ├── app/                    # Next.js App Router pages
@@ -146,6 +147,27 @@ src/
 - Turbopack enabled by default in development for faster builds
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
+- Thread history renders the backend `display.visible_in_chat` contract; internal
+  task, tool, middleware, and subagent rows stay persisted for run history but
+  are hidden from chat bubbles.
+- Thread reload rebuilds visible history from real per-run message endpoints and
+  continues through older runs while visible messages are being restored.
+- Reload recovery first uses the backend thread runtime snapshot, which bundles
+  runs, latest per-run message pages, native round state, and task lanes; task
+  lanes restore subtask terminal state even when task-event rows are missing
+  from the first message page.
+- The backend run list is newest-first with deterministic tie-breaks; reload
+  history relies on that order before sorting messages by each run's local
+  `seq`.
+- If a resumable stream disconnects after a run id is known, the UI keeps that
+  run busy and probes for the terminal state instead of clearing the chat as
+  finished; the transient stream error is hidden from the input state while
+  recovery is still responsible for that run.
+- If that bounded probe later gives up or receives a permanent auth/not-found
+  response, the UI clears local fake streaming ownership and refreshes run and
+  thread lists instead of waiting forever.
+- If the latest terminal run has no visible AI reply, the chat shows a terminal
+  notice instead of silently rendering an empty assistant turn.
 
 ## License
 

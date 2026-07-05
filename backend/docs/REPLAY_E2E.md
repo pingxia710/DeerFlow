@@ -110,9 +110,9 @@ screenshot + Playwright HTML report are uploaded as a CI artifact.
 
 ## Known limitations
 
-- Visual regression baselines are OS-specific, so they are a **local dev gate
-  only** (gitignored); CI uploads the render as an artifact for human review
-  instead of hard-asserting a cross-OS baseline.
+- Visual regression baselines are OS-specific, so DOM assertions are the default
+  gate and screenshots are saved as artifacts. Set
+  `PLAYWRIGHT_REAL_BACKEND_VISUAL=1` to opt into the local baseline assertion.
 - Fixtures are coupled to the recording-time prompt; if new
   environment-dependent content enters the system prompt, extend the
   normalization in `replay_provider.py` (or pin it in `build_config_yaml`).

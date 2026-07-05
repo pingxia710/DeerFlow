@@ -430,6 +430,135 @@ async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscrip
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_synthesizes_terminal_event_from_run_row_without_replay_event():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-terminal-row-only"
+    run_id = "run-terminal-row-only"
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal row replay should not subscribe to a cleaned stream")
+            yield
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.error,
+        terminal_reason="worker_lost",
+        on_disconnect=DisconnectMode.continue_,
+        user_id="user-terminal-row-only",
+    )
+    frames = []
+    async for frame in sse_consumer(
+        _CleanedBridge(),
+        record,
+        _NeverDisconnectedRequest(),
+        _CancelRecorder(),
+        event_store=MemoryRunEventStore(),
+        user_id=record.user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["custom", "end"]
+    assert json.loads(_parse_sse_frame(frames[0])["data"]) == {
+        "type": "run.terminal",
+        "event_type": "run.terminal",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "error",
+        "terminal_reason": "worker_lost",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_synthesizes_live_terminal_before_end_when_custom_event_is_missing():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.stream_bridge.base import END_SENTINEL
+
+    thread_id = "thread-live-terminal-row-only"
+    run_id = "run-live-terminal-row-only"
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id="user-live-terminal-row-only",
+    )
+
+    class _EndOnlyBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            record.status = RunStatus.success
+            yield END_SENTINEL
+
+    frames = []
+    async for frame in sse_consumer(_EndOnlyBridge(), record, _NeverDisconnectedRequest(), _CancelRecorder()):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["custom", "end"]
+    assert json.loads(_parse_sse_frame(frames[0])["data"]) == {
+        "type": "run.terminal",
+        "event_type": "run.terminal",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "success",
+        "terminal_reason": "success",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_synthesizes_normalized_worker_lost_terminal_reason():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-terminal-normalized"
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal row replay should not subscribe to a cleaned stream")
+            yield
+
+    records = [
+        RunRecord(
+            run_id="run-terminal-lease-recovered",
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.error,
+            terminal_reason="lease_expired_recovered",
+            on_disconnect=DisconnectMode.continue_,
+        ),
+        RunRecord(
+            run_id="run-terminal-restart-recovered",
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.error,
+            error="Gateway restarted before this run reached a durable final state.",
+            on_disconnect=DisconnectMode.continue_,
+        ),
+    ]
+
+    reasons = []
+    for record in records:
+        frames = []
+        async for frame in sse_consumer(
+            _CleanedBridge(),
+            record,
+            _NeverDisconnectedRequest(),
+            _CancelRecorder(),
+            event_store=MemoryRunEventStore(),
+            user_id=None,
+        ):
+            frames.append(frame)
+        reasons.append(json.loads(_parse_sse_frame(frames[0])["data"])["terminal_reason"])
+
+    assert reasons == ["worker_lost", "worker_lost"]
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_replays_persisted_messages_and_keeps_recovery_signal():
     from app.gateway.services import sse_consumer
 

@@ -219,6 +219,8 @@ export interface Translations {
     historyForbiddenDescription: string;
     historyLoadFailedTitle: string;
     historyLoadFailedDescription: string;
+    runTerminalNoticeTitle: string;
+    runTerminalNoticeDescription: (status: string, reason?: string) => string;
   };
 
   // Channels

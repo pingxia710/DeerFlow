@@ -123,8 +123,9 @@ class MemoryRunStore(RunStore):
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
             return []
+        tie_rank = {run_id: index for index, run_id in enumerate(run_ids)}
         results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id)]
-        results.sort(key=lambda r: r["created_at"], reverse=True)
+        results.sort(key=lambda r: (r["created_at"], r["updated_at"], tie_rank.get(r["run_id"], -1), r["run_id"]), reverse=True)
         return results[:limit]
 
     async def update_status(self, run_id, status, *, error=None, terminal_reason=None):

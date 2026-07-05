@@ -145,6 +145,14 @@ class TestMemoryRunStore:
         assert [r["run_id"] for r in rows] == ["r2", "r3", "r1"]
 
     @pytest.mark.anyio
+    async def test_list_by_thread_tie_uses_later_insert(self, store):
+        timestamp = "2024-01-01T00:00:00+00:00"
+        await store.put("r1", thread_id="t1", created_at=timestamp)
+        await store.put("r2", thread_id="t1", created_at=timestamp)
+        rows = await store.list_by_thread("t1")
+        assert [r["run_id"] for r in rows] == ["r2", "r1"]
+
+    @pytest.mark.anyio
     async def test_list_by_thread_respects_limit(self, store):
         for i in range(5):
             await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")

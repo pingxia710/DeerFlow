@@ -317,6 +317,24 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 Message rows returned by messages endpoints carry `display.visible_in_chat`
 and `display.reason`; frontend chat visibility should consume that contract
 instead of guessing from `caller`, `name`, or `hide_from_ui` when present.
+Chat-visible rows are user messages and lead-agent user-facing AI responses;
+task events, raw tool rows, middleware rows, and subagent rows are persisted
+control/history rows but should stay out of chat bubbles.
+`GET /api/threads/{thread_id}/runtime-snapshot` is the thread recovery envelope
+for frontend reloads. It aggregates run list, per-run latest message pages,
+native round_state rows, and task lanes using the same user scoping and
+`display` contract as the narrower endpoints; do not fork visibility or owner
+logic in the snapshot path.
+If the snapshot can read a terminal run but durable native state is stale
+(`rounds.state` still `open`/`executing`/`validating`/`waiting_user`, or task
+lanes still `in_progress`/`running`/`pending`/`executing`), it must converge
+that state before returning the recovery envelope: use `set_run_state()` to
+close/block the round and `record_task_events()` to settle active task lanes.
+Frontend reloads must not receive a snapshot that can recreate fake
+running/streaming state after the parent run is terminal.
+The replay-only `tests/seed_runs_router.py` may seed these row kinds for
+cross-stack frontend tests, but it is mounted only by `scripts/run_replay_gateway.py`
+when `DEERFLOW_ENABLE_TEST_SEED=1`, never by the production app.
 
 `RunJournal.on_chat_model_start` emits `llm.context` trace events with only
 context size metrics (`estimated_tokens`, chars, message count, caller, role
@@ -399,7 +417,18 @@ advisory context, not the old user goal as the current intent.
 - Custom-agent management routes that read/write `users/{user_id}/agents/...` must resolve `user_id` from `get_request_storage_user_id(request)`; the global `USER.md` profile remains a shared resource unless that storage model is explicitly changed.
 - Background worker updates to `threads_meta` (title/status) must pass `RunRecord.user_id` explicitly; do not rely on ambient user ContextVars after the request handler returns.
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
+- `list_by_thread()` is the newest-first ordering contract used by runtime snapshots and frontend history recovery. Fetch a full `limit` from the persistent store before merging with memory, then sort deterministically by `created_at`, `updated_at`, and local tie-breakers so store-only newer runs cannot disappear behind older in-memory rows.
 - Terminal transitions must persist `terminal_reason` through `RunStore.update_status()` and expose the same reason through store-only hydration; `run.terminal` events are the replay anchor, not a replacement for the run row field. SSE durable custom replay must include owner-scoped `run.terminal` alongside task events.
+- If a terminal `RunRecord` is readable but the durable `run.terminal` event is
+  missing, SSE replay must synthesize a `run.terminal` custom frame from the run
+  row before `end`; recovered/legacy terminal rows must not leave the frontend
+  without terminal evidence. The synthesized frame must normalize
+  `terminal_reason` the same way REST run responses do, e.g.
+  `lease_expired_recovered` and gateway-restart recovery errors surface as
+  `worker_lost`.
+- Live SSE must apply the same terminal fallback: if `END_SENTINEL` arrives
+  before this connection has forwarded a `run.terminal` custom frame, synthesize
+  one from the terminal run row before emitting `end`.
 - Cross-process lease checks live in `tests/test_run_store_multiprocess_lease.py`; SQLite runs by default, and CI also runs the Postgres path with a real service container. Local Postgres verification is opt-in via `DEER_FLOW_TEST_RUN_LEASE_POSTGRES_URL`.
 - `RunRepository.try_acquire_active_slot()` uses a per-thread Postgres transaction advisory lock before the active-slot CAS; do not remove it unless active slots move to a database-level uniqueness constraint.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
@@ -416,6 +445,11 @@ advisory context, not the old user goal as the current intent.
 - `RunManager.get()` and `list_by_thread()` also perform conservative stale
   inflight recovery: a persisted inflight run older than the recovery timeout is
   marked `error`/`worker_lost` only when this process has no live task for it.
+- `/api/threads/search` must keep active-looking thread-meta rows in sync with
+  latest-run recovery: if `RunManager.list_by_thread(..., limit=1)` returns the
+  newest run as `error` with `worker_lost`/`lease_expired_recovered`, update the
+  thread meta status and return `error` so multi-thread views do not keep stale
+  `running`/`busy` state.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265). After completion, it must refresh the final `RunRecord` with the request storage `user_id`.
 - Wait/detail responses may expose a short terminal exception message, but must not return raw tracebacks, stack frames, secrets, or overlong error text.
 - Late SSE reconnects to a terminal run must return an immediate `end` event so clients fetch final history instead of subscribing to an already-cleaned stream buffer.

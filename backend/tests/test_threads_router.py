@@ -1198,6 +1198,61 @@ async def test_delete_thread_without_runs_or_events_is_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_search_threads_syncs_latest_worker_lost_thread_status() -> None:
+    expected_user_id = str(_HISTORY_USER_ID)
+    thread_id = "worker-lost-search-thread"
+
+    class RecordingThreadStore:
+        def __init__(self) -> None:
+            self.update_calls: list[tuple[str, str, str | None]] = []
+
+        async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None):
+            assert user_id == expected_user_id
+            return [
+                {
+                    "thread_id": thread_id,
+                    "status": "running",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "metadata": {},
+                }
+            ]
+
+        async def update_status(self, requested_thread_id: str, status: str, *, user_id: str | None = None):
+            self.update_calls.append((requested_thread_id, status, user_id))
+
+    class RecordingRunManager:
+        async def list_by_thread(self, requested_thread_id: str, *, user_id: str | None = None, limit: int = 100):
+            assert requested_thread_id == thread_id
+            assert user_id == expected_user_id
+            assert limit == 1
+            return [
+                RunRecord(
+                    run_id="run-worker-lost",
+                    thread_id=thread_id,
+                    assistant_id=None,
+                    status=RunStatus.error,
+                    terminal_reason="worker_lost",
+                    on_disconnect=DisconnectMode.continue_,
+                    user_id=expected_user_id,
+                )
+            ]
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    thread_store = RecordingThreadStore()
+    app.state.thread_store = thread_store
+    app.state.run_manager = RecordingRunManager()
+    request = SimpleNamespace(app=app, state=SimpleNamespace(user=_make_user(_HISTORY_USER_ID)))
+
+    responses = await call_unwrapped(threads.search_threads, threads.ThreadSearchRequest(metadata={}), request)
+    filtered_responses = await call_unwrapped(threads.search_threads, threads.ThreadSearchRequest(metadata={}, status="running"), request)
+
+    assert [response.status for response in responses] == ["error"]
+    assert filtered_responses == []
+    assert thread_store.update_calls == [(thread_id, "error", expected_user_id), (thread_id, "error", expected_user_id)]
+
+
+@pytest.mark.asyncio
 async def test_list_runs_syncs_thread_error_for_latest_worker_lost() -> None:
     expected_user_id = str(_HISTORY_USER_ID)
     thread_id = "worker-lost-thread"

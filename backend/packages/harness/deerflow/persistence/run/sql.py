@@ -215,7 +215,7 @@ class RunRepository(RunStore):
         stmt = select(RunRow).where(RunRow.thread_id == thread_id)
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
-        stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
+        stmt = stmt.order_by(RunRow.created_at.desc(), RunRow.updated_at.desc(), RunRow.run_id.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]

@@ -1,5 +1,15 @@
 # Progress
 
+## 2026-07-05 — Runtime chat recovery hardening
+
+- Hardened the chat recovery path around the current user goal: visible history now relies on the backend display contract, runtime snapshot hydration, per-run message pages, task-lane recovery, terminal notices for terminal runs without visible AI replies, and known-run stream-error recovery instead of clearing chat state on transient stream disconnects.
+- Backend recovery state is closer to one authority: `/api/threads/{thread_id}/runtime-snapshot` aggregates owner-scoped runs, run-message pages, round state, and task lanes; SSE durable replay and live `END_SENTINEL` handling synthesize `run.terminal` from terminal run rows when the custom terminal event is missing; worker-lost/lease-recovery reasons normalize to `worker_lost`.
+- Closed the adjacent stale-native-state recovery gap: if the runtime snapshot sees a terminal run while native round_state is still active or a task lane is still `in_progress`/`running`/`pending`/`executing`, it now persists a minimal convergence before returning the snapshot, so reload cannot recreate fake running state from old round/task rows.
+- Fixed two run-list roots that could make frontend recovery point at the wrong run or miss a run: `RunManager.list_by_thread()` now fetches a full store `limit` before memory/store merge, and memory/SQL stores return deterministic newest-first order with tie-breaks.
+- Fixed frontend stream-error recovery ownership: known-run disconnects keep the visible run busy while probing, hide the transient error from the input state, but bounded probe exhaustion or permanent auth/not-found responses now clear local fake streaming ownership and invalidate run/thread lists instead of leaving the UI stuck forever.
+- Validation: targeted backend SSE, run-manager/store/repository, runtime snapshot, worker-terminal, rollback, and thread-router tests passed; targeted frontend thread history/recovery unit tests and typecheck passed; `pnpm exec playwright test -c playwright.real-backend.config.ts` passed with the real frontend against the replay Gateway, covering runtime snapshot reload, hidden internal rows, terminal no-reply notice, task-lane subtask recovery, and replayed model render.
+- Deliberately skipped: no P1 capability hard boundary, no evidence provenance rewrite, no role/governance engine changes, no production/live operation, and no new external dependency.
+
 ## 2026-07-05 — Phase 7 Runtime Chair Brief Wiring
 
 - Wired the compact Chair Operating Brief into command-room lead runtime context through `CommandRoomRoundContextMiddleware`, using the run's `Runtime.context` thread/run/round facts instead of requiring Chair to query the API manually.

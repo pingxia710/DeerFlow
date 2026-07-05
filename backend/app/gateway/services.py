@@ -37,7 +37,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.schemas import is_inflight_status
+from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,19 @@ _STREAM_REPLAY_TYPES = [
     "stream.error",
 ]
 _DURABLE_REPLAY_TYPES = [*_STREAM_REPLAY_TYPES, *_MESSAGE_REPLAY_TYPES, *_TASK_EVENT_REPLAY_TYPES, _RUN_TERMINAL_EVENT_TYPE]
+_RUN_TERMINAL_REASON_ALIASES = {
+    "boundary_blocked": "boundary_stopped",
+    "lease_expired_recovered": "worker_lost",
+    "polling_timed_out": "timeout",
+    "rollback_failed_owner_lost": "rollback_failed",
+    "timed_out": "timeout",
+    "user_cancelled": "cancelled",
+}
+_WORKER_LOST_ERROR_MARKERS = (
+    "gateway restarted before this run reached a durable final state",
+    "worker lost",
+    "owner lost",
+)
 
 
 async def resolve_thread_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
@@ -140,6 +153,58 @@ def _terminal_replay_frame(row: Mapping, record: RunRecord, payload: Any) -> str
     return None
 
 
+def _is_record_terminal_payload(payload: Any, record: RunRecord) -> bool:
+    return (
+        isinstance(payload, Mapping)
+        and (payload.get("event_type") == _RUN_TERMINAL_EVENT_TYPE or payload.get("type") == _RUN_TERMINAL_EVENT_TYPE)
+        and payload.get("thread_id") == record.thread_id
+        and payload.get("run_id") == record.run_id
+        and isinstance(payload.get("status"), str)
+        and isinstance(payload.get("terminal_reason"), str)
+    )
+
+
+def _record_terminal_reason(record: RunRecord) -> str | None:
+    reason = getattr(record, "terminal_reason", None)
+    if isinstance(reason, str) and reason:
+        return _RUN_TERMINAL_REASON_ALIASES.get(reason, reason)
+    status = run_status_value(record.status)
+    if status == "success":
+        return "success"
+    if status in {"timeout", "timed_out"}:
+        return "timeout"
+    if status in {"interrupted", "cancelled"}:
+        return "cancelled"
+    if status in {"worker_lost", "boundary_stopped", "rolled_back", "rollback_failed"}:
+        return status
+    if status == "error":
+        error = (getattr(record, "error", None) or "").strip().lower()
+        if "rolled back by user" in error:
+            return "rolled_back"
+        if any(marker in error for marker in _WORKER_LOST_ERROR_MARKERS):
+            return "worker_lost"
+        return "failed"
+    return None
+
+
+def _record_terminal_replay_frame(record: RunRecord) -> str | None:
+    status = run_status_value(record.status)
+    reason = _record_terminal_reason(record)
+    if not status or not reason:
+        return None
+    return format_sse(
+        "custom",
+        {
+            "type": _RUN_TERMINAL_EVENT_TYPE,
+            "event_type": _RUN_TERMINAL_EVENT_TYPE,
+            "thread_id": record.thread_id,
+            "run_id": record.run_id,
+            "status": status,
+            "terminal_reason": reason,
+        },
+    )
+
+
 async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, user_id: str | None) -> list[str] | None:
     if event_store is None:
         return None
@@ -167,6 +232,7 @@ async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, 
 
     has_stream_projection = any(isinstance(row, Mapping) and row.get("event_type") in _STREAM_REPLAY_TYPES for row in rows)
     frames = []
+    has_terminal_frame = False
     for row in rows:
         payload = row.get("content") if isinstance(row, Mapping) else None
         if has_stream_projection:
@@ -177,6 +243,7 @@ async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, 
                 continue
             terminal_frame = _terminal_replay_frame(row, record, payload) if isinstance(row, Mapping) else None
             if terminal_frame is not None:
+                has_terminal_frame = True
                 frames.append(terminal_frame)
             continue
 
@@ -188,6 +255,11 @@ async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, 
             frames.append(format_sse("custom", payload))
             continue
         terminal_frame = _terminal_replay_frame(row, record, payload) if isinstance(row, Mapping) else None
+        if terminal_frame is not None:
+            has_terminal_frame = True
+            frames.append(terminal_frame)
+    if not has_terminal_frame:
+        terminal_frame = _record_terminal_replay_frame(record)
         if terminal_frame is not None:
             frames.append(terminal_frame)
     return frames or None
@@ -673,10 +745,15 @@ async def sse_consumer(
         if replay_frames is not None:
             for frame in replay_frames:
                 yield frame
+        else:
+            terminal_frame = _record_terminal_replay_frame(record)
+            if terminal_frame is not None:
+                yield terminal_frame
         yield format_sse("end", None)
         return
 
     last_event_id = request.headers.get("Last-Event-ID")
+    saw_terminal_frame = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
@@ -687,17 +764,24 @@ async def sse_consumer(
                 continue
 
             if entry is END_SENTINEL:
+                if not saw_terminal_frame:
+                    terminal_frame = _record_terminal_replay_frame(record)
+                    if terminal_frame is not None:
+                        yield terminal_frame
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
             if entry.event == _STREAM_RECOVERY_REQUIRED_EVENT:
                 replay_frames = await _durable_replay_frames(event_store, record, user_id=user_id)
                 if replay_frames is not None:
+                    saw_terminal_frame = saw_terminal_frame or any(f'"event_type": "{_RUN_TERMINAL_EVENT_TYPE}"' in frame or f'"type": "{_RUN_TERMINAL_EVENT_TYPE}"' in frame for frame in replay_frames)
                     for frame in replay_frames:
                         yield frame
                 yield format_sse(entry.event, entry.data, event_id=entry.id or None)
                 continue
 
+            if entry.event == "custom" and _is_record_terminal_payload(entry.data, record):
+                saw_terminal_frame = True
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:

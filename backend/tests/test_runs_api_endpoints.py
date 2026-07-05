@@ -106,6 +106,46 @@ def test_run_messages_returns_display_contract():
     }
 
 
+def test_run_messages_marks_internal_rows_hidden_from_chat():
+    rows = [
+        {
+            "seq": 1,
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "generated title"},
+            "metadata": {"caller": "middleware:title"},
+        },
+        {
+            "seq": 2,
+            "event_type": "llm.tool.result",
+            "category": "message",
+            "content": {"type": "tool", "content": "tool output", "tool_call_id": "call-1"},
+            "metadata": {"caller": "task"},
+        },
+    ]
+    run_record = {"run_id": "run-1", "thread_id": "thread-1"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-1/messages")
+
+    assert response.status_code == 200
+    assert [row["display"] for row in response.json()["data"]] == [
+        {
+            "visible_in_chat": False,
+            "surface": "control",
+            "reason": "middleware_message",
+        },
+        {
+            "visible_in_chat": False,
+            "surface": "control",
+            "reason": "tool_message",
+        },
+    ]
+
+
 def test_run_messages_404_when_run_not_found():
     """Returns 404 when the run store returns None."""
     app = _make_app(

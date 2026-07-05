@@ -2,13 +2,16 @@ import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  applySnapshotRunMessagePageState,
   applyTaskEventRunMessages,
   buildRunMessagesUrl,
+  buildThreadRuntimeSnapshotUrl,
   buildVisibleHistoryMessages,
   completeOptimisticUploadMessages,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
+  getLatestRunTerminalNotice,
   getTerminalTransitionRunIds,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
@@ -18,18 +21,26 @@ import {
   isTaskEventRunMessage,
   isTaskEventRunMessageForRequest,
   isVisibleHistoryRunMessage,
+  keepQueuedMessagesForThread,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeFetchedRunMessages,
   mergeMessages,
   partitionKnownRunIds,
   readRunMessagesPageResponse,
+  resetLoadedRunStateForRefresh,
   removeSetItems,
   resolveThreadHistoryReset,
   roundIdOfRun,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
+  shouldAutoContinueRunHistory,
   shouldAutoLoadLatestRun,
+  shouldReleaseQueuedThreadMessage,
+  shouldShowLiveThreadState,
+  shouldShowThreadHistory,
+  taskLaneSubtaskUpdate,
   taskEventRunMessageKey,
+  threadRuntimeSnapshotQueryKey,
   threadRunsQueryKey,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -69,6 +80,39 @@ test("threadRunsQueryKey keeps run lists separate from thread metadata", () => {
     "thread-a",
     "runs",
   ]);
+});
+
+test("threadRuntimeSnapshotQueryKey keeps snapshot cache separate from run lists", () => {
+  expect(threadRuntimeSnapshotQueryKey("thread-a")).toEqual([
+    "thread",
+    "thread-a",
+    "runtime-snapshot",
+  ]);
+});
+
+test("thread switching gates live state, history, and queued messages by visible thread", () => {
+  expect(shouldShowLiveThreadState("thread-b", "thread-a", "thread-a")).toBe(
+    false,
+  );
+  expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
+  expect(
+    keepQueuedMessagesForThread(
+      [
+        { threadId: "thread-a", text: "old" },
+        { threadId: "thread-b", text: "current" },
+      ],
+      "thread-b",
+    ),
+  ).toEqual([{ threadId: "thread-b", text: "current" }]);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      isLoading: false,
+      streamFinished: true,
+      sendInFlight: false,
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(false);
 });
 
 test("round id changes revalidate thread history without clearing visible rows", () => {
@@ -470,6 +514,36 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
   ).toBeNull();
 });
 
+test("applySnapshotRunMessagePageState keeps paged snapshot runs loadable", () => {
+  const loadedRunIds = new Set<string>();
+  const runBeforeSeq = new Map<string, number>();
+
+  applySnapshotRunMessagePageState(
+    [
+      {
+        run_id: "run-complete",
+        data: [runMessage(4)],
+        has_more: false,
+      },
+      {
+        run_id: "run-paged",
+        data: [runMessage(9), runMessage(7)],
+        has_more: true,
+      },
+      {
+        run_id: "run-unknown-page",
+        data: [runMessage()],
+        has_more: true,
+      },
+    ],
+    loadedRunIds,
+    runBeforeSeq,
+  );
+
+  expect(loadedRunIds).toEqual(new Set(["run-complete"]));
+  expect(runBeforeSeq).toEqual(new Map([["run-paged", 7]]));
+});
+
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
@@ -493,6 +567,62 @@ test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", ()
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
   );
+});
+
+test("buildThreadRuntimeSnapshotUrl encodes the thread id", () => {
+  expect(
+    buildThreadRuntimeSnapshotUrl(
+      "https://api.example.test/",
+      "thread/with space",
+    ),
+  ).toBe(
+    "https://api.example.test/api/threads/thread%2Fwith%20space/runtime-snapshot",
+  );
+  expect(buildThreadRuntimeSnapshotUrl("", "thread-1")).toBe(
+    "/api/threads/thread-1/runtime-snapshot",
+  );
+});
+
+test("taskLaneSubtaskUpdate restores completed task lane state", () => {
+  expect(
+    taskLaneSubtaskUpdate({
+      thread_id: "thread-1",
+      run_id: "run-1",
+      task_id: "task-1",
+      role: "evidence",
+      status: "completed",
+      result_ref: "artifact://result",
+      created_at: "2026-06-18T00:00:00Z",
+    }),
+  ).toMatchObject({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "completed",
+    subagent_type: "evidence",
+    description: "evidence task",
+    prompt: "evidence task",
+    result: "artifact://result",
+    actionResultStatus: "completed",
+    notify: true,
+  });
+});
+
+test("taskLaneSubtaskUpdate maps non-active terminal lanes to failed", () => {
+  expect(
+    taskLaneSubtaskUpdate({
+      thread_id: "thread-1",
+      run_id: "run-1",
+      task_id: "task-1",
+      status: "blocked",
+      error: "Boundary stopped task.",
+    }),
+  ).toMatchObject({
+    id: "task-1",
+    status: "failed",
+    error: "Boundary stopped task.",
+    terminalReason: "blocked",
+  });
 });
 
 test("task event run messages update subtask state without entering visible history", () => {
@@ -534,6 +664,7 @@ test("task event run messages update subtask state without entering visible hist
     {
       id: "call-1",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "completed",
       result: "done",
@@ -570,6 +701,7 @@ test("legacy task event run messages without metadata still restore subtask stat
     {
       id: "call-legacy",
       threadId: "thread-1",
+      runId: "run-legacy",
       notify: true,
       status: "completed",
       result: "legacy done",
@@ -580,7 +712,7 @@ test("legacy task event run messages without metadata still restore subtask stat
   );
 });
 
-test("visible history run messages fall back to local rules for old rows without display", () => {
+test("visible history run messages fall back to hiding internal rows without display", () => {
   const middlewareAiRow = {
     run_id: "run-1",
     seq: 1,
@@ -603,9 +735,21 @@ test("visible history run messages fall back to local rules for old rows without
     metadata: { caller: "middleware:title" },
     created_at: "2026-05-22T00:00:01Z",
   } as RunMessage;
-  const taskEventRow = {
+  const toolRow = {
     run_id: "run-1",
     seq: 3,
+    content: {
+      id: "tool-1",
+      type: "tool",
+      content: "tool output",
+      tool_call_id: "call-1",
+    } as Message,
+    metadata: { caller: "task" },
+    created_at: "2026-05-22T00:00:02Z",
+  } as RunMessage;
+  const taskEventRow = {
+    run_id: "run-1",
+    seq: 4,
     content: {
       type: "task_running",
       task_id: "call-1",
@@ -613,11 +757,32 @@ test("visible history run messages fall back to local rules for old rows without
       run_id: "run-1",
     },
     metadata: { caller: "task_event" },
-    created_at: "2026-05-22T00:00:02Z",
+    created_at: "2026-05-22T00:00:03Z",
   } as unknown as RunMessage;
+  const systemRow = {
+    run_id: "run-1",
+    seq: 5,
+    content: {
+      id: "system-1",
+      type: "system",
+      content: "system prompt",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:00:04Z",
+  } as RunMessage;
+  const removeRow = {
+    run_id: "run-1",
+    seq: 6,
+    content: {
+      id: "__remove_all__",
+      type: "remove",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:00:05Z",
+  } as RunMessage;
   const hiddenRow = {
     run_id: "run-1",
-    seq: 4,
+    seq: 7,
     content: {
       id: "hidden-1",
       type: "ai",
@@ -625,20 +790,44 @@ test("visible history run messages fall back to local rules for old rows without
       additional_kwargs: { hide_from_ui: true },
     } as Message,
     metadata: { caller: "middleware:summarize" },
-    created_at: "2026-05-22T00:00:03Z",
+    created_at: "2026-05-22T00:00:06Z",
+  } as RunMessage;
+  const leadAiRow = {
+    run_id: "run-1",
+    seq: 8,
+    content: {
+      id: "ai-lead-1",
+      type: "ai",
+      content: "lead answer",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:00:07Z",
   } as RunMessage;
 
-  expect(isVisibleHistoryRunMessage(middlewareAiRow)).toBe(true);
-  expect(isVisibleHistoryRunMessage(middlewareHumanRow)).toBe(true);
+  expect(isVisibleHistoryRunMessage(middlewareAiRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(middlewareHumanRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(toolRow)).toBe(false);
   expect(isVisibleHistoryRunMessage(taskEventRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(systemRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(removeRow)).toBe(false);
   expect(isVisibleHistoryRunMessage(hiddenRow)).toBe(false);
+  expect(isVisibleHistoryRunMessage(leadAiRow)).toBe(true);
   expect(
     buildVisibleHistoryMessages(
-      [middlewareAiRow, middlewareHumanRow, taskEventRow, hiddenRow],
+      [
+        middlewareAiRow,
+        middlewareHumanRow,
+        toolRow,
+        taskEventRow,
+        systemRow,
+        removeRow,
+        hiddenRow,
+        leadAiRow,
+      ],
       new Set(),
       [],
     ).map((message) => message.id),
-  ).toEqual(["ai-middleware-1", "human-middleware-1"]);
+  ).toEqual(["ai-lead-1"]);
 });
 
 test("visible history run messages keep middleware rows marked visible by backend contract", () => {
@@ -762,6 +951,7 @@ test("task event run messages are idempotent and scoped to the requested thread 
     {
       id: "call-1",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "in_progress",
     },
@@ -843,6 +1033,62 @@ test("getTerminalTransitionRunIds selects active runs that just reached a termin
       runs,
     ),
   ).toEqual(["R5", "R3", "R2", "R1", "R0", "R-1"]);
+});
+
+test("getLatestRunTerminalNotice reports terminal runs without visible AI replies", () => {
+  const runs = [
+    {
+      run_id: "run-terminal",
+      status: "error",
+      terminal_reason: "worker_lost",
+    },
+  ] as unknown as Run[];
+  const humanOnlyRows = [
+    {
+      run_id: "run-terminal",
+      seq: 1,
+      content: {
+        id: "human-1",
+        type: "human",
+        content: "question",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+  ] satisfies RunMessage[];
+  const aiRows = [
+    ...humanOnlyRows,
+    {
+      run_id: "run-terminal",
+      seq: 2,
+      content: {
+        id: "ai-1",
+        type: "ai",
+        content: "final",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+  ] satisfies RunMessage[];
+
+  expect(getLatestRunTerminalNotice(runs, humanOnlyRows)).toEqual({
+    runId: "run-terminal",
+    status: "error",
+    terminalReason: "worker_lost",
+    error: undefined,
+  });
+  expect(getLatestRunTerminalNotice(runs, aiRows)).toBeNull();
+  expect(
+    getLatestRunTerminalNotice(
+      [{ run_id: "run-ok", status: "success" }] as unknown as Run[],
+      humanOnlyRows,
+    ),
+  ).toEqual({
+    runId: "run-ok",
+    status: "success",
+    terminalReason: undefined,
+    error: undefined,
+  });
 });
 
 test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
@@ -1253,6 +1499,55 @@ test("mergeFetchedRunMessages replaces stale rows for refreshed run first page",
   ).toEqual(["final", "new"]);
 });
 
+test("mergeFetchedRunMessages preserves older loaded rows outside a refreshed latest page", () => {
+  const previous = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "ai-older",
+        type: "ai",
+        content: "older answer",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "ai-stale",
+        type: "ai",
+        content: "stale latest",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+  ] satisfies RunMessage[];
+  const fetched = [
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "tool-1",
+        type: "tool",
+        content: "tool output",
+        tool_call_id: "call-1",
+      } as Message,
+      metadata: { caller: "task" },
+      created_at: "2026-06-18T00:00:03Z",
+    },
+  ] satisfies RunMessage[];
+
+  const merged = mergeFetchedRunMessages(previous, fetched, "run-1", true);
+
+  expect(
+    buildVisibleHistoryMessages(merged, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["older answer"]);
+});
+
 test("mergeFetchedRunMessages keeps existing rows when loading an older page", () => {
   const previous = [
     {
@@ -1300,6 +1595,29 @@ test("partitionKnownRunIds keeps unknown refresh ids pending until run list catc
     known: ["run-missing"],
     pending: [],
   });
+});
+
+test("resetLoadedRunStateForRefresh marks known runs unloaded and keeps unknown runs pending", () => {
+  const loadedRunIds = new Set(["run-known", "run-other"]);
+  const runBeforeSeq = new Map([
+    ["run-known", 42],
+    ["run-other", 7],
+  ]);
+  const runs = [
+    { run_id: "run-known" },
+    { run_id: "run-other" },
+  ] as unknown as Run[];
+
+  expect(
+    resetLoadedRunStateForRefresh(
+      ["run-missing", "run-known"],
+      runs,
+      loadedRunIds,
+      runBeforeSeq,
+    ),
+  ).toEqual({ known: ["run-known"], pending: ["run-missing"] });
+  expect([...loadedRunIds]).toEqual(["run-other"]);
+  expect([...runBeforeSeq.entries()]).toEqual([["run-other", 7]]);
 });
 
 test("buildVisibleHistoryMessages preserves run message created_at for elapsed timers", () => {
@@ -1419,6 +1737,26 @@ test("shouldAutoContinueOnEmptyRun stops once consecutive empty loads reach the 
 test("shouldAutoContinueOnEmptyRun honors a custom safety cap when provided", () => {
   expect(shouldAutoContinueOnEmptyRun(0, 0, 1)).toBe(true);
   expect(shouldAutoContinueOnEmptyRun(0, 1, 1)).toBe(false);
+});
+
+test("shouldAutoContinueRunHistory continues across visible runs while older runs remain", () => {
+  expect(
+    shouldAutoContinueRunHistory({
+      hasMoreUnloadedRuns: true,
+      visibleMessageCount: 2,
+      consecutiveEmptyLoads: 0,
+    }),
+  ).toBe(true);
+});
+
+test("shouldAutoContinueRunHistory stops when no older runs remain", () => {
+  expect(
+    shouldAutoContinueRunHistory({
+      hasMoreUnloadedRuns: false,
+      visibleMessageCount: 2,
+      consecutiveEmptyLoads: 0,
+    }),
+  ).toBe(false);
 });
 
 test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {

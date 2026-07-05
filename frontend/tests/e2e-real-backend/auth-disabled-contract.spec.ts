@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { AUTH_DISABLED_USER } from "../../src/core/auth/auth-disabled-user";
 
-const APP = "http://localhost:3000";
+const APP = `http://localhost:${process.env.PLAYWRIGHT_REAL_BACKEND_FRONTEND_PORT ?? "3100"}`;
 
 test.describe("auth-disabled contract (real backend)", () => {
   test("gateway /auth/me returns the frontend synthetic user without a cookie", async ({

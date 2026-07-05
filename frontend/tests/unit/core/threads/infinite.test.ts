@@ -418,6 +418,49 @@ describe("run history reconciliation", () => {
 
     clearThreadActivity(threadId);
   });
+
+  test("run terminal events settle same-run active task cards before later error frames", () => {
+    const client = new QueryClient();
+    const threadId = "terminal-timeout-thread";
+    const runId = "terminal-timeout-run";
+    const refreshed: string[][] = [];
+    const settled: unknown[] = [];
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      reconcileTerminalRunHistory(
+        client,
+        {
+          type: "run.terminal",
+          event_type: "run.terminal",
+          thread_id: threadId,
+          run_id: runId,
+          status: "timeout",
+          terminal_reason: "timeout",
+        },
+        (runIds) => refreshed.push([...(runIds ?? [])]),
+        (terminal) => settled.push(terminal),
+      ),
+    ).toBe(true);
+
+    expect(settled).toEqual([
+      {
+        threadId,
+        runId,
+        status: "timeout",
+        terminalReason: "timeout",
+      },
+    ]);
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+    expect(
+      client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
+    ).toBe("timeout");
+    expect(refreshed).toEqual([[runId]]);
+
+    clearThreadActivity(threadId);
+  });
 });
 
 describe("clearDeletedThreadClientState", () => {

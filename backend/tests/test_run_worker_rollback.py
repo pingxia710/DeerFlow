@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
     RunContext,
     _agent_factory_supports_app_config,
@@ -340,6 +341,95 @@ async def test_run_agent_times_out_stalled_stream_and_publishes_end():
     assert [event["content"] for event in events] == [
         {"status": "timeout", "terminal_reason": "timeout"},
     ]
+
+
+@pytest.mark.anyio
+async def test_run_agent_hard_timeout_finalizes_and_releases_active_slot():
+    run_manager = RunManager(store=MemoryRunStore())
+    record = await run_manager.create_or_reject("thread-hard-timeout", user_id="owner-1")
+    bridge_events: list[tuple[str, str | None, object | None]] = []
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=lambda run_id, event, data: bridge_events.append(("publish", event, data))),
+        publish_end=AsyncMock(side_effect=lambda run_id: bridge_events.append(("end", None, run_id))),
+        cleanup=AsyncMock(),
+    )
+    event_store = MemoryRunEventStore()
+    thread_store = SimpleNamespace(update_status=AsyncMock())
+    stream_entered = asyncio.Event()
+
+    class StalledAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            stream_entered.set()
+            await asyncio.Event().wait()
+            yield {"messages": []}
+
+    def factory(*, config):
+        return StalledAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=event_store,
+            thread_store=thread_store,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+        no_progress_timeout_seconds=60,
+        hard_timeout_seconds=0.05,
+    )
+
+    assert stream_entered.is_set()
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.timeout
+    assert fetched.terminal_reason == "timeout"
+    assert fetched.error == "Run exceeded hard timeout while waiting for stream progress."
+    thread_store.update_status.assert_awaited_once_with("thread-hard-timeout", "timeout", user_id="owner-1")
+    bridge.publish.assert_any_await(
+        record.run_id,
+        "custom",
+        {
+            "type": "run.terminal",
+            "event_type": "run.terminal",
+            "thread_id": "thread-hard-timeout",
+            "run_id": record.run_id,
+            "status": "timeout",
+            "terminal_reason": "timeout",
+        },
+    )
+    bridge.publish.assert_any_await(
+        record.run_id,
+        "error",
+        {
+            "message": "Run exceeded hard timeout while waiting for stream progress.",
+            "name": "RunHardTimeoutError",
+        },
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    assert [event for _, event, _ in bridge_events] == [
+        "metadata",
+        "custom",
+        "error",
+        None,
+    ]
+
+    terminal_events = await event_store.list_events(
+        "thread-hard-timeout",
+        record.run_id,
+        event_types=["run.terminal"],
+        user_id="owner-1",
+    )
+    assert [event["content"] for event in terminal_events] == [
+        {"status": "timeout", "terminal_reason": "timeout"},
+    ]
+
+    replacement = await run_manager.create_or_reject("thread-hard-timeout", user_id="owner-1")
+    assert replacement.run_id != record.run_id
+    await run_manager.set_status(replacement.run_id, RunStatus.interrupted, terminal_reason="test_cleanup")
 
 
 @pytest.mark.anyio

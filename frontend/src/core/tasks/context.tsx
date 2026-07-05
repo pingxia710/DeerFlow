@@ -21,6 +21,13 @@ export type SubtaskUpdate = Partial<Subtask> & {
   notify?: boolean;
 };
 
+export type RunTerminalSubtaskUpdate = {
+  threadId: string;
+  runId: string;
+  status: string;
+  terminalReason?: string;
+};
+
 export function getSubtaskStorageKey(id: string, threadId?: string | null) {
   if (!threadId) {
     return id;
@@ -107,6 +114,71 @@ export function didSubtaskChange(previous: Subtask | undefined, next: Subtask) {
     }
   }
   return false;
+}
+
+function runTerminalSubtaskError(status: string, terminalReason?: string) {
+  if (status === "timeout") {
+    return "Parent run timed out before this subtask completed.";
+  }
+  if (status === "interrupted") {
+    return "Parent run stopped before this subtask completed.";
+  }
+  if (status === "error") {
+    return "Parent run failed before this subtask completed.";
+  }
+  return `Parent run ended before this subtask completed${terminalReason ? `: ${terminalReason}` : "."}`;
+}
+
+export function settleRunningSubtasksForRun(
+  tasks: Record<string, Subtask>,
+  terminal: RunTerminalSubtaskUpdate,
+) {
+  if (terminal.status === "success") {
+    return tasks;
+  }
+
+  let changed = false;
+  const nextTasks: Record<string, Subtask> = { ...tasks };
+  for (const [storageKey, task] of Object.entries(tasks)) {
+    if (
+      task.threadId !== terminal.threadId ||
+      task.runId !== terminal.runId ||
+      task.status !== "in_progress"
+    ) {
+      continue;
+    }
+
+    const next = mergeSubtaskUpdate(task, {
+      id: task.id,
+      threadId: terminal.threadId,
+      runId: terminal.runId,
+      status: "failed",
+      error: runTerminalSubtaskError(terminal.status, terminal.terminalReason),
+      actionResultStatus: terminal.status,
+      terminalReason: terminal.terminalReason ?? terminal.status,
+      notify: true,
+    });
+    if (!didSubtaskChange(task, next)) {
+      continue;
+    }
+    nextTasks[storageKey] = next;
+    changed = true;
+  }
+
+  return changed ? nextTasks : tasks;
+}
+
+export function useSettleRunningSubtasksForRun() {
+  const { setTasks } = useSubtaskContext();
+
+  return useCallback(
+    (terminal: RunTerminalSubtaskUpdate) => {
+      setTasks((currentTasks) =>
+        settleRunningSubtasksForRun(currentTasks, terminal),
+      );
+    },
+    [setTasks],
+  );
 }
 
 export function useUpdateSubtask() {

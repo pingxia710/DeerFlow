@@ -31,7 +31,11 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
-import { type SubtaskUpdate, useUpdateSubtask } from "../tasks/context";
+import {
+  type SubtaskUpdate,
+  useSettleRunningSubtasksForRun,
+  useUpdateSubtask,
+} from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -654,6 +658,12 @@ type RunTerminalEvent = {
 };
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
+type SettleRunSubtasks = (terminal: {
+  threadId: string;
+  runId: string;
+  status: string;
+  terminalReason?: string;
+}) => void;
 
 export function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   if (typeof value !== "object" || value === null) {
@@ -811,7 +821,8 @@ export function applyTaskEventToSubtask(
 
   const threadId =
     stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
-  const base: SubtaskUpdate = { id: taskId, threadId, notify: true };
+  const runId = stringValue(taskEvent.run_id);
+  const base: SubtaskUpdate = { id: taskId, threadId, runId, notify: true };
 
   if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
@@ -1545,11 +1556,18 @@ export function reconcileTerminalRunHistory(
   queryClient: QueryClient,
   event: unknown,
   refreshRuns: RefreshRuns,
+  settleRunSubtasks?: SettleRunSubtasks,
 ) {
   const runTerminalEvent = asRunTerminalEvent(event);
   if (!runTerminalEvent) {
     return false;
   }
+  settleRunSubtasks?.({
+    threadId: runTerminalEvent.thread_id,
+    runId: runTerminalEvent.run_id,
+    status: runTerminalEvent.status,
+    terminalReason: runTerminalEvent.terminal_reason,
+  });
   stopBackgroundRunProbe(runTerminalEvent.thread_id, runTerminalEvent.run_id);
   if (
     !applyBackgroundRunProbeResult(
@@ -1909,6 +1927,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const settleRunSubtasks = useSettleRunningSubtasksForRun();
   const assistantId = resolveAssistantId(context.agent_name);
   const reconnectOnMount =
     !onStreamThreadId || !threadActivitySnapshot.finished.has(onStreamThreadId);
@@ -2078,7 +2097,14 @@ export function useThreadStream({
         return;
       }
 
-      if (reconcileTerminalRunHistory(queryClient, event, refreshHistoryRuns)) {
+      if (
+        reconcileTerminalRunHistory(
+          queryClient,
+          event,
+          refreshHistoryRuns,
+          settleRunSubtasks,
+        )
+      ) {
         return;
       }
 
@@ -2214,6 +2240,9 @@ export function useThreadStream({
   }, [threadId]);
 
   useEffect(() => {
+    // Intentional: queued follow-ups are tied to the visible chat. On route
+    // changes we drop hidden-thread queued sends so a stale stream end cannot
+    // submit them into the current window.
     queuedMessagesRef.current = keepQueuedMessagesForThread(
       queuedMessagesRef.current,
       currentViewThreadId,

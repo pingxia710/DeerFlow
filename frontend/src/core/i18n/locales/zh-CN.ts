@@ -51,6 +51,7 @@ export const zhCN: Translations = {
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
     regenerate: "重新生成",
+    retry: "重试",
   },
 
   // Home
@@ -269,6 +270,12 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+    historyNotFoundTitle: "找不到这个对话",
+    historyNotFoundDescription: "这个对话可能已被删除，或暂时不可用。",
+    historyForbiddenTitle: "无法访问这个对话",
+    historyForbiddenDescription: "当前账号没有权限访问这个对话。",
+    historyLoadFailedTitle: "对话加载失败",
+    historyLoadFailedDescription: "请检查网络或后端连接后重试。",
   },
 
   // Channels

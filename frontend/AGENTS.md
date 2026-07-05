@@ -133,7 +133,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   AuthProvider or the query caller refresh user state.
 - Queued follow-up messages while a stream is active are thread-local UI state;
   discard them on chat-thread switches unless a real per-thread queue/draft
-  store is implemented.
+  store is implemented. They may only auto-release when the queued thread id
+  equals the currently visible thread id.
 - Deleting a chat thread must also clear thread-local client state such as
   running/finished activity markers, run lists, metadata, token usage, and
   context usage caches.

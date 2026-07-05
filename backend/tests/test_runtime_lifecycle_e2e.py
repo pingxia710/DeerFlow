@@ -454,10 +454,18 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
             transcript = _drain_stream(response)
 
         events = _parse_sse(transcript)
-        assert [event["event"] for event in events] == ["metadata", "values", "end"]
+        assert [event["event"] for event in events] == ["metadata", "values", "custom", "end"]
         assert events[0]["data"] == {"run_id": run_id, "thread_id": thread_id}
         assert events[1]["data"]["title"] == "Lifecycle E2E"
         assert events[1]["data"]["messages"][-1]["content"] == "Lifecycle complete."
+        assert events[2]["data"] == {
+            "type": "run.terminal",
+            "event_type": "run.terminal",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "status": "success",
+            "terminal_reason": "success",
+        }
 
         run = client.get(f"/api/threads/{thread_id}/runs/{run_id}")
         assert run.status_code == 200, run.text

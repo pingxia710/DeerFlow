@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
@@ -28,6 +29,7 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
+  getThreadHistoryLoadErrorKind,
   useThreadContextUsage,
   useThreadMetadata,
   useThreadStream,
@@ -100,6 +102,7 @@ export default function ChatPage() {
     regenerateMessage,
     isUploading,
     isHistoryLoading,
+    historyError,
     hasMoreHistory,
     loadMoreHistory,
   } = useThreadStream({
@@ -211,6 +214,26 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const historyErrorKind = historyError
+    ? getThreadHistoryLoadErrorKind(historyError)
+    : null;
+  const historyErrorCopy =
+    historyErrorKind === "not-found"
+      ? {
+          title: t.chats.historyNotFoundTitle,
+          description: t.chats.historyNotFoundDescription,
+        }
+      : historyErrorKind === "forbidden"
+        ? {
+            title: t.chats.historyForbiddenTitle,
+            description: t.chats.historyForbiddenDescription,
+          }
+        : historyErrorKind === "failed"
+          ? {
+              title: t.chats.historyLoadFailedTitle,
+              description: t.chats.historyLoadFailedDescription,
+            }
+          : null;
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -252,29 +275,53 @@ export default function ChatPage() {
           </header>
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex min-h-0 flex-1 justify-center">
-              <MessageList
-                className={cn("size-full", !isWelcomeMode && "pt-10")}
-                threadId={threadId}
-                thread={thread}
-                contextSnapshot={
-                  threadContextUsage.data?.latest_lead ??
-                  threadContextUsage.data?.latest ??
-                  null
-                }
-                paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
-                hasMoreHistory={hasMoreHistory}
-                loadMoreHistory={loadMoreHistory}
-                isHistoryLoading={isHistoryLoading}
-                tokenUsageInlineMode={tokenUsageInlineMode}
-                canRegenerate={
-                  !isNewThread &&
-                  !isMock &&
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                  !isUploading &&
-                  !thread.isLoading
-                }
-                onRegenerateMessage={handleRegenerate}
-              />
+              {historyErrorCopy && !isHistoryLoading ? (
+                <div className="flex size-full items-center justify-center px-4 pt-10">
+                  <div className="border-border/60 bg-background/90 max-w-sm rounded-lg border p-4 text-center shadow-sm">
+                    <div className="text-sm font-medium">
+                      {historyErrorCopy.title}
+                    </div>
+                    <div className="text-muted-foreground mt-2 text-sm">
+                      {historyErrorCopy.description}
+                    </div>
+                    <Button
+                      className="mt-4"
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        void loadMoreHistory();
+                      }}
+                    >
+                      {t.common.retry}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <MessageList
+                  className={cn("size-full", !isWelcomeMode && "pt-10")}
+                  threadId={threadId}
+                  thread={thread}
+                  contextSnapshot={
+                    threadContextUsage.data?.latest_lead ??
+                    threadContextUsage.data?.latest ??
+                    null
+                  }
+                  paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+                  hasMoreHistory={hasMoreHistory}
+                  loadMoreHistory={loadMoreHistory}
+                  isHistoryLoading={isHistoryLoading}
+                  tokenUsageInlineMode={tokenUsageInlineMode}
+                  canRegenerate={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading
+                  }
+                  onRegenerateMessage={handleRegenerate}
+                />
+              )}
             </div>
             <div
               className={cn(

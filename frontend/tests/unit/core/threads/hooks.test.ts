@@ -175,7 +175,7 @@ test("resolveVisibleTaskRunningThreadId only accepts the current live thread", a
   ).toBe("thread-b");
 });
 
-test("shouldReleaseQueuedThreadMessage releases after completion even if user switched threads", async () => {
+test("shouldReleaseQueuedThreadMessage releases only for the visible queued thread", async () => {
   const { shouldReleaseQueuedThreadMessage } =
     await import("@/core/threads/hooks");
 
@@ -198,7 +198,7 @@ test("shouldReleaseQueuedThreadMessage releases after completion even if user sw
       streamFinished: true,
       currentViewThreadId: "thread-b",
     }),
-  ).toBe(true);
+  ).toBe(false);
 });
 
 test("keepQueuedMessagesForThread drops queued sends from other chats", async () => {
@@ -216,6 +216,24 @@ test("keepQueuedMessagesForThread drops queued sends from other chats", async ()
   expect(keepQueuedMessagesForThread([{ threadId: "thread-a" }], null)).toEqual(
     [],
   );
+});
+
+test("readRunMessagesPageResponse preserves HTTP status on history load errors", async () => {
+  const { getThreadHistoryLoadErrorKind, readRunMessagesPageResponse } =
+    await import("@/core/threads/hooks");
+
+  await expect(
+    readRunMessagesPageResponse(
+      new Response(JSON.stringify({ detail: "forbidden" }), {
+        status: 403,
+        statusText: "Forbidden",
+      }),
+    ),
+  ).rejects.toMatchObject({ message: "forbidden", status: 403 });
+
+  expect(getThreadHistoryLoadErrorKind({ status: 403 })).toBe("forbidden");
+  expect(getThreadHistoryLoadErrorKind({ status: 404 })).toBe("not-found");
+  expect(getThreadHistoryLoadErrorKind(new Error("network"))).toBe("failed");
 });
 
 test("shouldShowThreadRunningStatus trusts backend terminal status over stale local running state", async () => {

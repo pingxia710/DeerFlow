@@ -336,6 +336,76 @@ def _approval_policy_facts(app_config: AppConfig) -> dict[str, Any]:
     }
 
 
+def _capability_center(
+    *,
+    app_config: AppConfig,
+    thread_id: str | None,
+    tools: list[ToolCapability],
+    skills: list[dict[str, Any]],
+    filesystem_permissions: list[FilesystemPermission],
+) -> dict[str, Any]:
+    sandbox = _sandbox_facts(app_config)
+    approval_policy = _approval_policy_facts(app_config)
+    return {
+        "current_release": {
+            "source": "current request configuration",
+            "thread_scoped": thread_id is not None,
+            "tools": [tool.model_dump() for tool in tools],
+            "subagents_available": bool(_subagent_facts(app_config)),
+            "skills": [
+                {
+                    "name": skill.get("name"),
+                    "enabled": skill.get("enabled"),
+                    "category": skill.get("category"),
+                    "source": "skill_storage",
+                }
+                for skill in skills
+            ],
+            "filesystem": [item.model_dump() for item in filesystem_permissions],
+            "sandbox": {
+                "use": sandbox.get("use"),
+                "uses_local_provider": sandbox.get("uses_local_provider"),
+                "allow_host_bash": sandbox.get("allow_host_bash"),
+                "host_bash_available": sandbox.get("host_bash_available"),
+                "unrestricted_host_access": sandbox.get("unrestricted_host_access"),
+                "unrestricted_host_access_available": sandbox.get("unrestricted_host_access_available"),
+            },
+            "middleware_source": "lead_agent.build_middlewares",
+            "program_decides_next_step": False,
+        },
+        "stop_before": list(approval_policy["stop_before"]),
+        "permission_facts": {
+            "filesystem_scope": [item.model_dump() for item in filesystem_permissions],
+            "sandbox_unrestricted_host_access": sandbox.get("unrestricted_host_access"),
+            "sandbox_unrestricted_host_access_available": sandbox.get("unrestricted_host_access_available"),
+            "sandbox_allow_host_bash": sandbox.get("allow_host_bash"),
+            "sandbox_host_bash_available": sandbox.get("host_bash_available"),
+            "approval_requirements": {
+                "mcp_config_admin_required": approval_policy["mcp_config_admin_required"],
+                "global_skill_management_admin_required": approval_policy["global_skill_management_admin_required"],
+                "thread_owner_check_required": approval_policy["thread_owner_check_required"],
+            },
+            "program_makes_next_step_decisions": False,
+        },
+        "evidence_refs": [
+            "deerflow.capabilities.snapshot",
+            "config.tools",
+            "config.sandbox",
+            "skill_storage",
+            "lead_agent.build_middlewares",
+        ],
+        "advisory_only": True,
+        "non_decisions": {
+            "program_makes_next_step_decisions": False,
+            "auto_authorize": False,
+            "auto_reject": False,
+            "auto_pass_fail": False,
+            "auto_dispatch": False,
+            "auto_rework": False,
+        },
+    }
+
+
 def _risk_notes(app_config: AppConfig) -> list[dict[str, Any]]:
     sandbox = app_config.sandbox
     return [
@@ -411,6 +481,13 @@ def build_capability_snapshot(
             "thread_scoped": thread_id is not None,
             "program_decides_next_step": False,
         },
+        "capability_center": _capability_center(
+            app_config=app_config,
+            thread_id=thread_id,
+            tools=tools,
+            skills=skills,
+            filesystem_permissions=filesystem_permissions,
+        ),
         "risk_notes": _risk_notes(app_config),
         "agent_harness_profiles": [
             _profile(

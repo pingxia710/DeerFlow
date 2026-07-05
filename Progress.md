@@ -502,3 +502,8 @@
 - Deliberately skipped: no RunManager/run store/stream persistence/checkpoint/rollback/lease/permission-model/Target Role auto-chain/skill-loading-policy changes.
 
 - 2026-07-04: 整理 artifact URL encoding/base URL fallback 测试，合并重复 artifacts-utils 覆盖；验证 `npm test -- tests/unit/core/artifacts/utils.test.ts` 9/9 通过，`pnpm exec prettier --check tests/unit/core/artifacts/utils.test.ts src/core/artifacts/utils.ts` 通过。
+
+## 2026-07-05 - Capability Boundary Center
+
+- Added `capability_center` to the AI-readable capability snapshot with current release facts, normalized stop-before boundaries, permission facts, stable evidence refs, and explicit advisory-only/non-decision flags.
+- Locked regressions for field presence, legacy compatibility, stop-before reuse, non-secret exposure, and no automatic authorize/reject/PASS/FAIL/dispatch/rework decisions.

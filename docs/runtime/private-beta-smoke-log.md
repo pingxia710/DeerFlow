@@ -22,6 +22,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `92698bbe` | existing local stack on `localhost:2026`; system Google Chrome used for browser check; no new run created | UI persisted history checkpoint | pass | 10:57 CST checkpoint: worktree clean; `/health` healthy; DB status counts `error=61`, `interrupted=7`, `success=451`, `running=0`; browser opened and reloaded `codex-switch-a-20260705024313-ed1c8f` and `codex-switch-b-20260705024313-ed1c8f`; each page body still contained its own marker and not the other thread's marker; important console filter for duplicate keys, failed history load, HTTP 5xx, and page errors was empty |
 | 2026-07-05 | Codex    | `278fc354` | no new run created; frontend unit regression only | frontend history regression | pass | `cd frontend && pnpm test tests/unit/core/threads/message-merge.test.ts` passed: `63 passed`, `0 failed`, duration `810ms`; covers visible history display contract, task-event filtering, run-local `seq` ordering, same-id cross-run preservation, refreshed run row replacement, terminal lifecycle event exclusion, and optimistic/live/history message dedupe |
 | 2026-07-05 | Codex    | `dc1feef9` | existing local stack on `localhost:2026`; real Command Room usage observed while smoke continued | provider stream reliability | needs follow-up | Thread `3ba75b81-e1c9-4e43-9288-7cbff600fc4f` run `1bcfcf14-1a26-4495-b14a-59e0c73ba359` produced the acceptance-test mapping committed as `dc1feef9`, then ended as `error` with `Codex API stream ended without response.completed event`; JSONL contained `run.end` and `run.terminal status=error`; DB status counts after recheck were `error=62`, `interrupted=7`, `success=451`, `running=0` |
+| 2026-07-05 | Codex    | `2461dec0` | existing local stack on `localhost:2026`; real Command Room usage observed while smoke continued | provider stream reliability | needs follow-up | Same thread run `163c309f-e6d0-4d3c-82e8-d75791dbf5b5` also ended as `error` with `Codex API stream ended without response.completed event`; JSONL contained `run.end` and `run.terminal status=error`; final DB status counts were `error=63`, `interrupted=7`, `success=451` |
 
 ## Notes
 
@@ -53,9 +54,10 @@ Use this file for the 1-2 day real-use smoke from
 
 - Provider stream reliability: real Command Room runs
   `0e582444-dee2-4190-a65b-e7ad68c754fa`,
-  `54ee1cae-9cca-4be9-a637-5700d3598e22`, and
-  `3797322c-af03-4c56-af7e-06a0f68d8534`, and
-  `1bcfcf14-1a26-4495-b14a-59e0c73ba359` ended with
+  `54ee1cae-9cca-4be9-a637-5700d3598e22`,
+  `3797322c-af03-4c56-af7e-06a0f68d8534`,
+  `1bcfcf14-1a26-4495-b14a-59e0c73ba359`, and
+  `163c309f-e6d0-4d3c-82e8-d75791dbf5b5` ended with
   `Codex API stream ended without response.completed event`; memory updates also
   showed `httpx.RemoteProtocolError` / incomplete chunked read. Observed runs
   reached terminal `error` and did not remain stuck busy.

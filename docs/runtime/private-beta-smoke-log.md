@@ -101,7 +101,9 @@ handoffs.
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React
   uncontrolled-to-controlled warning; no duplicate-key warning after the
-  restored-message fix.
+  restored-message fix. `logs/frontend.log` also contains React Query
+  `Query data cannot be undefined` warnings for query key `["skills"]`; keep
+  this on the observation list until reproduced or cleared in a fresh UI smoke.
 - Workstation startup boundary: this local process depends on the temp
   `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
   trusted host mounts.

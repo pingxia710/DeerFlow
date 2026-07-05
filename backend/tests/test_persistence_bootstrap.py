@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0006_normalize_artifact_provenance_owner"
+HEAD = "0007_round_handoff_envelope"
 BASELINE = "0001_baseline"
 
 

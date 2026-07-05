@@ -36,6 +36,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `848f7650` | existing local stack on `localhost:2026`; no new backend run created | migration dry-run preflight | needs follow-up | 11:45 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run` exited `0` and made no git-visible changes, but skipped SQL owner migration because it looked for `backend/.deer-flow/deer-flow.db`; live SQLite data was at `backend/.deer-flow/data/deerflow.db` with `34` `threads_meta` rows and `521` `runs` rows. The dry-run would move `45` legacy thread dirs and `1` legacy `command-room` agent to `user_id=default`; actual beta migration needs the intended owner and the DB path mismatch fixed/reviewed first. |
 | 2026-07-05 | Codex    | `b94b88c5` | existing local stack on `localhost:2026`; system Google Chrome used; no backend run created | fresh new-chat UI smoke | pass | 12:02 CST local throwaway auth registration returned `201`; `/workspace/chats/new` loaded without redirect; `/api/channels/providers`, `/api/models`, `/api/skills`, `/api/suggestions/config`, and `/api/langgraph/threads/search` returned `200`; browser console had `0` warning/error/pageerror entries after filtering to warning/error; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`, so the check did not create a model run. |
 | 2026-07-05 | Codex    | `fabb0898` | isolated temp Gateway boot on `127.0.0.1:18002`; `ENVIRONMENT=production`; all worker envs `1`; safe local sandbox; SQLite app DB; DB run events; SQLite checkpointer/store | production-shaped gateway boot | pass; caveat documented | 12:06 CST isolated uvicorn boot returned `/health` `200`; temp app DB initialized `runs`, `run_events`, `threads_meta`, `users`, `artifact_provenance`, feedback/channel tables, and alembic stamp; temp checkpointer DB initialized `checkpoints`, `writes`, `store`, and `store_migrations`; process shut down cleanly. A prior minimal boot with `database.backend=sqlite` and no `checkpointer` also reached `/health`, but logged `InMemoryStore`, so `private-beta-runbook.md` now records that current code needs `checkpointer: sqlite` for LangGraph store persistence. Current `localhost:2026` stack stayed healthy and real DB run counts remained `error=63`, `interrupted=7`, `success=451`. |
+| 2026-07-05 | Codex    | `3b253bcf` | existing local stack on `localhost:2026`; no backend run created | migration dry-run path verification | pass; migration still not applied | 12:10 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id default` inspected `/Users/pingxia/projects/deer-flow/backend/.deer-flow/data/deerflow.db`, found `34` thread ownership records, and made no git-visible changes; SQL null-owner counts remained `threads_meta=0`, `runs=0`, `run_events=0`; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`. Dry-run still reported `45` legacy thread-dir actions, including `15` conflicts and `21` ownerless threads that would be assigned to `default`, plus `1` legacy `command-room` agent, so actual migration still needs owner/conflict review before running without `--dry-run`. |
 
 ## Notes
 
@@ -80,8 +81,9 @@ Use this file for the 1-2 day real-use smoke from
   day smoke steps.
 - Known limits/start config: recorded; the isolated production-shaped Gateway
   boot passed with `checkpointer: sqlite`, `database.backend: sqlite`, and
-  `run_events.backend: db`. Existing data migration remains incomplete until
-  the DB path mismatch in the dry-run path is resolved or explicitly verified.
+  `run_events.backend: db`. Existing data migration remains incomplete because
+  the latest dry-run still reports ownerless legacy thread assignments and
+  conflicts requiring owner review before applying changes.
 - 1-2 day real-use smoke: not complete. Continue observing real sessions and
   keep provider stream failures as a separate blocker/fix line.
 
@@ -111,12 +113,7 @@ handoffs.
   `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
   trusted host mounts.
 - Existing data directory boundary: SQL owner stamping currently has no
-  null-owner rows in the checked tables, but legacy JSONL and historical runs
-  without `threads_meta` remain. Do not treat this data directory as migration
-  complete until `scripts/migrate_user_isolation.py --dry-run` is reviewed for
+  null-owner rows in the checked tables, and the dry-run now inspects the live
+  SQLite DB path. Do not treat this data directory as migration complete until
+  the reported `default` owner assignments and conflict paths are reviewed for
   the intended beta owner.
-- Migration dry-run boundary: the current script invocation did not inspect the
-  live SQLite DB because it searched `backend/.deer-flow/deer-flow.db` while the
-  active DB is `backend/.deer-flow/data/deerflow.db`. Treat SQL owner migration
-  dry-run evidence as incomplete until that path mismatch is resolved or an
-  explicit DB path is supported.

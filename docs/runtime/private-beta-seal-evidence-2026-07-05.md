@@ -71,3 +71,20 @@ cd frontend && pnpm test tests/unit/core/threads/message-merge.test.ts
 The next gate is operational, not another code seal: run 1-2 days of real usage
 smoke using `docs/runtime/private-beta-runbook.md`, then file separate fixes for
 observed regressions.
+
+## Post-Seal Observation Index
+
+This section points to later observation evidence without changing the original
+seal baseline above.
+
+- Latest observation HEAD checked: `56616bad611eb9f8517b36e444bbe43947ba6a49`
+  (`56616bad docs(runtime): record log health checkpoint`).
+- Authoritative ongoing log:
+  `docs/runtime/private-beta-smoke-log.md`.
+- Latest checkpoint time: 2026-07-05 12:36 CST.
+- Current local stack remained healthy: public nginx entry returned `200`,
+  Gateway `/health` returned healthy, and DB run counts stayed
+  `error=63`, `interrupted=7`, `success=452`, `running=0`.
+- Still not complete: the 1-2 day real-use smoke window remains open, and the
+  existing data migration still needs intended-owner/conflict review before any
+  non-dry-run migration.

@@ -44,6 +44,10 @@ bridge/cancel signal exists.
   visibility.
 - Artifact provenance is indexed best-effort from observed run artifact events;
   missing files stay represented as unavailable artifacts.
+- Provider stream failures such as
+  `Codex API stream ended without response.completed event` are beta blockers
+  for real Command Room usage until fixed; observed runs must still reach a
+  terminal `error` and must not leave the thread busy.
 
 ## Preflight
 
@@ -84,6 +88,8 @@ Stop and open a separate fix if any of these appears:
 - cross-thread messages, tasks, artifacts, or busy state
 - history missing after refresh
 - run stuck busy after terminal/cancel
+- repeated provider stream terminal errors, even if they do not leave the run
+  stuck busy
 - artifact path resolves to the wrong owner bucket
 - startup accepts unsafe worker/event-store config in production
 - raw secrets or customer-like data appear in logs or UI

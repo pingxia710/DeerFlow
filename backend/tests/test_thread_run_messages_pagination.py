@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
 from deerflow.runtime import MemoryStreamBridge, RunManager, RunRecord, RunStatus
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -547,6 +549,77 @@ def test_stream_store_only_rolling_back_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_stream_store_only_terminal_run_replays_persisted_events_after_restart():
+    """Terminal store-only runs can be replayed after worker-local stream state is gone."""
+    thread_id = "thread-restart"
+    run_id = "run-restart"
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    task_event = {
+        "schema_version": "deerflow.task-event/v1",
+        "type": "task_completed",
+        "event_type": "task_completed",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "task_id": "task-restart",
+        "status": "completed",
+    }
+    asyncio.run(
+        run_store.put(
+            run_id,
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="success",
+            multitask_strategy="reject",
+            metadata={},
+            kwargs={},
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    asyncio.run(
+        event_store.put(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="task_completed",
+            category="message",
+            content=task_event,
+            metadata={"caller": "task_event"},
+            user_id=user_id,
+        )
+    )
+    asyncio.run(
+        event_store.put(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="run.terminal",
+            category="lifecycle",
+            content={"status": "success", "terminal_reason": "success"},
+            metadata={"caller": "runtime"},
+            user_id=user_id,
+        )
+    )
+    app = _make_app(event_store=event_store, run_manager=RunManager(store=run_store))
+    app.state.stream_bridge = MemoryStreamBridge()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}/stream")
+
+    assert response.status_code == 200
+    frames = [frame for frame in response.text.split("\n\n") if frame]
+    assert [frame.splitlines()[0] for frame in frames] == ["event: custom", "event: custom", "event: end"]
+    assert json.loads(frames[0].split("data: ", 1)[1].splitlines()[0]) == task_event
+    assert json.loads(frames[1].split("data: ", 1)[1].splitlines()[0]) == {
+        "type": "run.terminal",
+        "event_type": "run.terminal",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "success",
+        "terminal_reason": "success",
+    }
 
 
 def test_list_run_messages_injects_turn_duration():

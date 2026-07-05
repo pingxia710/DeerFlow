@@ -36,7 +36,10 @@ PYTHONPATH=. uv run pytest tests/test_llm_error_handling_middleware.py -q
 
 ## Migration Dry-Run DB Path
 
-Evidence:
+Status: fixed in the migration script; keep the useful checks below for
+regression coverage and beta-owner review.
+
+Original evidence:
 
 - `PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run`
   exited `0` but looked for `backend/.deer-flow/deer-flow.db`.
@@ -44,17 +47,16 @@ Evidence:
   `backend/.deer-flow/data/deerflow.db`.
 - Dry-run therefore did not inspect live SQL owner rows.
 
-Likely narrow entry point:
+Changed entry point:
 
 - `backend/scripts/migrate_user_isolation.py`
 - `backend/tests/test_migration_user_isolation.py`
-- `backend/packages/harness/deerflow/config/paths.py`
 
 Minimum acceptance:
 
 - Dry-run reports which DB path it inspected.
-- It inspects the same DB path used by the configured runtime, or supports an
-  explicit DB path.
+- It inspects `{base_dir}/data/deerflow.db` by default, preserves legacy
+  `{base_dir}/deer-flow.db` fallback, and supports explicit `--db-path`.
 - Running dry-run still makes no filesystem or SQL changes.
 
 Useful checks:

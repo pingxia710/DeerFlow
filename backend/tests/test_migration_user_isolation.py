@@ -130,8 +130,10 @@ class TestMigrateMemory:
 
 class TestMigrateSqlOwnerlessRows:
     @staticmethod
-    def _seed_db(base_dir: Path) -> sqlite3.Connection:
-        conn = sqlite3.connect(base_dir / "deer-flow.db")
+    def _seed_db(base_dir: Path, *, db_path: Path | None = None) -> sqlite3.Connection:
+        db_path = db_path or base_dir / "deer-flow.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE threads_meta (thread_id TEXT, user_id TEXT)")
         conn.execute("CREATE TABLE runs (run_id TEXT, thread_id TEXT, user_id TEXT)")
         conn.execute("CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, run_id TEXT, user_id TEXT)")
@@ -217,6 +219,44 @@ class TestMigrateSqlOwnerlessRows:
 
         assert report
         assert all(entry["action"] == "would update" for entry in report)
+
+    def test_uses_current_unified_sqlite_path(self, base_dir: Path, paths: Paths):
+        current_db = base_dir / "data" / "deerflow.db"
+        conn = self._seed_db(base_dir, db_path=current_db)
+        try:
+            conn.execute("INSERT INTO threads_meta (thread_id, user_id) VALUES (?, ?)", ("t1", None))
+            conn.commit()
+        finally:
+            conn.close()
+
+        from scripts.migrate_user_isolation import migrate_sql_ownerless_rows
+
+        migrate_sql_ownerless_rows(paths, user_id="admin")
+
+        conn = sqlite3.connect(current_db)
+        try:
+            assert self._rows(conn, "threads_meta") == [("t1", "admin")]
+        finally:
+            conn.close()
+
+    def test_explicit_db_path_overrides_default(self, base_dir: Path, paths: Paths):
+        explicit_db = base_dir / "custom" / "deerflow.db"
+        conn = self._seed_db(base_dir, db_path=explicit_db)
+        try:
+            conn.execute("INSERT INTO threads_meta (thread_id, user_id) VALUES (?, ?)", ("t1", None))
+            conn.commit()
+        finally:
+            conn.close()
+
+        from scripts.migrate_user_isolation import migrate_sql_ownerless_rows
+
+        migrate_sql_ownerless_rows(paths, user_id="admin", db_path=explicit_db)
+
+        conn = sqlite3.connect(explicit_db)
+        try:
+            assert self._rows(conn, "threads_meta") == [("t1", "admin")]
+        finally:
+            conn.close()
 
     def test_missing_database_is_noop(self, paths: Paths):
         from scripts.migrate_user_isolation import migrate_sql_ownerless_rows

@@ -80,11 +80,10 @@ PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id
 ```
 
 Run without `--dry-run` only after the report assigns legacy data to the
-intended owner and confirms it inspected the live database. Current local
-evidence showed the script looking for `backend/.deer-flow/deer-flow.db` while
-the active SQLite file was `backend/.deer-flow/data/deerflow.db`; treat SQL
-owner migration dry-run output as incomplete until that path is fixed or
-explicitly verified.
+intended owner and confirms it inspected the live database. The script reports
+the SQLite path it inspected; by default it checks `{base_dir}/data/deerflow.db`
+with a legacy `{base_dir}/deer-flow.db` fallback. Use `--db-path <path>` if the
+runtime database is elsewhere.
 
 ## 1-2 Day Smoke
 

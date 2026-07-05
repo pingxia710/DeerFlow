@@ -9,10 +9,25 @@ The script is idempotent — re-running it after a successful migration is a no-
 import argparse
 import logging
 import shutil
+from pathlib import Path
 
 from deerflow.config.paths import Paths, get_paths
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_sqlite_db_path(paths: Paths, db_path: str | Path | None = None) -> Path:
+    """Return the app SQLite DB path, preferring the current unified layout."""
+    if db_path is not None:
+        return Path(db_path).expanduser().resolve()
+
+    current = paths.base_dir / "data" / "deerflow.db"
+    legacy = paths.base_dir / "deer-flow.db"
+    if current.exists():
+        return current
+    if legacy.exists():
+        return legacy
+    return current
 
 
 def migrate_thread_dirs(
@@ -167,6 +182,7 @@ def migrate_sql_ownerless_rows(
     user_id: str = "default",
     *,
     dry_run: bool = False,
+    db_path: str | Path | None = None,
 ) -> list[dict]:
     """Stamp legacy SQL rows whose ``user_id`` is still NULL.
 
@@ -177,7 +193,7 @@ def migrate_sql_ownerless_rows(
     """
     import sqlite3
 
-    db_path = paths.base_dir / "deer-flow.db"
+    db_path = _resolve_sqlite_db_path(paths, db_path)
     if not db_path.exists():
         logger.info("No database found at %s - skipping SQL owner migration.", db_path)
         return []
@@ -249,14 +265,14 @@ def migrate_sql_ownerless_rows(
     return report
 
 
-def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
+def _build_owner_map_from_db(paths: Paths, *, db_path: str | Path | None = None) -> dict[str, str]:
     """Query threads_meta table for thread_id -> user_id mapping.
 
     Uses raw sqlite3 to avoid async dependencies.
     """
     import sqlite3
 
-    db_path = paths.base_dir / "deer-flow.db"
+    db_path = _resolve_sqlite_db_path(paths, db_path)
     if not db_path.exists():
         logger.info("No database found at %s — using empty owner map.", db_path)
         return {}
@@ -281,6 +297,11 @@ def main() -> None:
         metavar="USER_ID",
         help=("User ID to claim un-owned legacy data (global memory.json and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."),
     )
+    parser.add_argument(
+        "--db-path",
+        metavar="PATH",
+        help="Optional SQLite DB path. Defaults to {base_dir}/data/deerflow.db with legacy {base_dir}/deer-flow.db fallback.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -290,8 +311,11 @@ def main() -> None:
     logger.info("Dry run: %s", args.dry_run)
     logger.info("Claiming un-owned legacy data for user_id=%s", args.user_id)
 
-    sql_report = migrate_sql_ownerless_rows(paths, user_id=args.user_id, dry_run=args.dry_run)
-    owner_map = _build_owner_map_from_db(paths)
+    db_path = _resolve_sqlite_db_path(paths, args.db_path)
+    logger.info("SQLite database path: %s", db_path)
+
+    sql_report = migrate_sql_ownerless_rows(paths, user_id=args.user_id, dry_run=args.dry_run, db_path=db_path)
+    owner_map = _build_owner_map_from_db(paths, db_path=db_path)
     logger.info("Found %d thread ownership records in DB", len(owner_map))
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)

@@ -1,4 +1,4 @@
-import type { Message, Run } from "@langchain/langgraph-sdk";
+import type { Message, Run as LangGraphRun } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
@@ -68,6 +68,11 @@ export type ThreadStreamOptions = {
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
+};
+
+type Run = LangGraphRun & {
+  round_id?: string | null;
+  round_state?: string | null;
 };
 
 type SendMessageOptions = {
@@ -961,6 +966,19 @@ export function findLatestUnloadedRunIndex(
     }
   }
   return -1;
+}
+
+export function getLatestRunRoundId(runs: Run[] | undefined): string | null {
+  return stringValue(runs?.[0]?.round_id) ?? null;
+}
+
+export function shouldResetHistoryForRoundChange(
+  previousRoundId: string | null,
+  nextRoundId: string | null,
+): boolean {
+  return Boolean(
+    previousRoundId && nextRoundId && previousRoundId !== nextRoundId,
+  );
 }
 
 const ACTIVE_RUN_REVALIDATION_STATUSES = new Set([
@@ -2194,7 +2212,6 @@ export function useThreadStream({
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
-    const normalizedThreadId = threadId ?? null;
     startedRef.current = false;
     streamRunIdRef.current = null;
     sendInFlightRef.current = false;
@@ -2711,6 +2728,7 @@ export function useThreadHistory(
   const loadGenerationRef = useRef(0);
   const historyLoadAbortRef = useRef<AbortController | null>(null);
   const autoLoadedLatestRunIdRef = useRef<string | null>(null);
+  const latestRoundIdRef = useRef<string | null>(null);
   const activeRunIdsRef = useRef<Set<string>>(new Set());
   const pendingRefreshRunIdsRef = useRef<Set<string>>(new Set());
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
@@ -2885,6 +2903,7 @@ export function useThreadHistory(
       loadedRunIdsRef.current = new Set();
       runBeforeSeqRef.current = new Map();
       autoLoadedLatestRunIdRef.current = null;
+      latestRoundIdRef.current = null;
       activeRunIdsRef.current = new Set();
       pendingRefreshRunIdsRef.current = new Set();
       appliedTaskEventKeysRef.current = new Set();
@@ -2897,6 +2916,27 @@ export function useThreadHistory(
     if (!enabled) {
       return;
     }
+
+    const latestRoundId = getLatestRunRoundId(runs.data);
+    if (
+      shouldResetHistoryForRoundChange(latestRoundIdRef.current, latestRoundId)
+    ) {
+      loadGenerationRef.current += 1;
+      historyLoadAbortRef.current?.abort();
+      historyLoadAbortRef.current = null;
+      indexRef.current = -1;
+      pendingLoadRef.current = false;
+      loadingRunIdRef.current = null;
+      loadedRunIdsRef.current = new Set();
+      runBeforeSeqRef.current = new Map();
+      autoLoadedLatestRunIdRef.current = null;
+      appliedTaskEventKeysRef.current = new Set();
+      loadingRef.current = false;
+      setLoading(false);
+      setMessageRows([]);
+      setAppendedMessages([]);
+    }
+    latestRoundIdRef.current = latestRoundId ?? latestRoundIdRef.current;
 
     if (runs.data && runs.data.length > 0) {
       runsRef.current = runs.data ?? [];

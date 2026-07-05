@@ -9,6 +9,7 @@ import {
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
+  getLatestRunRoundId,
   getTerminalTransitionRunIds,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
@@ -28,6 +29,7 @@ import {
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
   shouldContinueRunMessagesPagination,
+  shouldResetHistoryForRoundChange,
   taskEventRunMessageKey,
   threadRunsQueryKey,
 } from "@/core/threads/hooks";
@@ -756,6 +758,17 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("round history reset only happens when latest run changes round", () => {
+  expect(
+    getLatestRunRoundId([
+      { run_id: "R2", round_id: "round-2" },
+    ] as unknown as Run[]),
+  ).toBe("round-2");
+  expect(shouldResetHistoryForRoundChange(null, "round-2")).toBe(false);
+  expect(shouldResetHistoryForRoundChange("round-2", "round-2")).toBe(false);
+  expect(shouldResetHistoryForRoundChange("round-1", "round-2")).toBe(true);
 });
 
 test("getTerminalTransitionRunIds selects active runs that just reached a terminal status", () => {

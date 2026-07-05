@@ -27,6 +27,7 @@ import {
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
+  shouldContinueRunMessagesPagination,
   taskEventRunMessageKey,
   threadRunsQueryKey,
 } from "@/core/threads/hooks";
@@ -383,6 +384,13 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
   ).toBeNull();
 });
 
+test("shouldContinueRunMessagesPagination lets automatic loads stop after the first page", () => {
+  expect(shouldContinueRunMessagesPagination(8, false)).toBe(false);
+  expect(shouldContinueRunMessagesPagination(8, true)).toBe(true);
+  expect(shouldContinueRunMessagesPagination(null, true)).toBe(false);
+  expect(shouldContinueRunMessagesPagination(undefined, true)).toBe(false);
+});
+
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
@@ -685,6 +693,18 @@ test("readRunMessagesPageResponse rejects html without surfacing a JSON SyntaxEr
   await expect(
     readRunMessagesPageResponse(
       new Response("<html></html>", {
+        headers: { "Content-Type": "text/html" },
+      }),
+    ),
+  ).rejects.toThrow("Failed to load thread history.");
+});
+
+test("readRunMessagesPageResponse rejects html without surfacing a 200 OK statusText", async () => {
+  await expect(
+    readRunMessagesPageResponse(
+      new Response("<html></html>", {
+        status: 200,
+        statusText: "OK",
         headers: { "Content-Type": "text/html" },
       }),
     ),

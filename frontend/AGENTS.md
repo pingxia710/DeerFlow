@@ -100,6 +100,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.
+- Automatic history loads, run refreshes, and user-triggered load-more should
+  fetch one run-message page at a time; do not recursively drain every
+  `has_more` page while switching chats or scrolling history.
 - Explicit run refresh requests that arrive before the run list contains that
   run should stay pending until the run list catches up; do not fall back to
   broad thread polling.

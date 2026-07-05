@@ -262,7 +262,7 @@ def format_chair_operating_brief_for_model(brief: ChairOperatingBrief | Mapping[
     data = brief.as_dict() if isinstance(brief, ChairOperatingBrief) else dict(brief)
     lines = [
         _CHAIR_BRIEF_HEADER,
-        "Facts only. Chair decides next step; program does not judge quality or dispatch reviewers.",
+        "Facts only. This brief is not a gate and does not choose the next step; Chair decides next steps. Program does not judge quality or dispatch reviewers.",
         f"thread_id={data.get('thread_id')}; run_id={data.get('run_id')}; round_id={data.get('round_id')}; task_id={data.get('task_id')}",
     ]
     if data.get("capability_snapshot_version") is not None:

@@ -34,6 +34,19 @@ class _Runtime:
     }
 
 
+class _RuntimeNoData:
+    context = {
+        "thread_id": "thread-empty",
+        "round_context": {
+            "current_run_id": "run-empty",
+        },
+    }
+
+
+class _RuntimeNoThread:
+    context = {}
+
+
 def _record(agent_name="command-room", signals=True, required=True):
     return {
         "agentName": agent_name,
@@ -262,6 +275,34 @@ def test_round_context_includes_compact_chair_brief(monkeypatch):
     assert "pass" not in lowered
     assert "fail" not in lowered
     assert "needs_rework" not in lowered
+
+
+def test_round_context_chair_brief_no_data_does_not_block(monkeypatch):
+    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
+    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
+    monkeypatch.setattr("deerflow.command_room.quality.list_quality_signals", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
+
+    text = middleware._context_text(_RuntimeNoData())
+
+    assert text is not None
+    assert "Internal Chair Operating Brief" in text
+    assert "run_id=run-empty" in text
+    assert "known_gaps: no_capability_snapshot; no_evidence_refs; no_quality_signals" in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+    assert "auto_rework" not in lowered
+    assert "auto_dispatch" not in lowered
+
+
+def test_round_context_without_thread_id_skips_runtime_context(monkeypatch):
+    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
+    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
+
+    assert middleware._context_text(_RuntimeNoThread()) is None
 
 
 def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):

@@ -124,6 +124,7 @@ def test_chair_operating_brief_known_gaps_are_mechanical_only() -> None:
     text = format_chair_operating_brief_for_model(brief)
     assert text is not None
     assert "Internal Chair Operating Brief" in text
+    assert "does not choose the next step" in text
     lowered = text.lower()
     assert "pass" not in lowered
     assert "fail" not in lowered

@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-05 — Phase 7 Runtime Chair Brief Wiring
+
+- Wired the compact Chair Operating Brief into command-room lead runtime context through `CommandRoomRoundContextMiddleware`, using the run's `Runtime.context` thread/run/round facts instead of requiring Chair to query the API manually.
+- Kept the brief internal, compact, and fact-only: it is not a gate, does not choose the next step, and does not dispatch reviewers or rework.
+- Added regression coverage for empty data returning mechanical `known_gaps` and missing `thread_id` skipping runtime context injection without blocking the run.
+- Synced `README.md` and `backend/AGENTS.md` to describe Phase 7 as runtime context wiring, not an automatic governance layer.
+- Validation: `cd backend && uv run pytest tests/test_round_context_injection.py tests/test_command_room_chair_brief.py tests/test_run_chair_brief_api.py tests/test_lead_agent_prompt.py -q` passed with 39 tests and 2 dependency deprecation warnings; `cd backend && uv run ruff check packages/harness/deerflow/command_room/brief.py tests/test_command_room_chair_brief.py tests/test_round_context_injection.py` passed; `cd backend && uv run ruff format --check packages/harness/deerflow/command_room/brief.py tests/test_command_room_chair_brief.py tests/test_round_context_injection.py` reported 3 files already formatted.
+- Deliberately skipped: no UI, no Browser replay, no new external dependency, no `task()` public return change, no raw prompt/result injection, no program PASS/FAIL, no automatic reviewer/opposition dispatch, and no automatic rework.
+
 ## 2026-07-05 — Phase 6 Chair Operating Brief read model
 
 - Added `ChairOperatingBrief` as a compact AI-readable read model over existing handoffs, evidence refs, capability snapshot version, quality signals, review invocations, account proposals, and Chair decisions.

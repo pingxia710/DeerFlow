@@ -34,6 +34,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `62e70b85` | existing local stack on `localhost:2026`; no new backend run created | runbook preflight rerun | pass | 11:42 CST checkpoint: worktree clean before edit; `/health` healthy; DB status counts `error=63`, `interrupted=7`, `success=451`, `running=0`; runbook preflight commands passed: backend guard/security `25 passed, 1 warning`; frontend `message-merge.test.ts` `63 passed`; frontend `thread-history.spec.ts` E2E `16 passed` with known `NO_COLOR`/`FORCE_COLOR` and Turbopack NFT warnings. |
 | 2026-07-05 | Codex    | `d0800a23` | existing local stack on `localhost:2026`; no new backend run created | existing data owner/legacy audit | needs follow-up | 11:44 CST read-only SQLite/filesystem audit: `threads_meta`, `runs`, and `artifact_provenance` had `0` null-owner rows and no owner mismatch across thread/run/artifact joins; `runs` still had `282` rows across `22` thread ids without matching `threads_meta`; legacy JSONL path `backend/.deer-flow/threads` still existed with `508` run JSONL files versus `9` owner-scoped user run JSONL files, so existing data still needs runbook dry-run/migration review before actual beta boot. |
 | 2026-07-05 | Codex    | `848f7650` | existing local stack on `localhost:2026`; no new backend run created | migration dry-run preflight | needs follow-up | 11:45 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run` exited `0` and made no git-visible changes, but skipped SQL owner migration because it looked for `backend/.deer-flow/deer-flow.db`; live SQLite data was at `backend/.deer-flow/data/deerflow.db` with `34` `threads_meta` rows and `521` `runs` rows. The dry-run would move `45` legacy thread dirs and `1` legacy `command-room` agent to `user_id=default`; actual beta migration needs the intended owner and the DB path mismatch fixed/reviewed first. |
+| 2026-07-05 | Codex    | `b94b88c5` | existing local stack on `localhost:2026`; system Google Chrome used; no backend run created | fresh new-chat UI smoke | pass | 12:02 CST local throwaway auth registration returned `201`; `/workspace/chats/new` loaded without redirect; `/api/channels/providers`, `/api/models`, `/api/skills`, `/api/suggestions/config`, and `/api/langgraph/threads/search` returned `200`; browser console had `0` warning/error/pageerror entries after filtering to warning/error; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`, so the check did not create a model run. |
 
 ## Notes
 
@@ -101,9 +102,10 @@ handoffs.
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React
   uncontrolled-to-controlled warning; no duplicate-key warning after the
-  restored-message fix. `logs/frontend.log` also contains React Query
-  `Query data cannot be undefined` warnings for query key `["skills"]`; keep
-  this on the observation list until reproduced or cleared in a fresh UI smoke.
+  restored-message fix. Older `logs/frontend.log` entries contained React Query
+  `Query data cannot be undefined` warnings for query key `["skills"]`, but the
+  12:02 fresh new-chat UI smoke hit `/api/skills` with `200` and did not
+  reproduce browser warnings/errors.
 - Workstation startup boundary: this local process depends on the temp
   `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
   trusted host mounts.

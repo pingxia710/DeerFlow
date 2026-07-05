@@ -94,6 +94,23 @@ record duplicate heartbeat rows; add a row only for a new real-use session, a
 new run/test result, a new failure/warning, or a meaningful checkpoint that
 changes the evidence state.
 
+For long in-flight runs, do not classify the run as stuck while there is still
+progress. Treat it as a suspected stuck run only after 30 minutes with no DB
+`updated_at` movement, no JSONL event growth, and no Gateway progress such as
+provider responses or terminal-event writes.
+
+Long-run monitoring process:
+
+1. At 5 minutes, capture run `status`, DB `updated_at`, JSONL event count, and
+   the last event types.
+2. At 15 minutes, repeat the same checks and scan Gateway logs for provider
+   retry/error messages.
+3. At 30 minutes, compare against the 15-minute sample. If nothing moved, open a
+   suspected stuck-run handoff; if any signal moved, keep observing and record it
+   as long-running progress, not failure.
+4. When the run reaches terminal state, replay run detail/messages once and add
+   one final smoke-log row with the terminal result.
+
 Minimum daily flow:
 
 1. Start stack from a clean shell.
@@ -110,7 +127,7 @@ Stop and open a separate fix if any of these appears:
 
 - cross-thread messages, tasks, artifacts, or busy state
 - history missing after refresh
-- run stuck busy after terminal/cancel
+- run stuck busy after terminal/cancel, or 30 minutes with no in-flight progress
 - repeated provider stream terminal errors, even if they do not leave the run
   stuck busy
 - artifact path resolves to the wrong owner bucket

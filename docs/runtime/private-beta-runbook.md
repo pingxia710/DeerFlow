@@ -99,6 +99,9 @@ Stop and open a separate fix if any of these appears:
 - startup accepts unsafe worker/event-store config in production
 - raw secrets or customer-like data appear in logs or UI
 
+Use `docs/runtime/private-beta-open-fix-handoffs.md` for the current separate
+fix-line handoffs.
+
 ## Evidence To Keep
 
 - commit hash

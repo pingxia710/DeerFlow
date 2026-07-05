@@ -1257,3 +1257,41 @@ async def test_terminal_status_schedules_memory_cleanup_quickly():
     await asyncio.sleep(0)
     assert record.run_id not in manager._runs
     assert "cleanup-thread" not in manager._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_rejects_persisted_inflight_same_thread():
+    """A persisted active run should block a second reject run after restart."""
+    store = MemoryRunStore()
+    await store.put("persisted-running", thread_id="thread-1", status="running")
+    manager = RunManager(store=store)
+
+    with pytest.raises(ConflictError, match="already has an active run"):
+        await manager.create_or_reject("thread-1", multitask_strategy="reject")
+
+    assert await store.get("persisted-running") is not None
+    assert await store.list_by_thread("thread-1")
+    assert len(await store.list_inflight()) == 1
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_persisted_terminal_and_other_thread_do_not_block():
+    store = MemoryRunStore()
+    await store.put("terminal", thread_id="thread-1", status="success")
+    await store.put("other-running", thread_id="thread-2", status="running")
+    manager = RunManager(store=store)
+
+    record = await manager.create_or_reject("thread-1", multitask_strategy="reject")
+
+    assert record.thread_id == "thread-1"
+    assert record.run_id != "terminal"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_without_store_still_rejects_memory_inflight(manager: RunManager):
+    first = await manager.create_or_reject("thread-1", multitask_strategy="reject")
+
+    with pytest.raises(ConflictError, match="already has an active run"):
+        await manager.create_or_reject("thread-1", multitask_strategy="reject")
+
+    assert first.run_id in manager._runs

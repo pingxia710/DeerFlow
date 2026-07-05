@@ -587,6 +587,31 @@ class RunManager:
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
+    async def _list_persisted_inflight_for_thread(self, thread_id: str) -> list[RunRecord]:
+        """Best-effort persisted active-run lookup for fail-safe multitask checks."""
+        if self._store is None:
+            return []
+        try:
+            rows = await self._call_store_with_retry(
+                "list_inflight",
+                "*",
+                lambda: self._store.list_inflight(),
+            )
+        except Exception:
+            logger.warning("Failed to list persisted inflight runs for thread %s", thread_id, exc_info=True)
+            raise
+
+        records: list[RunRecord] = []
+        for row in rows:
+            if row.get("thread_id") != thread_id:
+                continue
+            try:
+                records.append(self._record_from_store(row))
+            except Exception:
+                logger.warning("Failed to map persisted inflight run row for thread %s", thread_id, exc_info=True)
+                raise
+        return records
+
     async def create_or_reject(
         self,
         thread_id: str,
@@ -614,14 +639,23 @@ class RunManager:
         _supported_strategies = ("reject", "interrupt", "rollback")
         interrupted_records: list[RunRecord] = []
 
+        persisted_inflight = await self._list_persisted_inflight_for_thread(thread_id)
+
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._thread_records_locked(thread_id) if is_inflight_status(r.status)]
+            memory_by_id = {r.run_id: r for r in self._thread_records_locked(thread_id) if is_inflight_status(r.status)}
+            inflight = list(memory_by_id.values())
+            persisted_foreign_inflight = [r for r in persisted_inflight if r.run_id not in memory_by_id and is_inflight_status(r.status)]
 
-            if multitask_strategy == "reject" and inflight:
+            if multitask_strategy == "reject" and (inflight or persisted_foreign_inflight):
                 raise ConflictError(f"Thread {thread_id} already has an active run")
+
+            # Only local in-memory runs are safe to interrupt/rollback here. Persisted-only
+            # rows may belong to another worker or a stale process after restart; without a
+            # worker lease/generation we cannot safely kill them, so they remain a fail-safe
+            # conflict for reject and are left untouched for interrupt/rollback.
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 logger.info(

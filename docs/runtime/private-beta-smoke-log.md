@@ -33,6 +33,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `ff5612b3` | existing local stack on `localhost:2026`; no new run created | remaining-work audit | not complete | 11:33 CST checkpoint: worktree clean before edit; `/health` healthy; DB status counts `error=63`, `interrupted=7`, `success=451`, `running=0`; latest five real Command Room runs remain terminal `error` with `Codex API stream ended without response.completed event`; archive/runbook/frontend preflight evidence exists, but the 1-2 day observation window and provider stream blocker are still open. |
 | 2026-07-05 | Codex    | `62e70b85` | existing local stack on `localhost:2026`; no new backend run created | runbook preflight rerun | pass | 11:42 CST checkpoint: worktree clean before edit; `/health` healthy; DB status counts `error=63`, `interrupted=7`, `success=451`, `running=0`; runbook preflight commands passed: backend guard/security `25 passed, 1 warning`; frontend `message-merge.test.ts` `63 passed`; frontend `thread-history.spec.ts` E2E `16 passed` with known `NO_COLOR`/`FORCE_COLOR` and Turbopack NFT warnings. |
 | 2026-07-05 | Codex    | `d0800a23` | existing local stack on `localhost:2026`; no new backend run created | existing data owner/legacy audit | needs follow-up | 11:44 CST read-only SQLite/filesystem audit: `threads_meta`, `runs`, and `artifact_provenance` had `0` null-owner rows and no owner mismatch across thread/run/artifact joins; `runs` still had `282` rows across `22` thread ids without matching `threads_meta`; legacy JSONL path `backend/.deer-flow/threads` still existed with `508` run JSONL files versus `9` owner-scoped user run JSONL files, so existing data still needs runbook dry-run/migration review before actual beta boot. |
+| 2026-07-05 | Codex    | `848f7650` | existing local stack on `localhost:2026`; no new backend run created | migration dry-run preflight | needs follow-up | 11:45 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run` exited `0` and made no git-visible changes, but skipped SQL owner migration because it looked for `backend/.deer-flow/deer-flow.db`; live SQLite data was at `backend/.deer-flow/data/deerflow.db` with `34` `threads_meta` rows and `521` `runs` rows. The dry-run would move `45` legacy thread dirs and `1` legacy `command-room` agent to `user_id=default`; actual beta migration needs the intended owner and the DB path mismatch fixed/reviewed first. |
 
 ## Notes
 
@@ -103,3 +104,8 @@ Use this file for the 1-2 day real-use smoke from
   without `threads_meta` remain. Do not treat this data directory as migration
   complete until `scripts/migrate_user_isolation.py --dry-run` is reviewed for
   the intended beta owner.
+- Migration dry-run boundary: the current script invocation did not inspect the
+  live SQLite DB because it searched `backend/.deer-flow/deer-flow.db` while the
+  active DB is `backend/.deer-flow/data/deerflow.db`. Treat SQL owner migration
+  dry-run evidence as incomplete until that path mismatch is resolved or an
+  explicit DB path is supported.

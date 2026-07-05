@@ -120,3 +120,13 @@
 - 后端全量 pytest 输出：`/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/3ba75b81-e1c9-4e43-9288-7cbff600fc4f/user-data/outputs/.tool-results/backend-pytest-full.log`
 - 失败摘要：`/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/3ba75b81-e1c9-4e43-9288-7cbff600fc4f/user-data/outputs/.tool-results/backend-failures-summary.txt`
 - 多会话专项 pytest 输出：`/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/3ba75b81-e1c9-4e43-9288-7cbff600fc4f/user-data/outputs/.tool-results/backend-targeted-pytest.log`
+
+## skip / 外部依赖测试风险备注
+
+只读扫描 `backend/tests` 中的 `skip` / `skipif` / `xfail` 及 live、network、docker、redis、postgres、LLM API key 等关键词后，当前未发现直接针对 run/thread owner scope、runs API、threads router、thread run messages pagination 这些核心多用户/多会话入口的 `xfail` 或明确跳过标记。已发现的跳过主要分为三类：
+
+- 平台/本地上下文差异：`test_local_sandbox_provider_mounts.py`、`test_uploads_manager.py`、`test_mcp_file_migration.py`、`test_view_image_tool.py`、`test_client.py`、`test_sandbox_orphan_reconciliation.py`、`test_uvicorn_reload_exclude.py`、`test_subagent_skills_config.py` 等在 symlink、`O_NONBLOCK`、Windows 语义、`SIGHUP`、git worktree 或本地 custom skill 不可用时跳过。此类通常不阻塞当前本地多用户/多会话验收，但会影响跨平台文件、上传、artifact/sandbox 边界和本地开发工具行为的可信度。
+- 外部运行时依赖：`test_sandbox_orphan_reconciliation_e2e.py` 依赖 Docker 可用；`test_docker_sandbox_mode_detection.py` 依赖 bash。它们不直接证明 owner/thread 隔离，但完整验收前仍需在目标部署形态中确认 Docker sandbox 生命周期、孤儿容器清理和模式识别。
+- LLM/live 依赖：`test_client_e2e.py`、`test_create_deerflow_agent_live.py`、`test_deferred_tool_promotion_real_llm.py` 使用 `OPENAI_API_KEY` 或 CI 条件跳过真实 LLM 调用；`test_client_live.py` 会在 active config 不满足条件时模块级跳过或跳过 host bash 相关路径。这些测试覆盖真实 agent/client stream、tool call、middleware、deferred tool promotion 等端到端行为；不会阻塞当前仅基于本地 mock/专项 pytest 的验收，但不能作为完整“AI 工作底座”已通过 live/外部模型验收的证据。
+
+额外注意：扫描中看到 Redis/Postgres 多为方言编译、store kind 或配置路径测试，未必要求真实外部服务；credential/env 相关测试多使用 `monkeypatch` 注入测试值。后续若要提高验收可信度，建议在不输出真实 secret 的前提下单独记录一次目标环境的 live/LLM、Docker sandbox、Redis/Postgres 持久化组合验证结果，并继续把“本地可通过的核心入口测试”和“依赖外部服务的完整验收”分开表述。

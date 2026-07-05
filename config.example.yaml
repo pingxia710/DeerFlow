@@ -1335,6 +1335,8 @@ database:
 # backend: memory  -- No persistence, data lost on restart (default)
 # backend: db      -- SQL database via ORM, full query capability (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+# staging/shared/production startup requires backend: db and database.backend
+# set to sqlite or postgres; memory/jsonl are local single-process choices.
 #
 # run_events:
 #   backend: memory

@@ -259,6 +259,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 
 > [!IMPORTANT]
 > The Gateway holds run state (RunManager and the stream bridge) in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Raising the worker count without a shared cross-worker stream bridge — which is not yet available — breaks run cancellation, SSE reconnects, request de-duplication, and IM channels, because nginx uses no sticky sessions and each worker keeps its own run state. Non-development startups fail fast when `GATEWAY_WORKERS`, `WEB_CONCURRENCY`, or `UVICORN_WORKERS` is greater than 1. Scale a single worker up with more CPU/RAM (or move the database and sandbox onto dedicated tiers) instead of raising `GATEWAY_WORKERS`.
+
+> Staging/shared/production startups also require `run_events.backend: db` and a persistent `database.backend` (`sqlite` or `postgres`). `memory` and `jsonl` run-event stores are for development or local single-process use.
 > LangGraph-compatible run creation treats `stream_resumable=true` as a request to keep the run alive across client disconnects unless `on_disconnect=cancel` is explicitly provided.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.

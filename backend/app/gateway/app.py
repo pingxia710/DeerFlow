@@ -107,6 +107,19 @@ def _assert_safe_sandbox_config_for_environment(config: AppConfig) -> None:
         raise RuntimeError(f"Unsafe sandbox configuration is forbidden in staging/shared/production: sandbox.{', sandbox.'.join(unsafe)}")
 
 
+def _assert_run_event_store_config_for_environment(config: AppConfig) -> None:
+    if not _is_shared_environment():
+        return
+
+    run_events_backend = getattr(getattr(config, "run_events", None), "backend", "memory")
+    if run_events_backend != "db":
+        raise RuntimeError("run_events.backend='db' is required in staging/shared/production; memory/jsonl run-event stores are single-process only.")
+
+    database_backend = getattr(getattr(config, "database", None), "backend", "memory")
+    if database_backend == "memory":
+        raise RuntimeError("database.backend must be sqlite or postgres when run_events.backend='db' in staging/shared/production.")
+
+
 async def _ensure_admin_user(app: FastAPI) -> None:
     """Startup hook: handle first boot and migrate orphan threads otherwise.
 
@@ -233,6 +246,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
         _assert_safe_sandbox_config_for_environment(startup_config)
+        _assert_run_event_store_config_for_environment(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:

@@ -366,6 +366,9 @@ outputs from evidence references.
   `{base_dir}/users/{user_id}/threads/{thread_id}/runs/{run_id}.jsonl`;
   ownerless legacy events remain under `{base_dir}/threads/...`, and
   user-scoped reads include matching legacy owner rows for compatibility.
+- Staging/shared/production Gateway startup requires `run_events.backend: db`
+  and `database.backend` set to `sqlite` or `postgres`; `memory` and `jsonl`
+  run-event stores are local/single-process choices.
 - Explicit event writes should pass `user_id` when the owner is known; all
   RunEventStore backends accept it on `put()` and `put_batch()` rows.
 

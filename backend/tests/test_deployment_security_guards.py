@@ -2,11 +2,13 @@ import pytest
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 
-from app.gateway.app import _assert_safe_sandbox_config_for_environment
+from app.gateway.app import _assert_run_event_store_config_for_environment, _assert_safe_sandbox_config_for_environment
 from app.gateway.routers.auth import InitializeAdminRequest, _validate_first_boot_setup_access
 from app.gateway.routers.runs import stateless_wait
 from app.gateway.routers.thread_runs import run_error_for_response
 from deerflow.config.app_config import AppConfig
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
 _ENV_KEYS = ("DEER_FLOW_ENV", "ENVIRONMENT", "APP_ENV", "NODE_ENV")
@@ -32,12 +34,19 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def _config(**sandbox_overrides) -> AppConfig:
+def _config(
+    *,
+    database_backend: str = "memory",
+    run_events_backend: str = "memory",
+    **sandbox_overrides,
+) -> AppConfig:
     return AppConfig(
+        database=DatabaseConfig(backend=database_backend),
+        run_events=RunEventsConfig(backend=run_events_backend),
         sandbox=SandboxConfig(
             use="deerflow.sandbox.local:LocalSandboxProvider",
             **sandbox_overrides,
-        )
+        ),
     )
 
 
@@ -155,3 +164,33 @@ def test_safe_sandbox_settings_allowed_in_production(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("ENVIRONMENT", "production")
 
     _assert_safe_sandbox_config_for_environment(_config())
+
+
+@pytest.mark.parametrize("backend", ["memory", "jsonl"])
+def test_run_event_store_non_db_fails_fast_in_production(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="run_events.backend='db'"):
+        _assert_run_event_store_config_for_environment(_config(run_events_backend=backend))
+
+
+def test_run_event_store_db_requires_persistent_database_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="database.backend"):
+        _assert_run_event_store_config_for_environment(_config(run_events_backend="db"))
+
+
+def test_run_event_store_db_allowed_with_sqlite_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    _assert_run_event_store_config_for_environment(_config(database_backend="sqlite", run_events_backend="db"))
+
+
+def test_run_event_store_jsonl_allowed_when_environment_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+
+    _assert_run_event_store_config_for_environment(_config(run_events_backend="jsonl"))

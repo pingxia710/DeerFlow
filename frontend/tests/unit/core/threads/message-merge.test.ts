@@ -1350,8 +1350,18 @@ test("shouldAutoContinueOnEmptyRun stops once consecutive empty loads reach the 
 });
 
 test("shouldAutoContinueOnEmptyRun honors a custom safety cap when provided", () => {
-  expect(shouldAutoContinueOnEmptyRun(0, 0, 1)).toBe(true);
-  expect(shouldAutoContinueOnEmptyRun(0, 1, 1)).toBe(false);
+  expect(
+    shouldAutoContinueOnEmptyRun(0, 0, { maxConsecutiveEmptyLoads: 1 }),
+  ).toBe(true);
+  expect(
+    shouldAutoContinueOnEmptyRun(0, 1, { maxConsecutiveEmptyLoads: 1 }),
+  ).toBe(false);
+});
+
+test("shouldAutoContinueOnEmptyRun stops when automatic pagination is disabled", () => {
+  expect(shouldAutoContinueOnEmptyRun(0, 0, { continuePages: false })).toBe(
+    false,
+  );
 });
 
 test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {

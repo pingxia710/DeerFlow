@@ -1008,12 +1008,21 @@ export function getTerminalTransitionRunIds(
 
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
 
+type EmptyRunAutoContinueOptions = {
+  continuePages?: boolean;
+  maxConsecutiveEmptyLoads?: number;
+};
+
 export function shouldAutoContinueOnEmptyRun(
   fetchedMessageCount: number,
   consecutiveEmptyLoads: number,
-  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+  {
+    continuePages = true,
+    maxConsecutiveEmptyLoads = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+  }: EmptyRunAutoContinueOptions = {},
 ): boolean {
   return (
+    continuePages &&
     fetchedMessageCount === 0 &&
     consecutiveEmptyLoads < maxConsecutiveEmptyLoads
   );
@@ -2829,6 +2838,7 @@ export function useThreadHistory(
               shouldAutoContinueOnEmptyRun(
                 _messages.length,
                 consecutiveEmptyLoads,
+                { continuePages },
               )
             ) {
               consecutiveEmptyLoads += 1;

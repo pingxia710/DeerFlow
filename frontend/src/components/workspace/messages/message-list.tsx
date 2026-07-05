@@ -103,7 +103,6 @@ function LoadMoreHistoryIndicator({
   loadMore?: () => void;
 }) {
   const { t } = useI18n();
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadRef = useRef(0);
 
@@ -137,30 +136,6 @@ function LoadMoreHistoryIndicator({
   }, [hasMore, isLoading, loadMore]);
 
   useEffect(() => {
-    const element = sentinelRef.current;
-    if (!element || !hasMore) {
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry?.isIntersecting) {
-          throttledLoadMore();
-        }
-      },
-      {
-        rootMargin: "120px 0px 0px 0px",
-      },
-    );
-
-    observer.observe(element);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [hasMore, throttledLoadMore]);
-
-  useEffect(() => {
     return () => {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -173,7 +148,7 @@ function LoadMoreHistoryIndicator({
   }
 
   return (
-    <div ref={sentinelRef} className="flex w-full justify-center">
+    <div className="flex w-full justify-center">
       <Button
         type="button"
         variant="ghost"

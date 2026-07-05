@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
@@ -29,6 +30,9 @@ _RETRYABLE_SQLITE_ERROR_CODES = {
     sqlite3.SQLITE_BUSY,
     sqlite3.SQLITE_LOCKED,
 }
+
+_STALE_INFLIGHT_TIMEOUT = timedelta(minutes=30)
+_STALE_INFLIGHT_ERROR = "Worker lost after no run progress before the recovery timeout."
 
 
 def _is_retryable_persistence_error(exc: BaseException) -> bool:
@@ -65,6 +69,21 @@ def _record_matches_user_id(record: RunRecord, user_id: str | None) -> bool:
     if user_id is None:
         return True
     return record.user_id == user_id
+
+
+def _parse_run_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -431,6 +450,7 @@ class RunManager:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
         """
+        await self.recover_stale_inflight_runs(run_id=run_id, user_id=user_id)
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -475,6 +495,7 @@ class RunManager:
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
         """
+        await self.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if _record_matches_user_id(record, user_id)]
         if self._store is None:
@@ -762,6 +783,77 @@ class RunManager:
 
         if recovered:
             logger.warning("Recovered %d orphaned inflight run(s) as error", len(recovered))
+        return recovered
+
+    async def recover_stale_inflight_runs(
+        self,
+        *,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        before: str | None = None,
+        error: str = _STALE_INFLIGHT_ERROR,
+    ) -> list[RunRecord]:
+        """Mark persisted inflight runs stale when no local worker can own them."""
+        if self._store is None:
+            return []
+        cutoff = _parse_run_timestamp(before) or (datetime.now(UTC) - _STALE_INFLIGHT_TIMEOUT)
+        try:
+            rows = await self._call_store_with_retry(
+                "list_inflight",
+                "*",
+                lambda: self._store.list_inflight(),
+            )
+        except Exception:
+            logger.warning("Failed to list stale inflight runs for recovery", exc_info=True)
+            return []
+
+        recovered: list[RunRecord] = []
+        now = _now_iso()
+        for row in rows:
+            if thread_id is not None and row.get("thread_id") != thread_id:
+                continue
+            if run_id is not None and row.get("run_id") != run_id:
+                continue
+            if user_id is not None and row.get("user_id") != user_id:
+                continue
+            last_update = _parse_run_timestamp(row.get("updated_at")) or _parse_run_timestamp(row.get("created_at"))
+            if last_update is None or last_update > cutoff:
+                continue
+            try:
+                record = self._record_from_store(row)
+            except Exception:
+                logger.warning("Failed to map stale inflight run row during recovery", exc_info=True)
+                continue
+
+            async with self._lock:
+                live_record = self._runs.get(record.run_id)
+                if live_record is not None:
+                    if not _record_matches_user_id(live_record, user_id):
+                        continue
+                    if live_record.task is not None and not live_record.task.done():
+                        continue
+                    if not is_inflight_status(live_record.status):
+                        continue
+                    live_record.status = RunStatus.error
+                    live_record.error = error
+                    live_record.terminal_reason = "worker_lost"
+                    live_record.updated_at = now
+                    record = live_record
+                else:
+                    record.status = RunStatus.error
+                    record.error = error
+                    record.terminal_reason = "worker_lost"
+                    record.updated_at = now
+
+            persisted = await self._persist_status(record, RunStatus.error, error=error, terminal_reason="worker_lost")
+            if not persisted:
+                logger.warning("Skipped stale run %s recovery because error status was not persisted", record.run_id)
+                continue
+            recovered.append(record)
+
+        if recovered:
+            logger.warning("Recovered %d stale inflight run(s) as worker_lost", len(recovered))
         return recovered
 
     async def has_inflight(self, thread_id: str) -> bool:

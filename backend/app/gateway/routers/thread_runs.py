@@ -25,7 +25,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
@@ -399,6 +399,18 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         middleware_tokens=record.middleware_tokens,
         message_count=record.message_count,
     )
+
+
+async def _sync_thread_error_for_latest_worker_lost(thread_id: str, request: Request, *, records: list[RunRecord], user_id: str | None) -> None:
+    if not records:
+        return
+    latest = records[0]
+    if run_status_value(latest.status) != RunStatus.error.value or _run_terminal_reason(latest) != "worker_lost":
+        return
+    try:
+        await get_thread_store(request).update_status(thread_id, "error", user_id=user_id)
+    except Exception:
+        logger.debug("Failed to mark thread %s error after stale run recovery", sanitize_log_param(thread_id), exc_info=True)
 
 
 def _message_id(message: Any) -> str | None:
@@ -801,6 +813,7 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     run_mgr = get_run_manager(request)
     user_id = get_request_storage_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
 

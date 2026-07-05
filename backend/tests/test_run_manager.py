@@ -482,6 +482,49 @@ async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_
 
 
 @pytest.mark.anyio
+async def test_list_by_thread_recovers_stale_store_only_inflight_run():
+    """Read-side recovery should turn stale persisted active rows into worker_lost."""
+    store = MemoryRunStore()
+    await store.put("stale-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    store._runs["stale-run"]["updated_at"] = "2026-01-01T00:00:00+00:00"
+    manager = RunManager(store=store)
+
+    rows = await manager.list_by_thread("thread-1")
+
+    stored = await store.get("stale-run")
+    assert rows[0].run_id == "stale-run"
+    assert rows[0].status == RunStatus.error
+    assert rows[0].terminal_reason == "worker_lost"
+    assert stored["status"] == "error"
+    assert stored["terminal_reason"] == "worker_lost"
+
+
+@pytest.mark.anyio
+async def test_stale_recovery_skips_live_local_task():
+    """A long local task may be quiet; stale recovery must not kill it."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    store._runs[record.run_id]["updated_at"] = "2026-01-01T00:00:00+00:00"
+    task = asyncio.create_task(asyncio.sleep(60))
+    record.task = task
+
+    try:
+        recovered = await manager.recover_stale_inflight_runs(
+            before="2026-01-01T00:30:00+00:00",
+        )
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    stored = await store.get(record.run_id)
+    assert recovered == []
+    assert record.status == RunStatus.running
+    assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
 async def test_cancel_not_inflight(manager: RunManager):
     """Cancelling a completed run should return False."""
     record = await manager.create("thread-1")

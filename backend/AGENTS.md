@@ -389,6 +389,9 @@ outputs from evidence references.
 - Runtime recovery reasons such as `boundary_stopped` and `worker_lost` are terminal statuses for store predicates and frontend recovery; store-only hydrated `RunRecord.status` may be a string, so response/serialization code should use `run_status_value()` instead of direct `.value`.
 - Inflight run checks should use `is_inflight_status()` so `pending`, `running`, `cancelling`, and `rolling_back` stay consistent across memory and store-only records.
 - `RunStore.list_inflight()` is the startup recovery source and must use the same inflight status set; do not limit it to only `pending`/`running`. Startup recovery thread-status writes must use each recovered `RunRecord.user_id`, not the `user_id=None` migration escape hatch.
+- `RunManager.get()` and `list_by_thread()` also perform conservative stale
+  inflight recovery: a persisted inflight run older than the recovery timeout is
+  marked `error`/`worker_lost` only when this process has no live task for it.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265). After completion, it must refresh the final `RunRecord` with the request storage `user_id`.
 - Wait/detail responses may expose a short terminal exception message, but must not return raw tracebacks, stack frames, secrets, or overlong error text.
 - Late SSE reconnects to a terminal run must return an immediate `end` event so clients fetch final history instead of subscribing to an already-cleaned stream buffer.

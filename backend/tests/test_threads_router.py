@@ -11,7 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
-from app.gateway.routers import threads
+from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
@@ -1195,3 +1195,43 @@ async def test_delete_thread_without_runs_or_events_is_idempotent():
 
     assert first.success is True
     assert second.success is True
+
+
+@pytest.mark.asyncio
+async def test_list_runs_syncs_thread_error_for_latest_worker_lost() -> None:
+    expected_user_id = str(_HISTORY_USER_ID)
+    thread_id = "worker-lost-thread"
+
+    class RecordingRunManager:
+        async def list_by_thread(self, requested_thread_id: str, *, user_id: str | None = None):
+            assert requested_thread_id == thread_id
+            assert user_id == expected_user_id
+            return [
+                RunRecord(
+                    run_id="run-worker-lost",
+                    thread_id=thread_id,
+                    assistant_id=None,
+                    status=RunStatus.error,
+                    terminal_reason="worker_lost",
+                    on_disconnect=DisconnectMode.continue_,
+                    user_id=expected_user_id,
+                )
+            ]
+
+    class RecordingThreadStore:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str | None]] = []
+
+        async def update_status(self, requested_thread_id: str, status: str, *, user_id: str | None = None):
+            self.calls.append((requested_thread_id, status, user_id))
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    thread_store = RecordingThreadStore()
+    app.state.run_manager = RecordingRunManager()
+    app.state.thread_store = thread_store
+    request = SimpleNamespace(app=app, state=SimpleNamespace(user=_make_user(_HISTORY_USER_ID)))
+
+    responses = await call_unwrapped(thread_runs.list_runs, thread_id, request)
+
+    assert [response.run_id for response in responses] == ["run-worker-lost"]
+    assert thread_store.calls == [(thread_id, "error", expected_user_id)]

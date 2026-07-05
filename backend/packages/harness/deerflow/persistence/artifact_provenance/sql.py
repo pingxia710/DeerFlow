@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.artifact_provenance.model import ArtifactProvenanceRow
@@ -94,6 +94,7 @@ class ArtifactProvenanceRepository:
             for entry in entries:
                 values = self._entry_values(entry, user_id=resolved_user_id)
                 stmt = select(ArtifactProvenanceRow).where(
+                    ArtifactProvenanceRow.user_id == values["user_id"],
                     ArtifactProvenanceRow.thread_id == values["thread_id"],
                     ArtifactProvenanceRow.run_id == values["run_id"],
                     ArtifactProvenanceRow.virtual_path == values["virtual_path"],
@@ -128,13 +129,50 @@ class ArtifactProvenanceRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        resolved_user_id = resolve_user_id(user_id, method_name="ArtifactProvenanceRepository.delete_by_thread")
+        stmt = delete(ArtifactProvenanceRow).where(ArtifactProvenanceRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(ArtifactProvenanceRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        resolved_user_id = resolve_user_id(user_id, method_name="ArtifactProvenanceRepository.delete_by_run")
+        stmt = delete(ArtifactProvenanceRow).where(
+            ArtifactProvenanceRow.thread_id == thread_id,
+            ArtifactProvenanceRow.run_id == run_id,
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(ArtifactProvenanceRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return int(result.rowcount or 0)
+
 
 # Backwards-compatible method attached outside the class body for older imports.
 async def _claim_legacy_by_thread(self: ArtifactProvenanceRepository, thread_id: str, owner_user_id: str) -> int:
     async with self._sf() as session:
         result = await session.execute(
             update(ArtifactProvenanceRow)
-            .where(ArtifactProvenanceRow.thread_id == thread_id, ArtifactProvenanceRow.user_id.is_(None) | (ArtifactProvenanceRow.user_id == DEFAULT_USER_ID))
+            .where(
+                ArtifactProvenanceRow.thread_id == thread_id,
+                ArtifactProvenanceRow.user_id.is_(None) | (ArtifactProvenanceRow.user_id == DEFAULT_USER_ID),
+            )
             .values(user_id=owner_user_id, updated_at=datetime.now(UTC))
         )
         await session.commit()

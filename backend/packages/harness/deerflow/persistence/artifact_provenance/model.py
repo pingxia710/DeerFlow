@@ -37,7 +37,7 @@ class ArtifactProvenanceRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (
-        UniqueConstraint("thread_id", "run_id", "virtual_path", name="uq_artifact_provenance_run_path"),
+        UniqueConstraint("user_id", "thread_id", "run_id", "virtual_path", name="uq_artifact_provenance_owner_run_path"),
         Index("ix_artifact_provenance_thread_run", "thread_id", "run_id"),
         Index("ix_artifact_provenance_owner_thread_run", "user_id", "thread_id", "run_id"),
     )

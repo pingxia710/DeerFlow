@@ -332,6 +332,13 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     except Exception:
         logger.debug("Could not delete feedback for %s (not critical)", sanitize_log_param(thread_id))
 
+    try:
+        artifact_provenance_repo = getattr(request.app.state, "artifact_provenance_repo", None)
+        if artifact_provenance_repo is not None:
+            await artifact_provenance_repo.delete_by_thread(thread_id, user_id=storage_user_id)
+    except Exception:
+        logger.debug("Could not delete artifact provenance for %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:

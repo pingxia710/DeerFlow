@@ -90,6 +90,20 @@ async def test_artifact_provenance_repository_upserts_and_scopes_by_owner(artifa
     assert rows[0]["sha256"] == "b" * 64
     assert rows[0]["size_bytes"] == 24
 
+    other_owner = {**entry, "source_event_seq": 99, "sha256": "c" * 64, "size_bytes": 48}
+    assert await artifact_repo.upsert_many([other_owner], user_id="user-2") == 1
+
+    rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-1")
+    other_rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-2")
+    assert len(rows) == 1
+    assert len(other_rows) == 1
+    assert rows[0]["source_event_seq"] == 8
+    assert other_rows[0]["source_event_seq"] == 99
+
+    assert await artifact_repo.delete_by_thread("thread-1", user_id="user-1") == 1
+    assert await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-1") == []
+    assert len(await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-2")) == 1
+
 
 def test_build_artifact_index_from_task_event_artifact_refs() -> None:
     events = [

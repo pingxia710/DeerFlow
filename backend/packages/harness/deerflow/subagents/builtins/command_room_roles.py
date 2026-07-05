@@ -55,6 +55,12 @@ COMMAND_ROOM_ROLE_CONFIGS = {
         description="Command Room Evidence role; defines and checks evidence standards and result strength.",
         role="Evidence",
     ),
+    "fact-finder": _role_config(
+        "fact-finder",
+        skill="command-room-fact-finder",
+        description="Command Room Fact Finder angle; gathers read-only facts, source refs, conflicts, unknowns, and next clues for the Chair.",
+        role="Fact Finder",
+    ),
     "opposition": _role_config(
         "opposition",
         skill="command-room-opposition",

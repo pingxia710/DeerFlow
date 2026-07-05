@@ -55,6 +55,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `e8d78b7e` | current local stack on `localhost:2026`; system Google Chrome via Playwright; no backend run created | authenticated latest-thread browser refresh | pass | 12:55 CST browser opened `http://localhost:2026/workspace/chats/3ba75b81-e1c9-4e43-9288-7cbff600fc4f` with local owner JWT plus CSRF cookie. The app redirected to `/workspace/agents/command-room/chats/3ba75b81-e1c9-4e43-9288-7cbff600fc4f`, page title was `DeerFlow代码逻辑优化分析 - DeerFlow`, and both first load and reload contained the latest reply marker `skip / 外部依赖测试风险备注` / `baseline-and-failing-tests.md`. Browser warning/error/pageerror count was `0`; DB counts stayed `error=63`, `interrupted=7`, `success=453` with no `running` rows. A prior artificial-cookie probe without `csrf_token` produced expected `403` CSRF errors and was not treated as the passing browser check. |
 | 2026-07-05 | Codex    | `bd33da21` | current local stack on `localhost:2026`; no backend run created | migration dry-run owner boundary | needs owner review | 12:59 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id default` exited `0`, inspected `backend/.deer-flow/data/deerflow.db`, found `35` thread ownership records, and made no git-visible changes. SQL null-owner counts stayed zero for `threads_meta`, `runs`, `run_events`, and `artifact_provenance`; no `migration-conflicts` directory entries were created. Dry-run still reported `21` ownerless legacy thread dirs, `15` conflict thread dirs, and `1` legacy `command-room` agent assigned to `default`; a read-only join check still found `282` historical `runs` rows without matching `threads_meta` owner records, so existing data remains blocked on intended-owner/conflict review before non-dry-run migration. Gateway `/health` stayed healthy, nginx returned `200`, and DB counts stayed `error=63`, `interrupted=7`, `success=453` with no `running` rows. |
 | 2026-07-05 | Codex    | `d4b219b9` | current local stack on `localhost:2026`; frontend mock E2E spawned its own test server; no backend run created | runbook preflight rerun | pass | 13:03 CST runbook preflight commands passed: backend guard/security `cd backend && PYTHONPATH=. uv run pytest tests/test_gateway_worker_guard.py tests/test_deployment_security_guards.py -q` returned `25 passed, 1 warning`; frontend unit `cd frontend && pnpm test tests/unit/core/threads/message-merge.test.ts` returned `63 passed`; frontend E2E `cd frontend && pnpm exec playwright test tests/e2e/thread-history.spec.ts` returned `16 passed`. Known Playwright startup warnings remained `NO_COLOR` ignored due `FORCE_COLOR` and the Turbopack NFT trace warning. Gateway `/health` stayed healthy, nginx returned `200`, and DB counts stayed `error=63`, `interrupted=7`, `success=453` with no `running` rows. |
+| 2026-07-05 | Codex    | `86ae011d` | current local stack on `localhost:2026`; real Command Room usage observed while smoke continued | new task execution | pass | 13:07 CST real Command Room run `cf36bc84-f7c7-4326-ba52-70b706adcb99` on thread `3ba75b81-e1c9-4e43-9288-7cbff600fc4f` reached `success` with `model_name=gpt-5.5`, `llm_call_count=2`, `total_input_tokens=48233`, and `total_output_tokens=2453`. Owner-scoped JSONL wrote 14 events: `run.start`, `llm.context`, `llm.human.input`, `llm.ai.response`, `task_started`, three `task_running`, `task_completed`, `llm.tool.result`, second `llm.context`, second `llm.ai.response`, `run.end`, and `run.terminal status=success`. Gateway `/health` stayed healthy, nginx returned `200`, and DB counts became `error=63`, `interrupted=7`, `success=454` with no `running` rows. |
 
 ## Notes
 
@@ -111,8 +112,8 @@ Use this file for the 1-2 day real-use smoke from
   records skip/xfail/external dependency boundaries so local pytest evidence is
   not overstated as full live/LLM/Docker/deployment validation.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
-  one API-driven Command Room/Codex confirmation run, one real Command Room
-  subagent-task run that reached `success`, authenticated run detail/messages
+  one API-driven Command Room/Codex confirmation run, two real Command Room
+  subagent-task runs that reached `success`, authenticated run detail/messages
   replay, authenticated browser load/reload recovery, and a post-fix memory
   update success checkpoint, but the beta observation window still needs
   continued real sessions.
@@ -136,7 +137,10 @@ handoffs.
   on the observation list through the 1-2 day smoke window. A second post-fix
   real Command Room run, `e68d51f3-2bb7-46a3-b13e-e9ee46818fd9`, also reached
   `success` at 12:44 CST with `task_completed`, `run.end`, and
-  `run.terminal status=success`. Follow-up replay checks also passed: 12:52 CST
+  `run.terminal status=success`. A third post-fix real Command Room run,
+  `cf36bc84-f7c7-4326-ba52-70b706adcb99`, reached `success` at 13:07 CST with
+  `task_completed`, `run.end`, and `run.terminal status=success`. Follow-up
+  replay checks also passed: 12:52 CST
   authenticated run detail/messages APIs returned `200` for both post-fix
   success runs, and 12:55 CST authenticated browser load/reload restored the
   latest thread reply with zero browser warning/error/pageerror entries.

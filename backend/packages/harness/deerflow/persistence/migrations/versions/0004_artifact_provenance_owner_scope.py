@@ -23,8 +23,12 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if "artifact_provenance" not in inspector.get_table_names():
         return
+    unique_names = {constraint["name"] for constraint in inspector.get_unique_constraints("artifact_provenance")}
+    if "uq_artifact_provenance_owner_run_path" in unique_names:
+        return
     with op.batch_alter_table("artifact_provenance", schema=None) as batch_op:
-        batch_op.drop_constraint("uq_artifact_provenance_run_path", type_="unique")
+        if "uq_artifact_provenance_run_path" in unique_names:
+            batch_op.drop_constraint("uq_artifact_provenance_run_path", type_="unique")
         batch_op.create_unique_constraint(
             "uq_artifact_provenance_owner_run_path",
             ["user_id", "thread_id", "run_id", "virtual_path"],

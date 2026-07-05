@@ -1,5 +1,15 @@
 # Progress
 
+## 2026-07-05 — Phase 3 AI-readable quality loop data plane
+
+- Added `QualitySignal` as a compact AI-authored recommendation record with `continue`, `needs_more_evidence`, `needs_revision`, `escalate`, and `stop`; it deliberately has `quality_verdict: null`, `auto_rework: false`, and `programmatic_decision: false`.
+- Added owner-scoped thread audit storage at `audit/quality_signals.jsonl`.
+- Added `GET /api/threads/{thread_id}/runs/{run_id}/quality-context` to aggregate run handoffs, redacted evidence summary, capability snapshot, native round state, and existing quality signals for Chair/lead AI.
+- Added `POST /api/threads/{thread_id}/runs/{run_id}/quality-signals` to save AI-authored recommendations without requiring strong evidence refs.
+- Extended command-room round context injection with short compact quality signals only; no raw prompt, large text, reviewer scheduling, automatic rework, or program-side verdict was added.
+- Validation: `cd backend && uv run pytest tests/test_command_room_handoff.py tests/test_command_room_evidence.py tests/test_command_room_evidence_ref.py tests/test_run_evidence_api.py tests/test_round_context_injection.py tests/test_command_room_quality_signal.py tests/test_run_quality_loop_api.py -q` passed with 30 tests; targeted `ruff check` passed for changed Python files.
+- Deliberately skipped: no Command Room UI, no Browser replay, no automatic reviewer/opposition/rework trigger, and no program-owned quality gate.
+
 ## 2026-07-03 — Command Room Chair Activation Check landing
 
 - Added Chair Activation Check as the minimal startup guard for DeerFlow architecture, AI-AI, role, loop, governance, quality, boundary, development execution, and durable-rule work.

@@ -298,6 +298,39 @@ def test_round_context_chair_brief_no_data_does_not_block(monkeypatch):
     assert "auto_dispatch" not in lowered
 
 
+def test_native_round_context_precedes_legacy_round_record(monkeypatch):
+    class Runtime:
+        context = {
+            "thread_id": "thread-native-priority",
+            "round_context": {
+                "round_id": "round-native",
+                "state": "blocked",
+                "current_run_id": "run-native",
+            },
+        }
+
+    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
+    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
+    monkeypatch.setattr("deerflow.command_room.quality.list_quality_signals", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.round_context_middleware.latest_round_context_for_thread",
+        lambda thread_id, user_id=None: "[Internal Command Room Round signals]\nstate: closed\nrun_id: run-legacy",
+    )
+
+    text = middleware._context_text(Runtime())
+
+    assert text is not None
+    native_index = text.index("[Internal Native Round State]")
+    legacy_index = text.index("[Internal Command Room Round signals]")
+    assert native_index < legacy_index
+    assert "state: blocked" in text[native_index:legacy_index]
+    assert "current_run_id: run-native" in text[native_index:legacy_index]
+    assert "run_id: run-legacy" in text[legacy_index:]
+
+
 def test_round_context_without_thread_id_skips_runtime_context(monkeypatch):
     middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
     monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)

@@ -4,6 +4,8 @@ import {
   clearReconnectRun,
   getAPIClient,
   isInactiveRunStreamError,
+  isRunStreamRecoveryRequiredError,
+  RunStreamRecoveryRequiredError,
 } from "@/core/api/api-client";
 
 function makeSessionStorage() {
@@ -40,6 +42,16 @@ test("does not classify unrelated conflict errors as inactive streams", () => {
   });
 
   expect(isInactiveRunStreamError(error)).toBe(false);
+});
+
+test("identifies structured stream recovery errors", () => {
+  const error = new RunStreamRecoveryRequiredError({
+    threadId: "thread-1",
+    runId: "run-1",
+    reason: "stream_recovery_required",
+  });
+
+  expect(isRunStreamRecoveryRequiredError(error)).toBe(true);
 });
 
 test("clears matching reconnect metadata", () => {
@@ -119,7 +131,13 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
 
   await expect(
     getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
-  ).resolves.toMatchObject({ done: true });
+  ).rejects.toMatchObject({
+    recoveryRequired: true,
+    threadId: "thread-1",
+    runId: "run-1",
+    reason: "inactive_run_stream",
+    status: 409,
+  });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
@@ -143,7 +161,12 @@ test("clears stale reconnect metadata when stream recovery is required", async (
 
   await expect(
     getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
-  ).resolves.toMatchObject({ done: true });
+  ).rejects.toMatchObject({
+    recoveryRequired: true,
+    threadId: "thread-1",
+    runId: "run-1",
+    reason: "stream_recovery_required",
+  });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
@@ -171,7 +194,12 @@ test("stops consuming a stale stream after recovery is required", async () => {
 
   await expect(
     getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
-  ).resolves.toMatchObject({ done: true });
+  ).rejects.toMatchObject({
+    recoveryRequired: true,
+    threadId: "thread-1",
+    runId: "run-1",
+    reason: "stream_recovery_required",
+  });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });

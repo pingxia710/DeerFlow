@@ -662,9 +662,11 @@ async def test_sse_consumer_terminal_run_returns_end_without_bridge_subscription
     async for frame in sse_consumer(_CleanedBridge(), record, _ConnectedRequest(), run_manager):
         frames.append(frame)
 
-    assert len(frames) == 1
-    assert frames[0].startswith("event: end\n")
-    assert "data: null" in frames[0]
+    assert len(frames) == 2
+    assert frames[0].startswith("event: custom\n")
+    assert '"event_type": "run.terminal"' in frames[0]
+    assert frames[1].startswith("event: end\n")
+    assert "data: null" in frames[1]
 
 
 def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):

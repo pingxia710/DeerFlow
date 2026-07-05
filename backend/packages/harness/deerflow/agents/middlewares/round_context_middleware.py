@@ -357,6 +357,8 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         account_text = format_account_ledger_for_model(proposal_rows, decision_rows)
         if account_text:
             parts.append(account_text)
+        # Native round_state is the lifecycle authority; legacy RoundRecord is
+        # appended only as an audit/signals projection and must not override it.
         legacy_text = latest_round_context_for_thread(thread_id_text, user_id)
         if legacy_text:
             parts.append(legacy_text)

@@ -2,6 +2,7 @@ import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  applyNativeRoundsToSnapshotRuns,
   applySnapshotRunMessagePageState,
   applyTaskEventRunMessages,
   buildRunMessagesUrl,
@@ -22,6 +23,7 @@ import {
   isTaskEventRunMessageForRequest,
   isVisibleHistoryRunMessage,
   keepQueuedMessagesForThread,
+  latestRoundIdFromSnapshot,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeFetchedRunMessages,
   mergeMessages,
@@ -38,6 +40,7 @@ import {
   shouldReleaseQueuedThreadMessage,
   shouldShowLiveThreadState,
   shouldShowThreadHistory,
+  taskLanesForLatestRound,
   taskLaneSubtaskUpdate,
   taskEventRunMessageKey,
   threadRuntimeSnapshotQueryKey,
@@ -88,6 +91,95 @@ test("threadRuntimeSnapshotQueryKey keeps snapshot cache separate from run lists
     "thread-a",
     "runtime-snapshot",
   ]);
+});
+
+test("native runtime snapshot rounds settle stale active run metadata", () => {
+  const restored = applyNativeRoundsToSnapshotRuns(
+    [
+      { run_id: "run-closed", status: "running" },
+      { run_id: "run-blocked", status: "pending" },
+      { run_id: "run-waiting", status: "running" },
+    ] as unknown as Run[],
+    [
+      {
+        thread_id: "thread-1",
+        round_id: "round-closed",
+        current_run_id: "run-closed",
+        state: "closed",
+      },
+      {
+        thread_id: "thread-1",
+        round_id: "round-blocked",
+        current_run_id: "run-blocked",
+        state: "blocked",
+      },
+      {
+        thread_id: "thread-1",
+        round_id: "round-waiting",
+        current_run_id: "run-waiting",
+        state: "waiting_user",
+      },
+    ],
+  );
+
+  expect(restored?.map((run) => run.status)).toEqual([
+    "success",
+    "error",
+    "interrupted",
+  ]);
+  expect(restored?.map((run) => roundIdOfRun(run))).toEqual([
+    "round-closed",
+    "round-blocked",
+    "round-waiting",
+  ]);
+  expect(latestRoundIdFromSnapshot(restored, undefined)).toBe("round-closed");
+});
+
+test("runtime snapshot applies task lanes only for the latest native round", () => {
+  const runs = [
+    { run_id: "run-new", status: "running" },
+    { run_id: "run-old", status: "success" },
+  ] as unknown as Run[];
+  const rounds = [
+    {
+      thread_id: "thread-1",
+      round_id: "round-new",
+      current_run_id: "run-new",
+      state: "executing",
+    },
+    {
+      thread_id: "thread-1",
+      round_id: "round-old",
+      current_run_id: "run-old",
+      state: "closed",
+    },
+  ];
+
+  const restored = applyNativeRoundsToSnapshotRuns(runs, rounds);
+  const latestRoundId = latestRoundIdFromSnapshot(restored, rounds);
+  const lanes = taskLanesForLatestRound(
+    [
+      {
+        thread_id: "thread-1",
+        run_id: "run-old",
+        round_id: "round-old",
+        task_id: "task-old",
+        status: "completed",
+      },
+      {
+        thread_id: "thread-1",
+        run_id: "run-new",
+        round_id: "round-new",
+        task_id: "task-new",
+        status: "in_progress",
+      },
+    ],
+    latestRoundId,
+  );
+
+  expect(latestRoundId).toBe("round-new");
+  expect(restored?.[0]?.status).toBe("running");
+  expect(lanes.map((lane) => lane.task_id)).toEqual(["task-new"]);
 });
 
 test("thread switching gates live state, history, and queued messages by visible thread", () => {

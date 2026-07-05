@@ -1692,6 +1692,8 @@ async def get_thread_runtime_snapshot(
     """Return one recovery snapshot for thread runtime state."""
     user_id = get_request_storage_user_id(request)
     run_mgr = get_run_manager(request)
+    if hasattr(run_mgr, "recover_stale_inflight_runs"):
+        await run_mgr.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=run_limit)
     await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
 

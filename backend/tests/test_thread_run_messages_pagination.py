@@ -76,8 +76,14 @@ class _RoundStoreForSnapshotTests:
 
 
 class _RepairableRoundStoreForSnapshotTests:
-    def __init__(self, *, user_id: str) -> None:
-        self.rounds = [
+    def __init__(
+        self,
+        *,
+        user_id: str,
+        rounds: list[dict] | None = None,
+        task_lanes: list[dict] | None = None,
+    ) -> None:
+        self.rounds = rounds or [
             {
                 "round_id": "round-stale",
                 "thread_id": "thread-1",
@@ -86,7 +92,7 @@ class _RepairableRoundStoreForSnapshotTests:
                 "state": "executing",
             }
         ]
-        self.task_lanes = [
+        self.task_lanes = task_lanes or [
             {
                 "thread_id": "thread-1",
                 "run_id": "run-terminal",
@@ -323,6 +329,120 @@ def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
     assert round_store.set_run_state_calls[0]["state"] == "blocked"
     assert round_store.set_run_state_calls[0]["event_type"] == "round.blocked"
     assert round_store.record_task_events_calls[0][0]["event_type"] == "task_failed"
+
+
+def test_runtime_snapshot_recovers_stale_store_only_inflight_run():
+    """Runtime snapshot is a reload convergence point for stale inflight rows."""
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+    asyncio.run(
+        run_store.put(
+            "stale-run",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    run_store._runs["stale-run"]["updated_at"] = "2026-01-01T00:00:00+00:00"
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=run_store))
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runtime-snapshot")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runs"][0]["run_id"] == "stale-run"
+    assert body["runs"][0]["status"] == "error"
+    assert body["runs"][0]["terminal_reason"] == "worker_lost"
+    stored = asyncio.run(run_store.get("stale-run", user_id=user_id))
+    assert stored["status"] == "error"
+    assert stored["terminal_reason"] == "worker_lost"
+
+
+def test_runtime_snapshot_repair_keeps_new_active_round_and_lane_isolated():
+    """Repair only closes stale rows for terminal runs when old and new rounds coexist."""
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    asyncio.run(
+        run_store.put(
+            "run-old",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="error",
+            metadata={"round_id": "round-old", "terminal_reason": "worker_lost"},
+            error="worker lost",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    asyncio.run(
+        run_store.put(
+            "run-new",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            user_id=user_id,
+            status="running",
+            metadata={"round_id": "round-new"},
+            created_at="2026-01-01T00:01:00+00:00",
+        )
+    )
+    round_store = _RepairableRoundStoreForSnapshotTests(
+        user_id=user_id,
+        rounds=[
+            {
+                "round_id": "round-old",
+                "thread_id": "thread-1",
+                "user_id": user_id,
+                "current_run_id": "run-old",
+                "state": "executing",
+            },
+            {
+                "round_id": "round-new",
+                "thread_id": "thread-1",
+                "user_id": user_id,
+                "current_run_id": "run-new",
+                "state": "executing",
+            },
+        ],
+        task_lanes=[
+            {
+                "thread_id": "thread-1",
+                "run_id": "run-old",
+                "task_id": "task-old",
+                "round_id": "round-old",
+                "user_id": user_id,
+                "role": "evidence",
+                "status": "executing",
+            },
+            {
+                "thread_id": "thread-1",
+                "run_id": "run-new",
+                "task_id": "task-new",
+                "round_id": "round-new",
+                "user_id": user_id,
+                "role": "evidence",
+                "status": "in_progress",
+            },
+        ],
+    )
+    app = _make_app(event_store=event_store, run_manager=RunManager(store=run_store))
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runtime-snapshot")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [run["run_id"] for run in body["runs"]] == ["run-new", "run-old"]
+    round_states = {round_["round_id"]: round_["state"] for round_ in body["rounds"]}
+    lane_statuses = {lane["task_id"]: lane["status"] for lane in body["task_lanes"]}
+    assert round_states == {"round-old": "blocked", "round-new": "executing"}
+    assert lane_statuses == {"task-old": "failed", "task-new": "in_progress"}
+    assert [call["run_id"] for call in round_store.set_run_state_calls] == ["run-old"]
+    assert [event["task_id"] for event in round_store.record_task_events_calls[0]] == ["task-old"]
 
 
 def test_returns_middleware_message_rows_as_control_rows():

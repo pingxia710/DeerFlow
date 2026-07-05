@@ -1179,6 +1179,7 @@ type RunMessagesPageResponse = {
 export type TaskLaneSnapshot = {
   thread_id: string;
   run_id: string;
+  round_id?: string | null;
   task_id: string;
   role?: string | null;
   status: string;
@@ -1186,6 +1187,16 @@ export type TaskLaneSnapshot = {
   evidence_ref?: string | null;
   error?: string | null;
   created_at?: string;
+};
+
+export type RuntimeRoundSnapshot = {
+  round_id: string;
+  thread_id: string;
+  state: string;
+  current_run_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  closed_at?: string | null;
 };
 
 export type ThreadRunTerminalNotice = {
@@ -1198,6 +1209,7 @@ export type ThreadRunTerminalNotice = {
 type ThreadRuntimeSnapshotResponse = {
   thread_id: string;
   runs: Run[];
+  rounds?: RuntimeRoundSnapshot[];
   run_messages: Array<RunMessagesPageResponse & { run_id: string }>;
   task_lanes?: TaskLaneSnapshot[];
 };
@@ -1756,6 +1768,9 @@ export function applyStreamErrorRecovery({
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
   });
+  void queryClient.invalidateQueries({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
+  });
   return { threadId, runId };
 }
 
@@ -1812,6 +1827,9 @@ export function reconcileTaskEventRunHistory(
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
   });
+  void queryClient.invalidateQueries({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
+  });
   refreshRuns([runId]);
   return true;
 }
@@ -1859,6 +1877,9 @@ export function invalidateTerminalRunQueries(
     queryKey: threadRunsQueryKey(threadId),
   });
   void queryClient.invalidateQueries({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
     queryKey: threadTokenUsageQueryKey(threadId),
   });
   void queryClient.invalidateQueries({
@@ -1904,6 +1925,9 @@ export function stopBackgroundRunProbeRecovery(
   clearThreadActivity(threadId);
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
   void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
@@ -3083,6 +3107,8 @@ type ThreadHistoryOptions = {
 type RunWithRound = Run & {
   metadata?: { round_id?: unknown };
   round_id?: unknown;
+  status?: unknown;
+  terminal_reason?: unknown;
 };
 
 export function roundIdOfRun(run: Run | undefined) {
@@ -3092,6 +3118,113 @@ export function roundIdOfRun(run: Run | undefined) {
   }
   const metadataRoundId = (run as RunWithRound | undefined)?.metadata?.round_id;
   return typeof metadataRoundId === "string" ? metadataRoundId : null;
+}
+
+function roundCurrentRunId(round: RuntimeRoundSnapshot) {
+  return stringValue(round.current_run_id);
+}
+
+function terminalRunPatchForRoundState(state: string):
+  | {
+      status: string;
+      terminalReason: string;
+    }
+  | undefined {
+  if (state === "closed") {
+    return { status: "success", terminalReason: "success" };
+  }
+  if (state === "blocked") {
+    return { status: "error", terminalReason: "blocked" };
+  }
+  if (state === "waiting_user") {
+    return { status: "interrupted", terminalReason: "waiting_user" };
+  }
+  return undefined;
+}
+
+export function applyNativeRoundsToSnapshotRuns(
+  runs: Run[] | undefined,
+  rounds: RuntimeRoundSnapshot[] | undefined,
+): Run[] | undefined {
+  if (!runs) {
+    return undefined;
+  }
+  if (!rounds || rounds.length === 0) {
+    return runs;
+  }
+
+  const roundByRunId = new Map<string, RuntimeRoundSnapshot>();
+  for (const round of rounds) {
+    const runId = roundCurrentRunId(round);
+    if (runId) {
+      roundByRunId.set(runId, round);
+    }
+  }
+
+  let changed = false;
+  const nextRuns = runs.map((run) => {
+    const round = roundByRunId.get(run.run_id);
+    if (!round) {
+      return run;
+    }
+
+    const patch = terminalRunPatchForRoundState(round.state);
+    const currentRoundId = roundIdOfRun(run);
+    const runWithRound = run as RunWithRound;
+    if (!patch) {
+      if (currentRoundId === round.round_id) {
+        return run;
+      }
+      changed = true;
+      return { ...run, round_id: round.round_id } as Run;
+    }
+
+    const nextRun = {
+      ...run,
+      round_id: round.round_id,
+      status: patch.status,
+      terminal_reason:
+        runWithRound.status === patch.status
+          ? (stringValue(runWithRound.terminal_reason) ?? patch.terminalReason)
+          : patch.terminalReason,
+    } as Run;
+    if (
+      currentRoundId !== round.round_id ||
+      runWithRound.status !== patch.status
+    ) {
+      changed = true;
+    }
+    return nextRun;
+  });
+
+  return changed ? nextRuns : runs;
+}
+
+export function latestRoundIdFromSnapshot(
+  runs: Run[] | undefined,
+  rounds: RuntimeRoundSnapshot[] | undefined,
+) {
+  const latestRun = runs?.[0];
+  if (!latestRun) {
+    return null;
+  }
+  const latestRunRound = rounds?.find(
+    (round) => roundCurrentRunId(round) === latestRun.run_id,
+  );
+  return latestRunRound?.round_id ?? roundIdOfRun(latestRun);
+}
+
+export function taskLanesForLatestRound(
+  lanes: TaskLaneSnapshot[] | undefined,
+  latestRoundId: string | null,
+) {
+  const rows = lanes ?? [];
+  if (!latestRoundId) {
+    return rows;
+  }
+  return rows.filter(
+    (lane) => !lane.round_id || lane.round_id === latestRoundId,
+  );
 }
 
 export function resolveThreadHistoryReset({
@@ -3176,7 +3309,14 @@ export function useThreadHistory(
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
   const { isError: runsIsError, refetch: refetchRuns } = runs;
   updateSubtaskRef.current = updateSubtask;
-  const runsData = runs.data ?? snapshot.data?.runs;
+  const runsData = useMemo(
+    () =>
+      applyNativeRoundsToSnapshotRuns(
+        runs.data ?? snapshot.data?.runs,
+        snapshot.data?.rounds,
+      ),
+    [runs.data, snapshot.data?.rounds, snapshot.data?.runs],
+  );
 
   const supersededRunIds = useMemo(() => {
     return getSupersededRunIds(runsData, pendingSupersededRunIds);
@@ -3356,14 +3496,17 @@ export function useThreadHistory(
     historyLoadAbortRef.current?.abort();
     historyLoadAbortRef.current = null;
     threadIdRef.current = threadId;
-    runsRef.current = data.runs;
+    const snapshotRuns =
+      applyNativeRoundsToSnapshotRuns(data.runs, data.rounds) ?? data.runs;
+    const latestRoundId = latestRoundIdFromSnapshot(snapshotRuns, data.rounds);
+    runsRef.current = snapshotRuns;
     indexRef.current = -1;
     pendingLoadRef.current = false;
     loadingRunIdRef.current = null;
     loadedRunIdsRef.current = new Set();
     runBeforeSeqRef.current = new Map();
     activeRunIdsRef.current = new Set(
-      data.runs
+      snapshotRuns
         .filter((run) => isActiveRunStatus(run.status))
         .map((run) => run.run_id),
     );
@@ -3376,7 +3519,10 @@ export function useThreadHistory(
       threadId,
       appliedTaskEventKeysRef.current,
     );
-    for (const lane of data.task_lanes ?? []) {
+    for (const lane of taskLanesForLatestRound(
+      data.task_lanes,
+      latestRoundId,
+    )) {
       updateSubtaskRef.current(taskLaneSubtaskUpdate(lane));
     }
     for (const page of data.run_messages) {
@@ -3387,10 +3533,10 @@ export function useThreadHistory(
       loadedRunIdsRef.current,
       runBeforeSeqRef.current,
     );
-    latestRoundIdRef.current = roundIdOfRun(data.runs[0]);
-    autoLoadedLatestRunIdRef.current = data.runs[0]?.run_id ?? null;
+    latestRoundIdRef.current = latestRoundId;
+    autoLoadedLatestRunIdRef.current = snapshotRuns[0]?.run_id ?? null;
     indexRef.current = findLatestUnloadedRunIndex(
-      data.runs,
+      snapshotRuns,
       loadedRunIdsRef.current,
     );
     loadingRef.current = false;
@@ -3401,7 +3547,10 @@ export function useThreadHistory(
 
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
-    const latestRoundId = roundIdOfRun(runsData?.[0]);
+    const latestRoundId = latestRoundIdFromSnapshot(
+      runsData,
+      snapshot.data?.rounds,
+    );
     const resetMode = resolveThreadHistoryReset({
       enabled,
       threadChanged,
@@ -3458,7 +3607,7 @@ export function useThreadHistory(
         toast.error("Failed to load thread history.");
       });
     }
-  }, [enabled, threadId, runsData, loadMessages]);
+  }, [enabled, threadId, runsData, snapshot.data?.rounds, loadMessages]);
 
   useEffect(() => {
     return () => {

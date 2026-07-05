@@ -1,12 +1,14 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
+from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.persistence.round_state import MemoryRoundStateStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -180,6 +182,112 @@ async def test_run_agent_updates_thread_meta_with_run_owner():
     )
 
     thread_store.update_status.assert_awaited_once_with("thread-1", "idle", user_id="owner-1")
+
+
+@pytest.mark.anyio
+async def test_run_agent_success_path_persists_terminal_runtime_state_without_snapshot():
+    """The normal worker finalizer must persist terminal state before any snapshot repair."""
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    run_manager = RunManager(store=MemoryRunStore(), round_store=round_store)
+    record = await run_manager.create("thread-main-path", assistant_id="lead_agent", user_id="owner-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(update_status=AsyncMock())
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            llm_run_id = uuid4()
+            journal.on_chat_model_start(
+                {},
+                [[HumanMessage(content="main path prompt")]],
+                run_id=llm_run_id,
+                tags=["lead_agent"],
+            )
+            journal.record_task_event(
+                {
+                    "schema_version": "deerflow.task-event/v1",
+                    "type": "task_completed",
+                    "event_type": "task_completed",
+                    "thread_id": record.thread_id,
+                    "run_id": record.run_id,
+                    "task_id": "task-main",
+                    "subagent_type": "evidence",
+                    "status": "completed",
+                    "result_preview": "task done",
+                    "action_result": {
+                        "status": "completed",
+                        "summary": "task done",
+                        "evidence_refs": ["command: fake; exit code: 0"],
+                    },
+                }
+            )
+            journal.on_llm_end(
+                SimpleNamespace(generations=[[SimpleNamespace(message=AIMessage(content="Final answer"))]]),
+                run_id=llm_run_id,
+                tags=["lead_agent"],
+            )
+            yield {"messages": [AIMessage(content="Final answer")]}
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=event_store,
+            thread_store=thread_store,
+            round_store=round_store,
+        ),
+        agent_factory=factory,
+        graph_input={"messages": [HumanMessage(content="main path prompt")]},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id, user_id="owner-1")
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert fetched.terminal_reason == "success"
+
+    message_events = await event_store.list_messages_by_run(
+        "thread-main-path",
+        record.run_id,
+        user_id="owner-1",
+    )
+    event_types = [event["event_type"] for event in message_events]
+    assert "llm.human.input" in event_types
+    assert "llm.ai.response" in event_types
+    assert any(event["content"]["content"] == "Final answer" for event in message_events if event["event_type"] == "llm.ai.response")
+
+    terminal_events = await event_store.list_events(
+        "thread-main-path",
+        record.run_id,
+        event_types=["run.terminal"],
+        user_id="owner-1",
+    )
+    assert [event["content"] for event in terminal_events] == [
+        {"status": "success", "terminal_reason": "success"},
+    ]
+
+    rounds = await round_store.list_by_thread("thread-main-path", user_id="owner-1")
+    assert rounds[0]["round_id"] == record.round_id
+    assert rounds[0]["state"] == "closed"
+    lanes = await round_store.list_task_lanes_by_round(
+        thread_id="thread-main-path",
+        round_id=record.round_id,
+        user_id="owner-1",
+    )
+    assert [(lane["task_id"], lane["status"], lane["evidence_ref"]) for lane in lanes] == [
+        ("task-main", "completed", "command: fake; exit code: 0"),
+    ]
+    thread_store.update_status.assert_awaited_once_with("thread-main-path", "idle", user_id="owner-1")
 
 
 @pytest.mark.anyio

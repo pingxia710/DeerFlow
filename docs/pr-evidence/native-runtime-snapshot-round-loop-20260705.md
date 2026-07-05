@@ -60,6 +60,54 @@
 - Real-backend e2e uses the local replay Gateway, not production services.
 - Runtime snapshot read-side convergence is intentionally minimal; normal worker/finalizer terminal writes remain the primary path.
 
+## 2026-07-06 P0 Native Runtime Closure Addendum
+
+### What Changed
+
+- Frontend `ThreadRuntimeSnapshotResponse` now consumes native `rounds`, maps native `closed` / `blocked` / `waiting_user` round state over stale run metadata, and filters snapshot task lanes to the latest native round.
+- `joinStream` recovery is now observable: `stream_recovery_required` and inactive-run `409` clear stale reconnect metadata, then throw a structured recovery error so the thread runtime refresh path can invalidate runtime snapshot and run-list state.
+- Runtime snapshot now explicitly invokes stale inflight recovery before returning runs, so store-only stale `running` / `pending` rows converge to terminal `worker_lost` / `error` instead of replaying fake running state.
+- Normal worker/finalizer success path is covered without calling runtime snapshot: run terminal state, final AI message, native round terminal state, and task lane terminal state must all be durable on the main path.
+- Multi-run / multi-round tests cover an old terminal run beside a new active run; snapshot repair only closes the old run's native round/task lane, and frontend recovery ignores old-round lanes for the current UI.
+- Native `round_state` is documented and tested as lifecycle authority; legacy `RoundRecord` remains an audit/signals projection appended after native context.
+- Existing SSE terminal reconnect test was updated to the current durable replay contract: late terminal reconnect emits `run.terminal` before `end`.
+
+### Commands Run
+
+- `cd /Users/pingxia/projects/deer-flow/frontend && pnpm test tests/unit/core/api/api-client.test.ts tests/unit/core/threads/message-merge.test.ts tests/unit/core/threads/infinite.test.ts`
+  - Result: `126 passed`
+- `cd /Users/pingxia/projects/deer-flow/frontend && pnpm check`
+  - Result: passed (`eslint` and `tsc --noEmit`)
+- `cd /Users/pingxia/projects/deer-flow/frontend && pnpm test`
+  - Result: `497 passed`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run pytest tests/test_thread_run_messages_pagination.py tests/test_run_worker_rollback.py tests/test_round_context_injection.py -q`
+  - Result: `83 passed, 2 warnings`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run ruff check app/gateway/routers/thread_runs.py tests/test_thread_run_messages_pagination.py tests/test_run_worker_rollback.py packages/harness/deerflow/agents/middlewares/round_context_middleware.py tests/test_round_context_injection.py`
+  - Result: `All checks passed!`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run ruff format --check app/gateway/routers/thread_runs.py tests/test_thread_run_messages_pagination.py tests/test_run_worker_rollback.py packages/harness/deerflow/agents/middlewares/round_context_middleware.py tests/test_round_context_injection.py`
+  - Result: `5 files already formatted`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run pytest tests/test_thread_run_messages_pagination.py tests/test_run_worker_rollback.py tests/test_round_context_injection.py tests/test_sse_format.py tests/test_run_worker_terminal_event.py tests/test_runtime_lifecycle_e2e.py -q`
+  - Result: `105 passed, 2 warnings`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run ruff format --check tests/test_runtime_lifecycle_e2e.py && uv run ruff check tests/test_runtime_lifecycle_e2e.py`
+  - Result: `1 file already formatted`; `All checks passed!`
+- `cd /Users/pingxia/projects/deer-flow && git diff --check`
+  - Result: passed
+
+### Final Pre-Commit Review - 2026-07-06
+
+- `cd /Users/pingxia/projects/deer-flow/frontend && pnpm test tests/unit/core/api/api-client.test.ts tests/unit/core/threads/message-merge.test.ts tests/unit/core/threads/infinite.test.ts`
+  - Result: `126 passed`
+- `cd /Users/pingxia/projects/deer-flow/frontend && pnpm check`
+  - Result: passed (`eslint` and `tsc --noEmit`)
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run pytest tests/test_thread_run_messages_pagination.py tests/test_run_worker_rollback.py tests/test_round_context_injection.py tests/test_sse_format.py tests/test_run_worker_terminal_event.py tests/test_runtime_lifecycle_e2e.py -q`
+  - Result: `105 passed, 2 warnings`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run ruff check app/gateway/routers/thread_runs.py packages/harness/deerflow/agents/middlewares/round_context_middleware.py tests/test_round_context_injection.py tests/test_run_worker_rollback.py tests/test_runtime_lifecycle_e2e.py tests/test_thread_run_messages_pagination.py`
+  - Result: `All checks passed!`
+- `cd /Users/pingxia/projects/deer-flow/backend && uv run ruff format --check app/gateway/routers/thread_runs.py packages/harness/deerflow/agents/middlewares/round_context_middleware.py tests/test_round_context_injection.py tests/test_run_worker_rollback.py tests/test_runtime_lifecycle_e2e.py tests/test_thread_run_messages_pagination.py`
+  - Result: `6 files already formatted`
+- `cd /Users/pingxia/projects/deer-flow && git diff --check`
+  - Result: passed
+
 ## Manual Verification
 
 1. Start the replay Gateway and frontend through `pnpm exec playwright test -c playwright.real-backend.config.ts`.

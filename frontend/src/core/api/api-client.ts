@@ -20,6 +20,49 @@ import { sanitizeRunStreamOptions } from "./stream-mode";
 
 const STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required";
 
+export type RunStreamRecoveryReason =
+  | "stream_recovery_required"
+  | "inactive_run_stream";
+
+export class RunStreamRecoveryRequiredError extends Error {
+  readonly recoveryRequired = true;
+  readonly threadId: string | null | undefined;
+  readonly runId: string;
+  readonly reason: RunStreamRecoveryReason;
+  readonly status?: number;
+
+  constructor({
+    threadId,
+    runId,
+    reason,
+    status,
+    cause,
+  }: {
+    threadId: string | null | undefined;
+    runId: string;
+    reason: RunStreamRecoveryReason;
+    status?: number;
+    cause?: unknown;
+  }) {
+    super("Run stream requires runtime snapshot recovery.", { cause });
+    this.name = "RunStreamRecoveryRequiredError";
+    this.threadId = threadId;
+    this.runId = runId;
+    this.reason = reason;
+    this.status = status;
+  }
+}
+
+export function isRunStreamRecoveryRequiredError(
+  error: unknown,
+): error is RunStreamRecoveryRequiredError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    Reflect.get(error, "recoveryRequired") === true
+  );
+}
+
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
  * live ``csrf_token`` cookie just before each outbound fetch.
@@ -119,14 +162,24 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       )) {
         if (event.event === STREAM_RECOVERY_REQUIRED_EVENT) {
           clearReconnectRun(threadId, runId);
-          return;
+          throw new RunStreamRecoveryRequiredError({
+            threadId,
+            runId,
+            reason: "stream_recovery_required",
+          });
         }
         yield event;
       }
     } catch (error) {
       if (isInactiveRunStreamError(error)) {
         clearReconnectRun(threadId, runId);
-        return;
+        throw new RunStreamRecoveryRequiredError({
+          threadId,
+          runId,
+          reason: "inactive_run_stream",
+          status: 409,
+          cause: error,
+        });
       }
       throw error;
     }

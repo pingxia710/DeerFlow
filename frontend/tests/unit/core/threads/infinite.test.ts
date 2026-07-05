@@ -24,7 +24,9 @@ import {
   reconcileTerminalRunHistory,
   setManualThreadTitleLock,
   shouldKeepStreamErrorRecoveryRun,
+  shouldReleaseQueuedThreadMessage,
   threadRunsQueryKey,
+  threadRuntimeSnapshotQueryKey,
   stopBackgroundRunProbeRecovery,
   upsertThreadInInfiniteCache,
   upsertThreadInSearchCache,
@@ -343,12 +345,13 @@ describe("applyBackgroundRunProbeResult", () => {
 });
 
 describe("stream error recovery", () => {
-  test("keeps known stream-error runs busy and invalidates the run list", () => {
+  test("keeps known stream-error runs busy and invalidates run recovery sources", () => {
     const client = new QueryClient();
     const threadId = "stream-error-thread";
     const runId = "stream-error-run";
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
     client.setQueryData(threadRunsQueryKey(threadId), "cached");
+    client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "cached");
 
     const recovery = applyStreamErrorRecovery({
       queryClient: client,
@@ -366,8 +369,54 @@ describe("stream error recovery", () => {
     expect(
       client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
     ).toBe(true);
+    expect(
+      client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+        ?.isInvalidated,
+    ).toBe(true);
 
     clearThreadActivity(threadId);
+  });
+
+  test("stream recovery refreshes snapshot and lets queued follow-up conditions settle", () => {
+    const client = new QueryClient();
+    const threadId = "stream-error-settle-thread";
+    const runId = "stream-error-settle-run";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+    client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), {
+      runs: [{ run_id: runId, status: "running" }],
+    });
+
+    const recovery = applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId,
+      isMock: true,
+    });
+
+    expect(recovery).toEqual({ threadId, runId });
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(
+      client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+        ?.isInvalidated,
+    ).toBe(true);
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, runId, "worker_lost"),
+    ).toBe(true);
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, getThreadActivitySnapshot()),
+    ).toBe(false);
+    expect(
+      shouldReleaseQueuedThreadMessage({
+        isLoading: false,
+        streamFinished: true,
+        sendInFlight: false,
+        queuedThreadId: threadId,
+        currentViewThreadId: threadId,
+      }),
+    ).toBe(true);
   });
 
   test("clears local activity when a stream error has no known run id", () => {
@@ -427,6 +476,7 @@ describe("invalidateTerminalRunQueries", () => {
       ["threads", "search"],
       [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
       threadRunsQueryKey(threadId),
+      threadRuntimeSnapshotQueryKey(threadId),
       threadTokenUsageQueryKey(threadId),
       threadContextUsageQueryKey(threadId),
     ];
@@ -437,7 +487,7 @@ describe("invalidateTerminalRunQueries", () => {
     invalidateTerminalRunQueries(client, threadId);
 
     expect(keys.map((key) => client.getQueryState(key)?.isInvalidated)).toEqual(
-      [true, true, true, true, true],
+      [true, true, true, true, true, true],
     );
   });
 });
@@ -449,6 +499,7 @@ describe("run history reconciliation", () => {
     const runId = "task-terminal-run";
     const refreshed: string[][] = [];
     client.setQueryData(threadRunsQueryKey(threadId), "cached");
+    client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
 
     expect(
       reconcileTaskEventRunHistory(
@@ -465,6 +516,10 @@ describe("run history reconciliation", () => {
 
     expect(
       client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+    ).toBe(true);
+    expect(
+      client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+        ?.isInvalidated,
     ).toBe(true);
     expect(refreshed).toEqual([[runId]]);
   });

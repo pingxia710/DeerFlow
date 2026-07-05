@@ -55,6 +55,7 @@ bridge/cancel signal exists.
 git status --short
 cd backend && PYTHONPATH=. uv run pytest tests/test_gateway_worker_guard.py tests/test_deployment_security_guards.py -q
 cd frontend && pnpm test tests/unit/core/threads/message-merge.test.ts
+cd frontend && pnpm exec playwright test tests/e2e/thread-history.spec.ts
 ```
 
 Before first beta boot on an existing data directory:

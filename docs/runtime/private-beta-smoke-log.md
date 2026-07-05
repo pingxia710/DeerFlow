@@ -57,6 +57,10 @@ Use this file for the 1-2 day real-use smoke from
   `/tmp/deerflow-gateway-restart-smoke-config.yaml`. Removing that temp config
   while the process is alive keeps `/health` green but makes model/run config
   reads fail with `503 Configuration not available`.
+- Current ongoing observation is on the local development stack
+  (`ENVIRONMENT=development` on Gateway). Treat these rows as local real-use
+  smoke, not as a production-shaped private beta boot; use
+  `docs/runtime/private-beta-runbook.md` startup config before actual beta boot.
 
 ## Open Follow-Ups
 

@@ -48,6 +48,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `405123a8` | current local stack on `localhost:2026`; no backend run created | log/health observation checkpoint | pass | 12:34 CST public nginx entry `http://localhost:2026/` returned `200`; Gateway `/health` remained healthy; Gateway PID `99387` had been running about 19 minutes; DB status counts stayed `error=63`, `interrupted=7`, `success=452`, `running=0`. Recent Gateway log scan showed only known startup warnings (`InMemoryStore` for the temp dev checkpointer config and local JWT secret warning) plus health checks and the earlier provider smoke success; no new provider stream, connection/stream, `RemoteProtocolError`, 5xx, warning, or error entries were found. Recent frontend log scan found no warning/error/failure matches. |
 | 2026-07-05 | Codex    | `3b62d7b1` | current local stack on `localhost:2026`; no backend run created | current startup config checkpoint | pass; local-only caveat | 12:37 CST public nginx entry `http://localhost:2026/` returned `200`; Gateway `/health` remained healthy; Gateway PID `99387` had been running about 22 minutes; DB status counts stayed `error=63`, `interrupted=7`, `success=452`, `running=0`. The live temp config file `/tmp/deerflow-gateway-restart-smoke-config.yaml` still existed. Safe config summary: `database.backend=sqlite`, `database.sqlite_dir=.deer-flow/data`, `run_events.backend=jsonl`, `run_events.track_token_usage=True`, `checkpointer.present=False`, `sandbox.use=deerflow.sandbox.local:LocalSandboxProvider`, `agents_api.enabled=True`, `skill_evolution.enabled=False`, models `gpt-5.5` and `deepseek-command-room`. This is valid for the current local observation stack, not the production-shaped beta config, which remains documented separately with DB run events and SQLite checkpointer/store. |
 | 2026-07-05 | Codex    | `3326e7b4` | current local stack on `localhost:2026`; no backend run created | periodic stability checkpoint | pass | 12:40 CST public nginx entry `http://localhost:2026/` returned `200`; Gateway `/health` remained healthy; Gateway PID `99387` had been running about 24 minutes; DB status counts stayed `error=63`, `interrupted=7`, `success=452`, `running=0`. Recent Gateway log scan again showed only known startup warnings, health checks, and the earlier provider smoke success; no new provider stream, connection/stream, `RemoteProtocolError`, 5xx, warning, or error entries were found. Recent frontend log scan found no warning/error/failure matches. |
+| 2026-07-05 | Codex    | `472c51dc` | current local stack on `localhost:2026`; real Command Room usage observed while smoke continued | provider stream reliability + subagent task | pass | 12:44 CST real Command Room run `e68d51f3-2bb7-46a3-b13e-e9ee46818fd9` on thread `3ba75b81-e1c9-4e43-9288-7cbff600fc4f` reached `success` with `model_name=gpt-5.5`, `llm_call_count=2`, `total_input_tokens=114355`, and `total_output_tokens=3848`. Owner-scoped JSONL wrote 19 events; the tail contained `task_completed`, `llm.tool.result`, a second `llm.context`, `llm.ai.response`, `run.end`, and `run.terminal` with `status=success`. DB counts became `error=63`, `interrupted=7`, `success=453`, and no `running` rows. The subagent produced an uncommitted doc-only diff in `docs/runtime/baseline-and-failing-tests.md`; this observation did not stage or commit it. |
 
 ## Notes
 
@@ -100,8 +101,9 @@ Use this file for the 1-2 day real-use smoke from
   because the latest dry-run still reports ownerless legacy thread assignments
   and conflicts requiring owner review before applying changes.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
-  one real Command Room/Codex confirmation run plus a post-fix memory update
-  success checkpoint, but the beta observation window still needs continued real
+  one API-driven Command Room/Codex confirmation run, one real Command Room
+  subagent-task run that reached `success`, and a post-fix memory update success
+  checkpoint, but the beta observation window still needs continued real
   sessions.
 
 ## Open Follow-Ups
@@ -120,7 +122,10 @@ handoffs.
   reached terminal `error` and did not remain stuck busy. A code-level retry fix
   is in place, and the 12:18 CST real Command Room/Codex smoke run
   `d6591a6f-5240-42b1-a2ad-dc5acc59cfd6` passed without recurrence. Keep this
-  on the observation list through the 1-2 day smoke window.
+  on the observation list through the 1-2 day smoke window. A second post-fix
+  real Command Room run, `e68d51f3-2bb7-46a3-b13e-e9ee46818fd9`, also reached
+  `success` at 12:44 CST with `task_completed`, `run.end`, and
+  `run.terminal status=success`.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

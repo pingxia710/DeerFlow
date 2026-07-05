@@ -46,7 +46,7 @@ PYTHONPATH=. uv run pytest tests/test_llm_error_handling_middleware.py -q
 ## Migration Dry-Run DB Path
 
 Status: fixed in the migration script; keep the useful checks below for
-regression coverage and beta-owner review.
+regression coverage. Actual beta migration still needs owner/conflict review.
 
 Original evidence:
 
@@ -67,6 +67,13 @@ Minimum acceptance:
 - It inspects `{base_dir}/data/deerflow.db` by default, preserves legacy
   `{base_dir}/deer-flow.db` fallback, and supports explicit `--db-path`.
 - Running dry-run still makes no filesystem or SQL changes.
+- Beta-owner review remains separate from the DB-path fix: latest dry-run
+  evidence at 2026-07-05 12:32 CST inspected
+  `backend/.deer-flow/data/deerflow.db`, found `35` thread ownership records,
+  kept SQL null-owner counts at zero, made no git-visible changes, and still
+  reported `21` ownerless legacy thread dirs, `15` conflict thread dirs, and
+  `1` legacy `command-room` agent that need intended-owner review before any
+  non-dry-run migration.
 
 Useful checks:
 

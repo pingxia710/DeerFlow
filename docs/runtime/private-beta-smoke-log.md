@@ -102,17 +102,19 @@ Use this file for the 1-2 day real-use smoke from
   `a8f42500` passed `25` tests with `1` warning. Current local observation stack
   config was rechecked at `3b62d7b1`; it is intentionally local-only
   (`run_events.backend=jsonl`, no `checkpointer`) and must not be confused with
-  the production-shaped beta config. Existing data migration remains incomplete
-  because the latest dry-run still reports ownerless legacy thread assignments
-  and conflicts requiring owner review before applying changes.
+  the production-shaped beta config. Existing data migration remains incomplete:
+  the latest dry-run still reports `21` ownerless legacy thread dirs, `15`
+  conflict thread dirs, `1` legacy `command-room` agent, and `282` historical
+  `runs` rows without matching `threads_meta` owner records.
 - Test coverage credibility: `docs/runtime/baseline-and-failing-tests.md`
   records skip/xfail/external dependency boundaries so local pytest evidence is
   not overstated as full live/LLM/Docker/deployment validation.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
   one API-driven Command Room/Codex confirmation run, one real Command Room
-  subagent-task run that reached `success`, and a post-fix memory update success
-  checkpoint, but the beta observation window still needs continued real
-  sessions.
+  subagent-task run that reached `success`, authenticated run detail/messages
+  replay, authenticated browser load/reload recovery, and a post-fix memory
+  update success checkpoint, but the beta observation window still needs
+  continued real sessions.
 
 ## Open Follow-Ups
 
@@ -133,7 +135,10 @@ handoffs.
   on the observation list through the 1-2 day smoke window. A second post-fix
   real Command Room run, `e68d51f3-2bb7-46a3-b13e-e9ee46818fd9`, also reached
   `success` at 12:44 CST with `task_completed`, `run.end`, and
-  `run.terminal status=success`.
+  `run.terminal status=success`. Follow-up replay checks also passed: 12:52 CST
+  authenticated run detail/messages APIs returned `200` for both post-fix
+  success runs, and 12:55 CST authenticated browser load/reload restored the
+  latest thread reply with zero browser warning/error/pageerror entries.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

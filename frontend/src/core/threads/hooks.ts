@@ -1501,6 +1501,60 @@ export function applyBackgroundRunProbeResult(
   return true;
 }
 
+type RefreshRuns = (runIds?: Iterable<string>) => void;
+
+export function reconcileTaskEventRunHistory(
+  queryClient: QueryClient,
+  event: unknown,
+  refreshRuns: RefreshRuns,
+) {
+  const taskEvent = asTaskEvent(event);
+  const eventType = taskEventType(taskEvent);
+  if (
+    !taskEvent ||
+    (eventType !== "task_completed" &&
+      eventType !== "task_failed" &&
+      eventType !== "task_cancelled" &&
+      eventType !== "task_timed_out")
+  ) {
+    return false;
+  }
+  const threadId = stringValue(taskEvent.thread_id);
+  const runId = stringValue(taskEvent.run_id);
+  if (!threadId || !runId) {
+    return false;
+  }
+  void queryClient.invalidateQueries({
+    queryKey: threadRunsQueryKey(threadId),
+  });
+  refreshRuns([runId]);
+  return true;
+}
+
+export function reconcileTerminalRunHistory(
+  queryClient: QueryClient,
+  event: unknown,
+  refreshRuns: RefreshRuns,
+) {
+  const runTerminalEvent = asRunTerminalEvent(event);
+  if (!runTerminalEvent) {
+    return false;
+  }
+  stopBackgroundRunProbe(runTerminalEvent.thread_id, runTerminalEvent.run_id);
+  if (
+    !applyBackgroundRunProbeResult(
+      queryClient,
+      runTerminalEvent.thread_id,
+      runTerminalEvent.run_id,
+      runTerminalEvent.status,
+    )
+  ) {
+    invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
+  }
+  refreshRuns([runTerminalEvent.run_id]);
+  return true;
+}
+
 export function invalidateTerminalRunQueries(
   queryClient: QueryClient,
   threadId: string,
@@ -1950,22 +2004,15 @@ export function useThreadStream({
           return;
         }
         applyTaskEventToSubtask(taskEvent, updateSubtask, taskThreadId);
-        if (
-          taskEvent.type === "task_completed" ||
-          taskEvent.type === "task_failed" ||
-          taskEvent.type === "task_cancelled" ||
-          taskEvent.type === "task_timed_out"
-        ) {
-          const taskRunId = stringValue(taskEvent.run_id);
-          refreshHistoryRuns(taskRunId ? [taskRunId] : undefined);
-        }
+        reconcileTaskEventRunHistory(
+          queryClient,
+          taskEvent,
+          refreshHistoryRuns,
+        );
         return;
       }
 
-      const runTerminalEvent = asRunTerminalEvent(event);
-      if (runTerminalEvent) {
-        invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
-        refreshHistoryRuns([runTerminalEvent.run_id]);
+      if (reconcileTerminalRunHistory(queryClient, event, refreshHistoryRuns)) {
         return;
       }
 

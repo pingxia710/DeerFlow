@@ -16,6 +16,8 @@ import {
   markThreadFinished,
   clearThreadActivity,
   clearThreadFinishedActivity,
+  reconcileTaskEventRunHistory,
+  reconcileTerminalRunHistory,
   setManualThreadTitleLock,
   threadRunsQueryKey,
   upsertThreadInInfiniteCache,
@@ -351,6 +353,67 @@ describe("invalidateTerminalRunQueries", () => {
     expect(keys.map((key) => client.getQueryState(key)?.isInvalidated)).toEqual(
       [true, true, true, true, true],
     );
+  });
+});
+
+describe("run history reconciliation", () => {
+  test("task terminal events invalidate the run list and refresh that run", () => {
+    const client = new QueryClient();
+    const threadId = "task-terminal-thread";
+    const runId = "task-terminal-run";
+    const refreshed: string[][] = [];
+    client.setQueryData(threadRunsQueryKey(threadId), "cached");
+
+    expect(
+      reconcileTaskEventRunHistory(
+        client,
+        {
+          type: "task_completed",
+          task_id: "task-1",
+          thread_id: threadId,
+          run_id: runId,
+        },
+        (runIds) => refreshed.push([...(runIds ?? [])]),
+      ),
+    ).toBe(true);
+
+    expect(
+      client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+    ).toBe(true);
+    expect(refreshed).toEqual([[runId]]);
+  });
+
+  test("run terminal events clear local running state and refresh that run", () => {
+    const client = new QueryClient();
+    const threadId = "terminal-reconcile-thread";
+    const runId = "terminal-reconcile-run";
+    const refreshed: string[][] = [];
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    markThreadBusyInCaches(client, threadId);
+
+    expect(
+      reconcileTerminalRunHistory(
+        client,
+        {
+          type: "run.terminal",
+          event_type: "run.terminal",
+          thread_id: threadId,
+          run_id: runId,
+          status: "success",
+          terminal_reason: "success",
+        },
+        (runIds) => refreshed.push([...(runIds ?? [])]),
+      ),
+    ).toBe(true);
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+    expect(
+      client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
+    ).toBe("idle");
+    expect(refreshed).toEqual([[runId]]);
+
+    clearThreadActivity(threadId);
   });
 });
 

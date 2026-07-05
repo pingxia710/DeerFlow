@@ -45,3 +45,21 @@ Use this file for the 1-2 day real-use smoke from
   `/tmp/deerflow-gateway-restart-smoke-config.yaml`. Removing that temp config
   while the process is alive keeps `/health` green but makes model/run config
   reads fail with `503 Configuration not available`.
+
+## Open Follow-Ups
+
+- Provider stream reliability: real Command Room runs
+  `0e582444-dee2-4190-a65b-e7ad68c754fa`,
+  `54ee1cae-9cca-4be9-a637-5700d3598e22`, and
+  `3797322c-af03-4c56-af7e-06a0f68d8534` ended with
+  `Codex API stream ended without response.completed event`; memory updates also
+  showed `httpx.RemoteProtocolError` / incomplete chunked read. Observed runs
+  reached terminal `error` and did not remain stuck busy.
+- Cancel status naming: active-run cancel recovered the UI but surfaced terminal
+  status as `interrupted`, not `cancelled`.
+- Frontend warning: real model smoke still logged one React
+  uncontrolled-to-controlled warning; no duplicate-key warning after the
+  restored-message fix.
+- Workstation startup boundary: this local process depends on the temp
+  `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
+  trusted host mounts.

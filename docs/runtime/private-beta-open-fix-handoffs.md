@@ -5,9 +5,10 @@ new evidence is produced.
 
 ## Provider Stream Reliability
 
-Status: code-level retry fix added, one API-driven provider smoke and two real
-Command Room subagent-task runs passed, and API/browser replay checks succeeded.
-Keep this line on the observation list through the 1-2 day beta smoke window.
+Status: code-level retry fix added, one API-driven provider smoke and three
+real Command Room subagent-task runs passed, including one long multi-subagent
+run. API/browser replay checks also succeeded. Keep this line on the
+observation list through the 1-2 day beta smoke window.
 
 Original evidence:
 
@@ -43,17 +44,27 @@ Minimum acceptance:
   `cf36bc84-f7c7-4326-ba52-70b706adcb99` used `assistant_id=command-room` with
   `model_name=gpt-5.5`, ran a subagent task, reached `success`, and wrote
   `task_completed`, `run.end`, and `run.terminal status=success`.
+- Fourth real-use confirmation: 2026-07-05 13:28 CST run
+  `015b32d7-517a-4c64-b5d9-493c364f4399` used `assistant_id=command-room` with
+  `model_name=gpt-5.5`, ran a long multi-subagent task, reached `success` with
+  `llm_call_count=5`, and wrote `run.end` plus
+  `run.terminal status=success`.
 - Replay confirmation: 2026-07-05 12:52 CST authenticated run detail/messages
   API replay returned `200` for both post-fix success runs; unauthenticated
   requests returned `401 not_authenticated`. 2026-07-05 13:13 CST authenticated
   run detail/messages replay also returned `200` for latest run
   `cf36bc84-f7c7-4326-ba52-70b706adcb99`, with `messages_count=9` and the latest
-  reply marker present.
+  reply marker present. 2026-07-05 13:29 CST authenticated run detail/messages
+  replay returned `200` for long run `015b32d7-517a-4c64-b5d9-493c364f4399`,
+  with `messages_count=127`, `terminal_reason=success`, and visible final-answer
+  messages present.
 - Browser confirmation: 2026-07-05 12:55 CST authenticated browser load and
   reload of the latest Command Room thread restored the latest reply with zero
   browser warning/error/pageerror entries. 2026-07-05 13:13 CST authenticated
   browser load and reload restored the newer `cf36bc84...` reply marker with
-  zero browser warning/error/pageerror entries.
+  zero browser warning/error/pageerror entries. 2026-07-05 13:32 CST canonical
+  browser load and reload restored long-run final-answer markers with zero
+  browser warning/error/pageerror/requestfailed entries.
 
 Useful checks:
 

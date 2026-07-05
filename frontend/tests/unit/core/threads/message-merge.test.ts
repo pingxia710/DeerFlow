@@ -1020,6 +1020,35 @@ test("buildVisibleHistoryMessages groups repeated run-local seq by run order", (
   ).toEqual(["old first", "old second", "new first", "new second"]);
 });
 
+test("buildVisibleHistoryMessages excludes replayed run terminal lifecycle events", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: { id: "ai-1", type: "ai", content: "done" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-05T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        status: "success",
+      },
+      metadata: { caller: "runtime" },
+      created_at: "2026-07-05T00:00:02Z",
+    },
+  ] satisfies RunMessage[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["done"]);
+});
+
 test("mergeFetchedRunMessages replaces stale rows for refreshed run first page", () => {
   const previous = [
     {

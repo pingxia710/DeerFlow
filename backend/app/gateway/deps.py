@@ -188,15 +188,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.artifact_provenance import ArtifactProvenanceRepository
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.round_state import RoundStateRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
+            app.state.round_state_store = RoundStateRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
             app.state.artifact_provenance_repo = ArtifactProvenanceRepository(sf)
         else:
+            from deerflow.persistence.round_state import MemoryRoundStateStore
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
+            app.state.round_state_store = MemoryRoundStateStore()
             app.state.feedback_repo = None
             app.state.artifact_provenance_repo = None
 
@@ -213,7 +217,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store)
+        app.state.run_manager = RunManager(store=app.state.run_store, round_store=app.state.round_state_store)
         if getattr(config.database, "backend", None) == "sqlite":
             from deerflow.utils.time import now_iso
 
@@ -265,6 +269,17 @@ get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
 
+def get_round_state_store(request: Request) -> object | None:
+    """Return optional native round-state store.
+
+    Some focused tests construct minimal request.app.state objects without
+    running the gateway lifespan. Native round state is an optional adjunct to
+    run/checkpoint persistence, so missing state must not turn unrelated run
+    APIs into 503s.
+    """
+    return getattr(request.app.state, "round_state_store", None)
+
+
 def get_store(request: Request):
     """Return the global store (may be ``None`` if not configured)."""
     return getattr(request.app.state, "store", None)
@@ -295,6 +310,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
+        round_store=get_round_state_store(request),
     )
 
 

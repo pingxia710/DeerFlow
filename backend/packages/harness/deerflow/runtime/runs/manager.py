@@ -130,6 +130,7 @@ class RunRecord:
     message_count: int = 0
     last_ai_message: str | None = None
     first_human_message: str | None = None
+    round_id: str | None = None
 
 
 class RunManager:
@@ -144,6 +145,7 @@ class RunManager:
         self,
         store: RunStore | None = None,
         *,
+        round_store: Any | None = None,
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         terminal_cleanup_delay: float = 300,
     ) -> None:
@@ -155,6 +157,7 @@ class RunManager:
         self._runs_by_thread: dict[str, dict[str, None]] = {}
         self._lock = asyncio.Lock()
         self._store = store
+        self._round_store = round_store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._terminal_cleanup_delay = terminal_cleanup_delay
         self._cleanup_tasks: set[asyncio.Task] = set()
@@ -192,6 +195,8 @@ class RunManager:
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
         metadata = dict(record.metadata or {})
+        if record.round_id is not None:
+            metadata["round_id"] = record.round_id
         if record.terminal_reason is not None:
             metadata["terminal_reason"] = record.terminal_reason
         payload = {
@@ -337,7 +342,120 @@ class RunManager:
             message_count=row.get("message_count") or 0,
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
+            round_id=metadata.get("round_id") if isinstance(metadata.get("round_id"), str) else None,
         )
+
+    @staticmethod
+    def _message_text(value: Any) -> str:
+        if value is None:
+            return ""
+        content = value.get("content") if isinstance(value, dict) else getattr(value, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts)
+        return str(content or "")
+
+    @classmethod
+    def _current_intent_from_kwargs(cls, kwargs: dict[str, Any] | None) -> str | None:
+        raw_input = (kwargs or {}).get("input")
+        if not isinstance(raw_input, dict):
+            return None
+        messages = raw_input.get("messages")
+        if not isinstance(messages, list):
+            return None
+        for message in reversed(messages):
+            role = (message.get("role") or message.get("type")) if isinstance(message, dict) else getattr(message, "type", None)
+            if role in {"human", "user"}:
+                text = cls._message_text(message).strip()
+                return text[:4000] if text else None
+        return None
+
+    @staticmethod
+    def _round_context_from_info(info: dict[str, Any], *, run_id: str, current_intent: str | None) -> dict[str, Any]:
+        context = {
+            "round_id": info.get("round_id"),
+            "state": info.get("state"),
+            "current_run_id": run_id,
+            "source_goal_run_id": info.get("source_goal_run_id"),
+            "parent_round_id": info.get("parent_round_id"),
+            "current_intent": current_intent or info.get("current_intent"),
+            "accepted_next_action": info.get("accepted_next_action") or info.get("next_action"),
+        }
+        for key in ("artifact_refs", "evidence_refs"):
+            refs = info.get(key)
+            if isinstance(refs, list):
+                context[key] = [ref for ref in refs if isinstance(ref, str) and ref]
+        return context
+
+    async def _bind_round_to_run(self, record: RunRecord) -> None:
+        if self._round_store is None:
+            return
+        current_intent = self._current_intent_from_kwargs(record.kwargs)
+        info = await self._round_store.bind_run(
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            user_id=record.user_id,
+            current_intent=current_intent,
+            metadata=record.metadata,
+        )
+        round_id = info.get("round_id")
+        if isinstance(round_id, str) and round_id:
+            record.round_id = round_id
+            record.metadata = {
+                **(record.metadata or {}),
+                "round_id": round_id,
+                "round_context": self._round_context_from_info(info, run_id=record.run_id, current_intent=current_intent),
+            }
+
+    async def _persist_round_state_for_status(
+        self,
+        record: RunRecord,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        terminal_reason: str | None = None,
+        next_action: str | None = None,
+    ) -> None:
+        if self._round_store is None:
+            return
+        if status == RunStatus.running:
+            state = "executing"
+            event_type = "run.executing"
+        elif status == RunStatus.success:
+            state = "closed"
+            event_type = "round.closed"
+        elif is_terminal_status(status):
+            state = "blocked"
+            event_type = "round.blocked"
+        else:
+            return
+        try:
+            info = await self._round_store.set_run_state(
+                record.run_id,
+                state=state,
+                event_type=event_type,
+                content={"run_status": status.value, "terminal_reason": terminal_reason, "error": error},
+                next_action=next_action,
+            )
+            if isinstance(info, dict):
+                context = dict(record.metadata.get("round_context") or {})
+                context.update(self._round_context_from_info(info, run_id=record.run_id, current_intent=context.get("current_intent")))
+                record.round_id = context.get("round_id") if isinstance(context.get("round_id"), str) else record.round_id
+                record.metadata = {**(record.metadata or {}), "round_context": context}
+                if record.round_id is not None:
+                    record.metadata["round_id"] = record.round_id
+                await self._persist_snapshot_to_store(record.run_id, self._store_put_payload(record))
+        except Exception:
+            logger.warning("Failed to persist round state for run %s", record.run_id, exc_info=True)
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
@@ -375,6 +493,19 @@ class RunManager:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
         except Exception:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+        if record is not None:
+            status_value = kwargs.get("status")
+            try:
+                status = RunStatus(status_value) if isinstance(status_value, str) else record.status
+            except ValueError:
+                status = record.status
+            if status == RunStatus.success and isinstance(kwargs.get("last_ai_message"), str):
+                await self._persist_round_state_for_status(
+                    record,
+                    RunStatus.success,
+                    terminal_reason=record.terminal_reason or "success",
+                    next_action=kwargs["last_ai_message"],
+                )
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
@@ -431,9 +562,16 @@ class RunManager:
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
+                await self._bind_round_to_run(record)
+                await self._persist_new_run_to_store(record)
                 persisted = True
             except Exception:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                if self._store is not None:
+                    try:
+                        await self._store.delete(run_id)
+                    except Exception:
+                        logger.warning("Failed to delete partially persisted run %s", run_id, exc_info=True)
                 raise
             finally:
                 # Also covers cancellation, which bypasses ``except Exception``.
@@ -544,6 +682,7 @@ class RunManager:
             if error is not None:
                 record.error = error
         await self._persist_status(record, status, error=error, terminal_reason=terminal_reason)
+        await self._persist_round_state_for_status(record, status, error=error, terminal_reason=terminal_reason)
         if is_terminal_status(status):
             self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s -> %s", run_id, status.value)
@@ -604,6 +743,7 @@ class RunManager:
                 record.terminal_reason = terminal_reason
             record.updated_at = _now_iso()
         await self._persist_status(record, RunStatus.interrupted, terminal_reason=terminal_reason)
+        await self._persist_round_state_for_status(record, RunStatus.interrupted, terminal_reason=terminal_reason)
         self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
@@ -705,9 +845,16 @@ class RunManager:
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
+                await self._bind_round_to_run(record)
+                await self._persist_new_run_to_store(record)
                 persisted = True
             except Exception:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                if self._store is not None:
+                    try:
+                        await self._store.delete(run_id)
+                    except Exception:
+                        logger.warning("Failed to delete partially persisted run %s", run_id, exc_info=True)
                 raise
             finally:
                 # Also covers cancellation, which bypasses ``except Exception``.
@@ -727,6 +874,7 @@ class RunManager:
 
         for interrupted_record in interrupted_records:
             await self._persist_status(interrupted_record, RunStatus.interrupted)
+            await self._persist_round_state_for_status(interrupted_record, RunStatus.interrupted)
             self._schedule_terminal_cleanup(interrupted_record.run_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record

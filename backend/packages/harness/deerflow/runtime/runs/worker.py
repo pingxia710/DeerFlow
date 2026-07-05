@@ -85,6 +85,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    round_store: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -141,6 +142,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
+    round_store = ctx.round_store
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -177,6 +179,8 @@ async def run_agent(
                 user_id=record.user_id,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                round_store=round_store,
+                round_id=record.round_id,
             )
 
         # 1. Mark running
@@ -219,6 +223,9 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        round_context = (record.metadata or {}).get("round_context")
+        if isinstance(round_context, dict):
+            runtime_ctx["round_context"] = round_context
         configurable = config.get("configurable")
         if isinstance(configurable, dict) and isinstance(configurable.get("agent_name"), str) and configurable.get("agent_name", "").strip():
             runtime_ctx.setdefault("agent_name", configurable["agent_name"])

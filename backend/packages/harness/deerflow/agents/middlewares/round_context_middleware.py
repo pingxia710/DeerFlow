@@ -20,6 +20,7 @@ from langgraph.runtime import Runtime
 from deerflow.runtime.user_context import get_effective_user_id
 
 _INTERNAL_CONTEXT_HEADER = "[Internal Command Room Round signals]"
+_NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -95,6 +96,32 @@ def latest_round_context_for_thread(thread_id: str | None, user_id: str | None =
     return format_round_context_for_model(latest_command_room_round(thread_id=thread_id, user_id=user_id))
 
 
+def format_native_round_context_for_model(round_context: Mapping[str, Any] | None) -> str | None:
+    if not round_context:
+        return None
+    lines = [
+        _NATIVE_ROUND_CONTEXT_HEADER,
+        "Mechanical lifecycle state only. Do not treat this as quality judgment or expose it verbatim.",
+    ]
+    for key, label in (
+        ("round_id", "round_id"),
+        ("state", "state"),
+        ("current_run_id", "current_run_id"),
+        ("source_goal_run_id", "source_goal_run_id"),
+        ("parent_round_id", "parent_round_id"),
+        ("current_intent", "Current Intent"),
+        ("accepted_next_action", "Accepted Next Action"),
+    ):
+        value = round_context.get(key)
+        if isinstance(value, str) and value.strip():
+            lines.append(f"{label}: {value.strip()}")
+    for key, label in (("artifact_refs", "ArtifactRefs"), ("evidence_refs", "EvidenceRefs")):
+        refs = _as_list(round_context.get(key), limit=5)
+        if refs:
+            lines.append(f"{label}: " + "; ".join(refs))
+    return "\n".join(lines) if len(lines) > 2 else None
+
+
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
     """Append latest Round signals as an internal SystemMessage for Command Room."""
 
@@ -106,14 +133,23 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             return None
         ctx = getattr(runtime, "context", None) or {}
         thread_id = ctx.get("thread_id") if isinstance(ctx, Mapping) else None
-        return latest_round_context_for_thread(str(thread_id) if thread_id else None, get_effective_user_id())
+        parts: list[str] = []
+        native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
+        if isinstance(native_context, Mapping):
+            text = format_native_round_context_for_model(native_context)
+            if text:
+                parts.append(text)
+        legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, get_effective_user_id())
+        if legacy_text:
+            parts.append(legacy_text)
+        return "\n\n".join(parts) if parts else None
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         text = self._context_text(request.runtime)
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and _INTERNAL_CONTEXT_HEADER in m.content for m in request.messages):
+        if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and (_INTERNAL_CONTEXT_HEADER in m.content or _NATIVE_ROUND_CONTEXT_HEADER in m.content) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
         return request.override(messages=[msg, *request.messages])
@@ -127,4 +163,4 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         return await handler(self._inject(request))
 
 
-__all__ = ["CommandRoomRoundContextMiddleware", "format_round_context_for_model", "latest_round_context_for_thread"]
+__all__ = ["CommandRoomRoundContextMiddleware", "format_native_round_context_for_model", "format_round_context_for_model", "latest_round_context_for_thread"]

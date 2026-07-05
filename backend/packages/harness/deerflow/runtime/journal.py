@@ -52,6 +52,8 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        round_store: Any | None = None,
+        round_id: str | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -62,9 +64,12 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._round_store = round_store
+        self.round_id = round_id
 
         # Write buffer
         self._buffer: list[dict] = []
+        self._pending_task_lane_events: list[dict[str, Any]] = []
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
@@ -662,12 +667,15 @@ class RunJournal(BaseCallbackHandler):
             "run_id": run_id,
             "task_id": task_id,
         }
+        event_to_store = self._jsonable({**event, "round_id": self.round_id} if self.round_id else event)
         self._put(
             event_type=event_type,
             category="message",
-            content=self._jsonable(event),
+            content=event_to_store,
             metadata=metadata,
         )
+        if isinstance(event_to_store, dict):
+            self._pending_task_lane_events.append(event_to_store)
         self._flush_sync()
 
     def record_run_terminal(self, *, status: str, terminal_reason: str) -> None:
@@ -712,6 +720,18 @@ class RunJournal(BaseCallbackHandler):
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+        await self._flush_task_lane_events()
+
+    async def _flush_task_lane_events(self) -> None:
+        if self._round_store is None or not self._pending_task_lane_events:
+            return
+        batch = self._pending_task_lane_events.copy()
+        self._pending_task_lane_events.clear()
+        try:
+            await self._round_store.record_task_events(batch)
+        except Exception:
+            self._pending_task_lane_events = batch + self._pending_task_lane_events
+            raise
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""

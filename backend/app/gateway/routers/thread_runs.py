@@ -25,7 +25,16 @@ from langchain_core.messages import BaseMessage
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
+from app.gateway.deps import (
+    get_checkpointer,
+    get_feedback_repo,
+    get_round_state_store,
+    get_run_event_store,
+    get_run_manager,
+    get_run_store,
+    get_stream_bridge,
+    get_thread_store,
+)
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
@@ -166,6 +175,8 @@ class RegeneratePrepareResponse(BaseModel):
 class RunResponse(BaseModel):
     run_id: str
     thread_id: str
+    round_id: str | None = None
+    round_state: str | None = None
     assistant_id: str | None = None
     status: str
     terminal_reason: str | None = None
@@ -182,6 +193,38 @@ class RunResponse(BaseModel):
     subagent_tokens: int = 0
     middleware_tokens: int = 0
     message_count: int = 0
+
+
+class RoundResponse(BaseModel):
+    round_id: str
+    thread_id: str
+    user_id: str | None = None
+    parent_round_id: str | None = None
+    current_run_id: str | None = None
+    source_goal_run_id: str | None = None
+    current_intent: str | None = None
+    state: str
+    next_action: str | None = None
+    artifact_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    closed_at: str | None = None
+
+
+class TaskLaneResponse(BaseModel):
+    thread_id: str
+    run_id: str
+    task_id: str
+    round_id: str
+    user_id: str | None = None
+    role: str | None = None
+    status: str
+    result_ref: str | None = None
+    evidence_ref: str | None = None
+    error: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -379,9 +422,13 @@ async def _persist_artifact_index(request: Request, entries: list[dict[str, Any]
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
+    round_context = record.metadata.get("round_context") if isinstance(record.metadata, dict) else None
+    round_context = round_context if isinstance(round_context, dict) else {}
     return RunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
+        round_id=record.round_id,
+        round_state=round_context.get("state") if isinstance(round_context.get("state"), str) else None,
         assistant_id=record.assistant_id,
         status=run_status_value(record.status) or RunStatus.error.value,
         terminal_reason=_run_terminal_reason(record),
@@ -815,6 +862,39 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
     return [_record_to_response(r) for r in records]
+
+
+@router.get("/{thread_id}/rounds", response_model=list[RoundResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_rounds(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[RoundResponse]:
+    """List native round-state rows for a thread."""
+    round_store = get_round_state_store(request)
+    if round_store is None or not hasattr(round_store, "list_by_thread"):
+        return []
+    user_id = get_request_storage_user_id(request)
+    rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=limit)
+    return [RoundResponse.model_validate(row) for row in rows]
+
+
+@router.get("/{thread_id}/rounds/{round_id}/tasks", response_model=list[TaskLaneResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_round_tasks(
+    thread_id: str,
+    round_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[TaskLaneResponse]:
+    """List task lanes for a native round."""
+    round_store = get_round_state_store(request)
+    if round_store is None or not hasattr(round_store, "list_task_lanes_by_round"):
+        return []
+    user_id = get_request_storage_user_id(request)
+    rows = await round_store.list_task_lanes_by_round(thread_id=thread_id, round_id=round_id, user_id=user_id, limit=limit)
+    return [TaskLaneResponse.model_validate(row) for row in rows]
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)

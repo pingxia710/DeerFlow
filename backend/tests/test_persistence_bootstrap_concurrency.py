@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0004_artifact_provenance_owner_scope"
+HEAD = "0005_native_round_state"
 
 
 def _url(tmp_path: Path) -> str:

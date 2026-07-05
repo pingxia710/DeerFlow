@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0004_artifact_provenance_owner_scope"
+HEAD = "0005_native_round_state"
 BASELINE = "0001_baseline"
 
 

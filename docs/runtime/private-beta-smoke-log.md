@@ -38,6 +38,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `fabb0898` | isolated temp Gateway boot on `127.0.0.1:18002`; `ENVIRONMENT=production`; all worker envs `1`; safe local sandbox; SQLite app DB; DB run events; SQLite checkpointer/store | production-shaped gateway boot | pass; caveat documented | 12:06 CST isolated uvicorn boot returned `/health` `200`; temp app DB initialized `runs`, `run_events`, `threads_meta`, `users`, `artifact_provenance`, feedback/channel tables, and alembic stamp; temp checkpointer DB initialized `checkpoints`, `writes`, `store`, and `store_migrations`; process shut down cleanly. A prior minimal boot with `database.backend=sqlite` and no `checkpointer` also reached `/health`, but logged `InMemoryStore`, so `private-beta-runbook.md` now records that current code needs `checkpointer: sqlite` for LangGraph store persistence. Current `localhost:2026` stack stayed healthy and real DB run counts remained `error=63`, `interrupted=7`, `success=451`. |
 | 2026-07-05 | Codex    | `3b253bcf` | existing local stack on `localhost:2026`; no backend run created | migration dry-run path verification | pass; migration still not applied | 12:10 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id default` inspected `/Users/pingxia/projects/deer-flow/backend/.deer-flow/data/deerflow.db`, found `34` thread ownership records, and made no git-visible changes; SQL null-owner counts remained `threads_meta=0`, `runs=0`, `run_events=0`; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`. Dry-run still reported `45` legacy thread-dir actions, including `15` conflicts and `21` ownerless threads that would be assigned to `default`, plus `1` legacy `command-room` agent, so actual migration still needs owner/conflict review before running without `--dry-run`. |
 | 2026-07-05 | Codex    | `71fd3940` | no new backend run created; provider unit/contract fix only | provider stream reliability code fix | pass; needs real-use confirmation | 12:13 CST code-level fix changed Codex provider stream handling so a stream ending without `response.completed` raises typed `CodexStreamIncompleteError` and is retried inside the provider retry budget; `httpx.ReadError` and `httpx.RemoteProtocolError` are also included in that retry path. Validation passed: `tests/test_codex_provider.py tests/test_cli_auth_providers.py` `38 passed, 1 warning`; `tests/test_llm_error_handling_middleware.py` `28 passed, 1 warning`; ruff passed for touched provider/tests; `/health` healthy and DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`. Real Command Room/Codex provider confirmation is still pending. |
+| 2026-07-05 | Codex    | `dd128372` | current local stack on `localhost:2026`; restarted Gateway with temp `DEER_FLOW_CONFIG_PATH`; `run_events.backend=jsonl` | provider stream reliability real-use confirmation | pass | 12:18 CST throwaway authenticated `POST /api/runs/wait` ran `assistant_id=command-room` with `model_name=gpt-5.5`, `subagent_enabled=false`, marker `codex-provider-smoke-20260705121835-1735`, and returned `200`; run `d6591a6f-5240-42b1-a2ad-dc5acc59cfd6` reached `success`, final AI content matched the marker, `response_metadata.model_name=gpt-5.5`, and DB counts became `error=63`, `interrupted=7`, `success=452`, `running=0`. Owner-scoped JSONL wrote 8 events (`run.start`, `llm.human.input`, `llm.context` x2, `llm.ai.response` x2, `run.end`, `run.terminal`) plus an owner-scoped Command Room RoundRecord. Gateway log showed two successful Codex HTTP 200 calls and no new `stream ended without response.completed`, `connection/stream error`, or stuck-running symptom. |
 
 ## Notes
 
@@ -85,16 +86,16 @@ Use this file for the 1-2 day real-use smoke from
   `run_events.backend: db`. Existing data migration remains incomplete because
   the latest dry-run still reports ownerless legacy thread assignments and
   conflicts requiring owner review before applying changes.
-- 1-2 day real-use smoke: not complete. Continue observing real sessions and
-  confirm the provider stream retry fix in a real Command Room/Codex provider
-  session.
+- 1-2 day real-use smoke: not complete. The provider stream retry fix now has
+  one real Command Room/Codex confirmation run, but the beta observation window
+  still needs continued real sessions.
 
 ## Open Follow-Ups
 
 See `docs/runtime/private-beta-open-fix-handoffs.md` for separate fix-line
 handoffs.
 
-- Provider stream reliability: real Command Room runs
+- Provider stream reliability: earlier real Command Room runs
   `0e582444-dee2-4190-a65b-e7ad68c754fa`,
   `54ee1cae-9cca-4be9-a637-5700d3598e22`,
   `3797322c-af03-4c56-af7e-06a0f68d8534`,
@@ -103,8 +104,9 @@ handoffs.
   `Codex API stream ended without response.completed event`; memory updates also
   showed `httpx.RemoteProtocolError` / incomplete chunked read. Observed runs
   reached terminal `error` and did not remain stuck busy. A code-level retry fix
-  is in place; keep this open until the next real-use session confirms no
-  recurrence.
+  is in place, and the 12:18 CST real Command Room/Codex smoke run
+  `d6591a6f-5240-42b1-a2ad-dc5acc59cfd6` passed without recurrence. Keep this
+  on the observation list through the 1-2 day smoke window.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

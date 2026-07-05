@@ -5,8 +5,8 @@ new evidence is produced.
 
 ## Provider Stream Reliability
 
-Status: code-level retry fix added; keep this line open until the next real
-Command Room run confirms no recurrence.
+Status: code-level retry fix added and one real Command Room/Codex smoke passed;
+keep this line on the observation list through the 1-2 day beta smoke window.
 
 Original evidence:
 
@@ -29,9 +29,11 @@ Minimum acceptance:
 - Stream ending without `response.completed` is either retried within the
   provider retry budget or surfaced as a typed transient provider failure.
 - Existing terminal persistence invariant remains true: no stuck `running` run.
-- Real-use confirmation: the next Command Room/Codex provider session should
-  not reproduce this failure, or should show the retry attempts before a typed
-  terminal failure.
+- Real-use confirmation: 2026-07-05 12:18 CST run
+  `d6591a6f-5240-42b1-a2ad-dc5acc59cfd6` used `assistant_id=command-room` with
+  `model_name=gpt-5.5`, returned `success`, matched marker
+  `codex-provider-smoke-20260705121835-1735`, wrote owner-scoped JSONL events,
+  and did not reproduce the incomplete stream failure.
 
 Useful checks:
 

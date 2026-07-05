@@ -363,6 +363,50 @@ class TestAgentConstruction:
         assert "Use demo skill" in messages[0].content
 
     @pytest.mark.anyio
+    async def test_load_skills_warns_for_missing_or_disabled_whitelist_entries(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Whitelist misses should warn while returning found enabled skills."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+            skills=["present-skill", "missing-skill"],
+        )
+        present = SimpleNamespace(
+            name="present-skill",
+            skill_file=Path("/tmp/present-skill/SKILL.md"),
+            allowed_tools=None,
+        )
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [present]),
+        )
+
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            trace_id="test-trace",
+        )
+
+        with caplog.at_level("WARNING"):
+            skills = await executor._load_skills()
+
+        assert skills == [present]
+        assert "missing-skill" in caplog.text
+        assert "missing or disabled skills" in caplog.text
+
+    @pytest.mark.anyio
     async def test_build_initial_state_consolidates_system_prompt_and_skills(
         self,
         classes,

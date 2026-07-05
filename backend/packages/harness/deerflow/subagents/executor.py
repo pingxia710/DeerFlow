@@ -445,7 +445,12 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
-            return [s for s in all_skills if s.name in allowed]
+            selected = [s for s in all_skills if s.name in allowed]
+            found = {s.name for s in selected}
+            missing = sorted(allowed - found)
+            if missing:
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} skill whitelist references missing or disabled skills: {missing}")
+            return selected
         return all_skills
 
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:

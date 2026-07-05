@@ -47,28 +47,35 @@ def _live_tests_enabled() -> bool:
 
 @pytest.fixture(scope="session")
 def _default_test_config_files(tmp_path_factory):
-    """Safe config files for tests that only need any valid AppConfig."""
-    config_dir = tmp_path_factory.mktemp("deerflow-test-config")
-    config_path = config_dir / "config.yaml"
-    extensions_path = config_dir / "extensions_config.json"
+    """Safe project/home/config paths for tests that need any valid AppConfig."""
+    project_root = tmp_path_factory.mktemp("deerflow-test-project")
+    home_dir = tmp_path_factory.mktemp("deerflow-test-home")
+    config_path = project_root / "config.yaml"
+    extensions_path = project_root / "extensions_config.json"
+
     config_path.write_text(
         "sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
         encoding="utf-8",
     )
     extensions_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
-    return config_path, extensions_path
+    (project_root / "skills").mkdir()
+    (project_root / ".deer-flow").mkdir()
+    (home_dir / ".deer-flow").mkdir()
+    return config_path, extensions_path, project_root, home_dir
 
 
 @pytest.fixture(autouse=True)
 def _isolate_app_config_files(monkeypatch, _default_test_config_files):
-    """Keep unit tests from reading a developer's real config.yaml."""
+    """Keep unit tests from reading a developer's real config/home/skills."""
     if _live_tests_enabled():
         yield
         return
 
-    config_path, extensions_path = _default_test_config_files
+    config_path, extensions_path, project_root, home_dir = _default_test_config_files
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_root))
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home_dir))
     monkeypatch.setenv("DEER_FLOW_ENV", "test")
 
     try:

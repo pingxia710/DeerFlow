@@ -25,6 +25,7 @@ _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
 _CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
 _QUALITY_SIGNALS_HEADER = "[Internal AI Quality Signals]"
 _REVIEW_INVOCATIONS_HEADER = "[Internal AI Review Invocations]"
+_ACCOUNT_LEDGER_HEADER = "[Internal AI Account Ledger]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -245,6 +246,43 @@ def latest_review_invocations_for_thread(thread_id: str | None, user_id: str | N
     return format_review_invocations_for_model(list_review_invocations(thread_id=thread_id, user_id=user_id, limit=3))
 
 
+def format_account_ledger_for_model(proposals: list[Mapping[str, Any]] | None, decisions: list[Mapping[str, Any]] | None) -> str | None:
+    if not proposals and not decisions:
+        return None
+    from deerflow.command_room.account_ledger import compact_account_ledger
+
+    compact = compact_account_ledger([dict(proposal) for proposal in proposals or []], [dict(decision) for decision in decisions or []], limit=3)
+    if not compact:
+        return None
+    lines = [
+        _ACCOUNT_LEDGER_HEADER,
+        "AI-authored governance records only. Chair decisions are recorded, not automatically applied.",
+    ]
+    for entry in compact:
+        parts = [
+            f"account_type={entry.get('account_type')}",
+            f"proposed_by_role={entry.get('proposed_by_role')}",
+            f"target={entry.get('target_role') or 'Chair'}",
+        ]
+        if entry.get("decision"):
+            parts.append(f"decision={entry.get('decision')}")
+        if entry.get("created_at"):
+            parts.append(f"created_at={entry.get('created_at')}")
+        lines.append(f"{entry.get('entry')}: " + "; ".join(parts))
+    return "\n".join(lines)
+
+
+def latest_account_ledger_for_thread(thread_id: str | None, user_id: str | None = None) -> str | None:
+    if not thread_id:
+        return None
+    from deerflow.command_room.account_ledger import list_account_decisions, list_account_proposals
+
+    return format_account_ledger_for_model(
+        list_account_proposals(thread_id=thread_id, user_id=user_id, limit=3),
+        list_account_decisions(thread_id=thread_id, user_id=user_id, limit=3),
+    )
+
+
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
     """Append latest Round signals as an internal SystemMessage for Command Room."""
 
@@ -283,6 +321,9 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         review_text = latest_review_invocations_for_thread(str(thread_id) if thread_id else None, user_id)
         if review_text:
             parts.append(review_text)
+        account_text = latest_account_ledger_for_thread(str(thread_id) if thread_id else None, user_id)
+        if account_text:
+            parts.append(account_text)
         legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, user_id)
         if legacy_text:
             parts.append(legacy_text)
@@ -293,7 +334,14 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        headers = (_INTERNAL_CONTEXT_HEADER, _NATIVE_ROUND_CONTEXT_HEADER, _CAPABILITY_CONTEXT_HEADER, _QUALITY_SIGNALS_HEADER, _REVIEW_INVOCATIONS_HEADER)
+        headers = (
+            _INTERNAL_CONTEXT_HEADER,
+            _NATIVE_ROUND_CONTEXT_HEADER,
+            _CAPABILITY_CONTEXT_HEADER,
+            _QUALITY_SIGNALS_HEADER,
+            _REVIEW_INVOCATIONS_HEADER,
+            _ACCOUNT_LEDGER_HEADER,
+        )
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
@@ -310,11 +358,13 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
 
 __all__ = [
     "CommandRoomRoundContextMiddleware",
+    "format_account_ledger_for_model",
     "format_capability_snapshot_for_model",
     "format_native_round_context_for_model",
     "format_quality_signals_for_model",
     "format_review_invocations_for_model",
     "format_round_context_for_model",
+    "latest_account_ledger_for_thread",
     "latest_quality_signals_for_thread",
     "latest_review_invocations_for_thread",
     "latest_round_context_for_thread",

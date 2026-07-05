@@ -42,6 +42,13 @@ from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_v
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.capabilities import build_capability_snapshot
+from deerflow.command_room.account_ledger import (
+    build_account_decision,
+    build_account_update_proposal,
+    list_account_proposals,
+    record_account_decision,
+    record_account_update_proposal,
+)
 from deerflow.command_room.evidence import normalize_evidence_ref
 from deerflow.command_room.quality import build_quality_signal, list_quality_signals, record_quality_signal
 from deerflow.command_room.review import (
@@ -332,6 +339,66 @@ class ReviewInvocationResponse(BaseModel):
     target_role: str = "Chair"
     created_at: str
     completed_at: str | None = None
+    ai_authored: bool = True
+    schema_version: int = 1
+
+
+AccountType = Literal["goal", "boundary", "decision", "evidence", "debt", "learning"]
+AccountDecisionValue = Literal["adopt", "revise", "defer", "reject"]
+
+
+class AccountUpdateProposalCreateRequest(BaseModel):
+    round_id: str | None = None
+    task_id: str | None = None
+    proposed_by_role: str = Field(..., min_length=1, max_length=64)
+    account_type: AccountType
+    proposed_change: str = Field(..., min_length=1, max_length=4000)
+    rationale: str = Field(..., min_length=1, max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list)
+    quality_signal_refs: list[str] = Field(default_factory=list)
+    review_invocation_refs: list[str] = Field(default_factory=list)
+    target_role: str = Field(default="Chair", min_length=1, max_length=64)
+
+
+class AccountUpdateProposalResponse(BaseModel):
+    proposal_id: str
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    task_id: str | None = None
+    proposed_by_role: str
+    account_type: AccountType
+    proposed_change: str
+    rationale: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    quality_signal_refs: list[str] = Field(default_factory=list)
+    review_invocation_refs: list[str] = Field(default_factory=list)
+    target_role: str = "Chair"
+    created_at: str
+    ai_authored: bool = True
+    schema_version: int = 1
+
+
+class AccountDecisionCreateRequest(BaseModel):
+    proposal_id: str = Field(..., min_length=1, max_length=128)
+    decided_by_role: str = Field(default="chair", min_length=1, max_length=64)
+    decision: AccountDecisionValue
+    rationale: str = Field(..., min_length=1, max_length=4000)
+    revised_change: str | None = Field(default=None, max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class AccountDecisionResponse(BaseModel):
+    decision_id: str
+    proposal_id: str
+    thread_id: str
+    run_id: str
+    decided_by_role: str = "chair"
+    decision: AccountDecisionValue
+    rationale: str
+    revised_change: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    created_at: str
     ai_authored: bool = True
     schema_version: int = 1
 
@@ -862,6 +929,13 @@ def _review_invocation_by_id(invocations: list[dict[str, Any]], invocation_id: s
     for invocation in invocations:
         if invocation.get("invocation_id") == invocation_id:
             return invocation
+    return None
+
+
+def _account_proposal_by_id(proposals: list[dict[str, Any]], proposal_id: str) -> dict[str, Any] | None:
+    for proposal in proposals:
+        if proposal.get("proposal_id") == proposal_id:
+            return proposal
     return None
 
 
@@ -1706,6 +1780,86 @@ async def create_quality_signal(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     record_quality_signal(signal, user_id=user_id)
     return QualitySignalResponse.model_validate(signal.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/account-proposals", response_model=list[AccountUpdateProposalResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_account_proposals(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[AccountUpdateProposalResponse]:
+    """List AI-authored account update proposals for a run."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    proposals = list_account_proposals(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=limit)
+    return [AccountUpdateProposalResponse.model_validate(proposal) for proposal in proposals]
+
+
+@router.post("/{thread_id}/runs/{run_id}/account-proposals", response_model=AccountUpdateProposalResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_account_update_proposal(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    body: AccountUpdateProposalCreateRequest,
+) -> AccountUpdateProposalResponse:
+    """Save an AI-authored governance account update proposal for Chair review."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="account proposal round_id does not match run round_id")
+    try:
+        proposal = build_account_update_proposal(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            task_id=body.task_id,
+            proposed_by_role=body.proposed_by_role,
+            account_type=body.account_type,
+            proposed_change=body.proposed_change,
+            rationale=body.rationale,
+            evidence_refs=body.evidence_refs,
+            quality_signal_refs=body.quality_signal_refs,
+            review_invocation_refs=body.review_invocation_refs,
+            target_role=body.target_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_account_update_proposal(proposal, user_id=user_id)
+    return AccountUpdateProposalResponse.model_validate(proposal.as_dict())
+
+
+@router.post("/{thread_id}/runs/{run_id}/account-decisions", response_model=AccountDecisionResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_account_decision(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    body: AccountDecisionCreateRequest,
+) -> AccountDecisionResponse:
+    """Save an AI-authored Chair decision record for an account proposal."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    proposals = list_account_proposals(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=200)
+    if _account_proposal_by_id(proposals, body.proposal_id) is None:
+        raise HTTPException(status_code=404, detail=f"Account update proposal {body.proposal_id} not found")
+    try:
+        decision = build_account_decision(
+            proposal_id=body.proposal_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            decided_by_role=body.decided_by_role,
+            decision=body.decision,
+            rationale=body.rationale,
+            revised_change=body.revised_change,
+            evidence_refs=body.evidence_refs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_account_decision(decision, user_id=user_id)
+    return AccountDecisionResponse.model_validate(decision.as_dict())
 
 
 @router.get("/{thread_id}/runs/{run_id}/review-invocations", response_model=list[ReviewInvocationResponse])

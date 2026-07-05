@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-05 — Phase 5 AI decision ledger records
+
+- Added `AccountUpdateProposal` and `AccountDecision` as compact AI-authored governance records for Goal, Boundary, Decision, Evidence, Debt, and Learning account updates.
+- Added owner-scoped thread audit storage at `audit/account_ledger.jsonl`; proposals and decisions are append-only records, not account writers.
+- Added `GET/POST /api/threads/{thread_id}/runs/{run_id}/account-proposals` and `POST /api/threads/{thread_id}/runs/{run_id}/account-decisions`.
+- Extended command-room round context injection with compact account ledger state only: account type, proposed-by role, Chair decision, target role, and created time.
+- Validation: `cd backend && uv run pytest tests/test_command_room_quality_signal.py tests/test_command_room_review_invocation.py tests/test_run_quality_loop_api.py tests/test_run_review_invocation_api.py tests/test_round_context_injection.py tests/test_command_room_account_ledger.py tests/test_run_account_ledger_api.py -q` passed with 21 tests; targeted `ruff check` passed for changed Python files.
+- Deliberately skipped: no automatic governance, no program quality judgment, no PASS/FAIL output, no auto-rework, no auto-apply, no automatic AGENTS/README/rules updates, no UI, no Browser replay, and no external dependency.
+
 ## 2026-07-05 — Phase 4 AI review invocation records
 
 - Added `ReviewInvocation` as a compact AI-authored record for why Chair/lead asks `evidence_checker`, `opposition`, `synthesis_checker`, or `reviewer` to inspect a focused question, plus the returned short summary and evidence refs.

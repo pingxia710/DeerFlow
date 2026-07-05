@@ -1,8 +1,10 @@
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.routers import thread_runs
 from deerflow.agents.middlewares.round_context_middleware import format_native_round_context_for_model
-from deerflow.persistence.round_state import MemoryRoundStateStore
+from deerflow.persistence.base import Base
+from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import RunManager
@@ -111,6 +113,83 @@ async def test_task_event_updates_task_lane_outside_visible_history():
 
 
 @pytest.mark.anyio
+async def test_memory_round_state_preserves_handoff_envelope():
+    round_store = MemoryRoundStateStore()
+    round_info = await round_store.bind_run(
+        thread_id="thread-handoff",
+        run_id="run-handoff",
+        current_intent="handoff",
+    )
+    handoff = {
+        "sourceRole": "Planner",
+        "targetRole": "Evidence",
+        "taskOrQuestion": "inspect refs",
+        "evidenceRefs": ["docs/command-room/run-protocol.md:25"],
+        "evidenceStrength": "Strong",
+        "rawInputSha256": "abc123",
+    }
+
+    await round_store.record_task_events(
+        [
+            {
+                "type": "task_completed",
+                "thread_id": "thread-handoff",
+                "run_id": "run-handoff",
+                "task_id": "task-handoff",
+                "subagent_type": "evidence",
+                "status": "completed",
+                "handoff_envelope": handoff,
+            }
+        ]
+    )
+
+    [lane] = await round_store.list_task_lanes_by_round(thread_id="thread-handoff", round_id=round_info["round_id"])
+    assert lane["handoff"] == handoff
+
+
+@pytest.mark.anyio
+async def test_sql_round_state_preserves_handoff_envelope(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'round-state.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    round_store = RoundStateRepository(async_sessionmaker(engine, expire_on_commit=False))
+    round_info = await round_store.bind_run(
+        thread_id="thread-sql-handoff",
+        run_id="run-sql-handoff",
+        current_intent="handoff",
+    )
+    handoff = {
+        "sourceRole": "Planner",
+        "targetRole": "Evidence",
+        "taskOrQuestion": "inspect refs",
+        "artifactRefs": ["outputs/findings.md"],
+        "evidenceStrength": "Unverified",
+        "rawInputSha256": "def456",
+    }
+
+    try:
+        await round_store.record_task_events(
+            [
+                {
+                    "type": "task_completed",
+                    "thread_id": "thread-sql-handoff",
+                    "run_id": "run-sql-handoff",
+                    "task_id": "task-sql-handoff",
+                    "subagent_type": "evidence",
+                    "status": "completed",
+                    "handoff_envelope": handoff,
+                }
+            ]
+        )
+
+        [lane] = await round_store.list_task_lanes_by_round(thread_id="thread-sql-handoff", round_id=round_info["round_id"])
+        assert lane["handoff"] == handoff
+        assert "handoff_json" not in lane
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_task_refs_flow_into_native_round_context():
     event_store = MemoryRunEventStore()
     round_store = MemoryRoundStateStore()
@@ -177,6 +256,7 @@ async def test_native_round_routes_expose_rounds_and_task_lanes():
                 "subagent_type": "planner",
                 "status": "completed",
                 "action_result": {"output_ref": "outputs/plan.md"},
+                "handoff_envelope": {"targetRole": "Planner", "taskOrQuestion": "plan", "evidenceStrength": "Unverified"},
             }
         ]
     )
@@ -196,3 +276,4 @@ async def test_native_round_routes_expose_rounds_and_task_lanes():
     assert rounds[0].artifact_refs == ["outputs/plan.md"]
     assert tasks[0].task_id == "task-1"
     assert tasks[0].role == "planner"
+    assert tasks[0].handoff == {"targetRole": "Planner", "taskOrQuestion": "plan", "evidenceStrength": "Unverified"}

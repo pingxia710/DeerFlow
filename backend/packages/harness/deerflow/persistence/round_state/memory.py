@@ -64,6 +64,11 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
     return None
 
 
+def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
+    handoff = event.get("handoff_envelope")
+    return dict(handoff) if isinstance(handoff, dict) and handoff else None
+
+
 def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
     refs: list[str] = []
     seen: set[str] = set()
@@ -193,6 +198,7 @@ class MemoryRoundStateStore:
             lane["role"] = event.get("subagent_type") or lane.get("role")
             lane["result_ref"] = _task_result_ref(event) or lane.get("result_ref")
             lane["evidence_ref"] = _task_evidence_ref(event) or lane.get("evidence_ref")
+            lane["handoff"] = _task_handoff(event) or lane.get("handoff")
             lane["error"] = event.get("error_preview") or lane.get("error")
             lane["updated_at"] = _now_iso()
             self._append_event(
@@ -207,6 +213,7 @@ class MemoryRoundStateStore:
                     "role": lane.get("role"),
                     "result_ref": lane.get("result_ref"),
                     "evidence_ref": lane.get("evidence_ref"),
+                    "handoff": lane.get("handoff"),
                 },
             )
 

@@ -44,7 +44,11 @@ class MemoryRunStore(RunStore):
 
     @staticmethod
     def _terminal_reason(run: dict[str, Any]) -> str | None:
-        return run.get("terminal_reason")
+        reason = run.get("terminal_reason")
+        if reason is not None:
+            return reason
+        metadata = run.get("metadata")
+        return metadata.get("terminal_reason") if isinstance(metadata, dict) else None
 
     @staticmethod
     def _set_terminal_reason(run: dict[str, Any], terminal_reason: str | None) -> None:

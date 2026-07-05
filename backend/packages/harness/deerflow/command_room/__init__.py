@@ -1,6 +1,7 @@
 """Command Room responsibility protocol helpers."""
 
 from .action_result_adapter import action_result_from_value
+from .handoff import HandoffEnvelope, handoff_envelope_from_packet, handoff_envelope_to_audit_dict
 from .round import ActionResult, NextRound, Round, RoundAction, RoundItemStatus, summarize_round
 from .round_context import (
     RoundContextSignals,
@@ -35,4 +36,7 @@ __all__ = [
     "extract_verdict",
     "latest_command_room_round",
     "record_command_room_round",
+    "HandoffEnvelope",
+    "handoff_envelope_from_packet",
+    "handoff_envelope_to_audit_dict",
 ]

@@ -1,6 +1,7 @@
 """Core behavior tests for task tool orchestration."""
 
 import asyncio
+import hashlib
 import importlib
 from enum import Enum
 from types import SimpleNamespace
@@ -116,6 +117,20 @@ Recommended Next Decision: NEEDS_MORE
     assert "Boundary Status: unclear" in envelope
     assert "Recommended Next Decision: NEEDS_MORE" in envelope
     assert "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement." in envelope
+    compact = task_tool_module._compact_handoff_envelope(
+        handoff_prompt,
+        raw_prompt=prompt,
+        description="boundary review",
+        subagent_type="boundary",
+    )
+    assert compact["sourceRole"] == "Planner"
+    assert compact["targetRole"] == "Boundary"
+    assert compact["taskOrQuestion"] == "check bottom-boundary risk"
+    assert compact["evidenceRefs"] == ["docs/command-room/run-protocol.md:25"]
+    assert compact["evidenceStrength"] == "Strong"
+    assert compact["artifactRefs"] == ["docs/command-room/spec.md", "docs/command-room/findings.md"]
+    assert compact["rawInputSha256"] == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    assert prompt not in str(compact)
 
 
 def test_handoff_envelope_marks_refs_as_unverified_index_hints():
@@ -319,6 +334,12 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert events[-1]["redacted"] is True
     assert "result" not in events[-1]
     assert events[0]["action_result"] is None
+    assert events[0]["handoff_envelope"]["targetRole"] == "general-purpose"
+    assert events[0]["handoff_envelope"]["taskOrQuestion"] == "运行子任务"
+    assert events[0]["handoff_envelope"]["evidenceStrength"] == "Unverified"
+    assert events[0]["handoff_envelope"]["rawInputSha256"] == task_tool_module._sha256_text("collect diagnostics")
+    assert "collect diagnostics" not in str(events[0]["handoff_envelope"])
+    assert events[-1]["handoff_envelope"] == events[0]["handoff_envelope"]
     assert events[-1]["action_result"] == {
         "action_id": "tc-123",
         "description": "运行子任务",

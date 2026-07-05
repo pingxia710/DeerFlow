@@ -14,6 +14,7 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
+from deerflow.command_room.handoff import handoff_envelope_from_packet, handoff_envelope_to_audit_dict
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -389,6 +390,12 @@ def _with_ai_handoff_envelope(prompt: str, *, description: str, subagent_type: s
     return f"{envelope}\n\nTask Prompt\n{prompt}"
 
 
+def _compact_handoff_envelope(handoff_prompt: str, *, raw_prompt: str, description: str, subagent_type: str) -> dict[str, Any]:
+    packet = extract_handoff_packet(handoff_prompt, description=description, subagent_type=subagent_type)
+    envelope = handoff_envelope_from_packet(packet, raw_input=raw_prompt)
+    return handoff_envelope_to_audit_dict(envelope)
+
+
 def _suggested_handoff_receiver(result: str | None) -> str | None:
     """Extract advisory Target Role text without resolving or dispatching it."""
     match = _TARGET_ROLE_RE.search(result or "")
@@ -557,6 +564,7 @@ async def task_tool(
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
     handoff_prompt = _with_ai_handoff_envelope(prompt, description=description, subagent_type=subagent_type)
+    handoff_envelope = _compact_handoff_envelope(handoff_prompt, raw_prompt=prompt, description=description, subagent_type=subagent_type)
     task_id = executor.execute_async(handoff_prompt, task_id=tool_call_id)
     started_at = _utc_now_iso()
     started_monotonic = time.monotonic()
@@ -591,6 +599,7 @@ async def task_tool(
             "subagent_type": subagent_type,
             "status": "in_progress",
             "summary": _redacted_preview(description, fallback="Task started"),
+            "handoff_envelope": handoff_envelope,
         },
     )
 
@@ -625,6 +634,7 @@ async def task_tool(
                         "error_preview": error,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 cleanup_background_task(task_id)
@@ -693,6 +703,7 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
@@ -739,6 +750,7 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 error_text = _redacted_tool_text(result.error)
@@ -787,6 +799,7 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {_redacted_tool_text(result.error)}")
@@ -834,6 +847,7 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 error_text = _redacted_tool_text(result.error)
@@ -894,6 +908,7 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
+                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 # The task may still be running in the background. Signal cooperative
@@ -959,6 +974,7 @@ async def task_tool(
                 "usage": usage,
                 "artifact_refs": _artifact_refs(action_result),
                 "action_result": _compact_action_result_event(action_result),
+                "handoff_envelope": handoff_envelope,
             },
         )
         if final_result is not None and _is_subagent_terminal(final_result):

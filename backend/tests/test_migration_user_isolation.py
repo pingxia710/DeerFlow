@@ -1,6 +1,7 @@
 """Tests for per-user data migration."""
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,102 @@ class TestMigrateMemory:
         from scripts.migrate_user_isolation import migrate_memory
 
         migrate_memory(paths, user_id="default")  # should not raise
+
+
+class TestMigrateSqlOwnerlessRows:
+    @staticmethod
+    def _seed_db(base_dir: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(base_dir / "deer-flow.db")
+        conn.execute("CREATE TABLE threads_meta (thread_id TEXT, user_id TEXT)")
+        conn.execute("CREATE TABLE runs (run_id TEXT, thread_id TEXT, user_id TEXT)")
+        conn.execute("CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, run_id TEXT, user_id TEXT)")
+        return conn
+
+    @staticmethod
+    def _rows(conn: sqlite3.Connection, table: str) -> list[tuple]:
+        return conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+
+    def test_claims_null_sql_rows_without_overwriting_existing_owners(self, base_dir: Path, paths: Paths):
+        conn = self._seed_db(base_dir)
+        try:
+            conn.executemany(
+                "INSERT INTO threads_meta (thread_id, user_id) VALUES (?, ?)",
+                [("t-default", None), ("t-owned", "alice")],
+            )
+            conn.executemany(
+                "INSERT INTO runs (run_id, thread_id, user_id) VALUES (?, ?, ?)",
+                [
+                    ("r-default", "t-default", None),
+                    ("r-owned", "t-owned", None),
+                    ("r-explicit", "t-owned", "alice"),
+                    ("r-orphan", "t-orphan", None),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO run_events (thread_id, run_id, user_id) VALUES (?, ?, ?)",
+                [
+                    ("t-default", "r-default", None),
+                    ("t-owned", "r-owned", None),
+                    ("t-owned", "r-explicit", "alice"),
+                    ("t-orphan", "r-orphan", None),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        from scripts.migrate_user_isolation import migrate_sql_ownerless_rows
+
+        report = migrate_sql_ownerless_rows(paths, user_id="admin")
+
+        conn = sqlite3.connect(base_dir / "deer-flow.db")
+        try:
+            assert self._rows(conn, "threads_meta") == [("t-default", "admin"), ("t-owned", "alice")]
+            assert self._rows(conn, "runs") == [
+                ("r-default", "t-default", "admin"),
+                ("r-explicit", "t-owned", "alice"),
+                ("r-orphan", "t-orphan", "admin"),
+                ("r-owned", "t-owned", "alice"),
+            ]
+            assert conn.execute("SELECT thread_id, run_id, user_id FROM run_events ORDER BY id").fetchall() == [
+                ("t-default", "r-default", "admin"),
+                ("t-owned", "r-owned", "alice"),
+                ("t-owned", "r-explicit", "alice"),
+                ("t-orphan", "r-orphan", "admin"),
+            ]
+        finally:
+            conn.close()
+
+        assert {entry["table"] for entry in report} == {"threads_meta", "runs", "run_events"}
+        assert all(entry["action"] == "updated" for entry in report)
+
+    def test_dry_run_reports_without_changing_sql_rows(self, base_dir: Path, paths: Paths):
+        conn = self._seed_db(base_dir)
+        try:
+            conn.execute("INSERT INTO threads_meta (thread_id, user_id) VALUES (?, ?)", ("t1", None))
+            conn.execute("INSERT INTO runs (run_id, thread_id, user_id) VALUES (?, ?, ?)", ("r1", "t1", None))
+            conn.commit()
+        finally:
+            conn.close()
+
+        from scripts.migrate_user_isolation import migrate_sql_ownerless_rows
+
+        report = migrate_sql_ownerless_rows(paths, user_id="admin", dry_run=True)
+
+        conn = sqlite3.connect(base_dir / "deer-flow.db")
+        try:
+            assert self._rows(conn, "threads_meta") == [("t1", None)]
+            assert self._rows(conn, "runs") == [("r1", "t1", None)]
+        finally:
+            conn.close()
+
+        assert report
+        assert all(entry["action"] == "would update" for entry in report)
+
+    def test_missing_database_is_noop(self, paths: Paths):
+        from scripts.migrate_user_isolation import migrate_sql_ownerless_rows
+
+        assert migrate_sql_ownerless_rows(paths, user_id="admin") == []
 
 
 class TestMigrateAgents:

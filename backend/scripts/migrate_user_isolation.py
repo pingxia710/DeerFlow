@@ -162,6 +162,93 @@ def migrate_memory(
         shutil.move(str(legacy_mem), str(dest))
 
 
+def migrate_sql_ownerless_rows(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Stamp legacy SQL rows whose ``user_id`` is still NULL.
+
+    This is intentionally a conservative compatibility migration: it only
+    updates NULL owners and never overwrites an existing owner. Thread-level
+    owners are used to backfill matching run and event rows; rows without an
+    owner hint are claimed by ``user_id``.
+    """
+    import sqlite3
+
+    db_path = paths.base_dir / "deer-flow.db"
+    if not db_path.exists():
+        logger.info("No database found at %s - skipping SQL owner migration.", db_path)
+        return []
+
+    report: list[dict] = []
+
+    def _table_ready(conn: sqlite3.Connection, table: str) -> bool:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return False
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        return {"thread_id", "user_id"}.issubset(columns)
+
+    def _known_thread_owners(conn: sqlite3.Connection) -> dict[str, str]:
+        owners: dict[str, str] = {}
+        if _table_ready(conn, "threads_meta"):
+            for thread_id, owner in conn.execute("SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL"):
+                owners[str(thread_id)] = str(owner)
+            for (thread_id,) in conn.execute("SELECT thread_id FROM threads_meta WHERE user_id IS NULL"):
+                owners.setdefault(str(thread_id), user_id)
+        if _table_ready(conn, "runs"):
+            for thread_id, owner in conn.execute("SELECT DISTINCT thread_id, user_id FROM runs WHERE user_id IS NOT NULL"):
+                owners.setdefault(str(thread_id), str(owner))
+        if _table_ready(conn, "run_events"):
+            for thread_id, owner in conn.execute("SELECT DISTINCT thread_id, user_id FROM run_events WHERE user_id IS NOT NULL"):
+                owners.setdefault(str(thread_id), str(owner))
+        return owners
+
+    def _claim_null_rows(conn: sqlite3.Connection, table: str, owners: dict[str, str]) -> None:
+        if not _table_ready(conn, table):
+            return
+        thread_ids = [str(row[0]) for row in conn.execute(f"SELECT DISTINCT thread_id FROM {table} WHERE user_id IS NULL")]
+        for thread_id in thread_ids:
+            owner = owners.get(thread_id, user_id)
+            row_count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE thread_id=? AND user_id IS NULL",
+                (thread_id,),
+            ).fetchone()[0]
+            report.append(
+                {
+                    "table": table,
+                    "thread_id": thread_id,
+                    "user_id": owner,
+                    "rows": row_count,
+                    "action": "would update" if dry_run else "updated",
+                }
+            )
+            if not dry_run:
+                conn.execute(
+                    f"UPDATE {table} SET user_id=? WHERE thread_id=? AND user_id IS NULL",
+                    (owner, thread_id),
+                )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        owners = _known_thread_owners(conn)
+        for table in ("threads_meta", "runs", "run_events"):
+            _claim_null_rows(conn, table, owners)
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    finally:
+        conn.close()
+
+    return report
+
+
 def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
     """Query threads_meta table for thread_id -> user_id mapping.
 
@@ -203,12 +290,25 @@ def main() -> None:
     logger.info("Dry run: %s", args.dry_run)
     logger.info("Claiming un-owned legacy data for user_id=%s", args.user_id)
 
+    sql_report = migrate_sql_ownerless_rows(paths, user_id=args.user_id, dry_run=args.dry_run)
     owner_map = _build_owner_map_from_db(paths)
     logger.info("Found %d thread ownership records in DB", len(owner_map))
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
     migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
     agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
+
+    if sql_report:
+        logger.info("SQL owner migration report:")
+        for entry in sql_report:
+            logger.info(
+                "  table=%s thread=%s user=%s rows=%s action=%s",
+                entry["table"],
+                entry["thread_id"],
+                entry["user_id"],
+                entry["rows"],
+                entry["action"],
+            )
 
     if report:
         logger.info("Thread migration report:")

@@ -59,9 +59,11 @@ bridge/cancel signal exists.
 - Artifact provenance is indexed best-effort from observed run artifact events;
   missing files stay represented as unavailable artifacts.
 - Provider stream failures such as
-  `Codex API stream ended without response.completed event` are beta blockers
-  for real Command Room usage until fixed; observed runs must still reach a
-  terminal `error` and must not leave the thread busy.
+  `Codex API stream ended without response.completed event` previously blocked
+  real Command Room usage. A retry fix is in place and post-fix run/API/browser
+  replay checks have passed; keep observing through the 1-2 day window. If the
+  failure recurs repeatedly, runs must still reach terminal `error` and must
+  not leave the thread busy.
 
 ## Preflight
 

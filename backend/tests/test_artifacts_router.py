@@ -75,6 +75,35 @@ def test_get_artifact_uses_trusted_internal_owner_header(tmp_path, monkeypatch) 
     assert bytes(response.body).decode("utf-8") == "owner artifact"
 
 
+def test_get_artifact_uses_request_user_bucket(tmp_path, monkeypatch) -> None:
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    alice_outputs = tmp_path / "users" / "alice" / "threads" / "shared-thread" / "user-data" / "outputs"
+    alice_outputs.mkdir(parents=True)
+    (alice_outputs / "report.txt").write_text("alice artifact", encoding="utf-8")
+
+    bob_outputs = tmp_path / "users" / "bob" / "threads" / "shared-thread" / "user-data" / "outputs"
+    bob_outputs.mkdir(parents=True)
+    (bob_outputs / "report.txt").write_text("bob artifact", encoding="utf-8")
+
+    request = _make_request()
+    request.state.user = type("User", (), {"id": "alice", "system_role": "user"})()
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.get_artifact,
+            "shared-thread",
+            "mnt/user-data/outputs/report.txt",
+            request,
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "alice artifact"
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename

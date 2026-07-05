@@ -488,11 +488,12 @@ export function MessageList({
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           const groupIsLoading =
             thread.isLoading && groupIndex === lastGroupIndex;
+          const groupKey = `${groupIndex}-${group.type}-${group.id ?? "unknown"}`;
 
           if (group.type === "human" || group.type === "assistant") {
             return (
               <div
-                key={group.id}
+                key={groupKey}
                 data-assistant-turn={
                   group.type === "assistant" ? true : undefined
                 }
@@ -543,7 +544,7 @@ export function MessageList({
             const message = group.messages[0];
             if (message && hasContent(message)) {
               return (
-                <div key={group.id} className="w-full">
+                <div key={groupKey} className="w-full">
                   <MarkdownContent
                     content={extractContentFromMessage(message)}
                     isLoading={thread.isLoading}
@@ -566,7 +567,7 @@ export function MessageList({
               }
             }
             return (
-              <div className="w-full" key={group.id}>
+              <div className="w-full" key={groupKey}>
                 {group.messages[0] && hasContent(group.messages[0]) && (
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
@@ -689,7 +690,7 @@ export function MessageList({
             }
             return (
               <div
-                key={"subtask-group-" + group.id}
+                key={"subtask-group-" + groupKey}
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
@@ -702,7 +703,7 @@ export function MessageList({
             );
           }
           return (
-            <div key={"group-" + group.id} className="w-full">
+            <div key={"group-" + groupKey} className="w-full">
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}

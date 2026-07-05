@@ -324,6 +324,19 @@ function baseMessageIdentity(message: Message): string | undefined {
   return undefined;
 }
 
+function messageRunId(message: Message): string | undefined {
+  const runId =
+    message.additional_kwargs?.deerflow_run_id ??
+    message.additional_kwargs?.run_id;
+  return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+function runScopedBaseMessageIdentity(message: Message): string | undefined {
+  const identity = baseMessageIdentity(message);
+  const runId = messageRunId(message);
+  return identity && runId ? `${runId}:${identity}` : undefined;
+}
+
 function messageIdentity(message: Message): string | undefined {
   const historyIdentity = (message as MessageWithHistoryIdentity)[
     HISTORY_IDENTITY_SYMBOL
@@ -1118,6 +1131,21 @@ export function mergeMessages(
       .map(baseMessageIdentity)
       .filter(isNonEmptyString),
   );
+  const liveMessageByRunScopedIdentity = new Map<string, Message>();
+  const liveMessageByBaseIdentity = new Map<string, Message>();
+  for (const message of threadMessages) {
+    if (isHiddenFromUIMessage(message)) {
+      continue;
+    }
+    const baseIdentity = baseMessageIdentity(message);
+    if (baseIdentity) {
+      liveMessageByBaseIdentity.set(baseIdentity, message);
+    }
+    const identity = runScopedBaseMessageIdentity(message);
+    if (identity) {
+      liveMessageByRunScopedIdentity.set(identity, message);
+    }
+  }
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
   // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
@@ -1136,9 +1164,57 @@ export function mergeMessages(
     }
   }
 
+  const historyBaseIdentityCounts = new Map<string, number>();
+  for (const message of historyMessages.slice(0, cutoff)) {
+    const identity = baseMessageIdentity(message);
+    if (identity) {
+      historyBaseIdentityCounts.set(
+        identity,
+        (historyBaseIdentityCounts.get(identity) ?? 0) + 1,
+      );
+    }
+  }
+
+  const consumedLiveMessages = new Set<Message>();
+  const historyWithRunScopedLiveReplacements = historyMessages
+    .slice(0, cutoff)
+    .map((message) => {
+      const runScopedIdentity = runScopedBaseMessageIdentity(message);
+      const baseIdentity = baseMessageIdentity(message);
+      const liveMessage =
+        (runScopedIdentity
+          ? liveMessageByRunScopedIdentity.get(runScopedIdentity)
+          : undefined) ??
+        (baseIdentity && historyBaseIdentityCounts.get(baseIdentity) === 1
+          ? liveMessageByBaseIdentity.get(baseIdentity)
+          : undefined);
+      if (!liveMessage) {
+        return message;
+      }
+      consumedLiveMessages.add(liveMessage);
+      return {
+        ...liveMessage,
+        additional_kwargs: {
+          ...liveMessage.additional_kwargs,
+          ...(message.additional_kwargs?.turn_duration !== undefined &&
+          liveMessage.additional_kwargs?.turn_duration === undefined
+            ? { turn_duration: message.additional_kwargs.turn_duration }
+            : {}),
+          ...(message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] !==
+            undefined &&
+          liveMessage.additional_kwargs?.[HISTORY_CREATED_AT_KEY] === undefined
+            ? {
+                [HISTORY_CREATED_AT_KEY]:
+                  message.additional_kwargs[HISTORY_CREATED_AT_KEY],
+              }
+            : {}),
+        },
+      } as Message;
+    });
+
   const merged = dedupeMessagesByIdentity([
-    ...historyMessages.slice(0, cutoff),
-    ...threadMessages,
+    ...historyWithRunScopedLiveReplacements,
+    ...threadMessages.filter((message) => !consumedLiveMessages.has(message)),
     ...optimisticMessages,
   ]);
 

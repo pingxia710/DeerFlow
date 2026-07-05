@@ -937,6 +937,83 @@ test("mergeMessages lets live messages replace overlapping scoped history", () =
   ).toEqual(["live copy"]);
 });
 
+test("mergeMessages replaces same-run history copies when later history rows are not live", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-latest",
+      seq: 1,
+      content: {
+        id: "human-1",
+        type: "human",
+        content: "history human",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-latest",
+      seq: 2,
+      content: {
+        id: "ai-1",
+        type: "ai",
+        content: "history ai",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+    {
+      run_id: "run-latest",
+      seq: 3,
+      content: {
+        id: "suggestion-1",
+        type: "ai",
+        content: "follow-up suggestion",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:03Z",
+    },
+  ];
+  const history = buildVisibleHistoryMessages(rows, new Set(), []);
+  const runScopedLiveHuman = {
+    id: "human-1",
+    type: "human",
+    content: "live human",
+    additional_kwargs: { run_id: "run-latest" },
+  } as Message;
+  const runScopedLiveAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live ai",
+    additional_kwargs: { run_id: "run-latest" },
+  } as Message;
+  const checkpointLiveHuman = {
+    id: "human-1",
+    type: "human",
+    content: "live human",
+  } as Message;
+  const checkpointLiveAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live ai",
+  } as Message;
+
+  const assertMerged = (threadMessages: Message[]) => {
+    const merged = mergeMessages(history, threadMessages, []);
+
+    expect(merged.map((message) => message.content)).toEqual([
+      "live human",
+      "live ai",
+      "follow-up suggestion",
+    ]);
+    expect(merged[0]?.additional_kwargs?.[HISTORY_CREATED_AT_KEY]).toBe(
+      "2026-06-18T00:00:01Z",
+    );
+  };
+
+  assertMerged([runScopedLiveHuman, runScopedLiveAi]);
+  assertMerged([checkpointLiveHuman, checkpointLiveAi]);
+});
+
 test("buildVisibleHistoryMessages orders refreshed run rows by seq", () => {
   const rows: RunMessage[] = [
     {

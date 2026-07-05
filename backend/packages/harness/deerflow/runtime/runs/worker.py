@@ -44,6 +44,21 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 _LEASE_CONTROL_INTERVAL_SECONDS = 2.0
 _STREAM_FRAME_CATEGORY = "stream"
+_RUN_NO_PROGRESS_TIMEOUT_SECONDS = 30 * 60.0
+_RUN_HARD_TIMEOUT_SECONDS = 4 * 60 * 60.0
+_STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
+
+
+class RunStreamTimeoutError(TimeoutError):
+    """Raised when a live run stops making stream progress."""
+
+
+class RunNoProgressTimeoutError(RunStreamTimeoutError):
+    """Raised when ``agent.astream`` does not yield for the no-progress budget."""
+
+
+class RunHardTimeoutError(RunStreamTimeoutError):
+    """Raised when the whole run exceeds the hard runtime budget."""
 
 
 def _build_runtime_context(
@@ -162,6 +177,8 @@ async def run_agent(
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
+    no_progress_timeout_seconds: float | None = None,
+    hard_timeout_seconds: float | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -355,59 +372,36 @@ async def run_agent(
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
         # 7. Stream using graph.astream
-        if len(lg_modes) == 1 and not stream_subgraphs:
-            # Single mode, no subgraphs: astream yields raw chunks
-            single_mode = lg_modes[0]
-            async for chunk in agent.astream(graph_input, config=runnable_config, stream_mode=single_mode):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
-                latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and single_mode == "values" else latest_command_room_ai_text
-                sse_event = _lg_mode_to_sse_event(single_mode)
-                await _publish_stream_frame(
-                    bridge,
-                    event_store,
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    user_id=record.user_id,
-                    event=sse_event,
-                    data=serialize(chunk, mode=single_mode),
-                )
-        else:
-            # Multiple modes or subgraphs: astream yields tuples
-            async for item in agent.astream(
-                graph_input,
-                config=runnable_config,
-                stream_mode=lg_modes,
-                subgraphs=stream_subgraphs,
-            ):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
-
-                mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                if mode is None:
-                    continue
-
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
-                latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and mode == "values" else latest_command_room_ai_text
-                sse_event = _lg_mode_to_sse_event(mode)
-                await _publish_stream_frame(
-                    bridge,
-                    event_store,
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    user_id=record.user_id,
-                    event=sse_event,
-                    data=serialize(chunk, mode=mode),
-                )
+        async for mode, chunk in _iterate_agent_stream(
+            agent,
+            graph_input,
+            runnable_config,
+            lg_modes,
+            stream_subgraphs,
+            no_progress_timeout_seconds=no_progress_timeout_seconds,
+            hard_timeout_seconds=hard_timeout_seconds,
+        ):
+            if record.abort_event.is_set():
+                logger.info("Run %s abort requested — stopping", run_id)
+                break
+            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+            latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and mode == "values" else latest_command_room_ai_text
+            sse_event = _lg_mode_to_sse_event(mode)
+            await _publish_stream_frame(
+                bridge,
+                event_store,
+                run_id=run_id,
+                thread_id=thread_id,
+                user_id=record.user_id,
+                event=sse_event,
+                data=serialize(chunk, mode=mode),
+            )
 
         # 8. Final status
         if record.abort_event.is_set():
             action = record.abort_action
             if action == "rollback":
-                await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user")
+                await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         checkpointer=checkpointer,
@@ -421,13 +415,13 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled")
+                await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg)
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
         else:
             if record.assistant_id == "command-room":
                 await _record_command_room_round_from_worker(
@@ -437,12 +431,12 @@ async def run_agent(
                     final_text=latest_command_room_ai_text,
                     model_name=record.model_name,
                 )
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success")
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success", bridge=bridge, thread_id=thread_id)
 
     except asyncio.CancelledError:
         action = record.abort_action
         if action == "rollback":
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user")
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
             try:
                 await _rollback_to_pre_run_checkpoint(
                     checkpointer=checkpointer,
@@ -456,13 +450,32 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled")
+            await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
             logger.info("Run %s was cancelled", run_id)
+
+    except RunStreamTimeoutError as exc:
+        error_msg = str(exc)
+        logger.warning("Run %s timed out: %s", run_id, error_msg)
+        record.abort_action = "interrupt"
+        record.abort_event.set()
+        await _set_terminal_status(run_manager, journal, run_id, RunStatus.timeout, terminal_reason="timeout", error=error_msg, bridge=bridge, thread_id=thread_id)
+        await _publish_stream_frame(
+            bridge,
+            event_store,
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=record.user_id,
+            event="error",
+            data={
+                "message": error_msg,
+                "name": type(exc).__name__,
+            },
+        )
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg)
+        await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
         await _publish_stream_frame(
             bridge,
             event_store,
@@ -520,6 +533,128 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
+def _timeout_seconds_from_env(name: str, default: float | None) -> float | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using default %s", name, raw, default)
+        return default
+    return value if value > 0 else None
+
+
+def _resolve_timeout_seconds(override: float | None, env_name: str, default: float | None) -> float | None:
+    if override is not None:
+        return override if override > 0 else None
+    return _timeout_seconds_from_env(env_name, default)
+
+
+async def _next_stream_item(
+    iterator: Any,
+    *,
+    run_id: str,
+    no_progress_timeout: float | None,
+    hard_deadline: float | None,
+) -> Any:
+    timeout = no_progress_timeout
+    loop = asyncio.get_running_loop()
+    if hard_deadline is not None:
+        hard_remaining = hard_deadline - loop.time()
+        if hard_remaining <= 0:
+            raise RunHardTimeoutError("Run exceeded hard timeout while waiting for stream progress.")
+        timeout = hard_remaining if timeout is None else min(timeout, hard_remaining)
+    try:
+        if timeout is None:
+            return await iterator.__anext__()
+        return await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+    except TimeoutError as exc:
+        if timeout is None:
+            raise
+        if hard_deadline is not None and loop.time() >= hard_deadline:
+            raise RunHardTimeoutError("Run exceeded hard timeout while waiting for stream progress.") from exc
+        raise RunNoProgressTimeoutError(f"Run made no stream progress for {timeout:.1f}s.") from exc
+
+
+async def _close_stream_iterator(iterator: Any, run_id: str) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    try:
+        await asyncio.wait_for(close(), timeout=_STREAM_CLOSE_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning("Timed out closing stream iterator for run %s", run_id)
+    except Exception:
+        logger.debug("Failed to close stream iterator for run %s", run_id, exc_info=True)
+
+
+async def _iterate_agent_stream(
+    agent: Any,
+    graph_input: dict,
+    runnable_config: Any,
+    lg_modes: list[str],
+    stream_subgraphs: bool,
+    *,
+    no_progress_timeout_seconds: float | None,
+    hard_timeout_seconds: float | None,
+):
+    run_id = runnable_config.get("context", {}).get("run_id", "unknown") if isinstance(runnable_config, dict) else "unknown"
+    no_progress_timeout = _resolve_timeout_seconds(
+        no_progress_timeout_seconds,
+        "DEER_FLOW_RUN_NO_PROGRESS_TIMEOUT_SECONDS",
+        _RUN_NO_PROGRESS_TIMEOUT_SECONDS,
+    )
+    hard_timeout = _resolve_timeout_seconds(
+        hard_timeout_seconds,
+        "DEER_FLOW_RUN_HARD_TIMEOUT_SECONDS",
+        _RUN_HARD_TIMEOUT_SECONDS,
+    )
+    hard_deadline = asyncio.get_running_loop().time() + hard_timeout if hard_timeout is not None else None
+
+    if len(lg_modes) == 1 and not stream_subgraphs:
+        single_mode = lg_modes[0]
+        iterator = agent.astream(graph_input, config=runnable_config, stream_mode=single_mode).__aiter__()
+        try:
+            while True:
+                try:
+                    chunk = await _next_stream_item(
+                        iterator,
+                        run_id=run_id,
+                        no_progress_timeout=no_progress_timeout,
+                        hard_deadline=hard_deadline,
+                    )
+                except StopAsyncIteration:
+                    break
+                yield single_mode, chunk
+        finally:
+            await _close_stream_iterator(iterator, run_id)
+        return
+
+    iterator = agent.astream(
+        graph_input,
+        config=runnable_config,
+        stream_mode=lg_modes,
+        subgraphs=stream_subgraphs,
+    ).__aiter__()
+    try:
+        while True:
+            try:
+                item = await _next_stream_item(
+                    iterator,
+                    run_id=run_id,
+                    no_progress_timeout=no_progress_timeout,
+                    hard_deadline=hard_deadline,
+                )
+            except StopAsyncIteration:
+                break
+            mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+            if mode is not None:
+                yield mode, chunk
+    finally:
+        await _close_stream_iterator(iterator, run_id)
+
+
 async def _flush_journal_before_terminal_status(journal: Any | None, run_id: str) -> None:
     if journal is None:
         return
@@ -555,11 +690,29 @@ async def _set_terminal_status(
     *,
     terminal_reason: str,
     error: str | None = None,
+    bridge: StreamBridge | None = None,
+    thread_id: str | None = None,
 ) -> None:
     if journal is not None:
         journal.record_run_terminal(status=status.value, terminal_reason=terminal_reason)
     await _flush_journal_before_terminal_status(journal, run_id)
     await run_manager.set_status(run_id, status, error=error, terminal_reason=terminal_reason)
+    if bridge is not None and thread_id is not None:
+        try:
+            await bridge.publish(
+                run_id,
+                "custom",
+                {
+                    "type": "run.terminal",
+                    "event_type": "run.terminal",
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "status": status.value,
+                    "terminal_reason": terminal_reason,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to publish terminal event for run %s", run_id, exc_info=True)
 
 
 async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:

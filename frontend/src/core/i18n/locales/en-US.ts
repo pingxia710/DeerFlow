@@ -51,6 +51,7 @@ export const enUS: Translations = {
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
+    retry: "Retry",
   },
 
   // Home
@@ -284,6 +285,14 @@ export const enUS: Translations = {
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+    historyNotFoundTitle: "Conversation not found",
+    historyNotFoundDescription:
+      "This conversation may have been deleted or is no longer available.",
+    historyForbiddenTitle: "Conversation unavailable",
+    historyForbiddenDescription: "You do not have access to this conversation.",
+    historyLoadFailedTitle: "Could not load conversation",
+    historyLoadFailedDescription:
+      "Check your connection and retry loading this conversation.",
   },
 
   // Channels

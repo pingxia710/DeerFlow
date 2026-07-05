@@ -117,3 +117,66 @@ test("mergeSubtaskUpdate does not persist notification metadata", async () => {
     }),
   ).not.toHaveProperty("notify");
 });
+
+test("settleRunningSubtasksForRun marks same-run active task cards failed on timeout", async () => {
+  const { settleRunningSubtasksForRun } = await import("@/core/tasks/context");
+
+  const tasks = {
+    active: {
+      id: "task-active",
+      threadId: "thread-a",
+      runId: "run-a",
+      subagent_type: "executor",
+      description: "still running",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+    completed: {
+      id: "task-completed",
+      threadId: "thread-a",
+      runId: "run-a",
+      subagent_type: "executor",
+      description: "done",
+      prompt: "work",
+      status: "completed" as const,
+      result: "done",
+    },
+    otherRun: {
+      id: "task-other-run",
+      threadId: "thread-a",
+      runId: "run-b",
+      subagent_type: "executor",
+      description: "other run",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+    otherThread: {
+      id: "task-other-thread",
+      threadId: "thread-b",
+      runId: "run-a",
+      subagent_type: "executor",
+      description: "other thread",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+  };
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-a",
+    runId: "run-a",
+    status: "timeout",
+    terminalReason: "timeout",
+  });
+
+  expect(settled.active).toMatchObject({
+    status: "failed",
+    actionResultStatus: "timeout",
+    terminalReason: "timeout",
+    error: "Parent run timed out before this subtask completed.",
+  });
+  expect(settled).toMatchObject({
+    completed: { status: "completed" },
+    otherRun: { status: "in_progress" },
+    otherThread: { status: "in_progress" },
+  });
+});

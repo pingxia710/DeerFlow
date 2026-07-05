@@ -40,6 +40,7 @@ export interface Translations {
     exportAsJSON: string;
     exportSuccess: string;
     regenerate: string;
+    retry: string;
   };
 
   home: {
@@ -212,6 +213,12 @@ export interface Translations {
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
+    historyNotFoundTitle: string;
+    historyNotFoundDescription: string;
+    historyForbiddenTitle: string;
+    historyForbiddenDescription: string;
+    historyLoadFailedTitle: string;
+    historyLoadFailedDescription: string;
   };
 
   // Channels

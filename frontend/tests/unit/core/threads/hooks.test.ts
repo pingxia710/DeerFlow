@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 
 import { expect, test } from "@rstest/core";
 
+import type { Subtask } from "@/core/tasks";
+import type { SubtaskUpdate } from "@/core/tasks/context";
+
 interface TaskEventContractCase {
   event_type: string;
   status: string;
@@ -175,7 +178,7 @@ test("resolveVisibleTaskRunningThreadId only accepts the current live thread", a
   ).toBe("thread-b");
 });
 
-test("shouldReleaseQueuedThreadMessage releases after completion even if user switched threads", async () => {
+test("shouldReleaseQueuedThreadMessage releases visible queued thread after terminal/error/end", async () => {
   const { shouldReleaseQueuedThreadMessage } =
     await import("@/core/threads/hooks");
 
@@ -192,16 +195,19 @@ test("shouldReleaseQueuedThreadMessage releases after completion even if user sw
   expect(
     shouldReleaseQueuedThreadMessage({ ...base, streamFinished: true }),
   ).toBe(true);
+  // Timeout streams arrive as run.terminal -> error -> end. Once end makes
+  // loading false, the queued follow-up may release only for the same visible
+  // thread.
   expect(
     shouldReleaseQueuedThreadMessage({
       ...base,
       streamFinished: true,
       currentViewThreadId: "thread-b",
     }),
-  ).toBe(true);
+  ).toBe(false);
 });
 
-test("keepQueuedMessagesForThread drops queued sends from other chats", async () => {
+test("keepQueuedMessagesForThread intentionally drops queued sends from other chats on view switch", async () => {
   const { keepQueuedMessagesForThread } = await import("@/core/threads/hooks");
 
   expect(
@@ -216,6 +222,24 @@ test("keepQueuedMessagesForThread drops queued sends from other chats", async ()
   expect(keepQueuedMessagesForThread([{ threadId: "thread-a" }], null)).toEqual(
     [],
   );
+});
+
+test("readRunMessagesPageResponse preserves HTTP status on history load errors", async () => {
+  const { getThreadHistoryLoadErrorKind, readRunMessagesPageResponse } =
+    await import("@/core/threads/hooks");
+
+  await expect(
+    readRunMessagesPageResponse(
+      new Response(JSON.stringify({ detail: "forbidden" }), {
+        status: 403,
+        statusText: "Forbidden",
+      }),
+    ),
+  ).rejects.toMatchObject({ message: "forbidden", status: 403 });
+
+  expect(getThreadHistoryLoadErrorKind({ status: 403 })).toBe("forbidden");
+  expect(getThreadHistoryLoadErrorKind({ status: 404 })).toBe("not-found");
+  expect(getThreadHistoryLoadErrorKind(new Error("network"))).toBe("failed");
 });
 
 test("shouldShowThreadRunningStatus trusts backend terminal status over stale local running state", async () => {
@@ -365,6 +389,7 @@ test("applyTaskEventToSubtask accepts redacted task event fields", async () => {
     {
       id: "task-1",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "completed",
       result: "safe preview",
@@ -401,6 +426,7 @@ test("applyTaskEventToSubtask does not expose raw redacted completion result", a
     {
       id: "task-redacted-completed",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "completed",
       result: "safe preview",
@@ -435,6 +461,7 @@ test("applyTaskEventToSubtask accepts canonical event_type and action_result sum
     {
       id: "task-1",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "completed",
       result: "from action_result",
@@ -576,6 +603,7 @@ test("applyTaskEventToSubtask does not expose raw redacted fallbacks", async () 
     {
       id: "task-redacted",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "failed",
       actionResultStatus: "failed",
@@ -607,10 +635,76 @@ test("applyTaskEventToSubtask ignores task_running message payload", async () =>
     {
       id: "task-running",
       threadId: "thread-1",
+      runId: "run-1",
       notify: true,
       status: "in_progress",
     },
   ]);
+});
+
+test("run terminal settles task card after started and running events without task completion", async () => {
+  const {
+    getSubtaskStorageKey,
+    mergeSubtaskUpdate,
+    settleRunningSubtasksForRun,
+  } = await import("@/core/tasks/context");
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  let tasks: Record<string, Subtask> = {};
+  const update = (task: SubtaskUpdate) => {
+    const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+    tasks = {
+      ...tasks,
+      [storageKey]: mergeSubtaskUpdate(tasks[storageKey], task),
+    };
+  };
+  const baseEvent = {
+    schema_version: TASK_EVENT_CONTRACT.schema_version,
+    task_id: "task-terminal",
+    thread_id: "thread-1",
+    run_id: "run-1",
+  };
+  const storageKey = getSubtaskStorageKey("task-terminal", "thread-1");
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        ...baseEvent,
+        event_type: "task_started",
+        status: "in_progress",
+        description: "subtask",
+        subagent_type: "executor",
+        prompt: "work",
+      },
+      update,
+    ),
+  ).toBe(true);
+  expect(
+    applyTaskEventToSubtask(
+      {
+        ...baseEvent,
+        event_type: "task_running",
+        status: "in_progress",
+      },
+      update,
+    ),
+  ).toBe(true);
+  expect(tasks[storageKey]).toMatchObject({
+    status: "in_progress",
+    runId: "run-1",
+  });
+
+  tasks = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "timeout",
+    terminalReason: "timeout",
+  });
+
+  expect(tasks[storageKey]).toMatchObject({
+    status: "failed",
+    actionResultStatus: "timeout",
+    terminalReason: "timeout",
+  });
 });
 
 test("applyTaskEventRunMessages replays persisted task events with run seq dedupe", async () => {

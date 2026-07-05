@@ -31,7 +31,11 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
-import { type SubtaskUpdate, useUpdateSubtask } from "../tasks/context";
+import {
+  type SubtaskUpdate,
+  useSettleRunningSubtasksForRun,
+  useUpdateSubtask,
+} from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -210,7 +214,8 @@ export function shouldReleaseQueuedThreadMessage({
     streamFinished &&
     !sendInFlight &&
     Boolean(queuedThreadId) &&
-    Boolean(currentViewThreadId)
+    Boolean(currentViewThreadId) &&
+    queuedThreadId === currentViewThreadId
   );
 }
 
@@ -653,6 +658,12 @@ type RunTerminalEvent = {
 };
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
+type SettleRunSubtasks = (terminal: {
+  threadId: string;
+  runId: string;
+  status: string;
+  terminalReason?: string;
+}) => void;
 
 export function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   if (typeof value !== "object" || value === null) {
@@ -810,7 +821,8 @@ export function applyTaskEventToSubtask(
 
   const threadId =
     stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
-  const base: SubtaskUpdate = { id: taskId, threadId, notify: true };
+  const runId = stringValue(taskEvent.run_id);
+  const base: SubtaskUpdate = { id: taskId, threadId, runId, notify: true };
 
   if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
@@ -1080,7 +1092,12 @@ export async function readRunMessagesPageResponse(
 ): Promise<RunMessagesPageResponse> {
   const fallback = "Failed to load thread history.";
   if (!response.ok) {
-    throw new Error(await readResponseErrorMessage(response, fallback));
+    const error = new Error(await readResponseErrorMessage(response, fallback));
+    Object.defineProperty(error, "status", {
+      value: response.status,
+      enumerable: true,
+    });
+    throw error;
   }
   try {
     return (await response.json()) as RunMessagesPageResponse;
@@ -1539,11 +1556,18 @@ export function reconcileTerminalRunHistory(
   queryClient: QueryClient,
   event: unknown,
   refreshRuns: RefreshRuns,
+  settleRunSubtasks?: SettleRunSubtasks,
 ) {
   const runTerminalEvent = asRunTerminalEvent(event);
   if (!runTerminalEvent) {
     return false;
   }
+  settleRunSubtasks?.({
+    threadId: runTerminalEvent.thread_id,
+    runId: runTerminalEvent.run_id,
+    status: runTerminalEvent.status,
+    terminalReason: runTerminalEvent.terminal_reason,
+  });
   stopBackgroundRunProbe(runTerminalEvent.thread_id, runTerminalEvent.run_id);
   if (
     !applyBackgroundRunProbeResult(
@@ -1746,6 +1770,21 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+export type ThreadHistoryLoadErrorKind = "forbidden" | "not-found" | "failed";
+
+export function getThreadHistoryLoadErrorKind(
+  error: unknown,
+): ThreadHistoryLoadErrorKind {
+  const status = getHttpStatus(error);
+  if (status === 403) {
+    return "forbidden";
+  }
+  if (status === 404) {
+    return "not-found";
+  }
+  return "failed";
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -1806,6 +1845,7 @@ export function useThreadStream({
     hasMore: hasMoreHistory,
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
+    error: historyError,
     appendMessages,
     refreshRuns: refreshHistoryRuns,
   } = useThreadHistory(onStreamThreadId ?? "", {
@@ -1887,6 +1927,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const settleRunSubtasks = useSettleRunningSubtasksForRun();
   const assistantId = resolveAssistantId(context.agent_name);
   const reconnectOnMount =
     !onStreamThreadId || !threadActivitySnapshot.finished.has(onStreamThreadId);
@@ -2056,7 +2097,14 @@ export function useThreadStream({
         return;
       }
 
-      if (reconcileTerminalRunHistory(queryClient, event, refreshHistoryRuns)) {
+      if (
+        reconcileTerminalRunHistory(
+          queryClient,
+          event,
+          refreshHistoryRuns,
+          settleRunSubtasks,
+        )
+      ) {
         return;
       }
 
@@ -2192,6 +2240,13 @@ export function useThreadStream({
   }, [threadId]);
 
   useEffect(() => {
+    // Intentional: queued follow-ups are tied to the visible chat. On route
+    // changes we drop hidden-thread queued sends so a stale stream end cannot
+    // submit them into the current window.
+    queuedMessagesRef.current = keepQueuedMessagesForThread(
+      queuedMessagesRef.current,
+      currentViewThreadId,
+    );
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
       setOptimisticMessages([]);
       setOptimisticThreadTarget(null);
@@ -2664,6 +2719,7 @@ export function useThreadStream({
     regenerateMessage,
     isUploading,
     isHistoryLoading,
+    historyError,
     hasMoreHistory,
     loadMoreHistory,
   } as const;
@@ -2735,8 +2791,10 @@ export function useThreadHistory(
   const updateSubtask = useUpdateSubtask();
   const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<unknown>(null);
   const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
+  const { isError: runsIsError, refetch: refetchRuns } = runs;
   updateSubtaskRef.current = updateSubtask;
 
   const supersededRunIds = useMemo(() => {
@@ -2774,6 +2832,7 @@ export function useThreadHistory(
 
     loadingRef.current = true;
     setLoading(true);
+    setError(null);
     const abortController = new AbortController();
     historyLoadAbortRef.current?.abort();
     historyLoadAbortRef.current = abortController;
@@ -2870,6 +2929,7 @@ export function useThreadHistory(
         return;
       }
       console.warn("Failed to load thread history.", err);
+      setError(err);
     } finally {
       if (historyLoadAbortRef.current === abortController) {
         historyLoadAbortRef.current = null;
@@ -2903,6 +2963,7 @@ export function useThreadHistory(
       runBeforeSeqRef.current = new Map();
       autoLoadedLatestRunIdRef.current = null;
       loadingRef.current = false;
+      setError(null);
       setLoading(false);
       if (resetMode === "clear") {
         runsRef.current = [];
@@ -2984,6 +3045,18 @@ export function useThreadHistory(
     [enabled, loadMessages],
   );
 
+  const retryLoad = useCallback(async () => {
+    setError(null);
+    if (runsIsError) {
+      const result = await refetchRuns();
+      if (result.error) {
+        setError(result.error);
+      }
+      return;
+    }
+    await loadMessages();
+  }, [loadMessages, refetchRuns, runsIsError]);
+
   useEffect(() => {
     if (!enabled || !runs.data) {
       activeRunIdsRef.current = new Set();
@@ -3030,10 +3103,11 @@ export function useThreadHistory(
     runs: runs.data,
     messages,
     loading: loading || isRunsLoading || isRunsUnresolved,
+    error: error ?? (runs.isError ? runs.error : null),
     appendMessages,
     refreshRuns,
     hasMore,
-    loadMore: loadMessages,
+    loadMore: retryLoad,
   };
 }
 

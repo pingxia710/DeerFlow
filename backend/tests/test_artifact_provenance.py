@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 from langchain_core.messages import ToolMessage
@@ -13,6 +14,7 @@ from langgraph.types import Command
 
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
+from deerflow.persistence.artifact_provenance import ArtifactProvenanceRepository
 from deerflow.runtime import RunRecord, RunStatus
 from deerflow.runtime.artifacts import build_artifact_index
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -29,6 +31,64 @@ def _run_record() -> RunRecord:
         status=RunStatus.success,
         on_disconnect="cancel",
     )
+
+
+@pytest.fixture
+async def artifact_repo(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'artifact-provenance.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    try:
+        yield ArtifactProvenanceRepository(get_session_factory())
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
+async def test_artifact_provenance_repository_upserts_and_scopes_by_owner(artifact_repo) -> None:
+    entry = {
+        "user_id": "event-owner",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "virtual_path": "/mnt/user-data/outputs/report.md",
+        "created_at": "2026-01-01T00:00:00Z",
+        "source_event_type": "task_completed",
+        "source_event_seq": 7,
+        "source_tool": "task",
+        "source_node": "tools",
+        "available": True,
+        "display_policy": "inline",
+        "sha256": "a" * 64,
+        "size_bytes": 12,
+        "mime_type": "text/markdown",
+        "provenance": {
+            "kind": "runtime_observed",
+            "store": "run_events",
+            "caller": "task_event",
+            "ref_source": "artifact_refs",
+        },
+    }
+
+    assert await artifact_repo.upsert_many([entry], user_id="user-1") == 1
+    assert await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-2") == []
+
+    rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-1")
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == "user-1"
+    assert rows[0]["virtual_path"] == "/mnt/user-data/outputs/report.md"
+    assert rows[0]["source_ref"] == "artifact_refs"
+    assert rows[0]["provenance"]["kind"] == "runtime_observed"
+
+    updated = {**entry, "source_event_seq": 8, "sha256": "b" * 64, "size_bytes": 24}
+    assert await artifact_repo.upsert_many([updated], user_id="user-1") == 1
+
+    rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-1")
+    assert len(rows) == 1
+    assert rows[0]["source_event_seq"] == 8
+    assert rows[0]["sha256"] == "b" * 64
+    assert rows[0]["size_bytes"] == 24
 
 
 def test_build_artifact_index_from_task_event_artifact_refs() -> None:
@@ -198,6 +258,7 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
     event_store = EventStore()
     app.state.run_event_store = event_store
     app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=_run_record()))
+    app.state.artifact_provenance_repo = SimpleNamespace(upsert_many=AsyncMock(return_value=3))
 
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-1/runs/run-1/artifacts")
@@ -226,3 +287,11 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
         limit=500,
         user_id=str(_USER_ID),
     )
+    app.state.artifact_provenance_repo.upsert_many.assert_awaited_once()
+    persisted_entries = app.state.artifact_provenance_repo.upsert_many.await_args.args[0]
+    assert [entry["virtual_path"] for entry in persisted_entries] == [
+        "/mnt/user-data/outputs/report.md",
+        "/mnt/user-data/outputs/page.html",
+        "/mnt/user-data/outputs/missing.bin",
+    ]
+    assert app.state.artifact_provenance_repo.upsert_many.await_args.kwargs == {"user_id": str(_USER_ID)}

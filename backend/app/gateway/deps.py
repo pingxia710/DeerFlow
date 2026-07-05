@@ -186,16 +186,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from deerflow.persistence.artifact_provenance import ArtifactProvenanceRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            app.state.artifact_provenance_repo = ArtifactProvenanceRepository(sf)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            app.state.artifact_provenance_repo = None
 
         from deerflow.persistence.thread_meta import make_thread_store
 

@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0002_runs_token_usage"
+HEAD = "0003_artifact_provenance"
 BASELINE = "0001_baseline"
 
 
@@ -133,6 +133,7 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
             "feedback",
             "users",
             "run_events",
+            "artifact_provenance",
             "channel_connections",
             "channel_credentials",
             "channel_conversations",
@@ -615,7 +616,7 @@ class TestDecideState:
 # ---------------------------------------------------------------------------
 
 
-def test_head_revision_is_token_usage_revision() -> None:
+def test_head_revision_matches_expected_head() -> None:
     assert _get_head_revision() == HEAD
 
 

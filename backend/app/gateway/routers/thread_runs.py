@@ -366,6 +366,18 @@ def _attach_artifact_file_metadata(entries: list[dict[str, Any]], thread_id: str
     return entries
 
 
+async def _persist_artifact_index(request: Request, entries: list[dict[str, Any]], *, user_id: str | None) -> None:
+    if not entries:
+        return
+    repo = getattr(request.app.state, "artifact_provenance_repo", None)
+    if repo is None:
+        return
+    try:
+        await repo.upsert_many(entries, user_id=user_id)
+    except Exception:
+        logger.warning("Failed to persist artifact provenance index", exc_info=True)
+
+
 def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
@@ -1080,7 +1092,9 @@ async def list_run_artifacts(
         list_events_kwargs["user_id"] = user_id
     events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
     index = build_artifact_index(events)
-    return await asyncio.to_thread(_attach_artifact_file_metadata, index, thread_id, user_id=user_id)
+    index = await asyncio.to_thread(_attach_artifact_file_metadata, index, thread_id, user_id=user_id)
+    await _persist_artifact_index(request, index, user_id=user_id)
+    return index
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

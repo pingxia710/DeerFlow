@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-05 — Phase 6 Chair Operating Brief read model
+
+- Added `ChairOperatingBrief` as a compact AI-readable read model over existing handoffs, evidence refs, capability snapshot version, quality signals, review invocations, account proposals, and Chair decisions.
+- Added owner-scoped `GET /api/threads/{thread_id}/runs/{run_id}/chair-brief` with optional `round_id` and `task_id` filters; it reads existing state and writes no durable decision record.
+- Extended command-room round context injection with a short internal Chair Operating Brief block while keeping existing capability, native round, quality, review, account, and legacy round signal blocks.
+- Added mechanical `known_gaps` only for missing capability snapshot, evidence refs, or quality signals; the brief does not emit PASS/FAIL, choose next steps, dispatch reviewers, or trigger rework.
+- Validation: `cd backend && uv run pytest tests/test_command_room_handoff.py tests/test_command_room_evidence_ref.py tests/test_command_room_quality_signal.py tests/test_command_room_review_invocation.py tests/test_command_room_account_ledger.py tests/test_run_evidence_api.py tests/test_run_quality_loop_api.py tests/test_run_review_invocation_api.py tests/test_run_account_ledger_api.py tests/test_round_context_injection.py tests/test_command_room_chair_brief.py tests/test_run_chair_brief_api.py -q` passed with 42 tests; targeted `ruff check` and `ruff format --check` passed for changed Python files.
+- Deliberately skipped: no UI, no Browser replay, no new external dependency, no raw prompt/result storage, no program quality judgment, no automatic reviewer/opposition dispatch, no automatic rework, and no account auto-apply.
+
 ## 2026-07-05 — Phase 5 AI decision ledger records
 
 - Added `AccountUpdateProposal` and `AccountDecision` as compact AI-authored governance records for Goal, Boundary, Decision, Evidence, Debt, and Learning account updates.

@@ -207,6 +207,17 @@ def _mcp_server_facts(app_config: AppConfig) -> list[dict[str, Any]]:
     return facts
 
 
+def _skill_catalog_source_facts(app_config: AppConfig) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    for name, source in app_config.extensions.skill_catalog_sources.items():
+        raw = _mask_secrets(source.model_dump(by_alias=True))
+        raw["name"] = name
+        raw["source"] = "extensions_config.skillCatalogSources"
+        raw["requires_approval"] = source.trust_level == "community"
+        facts.append(raw)
+    return facts
+
+
 def _subagent_facts(app_config: AppConfig) -> list[dict[str, Any]]:
     from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
     from deerflow.subagents.registry import get_available_subagent_names, list_subagents
@@ -382,6 +393,7 @@ def build_capability_snapshot(
         "tools": [tool.model_dump() for tool in tools],
         "mcp_servers": _mcp_server_facts(app_config),
         "skills": skills,
+        "skill_catalog_sources": _skill_catalog_source_facts(app_config),
         "middleware_stack": [item.model_dump() for item in middleware_stack],
         "filesystem_permissions": [item.model_dump() for item in filesystem_permissions],
         "async_tasks": [

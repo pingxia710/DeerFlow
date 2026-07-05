@@ -612,6 +612,8 @@ When you install `.skill` archives through the Gateway, DeerFlow accepts standar
 
 Gateway-managed custom skills are global resources. Installing, editing, deleting, rolling back, enabling, disabling, and reading raw custom skill content or history require an admin user; regular authenticated users can read only the safe skills summary/detail.
 
+Skill catalogs can be configured in `extensions_config.json` under `skillCatalogSources`. The Gateway exposes `GET /api/skills/catalog`, `POST /api/skills/catalog/preview`, and admin-only `POST /api/skills/catalog/install`; catalog installs reuse the existing `.skill` archive scanner/installer, while high-risk entries return an approval-required response without mutating local skills.
+
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 
 The Gateway also exposes masked AI-readable capability facts at `GET /api/capabilities` and `GET /api/threads/{thread_id}/capabilities` so agents can inspect current models, tools, skills, MCP, sandbox, permissions, middleware, and harness profiles without receiving program-owned next-step judgments.

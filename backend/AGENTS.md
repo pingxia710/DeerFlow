@@ -303,7 +303,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json); API-managed stdio servers are local/dev/test only, command-allowlisted there, and `@modelcontextprotocol/server-filesystem` cannot expose dangerous host paths such as `/`, home roots, credential dirs, or Docker sockets |
-| **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; admin-only `PUT /{name}`, `POST /install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
+| **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; `GET /catalog` and `POST /catalog/preview` read configured skill catalog sources; admin-only `PUT /{name}`, `POST /install`, `POST /catalog/install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
 | **Capabilities** (`/api/capabilities`) | `GET /` and `GET /threads/{thread_id}/capabilities` return masked AI-readable facts about models, tools, skills, MCP, sandbox, permissions, middleware, and harness profiles; these endpoints must not judge next steps or emit PASS/FAIL |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
@@ -515,6 +515,7 @@ Additional providers also live here (`brave`, `browserless`, `ddg_search`, `exa`
 - **Slash activation**: `/skill-name task` loads that enabled skill's `SKILL.md` for the current model call only. The resolver rejects leading whitespace, missing separators, reserved channel commands (`/new`, `/help`, `/bootstrap`, `/status`, `/models`, `/memory`), disabled skills, and skills outside a custom agent's whitelist.
 - **Gateway governance**: `skills/custom`, `extensions_config.json` skill enablement, and the skills prompt cache are global resources in the current storage model. Gateway install/edit/delete/rollback/history/raw custom content/enable-disable operations are admin-only; do not add route-level `user_id` tenancy without also tenant-scoping storage, config, cache, and activation.
 - **Installation**: Admin-only `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory.
+- **Catalog sources**: `extensions_config.json` may define `skillCatalogSources`; catalog list/preview are read-only, catalog install is admin-only, reuses the existing `.skill` archive scanner/installer, records source/hash history, and returns approval-required without local mutation for high-risk entries.
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 

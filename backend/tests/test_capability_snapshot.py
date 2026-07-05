@@ -13,7 +13,7 @@ from app.gateway.deps import get_config
 from app.gateway.routers import capabilities
 from deerflow.capabilities import build_capability_snapshot
 from deerflow.config.app_config import AppConfig
-from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, McpServerConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, McpServerConfig, SkillCatalogSourceConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -72,7 +72,15 @@ def _app_config(tmp_path: Path) -> AppConfig:
                     ),
                     description="GitHub MCP",
                 )
-            }
+            },
+            skillCatalogSources={
+                "official": SkillCatalogSourceConfig(
+                    enabled=True,
+                    url="https://example.com/catalog.json",
+                    trustLevel="official",
+                    description="Official catalog",
+                )
+            },
         ),
         tool_search=ToolSearchConfig(enabled=True),
     )
@@ -100,6 +108,7 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
         "subagents",
         "tools",
         "skills",
+        "skill_catalog_sources",
         "mcp_servers",
         "sandbox",
         "approval_policy",
@@ -119,6 +128,8 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
     assert snapshot["mcp_servers"][0]["oauth"]["client_secret"] == "***"
     assert snapshot["mcp_servers"][0]["oauth"]["refresh_token"] == "***"
     assert snapshot["sandbox"]["environment"] == {"SANDBOX_TOKEN": "***"}
+    assert snapshot["skill_catalog_sources"][0]["name"] == "official"
+    assert snapshot["skill_catalog_sources"][0]["trustLevel"] == "official"
 
 
 def test_capability_snapshot_labels_tools_skills_middleware_and_policy(tmp_path: Path):

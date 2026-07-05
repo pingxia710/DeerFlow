@@ -405,6 +405,8 @@
 
 ## 2026-07-03 — Audit follow-up fail-closed and event contract hardening
 
+- 2026-07-05: Added configured Skill Catalog sources (`skillCatalogSources`) with read-only list/preview endpoints and admin-only catalog install that reuses the existing `.skill` scanner/installer, records source/hash history, and blocks high-risk entries with an approval-required response instead of mutating local skills.
+
 - Fixed the frontend subtask context type so functional `setTasks(current => next)` updates pass `pnpm typecheck` and concurrent live task notifications keep merging against the latest state.
 - Changed backend `make dev` / `make dev-reload` / `make gateway` to bind Gateway to `127.0.0.1` by default, with `DEER_FLOW_BIND_HOST` / `DEER_FLOW_GATEWAY_HOST` as explicit opt-ins.
 - Added route-level `runs:create` permission to stateless `/api/runs/stream` and `/api/runs/wait`; body `thread_id` owner checks remain in `start_run()`.

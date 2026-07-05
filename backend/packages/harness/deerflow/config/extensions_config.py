@@ -72,6 +72,16 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+class SkillCatalogSourceConfig(BaseModel):
+    """Configuration for a remote or local skill catalog source."""
+
+    enabled: bool = Field(default=True, description="Whether this catalog source is enabled")
+    url: str = Field(description="Catalog index URL or local path")
+    trust_level: Literal["official", "community"] = Field(default="community", alias="trustLevel")
+    description: str = Field(default="", description="Human-readable source description")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
@@ -83,6 +93,11 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    skill_catalog_sources: dict[str, SkillCatalogSourceConfig] = Field(
+        default_factory=dict,
+        description="Map of skill catalog source name to configuration",
+        alias="skillCatalogSources",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

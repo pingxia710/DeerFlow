@@ -29,5 +29,13 @@
       "description": "PostgreSQL database access"
     }
   },
+  "skillCatalogSources": {
+    "official": {
+      "enabled": false,
+      "url": "https://example.com/deerflow-skills/index.json",
+      "trustLevel": "official",
+      "description": "Official DeerFlow skill catalog"
+    }
+  },
   "skills": {}
 }

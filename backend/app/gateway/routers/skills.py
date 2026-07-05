@@ -12,6 +12,7 @@ from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill
+from deerflow.skills.catalog import fetch_skill_preview, install_catalog_skill, list_catalog_entries
 from deerflow.skills.installer import SkillAlreadyExistsError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -58,6 +59,11 @@ class SkillInstallResponse(BaseModel):
     success: bool = Field(..., description="Whether the installation was successful")
     skill_name: str = Field(..., description="Name of the installed skill")
     message: str = Field(..., description="Installation result message")
+
+
+class SkillCatalogActionRequest(BaseModel):
+    source: str = Field(..., description="Configured catalog source name")
+    name: str = Field(..., description="Catalog skill name")
 
 
 class CustomSkillContentResponse(SkillResponse):
@@ -131,6 +137,51 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
     except Exception as e:
         logger.error(f"Failed to install skill: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+
+
+@router.get("/skills/catalog", summary="List Skill Catalog")
+@require_auth
+async def list_skill_catalog(request: Request, config: AppConfig = Depends(get_config)) -> dict:
+    try:
+        return {"skills": list_catalog_entries(config)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to list skill catalog: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list skill catalog: {str(e)}")
+
+
+@router.post("/skills/catalog/preview", summary="Preview Catalog Skill")
+@require_auth
+async def preview_catalog_skill(request: Request, body: SkillCatalogActionRequest, config: AppConfig = Depends(get_config)) -> dict:
+    try:
+        return await fetch_skill_preview(config, body.source, body.name)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to preview catalog skill: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to preview catalog skill: {str(e)}")
+
+
+@router.post("/skills/catalog/install", summary="Install Catalog Skill")
+async def install_catalog_skill_route(request: Request, body: SkillCatalogActionRequest, config: AppConfig = Depends(get_config)) -> dict:
+    await _require_skills_admin(request)
+    try:
+        result = await install_catalog_skill(config, body.source, body.name)
+        if result.get("success"):
+            await refresh_skills_system_prompt_cache_async()
+        return result
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to install catalog skill: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install catalog skill: {str(e)}")
 
 
 @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
@@ -341,10 +392,12 @@ async def update_skill(skill_name: str, request: Request, body: SkillUpdateReque
         extensions_config = get_extensions_config()
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
+        config_data = dict(getattr(extensions_config, "model_extra", None) or {})
+        config_data["mcpServers"] = {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()}
+        config_data["skills"] = {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()}
+        catalog_sources = getattr(extensions_config, "skill_catalog_sources", {})
+        if catalog_sources:
+            config_data["skillCatalogSources"] = {name: source.model_dump(by_alias=True) for name, source in catalog_sources.items()}
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)

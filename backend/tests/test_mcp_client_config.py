@@ -44,6 +44,31 @@ def test_extensions_config_resolves_env_variables_inside_nested_collections(monk
     assert resolved["timeout"] == 30
 
 
+def test_extensions_config_loads_skill_catalog_sources_and_preserves_unknown_extra(monkeypatch):
+    monkeypatch.setenv("CATALOG_URL", "file:///tmp/catalog.json")
+    raw_config = {
+        "mcpServers": {},
+        "skills": {},
+        "skillCatalogSources": {
+            "official": {
+                "enabled": True,
+                "url": "$CATALOG_URL",
+                "trustLevel": "official",
+                "description": "Official catalog",
+            }
+        },
+        "unknownFutureField": {"keep": True},
+    }
+
+    config = ExtensionsConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw_config))
+
+    source = config.skill_catalog_sources["official"]
+    assert source.enabled is True
+    assert source.url == "file:///tmp/catalog.json"
+    assert source.trust_level == "official"
+    assert config.model_extra["unknownFutureField"] == {"keep": True}
+
+
 def test_build_server_params_stdio_requires_command():
     config = McpServerConfig(type="stdio", command=None)
 

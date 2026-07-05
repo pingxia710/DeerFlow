@@ -16,6 +16,7 @@ from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
+from deerflow.config.extensions_config import ExtensionsConfig, SkillCatalogSourceConfig
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
 
@@ -85,6 +86,12 @@ def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -
     return archive
 
 
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
     buffer = BytesIO()
     skill_content = content or _skill_content(name)
@@ -92,6 +99,16 @@ def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
         zf.writestr(f"{name}/SKILL.md", skill_content)
         zf.writestr(f"{name}/references/guide.md", "# Guide\n")
     return buffer.getvalue()
+
+
+def _catalog_config(tmp_path: Path, index_path: Path, *, trust_level: str = "official"):
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(exist_ok=True)
+    return SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        extensions=ExtensionsConfig(skillCatalogSources={"official": SkillCatalogSourceConfig(url=str(index_path), trustLevel=trust_level)}),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
 
 
 @pytest.mark.parametrize(
@@ -358,6 +375,120 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     assert response.status_code == 400
     assert "Security scan blocked skill 'blocked-skill': prompt injection" in response.json()["detail"]
     assert not (skills_root / "custom" / "blocked-skill").exists()
+    assert refresh_calls == []
+
+
+def test_catalog_preview_and_install_low_risk_skill(monkeypatch, tmp_path):
+    archive = _make_skill_archive(tmp_path, "catalog-skill")
+    index = tmp_path / "index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "catalog-skill",
+                        "version": "1.0.0",
+                        "archiveUrl": archive.name,
+                        "sha256": _sha256(archive),
+                        "description": "Catalog skill",
+                        "riskLevel": "low",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _catalog_config(tmp_path, index)
+    refresh_calls = []
+
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    monkeypatch.setattr("deerflow.skills.catalog.scan_skill_content", _scan)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        list_response = client.get("/api/skills/catalog")
+        preview_response = client.post("/api/skills/catalog/preview", json={"source": "official", "name": "catalog-skill"})
+        install_response = client.post("/api/skills/catalog/install", json={"source": "official", "name": "catalog-skill"})
+        installed_list_response = client.get("/api/skills/catalog")
+
+    assert list_response.status_code == 200
+    [listed] = list_response.json()["skills"]
+    assert listed["name"] == "catalog-skill"
+    assert listed["installed"] is False
+    assert listed["source"] == "official"
+
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["name"] == "catalog-skill"
+    assert preview["scannerSummary"] == {"decision": "allow", "reason": "ok"}
+    assert Path(preview["previewPath"]).is_file()
+
+    assert install_response.status_code == 200
+    assert install_response.json()["success"] is True
+    assert install_response.json()["approval_required"] is False
+    assert (config.skills.get_skills_path() / "custom" / "catalog-skill" / "SKILL.md").exists()
+    history = get_or_new_skill_storage(app_config=config).read_history("catalog-skill")
+    assert history[-1]["action"] == "catalog_install"
+    assert history[-1]["sha256"] == _sha256(archive)
+    assert refresh_calls == ["refresh"]
+
+    [installed] = installed_list_response.json()["skills"]
+    assert installed["installed"] is True
+    assert installed["enabled"] is True
+
+
+def test_catalog_install_high_risk_requires_approval_without_mutation(monkeypatch, tmp_path):
+    archive = _make_skill_archive(tmp_path, "danger-skill")
+    index = tmp_path / "index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "danger-skill",
+                        "archiveUrl": archive.name,
+                        "sha256": _sha256(archive),
+                        "riskLevel": "high",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _catalog_config(tmp_path, index)
+    refresh_calls = []
+
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    monkeypatch.setattr("deerflow.skills.catalog.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.post("/api/skills/catalog/install", json={"source": "official", "name": "danger-skill"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["approval_required"] is True
+    assert not (config.skills.get_skills_path() / "custom" / "danger-skill").exists()
     assert refresh_calls == []
 
 

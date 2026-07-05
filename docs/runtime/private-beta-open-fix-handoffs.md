@@ -5,9 +5,9 @@ new evidence is produced.
 
 ## Provider Stream Reliability
 
-Status: code-level retry fix added, two post-fix Command Room/Codex runs passed,
-and API/browser replay checks succeeded. Keep this line on the observation list
-through the 1-2 day beta smoke window.
+Status: code-level retry fix added, one API-driven provider smoke and two real
+Command Room subagent-task runs passed, and API/browser replay checks succeeded.
+Keep this line on the observation list through the 1-2 day beta smoke window.
 
 Original evidence:
 
@@ -39,12 +39,21 @@ Minimum acceptance:
   `e68d51f3-2bb7-46a3-b13e-e9ee46818fd9` used `assistant_id=command-room` with
   `model_name=gpt-5.5`, ran a subagent task, reached `success`, and wrote
   `task_completed`, `run.end`, and `run.terminal status=success`.
+- Third real-use confirmation: 2026-07-05 13:07 CST run
+  `cf36bc84-f7c7-4326-ba52-70b706adcb99` used `assistant_id=command-room` with
+  `model_name=gpt-5.5`, ran a subagent task, reached `success`, and wrote
+  `task_completed`, `run.end`, and `run.terminal status=success`.
 - Replay confirmation: 2026-07-05 12:52 CST authenticated run detail/messages
   API replay returned `200` for both post-fix success runs; unauthenticated
-  requests returned `401 not_authenticated`.
+  requests returned `401 not_authenticated`. 2026-07-05 13:13 CST authenticated
+  run detail/messages replay also returned `200` for latest run
+  `cf36bc84-f7c7-4326-ba52-70b706adcb99`, with `messages_count=9` and the latest
+  reply marker present.
 - Browser confirmation: 2026-07-05 12:55 CST authenticated browser load and
   reload of the latest Command Room thread restored the latest reply with zero
-  browser warning/error/pageerror entries.
+  browser warning/error/pageerror entries. 2026-07-05 13:13 CST authenticated
+  browser load and reload restored the newer `cf36bc84...` reply marker with
+  zero browser warning/error/pageerror entries.
 
 Useful checks:
 

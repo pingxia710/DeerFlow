@@ -116,9 +116,9 @@ Use this file for the 1-2 day real-use smoke from
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
   one API-driven Command Room/Codex confirmation run, two real Command Room
   subagent-task runs that reached `success`, authenticated run detail/messages
-  replay, authenticated browser load/reload recovery, and a post-fix memory
-  update success checkpoint, but the beta observation window still needs
-  continued real sessions.
+  replay including the latest run, authenticated browser load/reload recovery,
+  and a post-fix memory update success checkpoint, but the beta observation
+  window still needs continued real sessions.
 
 ## Open Follow-Ups
 
@@ -145,7 +145,11 @@ handoffs.
   replay checks also passed: 12:52 CST
   authenticated run detail/messages APIs returned `200` for both post-fix
   success runs, and 12:55 CST authenticated browser load/reload restored the
-  latest thread reply with zero browser warning/error/pageerror entries.
+  latest thread reply with zero browser warning/error/pageerror entries. 13:13
+  CST authenticated API replay for latest run
+  `cf36bc84-f7c7-4326-ba52-70b706adcb99` returned `200` with `messages_count=9`,
+  and authenticated browser load/reload restored the newer reply marker with
+  zero browser warning/error/pageerror entries.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

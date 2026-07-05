@@ -81,19 +81,21 @@ Use this file for the 1-2 day real-use smoke from
   `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; the latest rows in
   this log are the authoritative observation checkpoints.
 - Frontend targeted tests: covered by `message-merge.test.ts` and
-  `thread-history.spec.ts`; latest recorded preflight passed `63` unit tests and
-  `16` E2E tests at `d0800a23`.
+  `thread-history.spec.ts`; latest recorded preflight at `a1b9b489` passed `63`
+  unit tests and `16` E2E tests.
 - Private beta runbook: present in `docs/runtime/private-beta-runbook.md` with
   startup config, known limits, preflight, migration dry-run caveats, and 1-2
   day smoke steps.
 - Known limits/start config: recorded; the isolated production-shaped Gateway
   boot passed with `checkpointer: sqlite`, `database.backend: sqlite`, and
-  `run_events.backend: db`. Existing data migration remains incomplete because
-  the latest dry-run still reports ownerless legacy thread assignments and
-  conflicts requiring owner review before applying changes.
+  `run_events.backend: db`; latest backend guard/security preflight at
+  `a8f42500` passed `25` tests with `1` warning. Existing data migration remains
+  incomplete because the latest dry-run still reports ownerless legacy thread
+  assignments and conflicts requiring owner review before applying changes.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
-  one real Command Room/Codex confirmation run, but the beta observation window
-  still needs continued real sessions.
+  one real Command Room/Codex confirmation run plus a post-fix memory update
+  success checkpoint, but the beta observation window still needs continued real
+  sessions.
 
 ## Open Follow-Ups
 
@@ -118,8 +120,8 @@ handoffs.
   uncontrolled-to-controlled warning; no duplicate-key warning after the
   restored-message fix. Older `logs/frontend.log` entries contained React Query
   `Query data cannot be undefined` warnings for query key `["skills"]`, but the
-  12:02 fresh new-chat UI smoke hit `/api/skills` with `200` and did not
-  reproduce browser warnings/errors.
+  12:02 and 12:29 fresh new-chat UI smokes hit `/api/skills` with `200` and did
+  not reproduce browser warnings/errors.
 - Workstation startup boundary: this local process depends on the temp
   `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
   trusted host mounts.

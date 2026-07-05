@@ -439,7 +439,7 @@
 | terminal status / `terminal_reason` / store-only replay | P0-10、P0-14、P1-07、P1-11、P1-12 | `backend/tests/test_run_manager.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_run_event_store_pagination.py`；`backend/tests/test_persistence_bootstrap_concurrency.py` | 重点验证 terminal_reason 持久化、迟到写不覆盖、wait/detail/timeline 一致；跨 worker lease/fencing 需按部署补并发或 E2E。 |
 | checkpoint run_id-not-key contract | P0-11、P1-08、P1-12 | `backend/tests/test_owner_checkpoint_contract.py`；`backend/tests/test_run_manager.py` | 明确 checkpoint 定位不把 `run_id` 当隔离键；rollback 审计和 UI 可解释性仍需补 API/E2E 覆盖。 |
 | 同一用户多会话并发与同 thread active-run 排他 | P0-03、P0-04、P1-01、P0-14 | `backend/tests/test_run_manager.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_persistence_bootstrap_concurrency.py` | 候选入口偏后端状态机/并发；真实双会话 stream 与多标签一致性需前端/E2E smoke。 |
-| 多会话切换前端 smoke | P0-05、P0-06、P1-01、P1-09、P2-01 | 待补测试；建议新增前端/E2E smoke，覆盖切 A→B→A、刷新 replay、分类展示、空 thread | 当前映射未发现明确前端测试入口；不应视为已自动化覆盖。 |
+| 多会话切换前端 smoke | P0-05、P0-06、P1-01、P1-09、P2-01 | `frontend/tests/e2e/thread-history.spec.ts` | 已覆盖已有会话 A→B→reload→A 的历史隔离；空 thread、分类展示和真实 replay 仍需继续用 E2E smoke 补强。 |
 | 主 AI round 上下文、边界与 secrets | P0-12、P0-13、P1-04、P1-10、P2-10 | `backend/tests/test_task_event_contract.py`；`backend/tests/test_gateway_services.py`；待补安全/脱敏测试 | 可从 task/event/gateway 契约切入；secrets 脱敏、边界授权记录、诊断字段不泄密需专项测试或 manual 验收。 |
 
 ## 最小通过标准建议

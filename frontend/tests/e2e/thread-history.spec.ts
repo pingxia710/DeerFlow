@@ -94,6 +94,70 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("switching existing chats and reloading keeps histories isolated", async ({
+    page,
+  }) => {
+    const markerA = "THREAD-A-HISTORY-MARKER";
+    const markerB = "THREAD-B-HISTORY-MARKER";
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "First conversation",
+          updated_at: "2025-06-01T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "thread-a-human",
+              content: [{ type: "text", text: markerA }],
+            },
+            {
+              type: "ai",
+              id: "thread-a-ai",
+              content: "Answer for thread A",
+            },
+          ],
+        },
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Second conversation",
+          updated_at: "2025-06-02T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "thread-b-human",
+              content: [{ type: "text", text: markerB }],
+            },
+            {
+              type: "ai",
+              id: "thread-b-ai",
+              content: "Answer for thread B",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(markerA)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(markerB)).toHaveCount(0);
+
+    await page.getByText("Second conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText(markerB)).toBeVisible();
+    await expect(page.getByText(markerA)).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.getByText(markerB)).toBeVisible();
+    await expect(page.getByText(markerA)).toHaveCount(0);
+
+    await page.getByText("First conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(markerA)).toBeVisible();
+    await expect(page.getByText(markerB)).toHaveCount(0);
+  });
+
   test("input box recalls previous prompts with arrow keys", async ({
     page,
   }) => {

@@ -265,6 +265,29 @@ def test_codex_provider_orders_streamed_output_items_by_output_index(monkeypatch
     ]
 
 
+def test_codex_provider_missing_completed_raises_typed_stream_error(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"partial"}]}}',
+        "data: [DONE]",
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    with pytest.raises(codex_provider_module.CodexStreamIncompleteError, match="response.completed"):
+        model._stream_response(headers={}, payload={})
+
+
 def test_codex_provider_preserves_completed_output_when_stream_only_has_placeholder(monkeypatch):
     monkeypatch.setattr(
         CodexChatModel,

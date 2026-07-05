@@ -58,6 +58,10 @@ def _build_usage_metadata(oai_usage: dict) -> dict:
 MAX_RETRIES = 3
 
 
+class CodexStreamIncompleteError(RuntimeError):
+    """Codex SSE ended before the required response.completed event."""
+
+
 class CodexChatModel(BaseChatModel):
     """LangChain chat model using ChatGPT Codex Responses API.
 
@@ -257,12 +261,12 @@ class CodexChatModel(BaseChatModel):
                     time.sleep(wait_ms / 1000)
                 else:
                     raise
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError, CodexStreamIncompleteError) as e:
                 last_error = e
                 if attempt >= self.retry_max_attempts:
                     raise
                 wait_ms = 1000 * (1 << (attempt - 1))
-                logger.warning(f"Codex API connection error, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms: {e}")
+                logger.warning(f"Codex API connection/stream error, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms: {e}")
                 time.sleep(wait_ms / 1000)
             except Exception:
                 raise
@@ -292,7 +296,7 @@ class CodexChatModel(BaseChatModel):
                         completed_response = data["response"]
 
         if not completed_response:
-            raise RuntimeError("Codex API stream ended without response.completed event")
+            raise CodexStreamIncompleteError("Codex API stream ended without response.completed event")
 
         # ChatGPT Codex can emit the final assistant content only in stream events.
         # When response.completed arrives, response.output may still be empty.

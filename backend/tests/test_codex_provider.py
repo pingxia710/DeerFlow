@@ -253,6 +253,29 @@ def test_call_codex_api_retries_transient_connection_errors(monkeypatch):
     assert sleeps == [1, 2]
 
 
+def test_call_codex_api_retries_incomplete_stream(monkeypatch):
+    from deerflow.models.openai_codex_provider import CodexStreamIncompleteError
+
+    model = _make_model()
+    attempts = 0
+    sleeps = []
+
+    def flaky_stream_response(headers, payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise CodexStreamIncompleteError("Codex API stream ended without response.completed event")
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_refresh_codex_auth", lambda: None)
+    monkeypatch.setattr(model, "_stream_response", flaky_stream_response)
+    monkeypatch.setattr("deerflow.models.openai_codex_provider.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert model._call_codex_api([HumanMessage(content="Hello")]) == {"output": [], "usage": {}}
+    assert attempts == 2
+    assert sleeps == [1]
+
+
 # ---------------------------------------------------------------------------
 # _parse_sse_data_line
 # ---------------------------------------------------------------------------

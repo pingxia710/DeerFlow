@@ -9,7 +9,6 @@ import {
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
-  getLatestRunRoundId,
   getTerminalTransitionRunIds,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
@@ -25,11 +24,11 @@ import {
   partitionKnownRunIds,
   readRunMessagesPageResponse,
   removeSetItems,
+  resolveThreadHistoryReset,
+  roundIdOfRun,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
   shouldAutoLoadLatestRun,
-  shouldContinueRunMessagesPagination,
-  shouldResetHistoryForRoundChange,
   taskEventRunMessageKey,
   threadRunsQueryKey,
 } from "@/core/threads/hooks";
@@ -70,6 +69,91 @@ test("threadRunsQueryKey keeps run lists separate from thread metadata", () => {
     "thread-a",
     "runs",
   ]);
+});
+
+test("round id changes revalidate thread history without clearing visible rows", () => {
+  const oldRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      id: "old-ai",
+      type: "ai",
+      content: "old round",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+  const newRow = {
+    run_id: "run-2",
+    seq: 1,
+    content: {
+      id: "new-ai",
+      type: "ai",
+      content: "new round",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-05-22T00:01:00Z",
+  } as RunMessage;
+  const appended = {
+    id: "appended-ai",
+    type: "ai",
+    content: "streamed while history reloads",
+  } as Message;
+
+  expect(
+    resolveThreadHistoryReset({
+      enabled: true,
+      threadChanged: false,
+      previousRoundId: "round-1",
+      latestRoundId: "round-2",
+    }),
+  ).toBe("revalidate");
+
+  const mergedRows = mergeFetchedRunMessages([oldRow], [newRow], "run-2", true);
+
+  expect(mergedRows.map((message) => message.run_id)).toEqual([
+    "run-1",
+    "run-2",
+  ]);
+  expect(
+    buildVisibleHistoryMessages(
+      mergedRows,
+      new Set(),
+      [appended],
+      [{ run_id: "run-2", round_id: "round-2" } as unknown as Run],
+    ).map((message) => message.id),
+  ).toEqual(["new-ai", "old-ai", "appended-ai"]);
+});
+
+test("thread id or disabled history still clears thread history state", () => {
+  expect(
+    resolveThreadHistoryReset({
+      enabled: true,
+      threadChanged: true,
+      previousRoundId: "round-1",
+      latestRoundId: "round-2",
+    }),
+  ).toBe("clear");
+  expect(
+    resolveThreadHistoryReset({
+      enabled: false,
+      threadChanged: false,
+      previousRoundId: "round-1",
+      latestRoundId: "round-2",
+    }),
+  ).toBe("clear");
+});
+
+test("roundIdOfRun reads round ids from run responses", () => {
+  expect(
+    roundIdOfRun({ run_id: "run-1", round_id: "round-1" } as unknown as Run),
+  ).toBe("round-1");
+  expect(
+    roundIdOfRun({
+      run_id: "run-2",
+      metadata: { round_id: "round-2" },
+    } as unknown as Run),
+  ).toBe("round-2");
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {
@@ -386,13 +470,6 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
   ).toBeNull();
 });
 
-test("shouldContinueRunMessagesPagination lets automatic loads stop after the first page", () => {
-  expect(shouldContinueRunMessagesPagination(8, false)).toBe(false);
-  expect(shouldContinueRunMessagesPagination(8, true)).toBe(true);
-  expect(shouldContinueRunMessagesPagination(null, true)).toBe(false);
-  expect(shouldContinueRunMessagesPagination(undefined, true)).toBe(false);
-});
-
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
@@ -701,18 +778,6 @@ test("readRunMessagesPageResponse rejects html without surfacing a JSON SyntaxEr
   ).rejects.toThrow("Failed to load thread history.");
 });
 
-test("readRunMessagesPageResponse rejects html without surfacing a 200 OK statusText", async () => {
-  await expect(
-    readRunMessagesPageResponse(
-      new Response("<html></html>", {
-        status: 200,
-        statusText: "OK",
-        headers: { "Content-Type": "text/html" },
-      }),
-    ),
-  ).rejects.toThrow("Failed to load thread history.");
-});
-
 test("readRunMessagesPageResponse uses backend JSON error detail", async () => {
   await expect(
     readRunMessagesPageResponse(
@@ -758,17 +823,6 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
-});
-
-test("round history reset only happens when latest run changes round", () => {
-  expect(
-    getLatestRunRoundId([
-      { run_id: "R2", round_id: "round-2" },
-    ] as unknown as Run[]),
-  ).toBe("round-2");
-  expect(shouldResetHistoryForRoundChange(null, "round-2")).toBe(false);
-  expect(shouldResetHistoryForRoundChange("round-2", "round-2")).toBe(false);
-  expect(shouldResetHistoryForRoundChange("round-1", "round-2")).toBe(true);
 });
 
 test("getTerminalTransitionRunIds selects active runs that just reached a terminal status", () => {
@@ -1363,18 +1417,8 @@ test("shouldAutoContinueOnEmptyRun stops once consecutive empty loads reach the 
 });
 
 test("shouldAutoContinueOnEmptyRun honors a custom safety cap when provided", () => {
-  expect(
-    shouldAutoContinueOnEmptyRun(0, 0, { maxConsecutiveEmptyLoads: 1 }),
-  ).toBe(true);
-  expect(
-    shouldAutoContinueOnEmptyRun(0, 1, { maxConsecutiveEmptyLoads: 1 }),
-  ).toBe(false);
-});
-
-test("shouldAutoContinueOnEmptyRun stops when automatic pagination is disabled", () => {
-  expect(shouldAutoContinueOnEmptyRun(0, 0, { continuePages: false })).toBe(
-    false,
-  );
+  expect(shouldAutoContinueOnEmptyRun(0, 0, 1)).toBe(true);
+  expect(shouldAutoContinueOnEmptyRun(0, 1, 1)).toBe(false);
 });
 
 test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {

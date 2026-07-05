@@ -44,6 +44,22 @@ curl http://localhost:8001/health
 curl http://localhost:2026/api/models
 ```
 
+Gateway 每个响应都会带 `X-Request-ID`。复现问题时可以自己传入，方便把代理、前端和 Gateway 日志串起来：
+
+```bash
+curl -H "X-Request-ID: debug-$(date +%s)" http://localhost:8001/health
+```
+
+Gateway access log 每个请求会写一行 JSON，包含 `event: "gateway.request"`、
+`request_id`、`method`、`path`、`status_code` 和 `duration_ms`。
+
+Gateway 也在 `/metrics` 暴露 Prometheus text metrics；它走正常 Gateway
+认证。Dashboard 可先接 `deerflow_gateway_http_requests_total`、
+`deerflow_gateway_http_request_duration_seconds_sum` 和
+`deerflow_gateway_uptime_seconds`。
+第一批告警建议只看持续 5xx 请求率、平均延迟上升
+（`duration_sum / requests_total`）和 scrape 缺失。
+
 ## 配置升级
 
 当 `config.yaml` schema 更新时（由 `config_version` 字段标识），运行：
@@ -150,6 +166,24 @@ DeerFlow 将持久化数据存储在：
 - **自定义 Agent 配置**：`backend/agents/*/config.yaml`
 
 对于生产部署，定期备份这些目录。Docker 部署中，确保这些目录绑定挂载到持久卷，而不是容器内部。
+
+最小本地备份：
+
+```bash
+tar -czf deerflow-backup-$(date +%Y%m%d%H%M%S).tgz backend/.deer-flow
+```
+
+恢复或回滚：
+
+```bash
+make stop
+mv backend/.deer-flow backend/.deer-flow.rollback.$(date +%Y%m%d%H%M%S)
+tar -xzf deerflow-backup-YYYYMMDDHHMMSS.tgz
+make dev
+curl http://localhost:8001/health
+```
+
+除非备份目标已加密且有访问控制，不要把 `.env`、API key、OAuth/session secrets 放进共享备份包。
 
 ## 停止和重启服务
 

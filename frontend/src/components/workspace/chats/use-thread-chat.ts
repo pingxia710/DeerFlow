@@ -13,6 +13,60 @@ type ThreadChatResetDetail = {
   force?: boolean;
 };
 
+type ThreadChatRouteSyncInput = {
+  committedPathname: string;
+  threadIdFromPath: string;
+  currentThreadId: string;
+  newThreadId: string | null;
+  createThreadId: () => string;
+};
+
+type ThreadChatRouteSyncState = {
+  threadId: string;
+  isNewThread: boolean;
+  newThreadId: string | null;
+};
+
+export function threadIdFromCommittedPathname(pathname: string) {
+  const segments = pathname.split("/").filter(Boolean);
+  const chatsIndex = segments.lastIndexOf("chats");
+  const threadId = chatsIndex >= 0 ? segments[chatsIndex + 1] : undefined;
+  if (!threadId || threadId === "new") {
+    return null;
+  }
+  try {
+    return decodeURIComponent(threadId);
+  } catch {
+    return threadId;
+  }
+}
+
+export function resolveThreadChatRouteSync({
+  committedPathname,
+  threadIdFromPath,
+  currentThreadId,
+  newThreadId,
+  createThreadId,
+}: ThreadChatRouteSyncInput): ThreadChatRouteSyncState {
+  if (committedPathname.endsWith("/new")) {
+    const nextThreadId = newThreadId ?? createThreadId();
+    return {
+      threadId: nextThreadId,
+      isNewThread: true,
+      newThreadId: nextThreadId,
+    };
+  }
+
+  return {
+    threadId:
+      threadIdFromPath === "new"
+        ? (threadIdFromCommittedPathname(committedPathname) ?? currentThreadId)
+        : threadIdFromPath,
+    isNewThread: false,
+    newThreadId: null,
+  };
+}
+
 export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
   if (typeof window === "undefined") {
     return;
@@ -43,14 +97,12 @@ export function useThreadChat() {
 
   const searchParams = useSearchParams();
   const [threadId, setThreadIdState] = useState(() => {
-    return threadIdFromPath === "new"
+    return isNewPath && threadIdFromPath === "new"
       ? (newThreadIdRef.current ?? uuid())
-      : threadIdFromPath;
+      : (threadIdFromCommittedPathname(actualPathname) ?? threadIdFromPath);
   });
 
-  const [isNewThreadState, setIsNewThreadState] = useState(
-    () => threadIdFromPath === "new",
-  );
+  const [isNewThreadState, setIsNewThreadState] = useState(() => isNewPath);
 
   const resetToNewThread = useCallback(() => {
     const nextThreadId = uuid();
@@ -60,23 +112,19 @@ export function useThreadChat() {
   }, []);
 
   useEffect(() => {
-    if (pathname.endsWith("/new")) {
-      const nextThreadId = newThreadIdRef.current ?? uuid();
-      newThreadIdRef.current = nextThreadId;
-      setIsNewThreadState(true);
-      setThreadIdState(nextThreadId);
-      return;
-    }
-    newThreadIdRef.current = null;
-    // Native history updates the canonical pathname but preserves the route
-    // tree, so useParams may still return the stale "new" value. Avoid passing
-    // it to downstream hooks (e.g. useStream), which would cause a 422.
-    if (threadIdFromPath === "new") {
-      return;
-    }
-    setIsNewThreadState(false);
-    setThreadIdState(threadIdFromPath);
-  }, [pathname, threadIdFromPath]);
+    const committedPathname =
+      typeof window === "undefined" ? pathname : window.location.pathname;
+    const nextState = resolveThreadChatRouteSync({
+      committedPathname,
+      threadIdFromPath,
+      currentThreadId: threadId,
+      newThreadId: newThreadIdRef.current,
+      createThreadId: uuid,
+    });
+    newThreadIdRef.current = nextState.newThreadId;
+    setIsNewThreadState(nextState.isNewThread);
+    setThreadIdState(nextState.threadId);
+  }, [pathname, threadId, threadIdFromPath]);
 
   useEffect(() => {
     const handleReset = (event: Event) => {

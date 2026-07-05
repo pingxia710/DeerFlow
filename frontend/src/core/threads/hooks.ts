@@ -1,4 +1,4 @@
-import type { Message, Run as LangGraphRun } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
@@ -68,11 +68,6 @@ export type ThreadStreamOptions = {
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
-};
-
-type Run = LangGraphRun & {
-  round_id?: string | null;
-  round_state?: string | null;
 };
 
 type SendMessageOptions = {
@@ -968,19 +963,6 @@ export function findLatestUnloadedRunIndex(
   return -1;
 }
 
-export function getLatestRunRoundId(runs: Run[] | undefined): string | null {
-  return stringValue(runs?.[0]?.round_id) ?? null;
-}
-
-export function shouldResetHistoryForRoundChange(
-  previousRoundId: string | null,
-  nextRoundId: string | null,
-): boolean {
-  return Boolean(
-    previousRoundId && nextRoundId && previousRoundId !== nextRoundId,
-  );
-}
-
 const ACTIVE_RUN_REVALIDATION_STATUSES = new Set([
   "pending",
   "running",
@@ -1026,21 +1008,12 @@ export function getTerminalTransitionRunIds(
 
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
 
-type EmptyRunAutoContinueOptions = {
-  continuePages?: boolean;
-  maxConsecutiveEmptyLoads?: number;
-};
-
 export function shouldAutoContinueOnEmptyRun(
   fetchedMessageCount: number,
   consecutiveEmptyLoads: number,
-  {
-    continuePages = true,
-    maxConsecutiveEmptyLoads = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
-  }: EmptyRunAutoContinueOptions = {},
+  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
 ): boolean {
   return (
-    continuePages &&
     fetchedMessageCount === 0 &&
     consecutiveEmptyLoads < maxConsecutiveEmptyLoads
   );
@@ -1084,13 +1057,6 @@ export function getNextRunMessagesBeforeSeq(
   return getOldestRunMessageSeq(result.data) ?? undefined;
 }
 
-export function shouldContinueRunMessagesPagination(
-  nextBeforeSeq: number | null | undefined,
-  continuePages: boolean,
-): boolean {
-  return continuePages && typeof nextBeforeSeq === "number";
-}
-
 export function buildRunMessagesUrl(
   baseUrl: string,
   threadId: string,
@@ -1119,7 +1085,7 @@ export async function readRunMessagesPageResponse(
   try {
     return (await response.json()) as RunMessagesPageResponse;
   } catch {
-    throw new Error(fallback);
+    throw new Error(response.statusText || fallback);
   }
 }
 
@@ -2708,9 +2674,43 @@ type ThreadHistoryOptions = {
   pendingSupersededRunIds?: ReadonlySet<string>;
 };
 
-type LoadMessagesOptions = {
-  continuePages?: boolean;
+type RunWithRound = Run & {
+  metadata?: { round_id?: unknown };
+  round_id?: unknown;
 };
+
+export function roundIdOfRun(run: Run | undefined) {
+  const roundId = (run as RunWithRound | undefined)?.round_id;
+  if (typeof roundId === "string") {
+    return roundId;
+  }
+  const metadataRoundId = (run as RunWithRound | undefined)?.metadata?.round_id;
+  return typeof metadataRoundId === "string" ? metadataRoundId : null;
+}
+
+export function resolveThreadHistoryReset({
+  enabled,
+  threadChanged,
+  previousRoundId,
+  latestRoundId,
+}: {
+  enabled: boolean;
+  threadChanged: boolean;
+  previousRoundId: string | null;
+  latestRoundId: string | null;
+}) {
+  if (!enabled || threadChanged) {
+    return "clear";
+  }
+  if (
+    previousRoundId !== null &&
+    latestRoundId !== null &&
+    previousRoundId !== latestRoundId
+  ) {
+    return "revalidate";
+  }
+  return "none";
+}
 
 export function useThreadHistory(
   threadId: string,
@@ -2728,10 +2728,10 @@ export function useThreadHistory(
   const loadGenerationRef = useRef(0);
   const historyLoadAbortRef = useRef<AbortController | null>(null);
   const autoLoadedLatestRunIdRef = useRef<string | null>(null);
-  const latestRoundIdRef = useRef<string | null>(null);
   const activeRunIdsRef = useRef<Set<string>>(new Set());
   const pendingRefreshRunIdsRef = useRef<Set<string>>(new Set());
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
+  const latestRoundIdRef = useRef<string | null>(null);
   const updateSubtask = useUpdateSubtask();
   const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
@@ -2752,191 +2752,176 @@ export function useThreadHistory(
     );
   }, [appendedMessages, messageRows, runs.data, supersededRunIds]);
 
-  const loadMessages = useCallback(
-    async (options: LoadMessagesOptions = {}) => {
-      if (!enabled) {
-        return;
+  const loadMessages = useCallback(async () => {
+    if (!enabled) {
+      return;
+    }
+    const loadGeneration = loadGenerationRef.current;
+    if (loadingRef.current) {
+      const pendingRunIndex = findLatestUnloadedRunIndex(
+        runsRef.current,
+        loadedRunIdsRef.current,
+      );
+      const pendingRun = runsRef.current[pendingRunIndex];
+      if (pendingRun && pendingRun.run_id !== loadingRunIdRef.current) {
+        pendingLoadRef.current = true;
       }
-      const { continuePages = true } = options;
-      const loadGeneration = loadGenerationRef.current;
-      if (loadingRef.current) {
-        const pendingRunIndex = findLatestUnloadedRunIndex(
+      return;
+    }
+    if (runsRef.current.length === 0) {
+      return;
+    }
+
+    loadingRef.current = true;
+    setLoading(true);
+    const abortController = new AbortController();
+    historyLoadAbortRef.current?.abort();
+    historyLoadAbortRef.current = abortController;
+
+    try {
+      let consecutiveEmptyLoads = 0;
+      do {
+        pendingLoadRef.current = false;
+
+        const nextRunIndex = findLatestUnloadedRunIndex(
           runsRef.current,
           loadedRunIdsRef.current,
         );
-        const pendingRun = runsRef.current[pendingRunIndex];
-        if (pendingRun && pendingRun.run_id !== loadingRunIdRef.current) {
-          pendingLoadRef.current = true;
-        }
-        return;
-      }
-      if (runsRef.current.length === 0) {
-        return;
-      }
+        indexRef.current = nextRunIndex;
 
-      loadingRef.current = true;
-      setLoading(true);
-      const abortController = new AbortController();
-      historyLoadAbortRef.current?.abort();
-      historyLoadAbortRef.current = abortController;
-
-      try {
-        let consecutiveEmptyLoads = 0;
-        do {
-          pendingLoadRef.current = false;
-
-          const nextRunIndex = findLatestUnloadedRunIndex(
-            runsRef.current,
-            loadedRunIdsRef.current,
-          );
-          indexRef.current = nextRunIndex;
-
-          const run = runsRef.current[nextRunIndex];
-          if (!run) {
-            indexRef.current = -1;
-            return;
-          }
-
-          const requestThreadId = threadIdRef.current;
-          loadingRunIdRef.current = run.run_id;
-          const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
-          const url = buildRunMessagesUrl(
-            getBackendBaseURL(),
-            requestThreadId,
-            run.run_id,
-            beforeSeq,
-          );
-          const result: RunMessagesPageResponse = await fetch(url, {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-            timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
-            signal: abortController.signal,
-          }).then(readRunMessagesPageResponse);
-          if (
-            loadGenerationRef.current !== loadGeneration ||
-            threadIdRef.current !== requestThreadId ||
-            !runsRef.current.some(
-              (currentRun) => currentRun.run_id === run.run_id,
-            )
-          ) {
-            return;
-          }
-          applyTaskEventRunMessages(
-            result.data,
-            updateSubtaskRef.current,
-            requestThreadId,
-            appliedTaskEventKeysRef.current,
-          );
-          const _messages = result.data.filter(isVisibleHistoryRunMessage);
-          setMessageRows((prev) =>
-            mergeFetchedRunMessages(
-              prev,
-              _messages,
-              run.run_id,
-              beforeSeq === undefined,
-            ),
-          );
-          const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
-          if (typeof nextBeforeSeq === "number") {
-            runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
-            pendingLoadRef.current =
-              pendingLoadRef.current ||
-              shouldContinueRunMessagesPagination(nextBeforeSeq, continuePages);
-          } else if (nextBeforeSeq === undefined) {
-            console.warn(
-              `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
-            );
-          } else {
-            runBeforeSeqRef.current.delete(run.run_id);
-            loadedRunIdsRef.current.add(run.run_id);
-            if (
-              shouldAutoContinueOnEmptyRun(
-                _messages.length,
-                consecutiveEmptyLoads,
-                { continuePages },
-              )
-            ) {
-              consecutiveEmptyLoads += 1;
-              pendingLoadRef.current = true;
-            } else {
-              consecutiveEmptyLoads = 0;
-            }
-          }
-          indexRef.current = findLatestUnloadedRunIndex(
-            runsRef.current,
-            loadedRunIdsRef.current,
-          );
-        } while (pendingLoadRef.current);
-      } catch (err) {
-        if (isAbortError(err)) {
+        const run = runsRef.current[nextRunIndex];
+        if (!run) {
+          indexRef.current = -1;
           return;
         }
-        console.warn("Failed to load thread history.", err);
-      } finally {
-        if (historyLoadAbortRef.current === abortController) {
-          historyLoadAbortRef.current = null;
+
+        const requestThreadId = threadIdRef.current;
+        loadingRunIdRef.current = run.run_id;
+        const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
+        const url = buildRunMessagesUrl(
+          getBackendBaseURL(),
+          requestThreadId,
+          run.run_id,
+          beforeSeq,
+        );
+        const result: RunMessagesPageResponse = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+          signal: abortController.signal,
+        }).then(readRunMessagesPageResponse);
+        if (
+          loadGenerationRef.current !== loadGeneration ||
+          threadIdRef.current !== requestThreadId ||
+          !runsRef.current.some(
+            (currentRun) => currentRun.run_id === run.run_id,
+          )
+        ) {
+          return;
         }
-        if (loadGenerationRef.current === loadGeneration) {
-          loadingRef.current = false;
-          loadingRunIdRef.current = null;
-          setLoading(false);
+        applyTaskEventRunMessages(
+          result.data,
+          updateSubtaskRef.current,
+          requestThreadId,
+          appliedTaskEventKeysRef.current,
+        );
+        const _messages = result.data.filter(isVisibleHistoryRunMessage);
+        setMessageRows((prev) =>
+          mergeFetchedRunMessages(
+            prev,
+            _messages,
+            run.run_id,
+            beforeSeq === undefined,
+          ),
+        );
+        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
+        if (typeof nextBeforeSeq === "number") {
+          runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
+          pendingLoadRef.current = true;
+        } else if (nextBeforeSeq === undefined) {
+          console.warn(
+            `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
+          );
+        } else {
+          runBeforeSeqRef.current.delete(run.run_id);
+          loadedRunIdsRef.current.add(run.run_id);
+          if (
+            shouldAutoContinueOnEmptyRun(
+              _messages.length,
+              consecutiveEmptyLoads,
+            )
+          ) {
+            consecutiveEmptyLoads += 1;
+            pendingLoadRef.current = true;
+          } else {
+            consecutiveEmptyLoads = 0;
+          }
         }
+        indexRef.current = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+      } while (pendingLoadRef.current);
+    } catch (err) {
+      if (isAbortError(err)) {
+        return;
       }
-    },
-    [enabled],
-  );
+      console.warn("Failed to load thread history.", err);
+    } finally {
+      if (historyLoadAbortRef.current === abortController) {
+        historyLoadAbortRef.current = null;
+      }
+      if (loadGenerationRef.current === loadGeneration) {
+        loadingRef.current = false;
+        loadingRunIdRef.current = null;
+        setLoading(false);
+      }
+    }
+  }, [enabled]);
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
+    const latestRoundId = roundIdOfRun(runs.data?.[0]);
+    const resetMode = resolveThreadHistoryReset({
+      enabled,
+      threadChanged,
+      previousRoundId: latestRoundIdRef.current,
+      latestRoundId,
+    });
     threadIdRef.current = threadId;
 
-    if (!enabled || threadChanged) {
+    if (resetMode !== "none") {
       loadGenerationRef.current += 1;
       historyLoadAbortRef.current?.abort();
       historyLoadAbortRef.current = null;
-      runsRef.current = [];
       indexRef.current = -1;
       pendingLoadRef.current = false;
       loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
       runBeforeSeqRef.current = new Map();
       autoLoadedLatestRunIdRef.current = null;
-      latestRoundIdRef.current = null;
-      activeRunIdsRef.current = new Set();
-      pendingRefreshRunIdsRef.current = new Set();
-      appliedTaskEventKeysRef.current = new Set();
       loadingRef.current = false;
       setLoading(false);
-      setMessageRows([]);
-      setAppendedMessages([]);
+      if (resetMode === "clear") {
+        runsRef.current = [];
+        activeRunIdsRef.current = new Set();
+        pendingRefreshRunIdsRef.current = new Set();
+        appliedTaskEventKeysRef.current = new Set();
+        latestRoundIdRef.current = null;
+        setMessageRows([]);
+        setAppendedMessages([]);
+      }
     }
 
     if (!enabled) {
       return;
     }
 
-    const latestRoundId = getLatestRunRoundId(runs.data);
-    if (
-      shouldResetHistoryForRoundChange(latestRoundIdRef.current, latestRoundId)
-    ) {
-      loadGenerationRef.current += 1;
-      historyLoadAbortRef.current?.abort();
-      historyLoadAbortRef.current = null;
-      indexRef.current = -1;
-      pendingLoadRef.current = false;
-      loadingRunIdRef.current = null;
-      loadedRunIdsRef.current = new Set();
-      runBeforeSeqRef.current = new Map();
-      autoLoadedLatestRunIdRef.current = null;
-      appliedTaskEventKeysRef.current = new Set();
-      loadingRef.current = false;
-      setLoading(false);
-      setMessageRows([]);
-      setAppendedMessages([]);
+    if (latestRoundId !== null) {
+      latestRoundIdRef.current = latestRoundId;
     }
-    latestRoundIdRef.current = latestRoundId ?? latestRoundIdRef.current;
 
     if (runs.data && runs.data.length > 0) {
       runsRef.current = runs.data ?? [];
@@ -2950,7 +2935,7 @@ export function useThreadHistory(
       shouldAutoLoadLatestRun(latestRunId, autoLoadedLatestRunIdRef.current)
     ) {
       autoLoadedLatestRunIdRef.current = latestRunId;
-      loadMessages({ continuePages: false }).catch(() => {
+      loadMessages().catch(() => {
         toast.error("Failed to load thread history.");
       });
     }
@@ -2992,7 +2977,7 @@ export function useThreadHistory(
         runsRef.current,
         loadedRunIdsRef.current,
       );
-      loadMessages({ continuePages: false }).catch(() => {
+      loadMessages().catch(() => {
         toast.error("Failed to load thread history.");
       });
     },
@@ -3041,10 +3026,6 @@ export function useThreadHistory(
     enabled && hasThreadId && !runs.data && !runs.isError;
   const hasMore =
     enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
-  const loadMore = useCallback(
-    () => loadMessages({ continuePages: false }),
-    [loadMessages],
-  );
   return {
     runs: runs.data,
     messages,
@@ -3052,7 +3033,7 @@ export function useThreadHistory(
     appendMessages,
     refreshRuns,
     hasMore,
-    loadMore,
+    loadMore: loadMessages,
   };
 }
 

@@ -60,7 +60,7 @@ class ArtifactProvenanceRepository:
             source_ref = entry.get("source_ref") if isinstance(entry.get("source_ref"), str) else None
 
         entry_user_id = entry.get("user_id")
-        owner = user_id if user_id is not None else str(entry_user_id) if entry_user_id is not None else None
+        owner = user_id if user_id is not None else str(entry_user_id) if entry_user_id is not None else DEFAULT_USER_ID
         return {
             "user_id": owner,
             "thread_id": thread_id,

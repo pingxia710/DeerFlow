@@ -128,6 +128,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   prefer explicit user actions, route changes, or recovery probes.
 - Generic API fetch helpers should throw on 401 instead of performing global
   browser redirects; route guards and AuthProvider own login navigation.
+- Optional background UI requests must not swallow 401 as ordinary empty data;
+  use the fetcher's `UnauthorizedError`/`isUnauthorizedError()` path and let
+  AuthProvider or the query caller refresh user state.
 - Queued follow-up messages while a stream is active are thread-local UI state;
   discard them on chat-thread switches unless a real per-thread queue/draft
   store is implemented.

@@ -137,6 +137,7 @@ class TestMigrateSqlOwnerlessRows:
         conn.execute("CREATE TABLE threads_meta (thread_id TEXT, user_id TEXT)")
         conn.execute("CREATE TABLE runs (run_id TEXT, thread_id TEXT, user_id TEXT)")
         conn.execute("CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, run_id TEXT, user_id TEXT)")
+        conn.execute("CREATE TABLE artifact_provenance (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT, run_id TEXT, user_id TEXT)")
         return conn
 
     @staticmethod
@@ -168,6 +169,15 @@ class TestMigrateSqlOwnerlessRows:
                     ("t-orphan", "r-orphan", None),
                 ],
             )
+            conn.executemany(
+                "INSERT INTO artifact_provenance (thread_id, run_id, user_id) VALUES (?, ?, ?)",
+                [
+                    ("t-default", "r-default", None),
+                    ("t-owned", "r-owned", None),
+                    ("t-owned", "r-explicit", "alice"),
+                    ("t-orphan", "r-orphan", None),
+                ],
+            )
             conn.commit()
         finally:
             conn.close()
@@ -191,10 +201,16 @@ class TestMigrateSqlOwnerlessRows:
                 ("t-owned", "r-explicit", "alice"),
                 ("t-orphan", "r-orphan", "admin"),
             ]
+            assert conn.execute("SELECT thread_id, run_id, user_id FROM artifact_provenance ORDER BY id").fetchall() == [
+                ("t-default", "r-default", "admin"),
+                ("t-owned", "r-owned", "alice"),
+                ("t-owned", "r-explicit", "alice"),
+                ("t-orphan", "r-orphan", "admin"),
+            ]
         finally:
             conn.close()
 
-        assert {entry["table"] for entry in report} == {"threads_meta", "runs", "run_events"}
+        assert {entry["table"] for entry in report} == {"threads_meta", "runs", "run_events", "artifact_provenance"}
         assert all(entry["action"] == "updated" for entry in report)
 
     def test_dry_run_reports_without_changing_sql_rows(self, base_dir: Path, paths: Paths):

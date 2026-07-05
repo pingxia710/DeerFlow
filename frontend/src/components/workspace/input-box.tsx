@@ -61,6 +61,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
@@ -86,7 +87,10 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
-import { shouldClearPromptInputForThreadChange } from "./input-box-state";
+import {
+  getFollowupSuggestionsErrorAction,
+  shouldClearPromptInputForThreadChange,
+} from "./input-box-state";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
@@ -235,6 +239,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const { models } = useModels();
   const { thread, isMock } = useThread();
+  const { refreshUser } = useAuth();
   const { textInput } = usePromptInputController();
   const attachments = usePromptInputAttachments();
   const clearPromptInput = textInput.clear;
@@ -864,16 +869,21 @@ export function InputBox({
     setFollowupsLoading(true);
     setFollowups([]);
 
-    fetch(`${getBackendBaseURL()}/api/threads/${threadId}/suggestions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: recent,
-        n: 3,
-        model_name: context.model_name ?? undefined,
-      }),
-      signal: controller.signal,
-    })
+    fetch(
+      `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+        threadId,
+      )}/suggestions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: recent,
+          n: 3,
+          model_name: context.model_name ?? undefined,
+        }),
+        signal: controller.signal,
+      },
+    )
       .then(async (res) => {
         if (!res.ok) {
           return { suggestions: [] as string[] };
@@ -887,7 +897,11 @@ export function InputBox({
           .slice(0, 5);
         setFollowups(suggestions);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        if (getFollowupSuggestionsErrorAction(error) === "refresh-auth") {
+          void refreshUser();
+          return;
+        }
         setFollowups([]);
       })
       .finally(() => {
@@ -902,6 +916,7 @@ export function InputBox({
     status,
     suggestionsConfigLoaded,
     suggestionsEnabled,
+    refreshUser,
     threadId,
   ]);
 

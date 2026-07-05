@@ -286,8 +286,8 @@ def require_permission(
             #
             # 2.0-rc moved thread metadata into the SQL persistence layer
             # (``threads_meta`` table). We verify ownership via
-            # ``ThreadMetaStore.check_access``: it returns True for
-            # missing rows (untracked legacy thread) and for rows whose
+            # ``ThreadMetaStore.check_access``: in permissive mode it returns
+            # True for missing rows (untracked legacy thread) and rows whose
             # ``user_id`` is NULL (shared / pre-auth data), so this is
             # strict-deny rather than strict-allow — only an *existing*
             # row with a *different* user_id triggers 404.

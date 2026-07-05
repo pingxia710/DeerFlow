@@ -68,6 +68,25 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     sandbox.update_file.assert_not_called()
 
 
+def test_upload_files_requires_existing_owned_thread():
+    app = make_authed_test_app(owner_check_passes=False)
+    config = MagicMock()
+    config.uploads = {}
+    app.state.config = config
+    app.dependency_overrides[get_config] = lambda: config
+    app.include_router(uploads.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads/thread-local/uploads",
+            files=[("files", ("notes.txt", b"hello", "text/plain"))],
+        )
+
+    assert response.status_code == 404
+    app.state.thread_store.check_access.assert_awaited_once()
+    assert app.state.thread_store.check_access.await_args.kwargs["require_existing"] is True
+
+
 def test_upload_files_writes_ocr_sidecar_for_images(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

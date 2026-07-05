@@ -121,7 +121,7 @@ class DbRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
-        user_id=None,
+        user_id=AUTO,
     ):  # noqa: D401
         """Write a single event — low-frequency path only.
 
@@ -133,7 +133,10 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        resolved_user_id = user_id if user_id is None else str(user_id)
+        if user_id is AUTO:
+            resolved_user_id = self._user_id_from_context()
+        else:
+            resolved_user_id = None if user_id is None else str(user_id)
         async with self._sf() as session:
             async with session.begin():
                 max_seq = await self._max_seq_for_thread(session, thread_id)

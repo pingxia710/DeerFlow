@@ -40,6 +40,10 @@ by default; use `DEER_FLOW_BIND_HOST=0.0.0.0` or `DEER_FLOW_GATEWAY_HOST` only
 for intentional non-local exposure. Docker nginx keeps `/docs`, `/redoc`,
 `/openapi.json`, and `/api/sandboxes` closed by default; expose them only with
 `DEER_FLOW_EXPOSE_API_DOCS=true` or `DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+Production and development Compose files include healthchecks for nginx,
+frontend, Gateway, and provisioner; CI smoke workflows validate Compose config,
+container builds, a minimal Compose runtime `/health` probe, Postgres run-lease
+behavior, and root `scripts/` syntax.
 In daemon mode, `serve.sh` must detach stdin and start spawned services in a new
 session so the Gateway, frontend, and nginx survive after the launcher exits.
 If a daemon-owned process invokes `serve.sh --restart --daemon`, it must hand

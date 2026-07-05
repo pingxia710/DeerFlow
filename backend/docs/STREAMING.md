@@ -143,6 +143,12 @@ sequenceDiagram
 
 **`StreamBridge` 的存在价值**：当生产者（`run_agent` 任务）和消费者（HTTP 连接）在不同的 asyncio task 里运行时，需要一个可以跨 task 传递事件的中介。Queue 同时还承担断连重连的 buffer 和多订阅者的 fan-out。
 
+### 断连恢复合同
+
+`StreamBridge` 的 `Last-Event-ID` 恢复只保证 retained in-memory buffer 内的实时体验。buffer 被清理、worker 重启、或客户端的 `Last-Event-ID` 早于保留窗口时，Gateway 会发送 `stream_recovery_required` 并结束旧流；前端必须清理 reconnect metadata，然后通过 run list、run messages、checkpoint/history API 刷新最终视图。
+
+当前 Gateway 会把实时 SSE 帧以 `stream.<event>` run-event projection 持久化；durable replay 优先按 persisted stream frame 顺序回放 `metadata` / `values` / `messages` / `custom` / `error` 等原始帧。老数据没有 `stream.*` projection 时，Gateway 会回退到重建 `llm.human.input` / `llm.ai.response` / `llm.tool.result` 对应的 `messages` 帧、关键 custom task events，以及 `run.terminal`。Gateway 在 durable replay 后仍发送 `stream_recovery_required`，让前端通过 run list、run messages、checkpoint/history API 做最终一致刷新。
+
 ---
 
 ## DeerFlowClient 路径：sync + in-process

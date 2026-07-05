@@ -49,6 +49,12 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2026/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   # ── Frontend: Next.js Production ───────────────────────────────────────────
   frontend:
@@ -68,6 +74,16 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   # ── Gateway API ────────────────────────────────────────────────────────────
   gateway:
@@ -129,6 +145,16 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3).read()\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:

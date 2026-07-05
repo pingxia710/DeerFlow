@@ -39,6 +39,42 @@ async def test_closed_round_followup_starts_new_round_with_next_action_only():
 
 
 @pytest.mark.anyio
+async def test_closed_round_state_is_mechanical_not_quality_verdict_or_authorization():
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
+
+    first = await manager.create_or_reject(
+        "thread-closed-contract",
+        kwargs={"input": {"messages": [{"role": "user", "content": "inspect system"}]}},
+    )
+    await manager.set_status(first.run_id, RunStatus.running)
+    await manager.set_status(first.run_id, RunStatus.success, terminal_reason="success")
+    await manager.update_run_completion(first.run_id, status="success", last_ai_message="Next: inspect refs.")
+
+    rounds = await round_store.list_by_thread("thread-closed-contract")
+    first_round = next(round for round in rounds if round["round_id"] == first.round_id)
+    assert first_round["state"] == "closed"
+    assert "PASS" not in str(first_round)
+    assert "quality_verdict" not in first_round
+    assert "verdict" not in first_round
+
+    second = await manager.create_or_reject(
+        "thread-closed-contract",
+        kwargs={"input": {"messages": [{"role": "user", "content": "continue"}]}},
+    )
+
+    assert second.round_id != first.round_id
+    context = second.metadata["round_context"]
+    assert context["parent_round_id"] == first.round_id
+    assert context["accepted_next_action"] == "Next: inspect refs."
+    assert second.status != RunStatus.running
+    assert not round_store.task_lanes
+
+    second_round = next(round for round in await round_store.list_by_thread("thread-closed-contract") if round["round_id"] == second.round_id)
+    assert second_round["state"] not in {"executing", "validating"}
+
+
+@pytest.mark.anyio
 async def test_task_event_updates_task_lane_outside_visible_history():
     event_store = MemoryRunEventStore()
     round_store = MemoryRoundStateStore()

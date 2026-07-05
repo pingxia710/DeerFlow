@@ -7,6 +7,8 @@ GATEWAY_ENABLE_DOCS=true is set explicitly.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from unittest.mock import patch
 
@@ -135,6 +137,61 @@ def test_health_still_works_when_docs_disabled():
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+
+def test_gateway_request_id_header_is_returned():
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false"}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        response = TestClient(create_app()).get("/health", headers={"X-Request-ID": "req-123"})
+
+        assert response.headers["x-request-id"] == "req-123"
+
+
+def test_gateway_request_id_header_is_generated():
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false"}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        response = TestClient(create_app()).get("/health")
+
+        assert response.headers["x-request-id"]
+
+
+def test_gateway_request_id_is_logged(caplog):
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false"}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        with caplog.at_level(logging.INFO, logger="app.gateway.app"):
+            response = TestClient(create_app()).get("/health", headers={"X-Request-ID": "req-log"})
+
+        assert response.status_code == 200
+        payloads = [json.loads(record.getMessage()) for record in caplog.records if record.getMessage().startswith('{"event":"gateway.request"')]
+        assert payloads[-1]["request_id"] == "req-log"
+        assert payloads[-1]["method"] == "GET"
+        assert payloads[-1]["path"] == "/health"
+        assert payloads[-1]["status_code"] == 200
+        assert isinstance(payloads[-1]["duration_ms"], (float, int))
+
+
+def test_gateway_metrics_endpoint_records_requests():
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false", "DEER_FLOW_AUTH_DISABLED": "1", "ENVIRONMENT": "test"}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        client = TestClient(create_app())
+        assert client.get("/health").status_code == 200
+
+        response = client.get("/metrics")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        body = response.text
+        assert "deerflow_gateway_uptime_seconds" in body
+        assert 'deerflow_gateway_http_requests_total{method="GET",route="/health",status_class="2xx"}' in body
+        assert "deerflow_gateway_http_request_duration_seconds_sum" in body
 
 
 # ---------------------------------------------------------------------------

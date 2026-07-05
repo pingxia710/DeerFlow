@@ -105,6 +105,21 @@ class TestTruncateTaskCalls:
         assert task_calls[0]["id"] == "t1"
         assert task_calls[1]["id"] == "t2"
 
+    def test_task_calls_exceeding_limit_adds_model_visible_warning(self):
+        mw = SubagentLimitMiddleware(max_concurrent=2)
+        msg = AIMessage(
+            content="Planning work.",
+            tool_calls=[_task_call("t1"), _task_call("t2"), _task_call("t3")],
+        )
+
+        result = mw._truncate_task_calls({"messages": [msg]})
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert "Planning work." in updated_msg.content
+        assert "1 task() call(s) were not dispatched" in updated_msg.content
+        assert "per-turn limit is 2" in updated_msg.content
+
     def test_non_task_calls_preserved(self):
         mw = SubagentLimitMiddleware(max_concurrent=2)
         msg = AIMessage(

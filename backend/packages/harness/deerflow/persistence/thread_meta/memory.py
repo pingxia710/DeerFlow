@@ -98,7 +98,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             return not require_existing
         record_user_id = item.value.get("user_id")
         if record_user_id is None:
-            return True
+            return not require_existing
         return record_user_id == user_id
 
     async def update_display_name(self, thread_id: str, display_name: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:

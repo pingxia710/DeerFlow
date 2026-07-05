@@ -59,6 +59,7 @@ async def test_legacy_null_owner_metadata_access_differs_from_filtered_reads(thr
     await thread_repo.create("legacy-thread", user_id=None)
 
     assert await thread_repo.check_access("legacy-thread", "user-1") is True
+    assert await thread_repo.check_access("legacy-thread", "user-1", require_existing=True) is False
     assert await thread_repo.get("legacy-thread", user_id="user-1") is None
     assert await thread_repo.search(user_id="user-1") == []
     assert (await thread_repo.get("legacy-thread", user_id=None))["thread_id"] == "legacy-thread"

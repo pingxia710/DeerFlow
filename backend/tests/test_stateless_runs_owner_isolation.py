@@ -245,7 +245,7 @@ def test_stream_untracked_thread_passes_owner_check():
 
 
 def test_stream_shared_thread_passes_owner_check():
-    """A thread_meta row with user_id NULL (shared / pre-auth data) stays accessible."""
+    """Run creation still uses permissive legacy read semantics for NULL-owner rows."""
     with _client(USER_B) as (client, create_or_reject):
         response = client.post("/api/runs/stream", json=_body(THREAD_SHARED))
     assert response.status_code == 409

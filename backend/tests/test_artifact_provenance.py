@@ -105,6 +105,27 @@ async def test_artifact_provenance_repository_upserts_and_scopes_by_owner(artifa
     assert len(await artifact_repo.list_by_run("thread-1", "run-1", user_id="user-2")) == 1
 
 
+@pytest.mark.anyio
+async def test_artifact_provenance_repository_normalizes_ownerless_entries(artifact_repo) -> None:
+    assert (
+        await artifact_repo.upsert_many(
+            [
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "virtual_path": "/mnt/user-data/outputs/report.md",
+                }
+            ],
+            user_id=None,
+        )
+        == 1
+    )
+
+    rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id=None)
+
+    assert rows[0]["user_id"] == "default"
+
+
 def test_build_artifact_index_from_task_event_artifact_refs() -> None:
     events = [
         {

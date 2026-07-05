@@ -1,0 +1,130 @@
+name: Docker Smoke
+
+on:
+  push:
+    branches: ["main", "2.0.x-dev"]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "docker/**"
+      - ".github/workflows/docker-smoke.yml"
+  pull_request:
+    branches: ["*"]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "docker/**"
+      - ".github/workflows/docker-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-lease-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: deerflow
+          POSTGRES_PASSWORD: deerflow
+          POSTGRES_DB: deerflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deerflow -d deerflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies with Postgres extra
+        working-directory: backend
+        run: uv sync --group dev --extra postgres
+
+      - name: Run Postgres cross-process lease smoke
+        working-directory: backend
+        env:
+          DEER_FLOW_TEST_RUN_LEASE_POSTGRES_URL: postgresql+asyncpg://deerflow:deerflow@127.0.0.1:5432/deerflow
+        run: uv run --extra postgres pytest tests/test_run_store_multiprocess_lease.py -q
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Compose files
+        run: |
+          docker compose -f docker/docker-compose.yaml config --quiet --no-env-resolution --no-interpolate
+          docker compose -f docker/docker-compose-dev.yaml config --quiet --no-env-resolution --no-interpolate
+
+      - name: Build backend image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+
+      - name: Build frontend image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: false
+
+  compose-runtime-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare smoke config
+        run: |
+          mkdir -p .ci/deer-flow-home
+          cp config.example.yaml .ci/config.yaml
+          cp extensions_config.example.json .ci/extensions_config.json
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(".ci/config.yaml")
+          text = path.read_text()
+          text = text.replace("run_events:\n  backend: memory", "run_events:\n  backend: db", 1)
+          path.write_text(text)
+          PY
+          {
+            echo "BETTER_AUTH_SECRET=ci-smoke-better-auth-secret"
+            echo "DEER_FLOW_INTERNAL_AUTH_TOKEN=ci-smoke-internal-token"
+          } > .env
+          : > frontend/.env
+
+      - name: Build and start Compose stack
+        env:
+          BETTER_AUTH_SECRET: ci-smoke-better-auth-secret
+          DEER_FLOW_BIND_HOST: 127.0.0.1
+          DEER_FLOW_CONFIG_PATH: ${{ github.workspace }}/.ci/config.yaml
+          DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${{ github.workspace }}/.ci/extensions_config.json
+          DEER_FLOW_HOME: ${{ github.workspace }}/.ci/deer-flow-home
+          DEER_FLOW_INTERNAL_AUTH_TOKEN: ci-smoke-internal-token
+          DEER_FLOW_REPO_ROOT: ${{ github.workspace }}
+        run: docker compose -f docker/docker-compose.yaml -p deer-flow-smoke up -d --build --wait --wait-timeout 240 nginx
+
+      - name: Check nginx health endpoint
+        run: |
+          curl -fsS -D .ci/health.headers http://127.0.0.1:2026/health
+          grep -i '^x-request-id:' .ci/health.headers
+
+      - name: Dump Compose logs
+        if: failure()
+        run: docker compose -f docker/docker-compose.yaml -p deer-flow-smoke logs --no-color --tail=200
+
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose -f docker/docker-compose.yaml -p deer-flow-smoke down -v

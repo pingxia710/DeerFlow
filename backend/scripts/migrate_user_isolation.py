@@ -253,7 +253,7 @@ def migrate_sql_ownerless_rows(
     conn = sqlite3.connect(str(db_path))
     try:
         owners = _known_thread_owners(conn)
-        for table in ("threads_meta", "runs", "run_events"):
+        for table in ("threads_meta", "runs", "run_events", "artifact_provenance"):
             _claim_null_rows(conn, table, owners)
         if dry_run:
             conn.rollback()

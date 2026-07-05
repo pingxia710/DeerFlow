@@ -14,7 +14,7 @@ class ArtifactProvenanceRow(Base):
     __tablename__ = "artifact_provenance"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     task_id: Mapped[str | None] = mapped_column(String(128))

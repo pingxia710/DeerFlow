@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0005_native_round_state"
+HEAD = "0006_normalize_artifact_provenance_owner"
 BASELINE = "0001_baseline"
 
 
@@ -431,6 +431,72 @@ async def test_token_usage_column_parity_between_fresh_and_upgraded(tmp_path: Pa
     finally:
         await fresh.dispose()
         await upgraded.dispose()
+
+
+@asyncio_test
+async def test_artifact_provenance_owner_normalization_migration(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "artifact-owner.db"))
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('0005_native_round_state')"))
+            await conn.execute(sa.text("CREATE TABLE threads_meta (thread_id VARCHAR(64), user_id VARCHAR(64))"))
+            await conn.execute(sa.text("CREATE TABLE runs (run_id VARCHAR(64), thread_id VARCHAR(64), user_id VARCHAR(64))"))
+            await conn.execute(
+                sa.text(
+                    """
+                    CREATE TABLE artifact_provenance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id VARCHAR(64),
+                        thread_id VARCHAR(64) NOT NULL,
+                        run_id VARCHAR(64) NOT NULL,
+                        virtual_path TEXT NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            await conn.execute(sa.text("INSERT INTO threads_meta (thread_id, user_id) VALUES ('thread-from-thread', 'thread-owner')"))
+            await conn.execute(sa.text("INSERT INTO runs (run_id, thread_id, user_id) VALUES ('run-1', 'thread-1', 'run-owner')"))
+            await conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO artifact_provenance (user_id, thread_id, run_id, virtual_path, updated_at)
+                    VALUES
+                        (NULL, 'thread-1', 'run-1', '/mnt/user-data/outputs/report.md', '2026-01-01 00:00:00'),
+                        (NULL, 'thread-1', 'run-1', '/mnt/user-data/outputs/report.md', '2026-01-01 00:01:00'),
+                        ('default', 'thread-from-thread', 'run-2', '/mnt/user-data/outputs/thread.md', '2026-01-01 00:00:00'),
+                        (NULL, 'orphan-thread', 'orphan-run', '/mnt/user-data/outputs/orphan.md', '2026-01-01 00:00:00')
+                    """
+                )
+            )
+
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(_upgrade, cfg, "head")
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.text(
+                        """
+                        SELECT user_id, thread_id, run_id, virtual_path
+                        FROM artifact_provenance
+                        ORDER BY thread_id, run_id, virtual_path
+                        """
+                    )
+                )
+            ).fetchall()
+            user_id_col = next(col for col in await conn.run_sync(lambda c: sa.inspect(c).get_columns("artifact_provenance")) if col["name"] == "user_id")
+
+        assert rows == [
+            ("default", "orphan-thread", "orphan-run", "/mnt/user-data/outputs/orphan.md"),
+            ("run-owner", "thread-1", "run-1", "/mnt/user-data/outputs/report.md"),
+            ("thread-owner", "thread-from-thread", "run-2", "/mnt/user-data/outputs/thread.md"),
+        ]
+        assert user_id_col["nullable"] is False
+        assert await _alembic_version(engine) == HEAD
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

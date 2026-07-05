@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { fetch as fetcher } from "../api/fetcher";
+import { fetch as fetcher, isUnauthorizedError } from "../api/fetcher";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { type User, buildLoginUrl } from "./types";
@@ -105,6 +105,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
         }
       }
     } catch (err) {
+      if (isUnauthorizedError(err)) {
+        setUser(null);
+        if (pathname?.startsWith("/workspace")) {
+          router.push(buildLoginUrl(pathname));
+        }
+        return;
+      }
       console.error("Failed to refresh user:", err);
       setUser(null);
     } finally {

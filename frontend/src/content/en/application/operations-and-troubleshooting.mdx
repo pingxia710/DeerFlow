@@ -43,6 +43,23 @@ curl http://localhost:8001/health
 curl http://localhost:2026/api/models
 ```
 
+Every Gateway response includes `X-Request-ID`. Pass your own value when
+reproducing an issue so proxy, frontend, and Gateway logs can be correlated:
+
+```bash
+curl -H "X-Request-ID: debug-$(date +%s)" http://localhost:8001/health
+```
+
+Gateway access logs include one JSON line per request with `event: "gateway.request"`,
+`request_id`, `method`, `path`, `status_code`, and `duration_ms`.
+
+Gateway also exposes Prometheus text metrics at `/metrics`; normal Gateway
+authentication applies. Start dashboards with `deerflow_gateway_http_requests_total`,
+`deerflow_gateway_http_request_duration_seconds_sum`, and
+`deerflow_gateway_uptime_seconds`.
+Useful first alerts are sustained 5xx request rate, rising average latency
+(`duration_sum / requests_total`), and missing scrapes.
+
 ## Config upgrade
 
 When you pull a new version of DeerFlow, the `config_version` in `config.example.yaml` may be higher than your `config.yaml`. To merge new fields without losing your customizations:
@@ -153,6 +170,24 @@ backend/.deer-flow/
 Back up this entire directory to preserve conversation history, artifacts, and learned memory.
 
 In Docker deployments, the bind-mounted host path (`$DEER_FLOW_ROOT/backend/.deer-flow/`) is the source of truth — back up the host path.
+
+Minimal local backup:
+
+```bash
+tar -czf deerflow-backup-$(date +%Y%m%d%H%M%S).tgz backend/.deer-flow
+```
+
+Restore or rollback:
+
+```bash
+make stop
+mv backend/.deer-flow backend/.deer-flow.rollback.$(date +%Y%m%d%H%M%S)
+tar -xzf deerflow-backup-YYYYMMDDHHMMSS.tgz
+make dev
+curl http://localhost:8001/health
+```
+
+Keep `.env`, API keys, and OAuth/session secrets out of shared backup artifacts unless the backup target is encrypted and access-controlled.
 
 ## Restarting services
 

@@ -177,7 +177,8 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
         run_id=run_id,
         event_type="llm.ai.response",
         category="message",
-        content={"type": "ai", "content": "not a task event"},
+        content={"type": "ai", "content": "durable reply", "id": "ai-1"},
+        metadata={"caller": "lead_agent"},
         user_id=user_id,
     )
 
@@ -208,10 +209,10 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
         frames.append(frame)
 
     events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events == ["custom", "values", "end"]
-    assert "stream_recovery_required" not in "\n".join(frames)
+    assert events == ["custom", "messages", "stream_recovery_required", "values", "end"]
     assert json.loads(_parse_sse_frame(frames[0])["data"]) == task_event
-    assert json.loads(_parse_sse_frame(frames[1])["data"]) == {"live": True}
+    assert json.loads(_parse_sse_frame(frames[1])["data"]) == [{"type": "ai", "content": "durable reply", "id": "ai-1"}, {"caller": "lead_agent"}]
+    assert json.loads(_parse_sse_frame(frames[3])["data"]) == {"live": True}
 
 
 @pytest.mark.asyncio
@@ -429,7 +430,7 @@ async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscrip
 
 
 @pytest.mark.asyncio
-async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay():
+async def test_sse_consumer_replays_persisted_messages_and_keeps_recovery_signal():
     from app.gateway.services import sse_consumer
 
     thread_id = "thread-empty-replay"
@@ -442,7 +443,8 @@ async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay
         run_id=run_id,
         event_type="llm.ai.response",
         category="message",
-        content={"type": "ai", "content": "not replayable as SSE"},
+        content={"type": "ai", "content": "replayed message", "id": "ai-replay"},
+        metadata={"caller": "lead_agent"},
         user_id=user_id,
     )
 
@@ -473,8 +475,83 @@ async def test_sse_consumer_keeps_recovery_signal_when_no_task_events_can_replay
         frames.append(frame)
 
     events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events == ["stream_recovery_required", "values", "end"]
-    assert json.loads(_parse_sse_frame(frames[1])["data"]) == {"live": True}
+    assert events == ["messages", "stream_recovery_required", "values", "end"]
+    assert json.loads(_parse_sse_frame(frames[0])["data"]) == [{"type": "ai", "content": "replayed message", "id": "ai-replay"}, {"caller": "lead_agent"}]
+    assert json.loads(_parse_sse_frame(frames[2])["data"]) == {"live": True}
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_prefers_persisted_stream_frames_for_durable_replay():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-stream-projection"
+    run_id = "run-stream-projection"
+    user_id = "user-stream-projection"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.metadata",
+        category="stream",
+        content={"event": "metadata", "data": {"run_id": run_id, "thread_id": thread_id}},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="llm.ai.response",
+        category="message",
+        content={"type": "ai", "content": "fallback duplicate", "id": "ai-fallback"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.messages",
+        category="stream",
+        content={"event": "messages", "data": [{"type": "ai", "content": "stream token", "id": "ai-stream"}, {"langgraph_node": "agent"}]},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.values",
+        category="stream",
+        content={"event": "values", "data": {"messages": [{"type": "ai", "content": "full state", "id": "ai-stream"}]}},
+        user_id=user_id,
+    )
+
+    await bridge.publish(run_id, "values", {"old": True})
+    last_event_id = bridge._streams[run_id].events[0].id
+    await bridge.publish(run_id, "values", {"missed": True})
+    await bridge.publish(run_id, "values", {"live": True})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        bridge,
+        record,
+        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events[:4] == ["metadata", "messages", "values", "stream_recovery_required"]
+    assert "fallback duplicate" not in "\n".join(frames)
+    assert json.loads(_parse_sse_frame(frames[1])["data"])[0]["content"] == "stream token"
+    assert json.loads(_parse_sse_frame(frames[2])["data"])["messages"][0]["content"] == "full state"
 
 
 @pytest.mark.asyncio
@@ -528,6 +605,16 @@ async def test_sse_end_waits_until_run_messages_are_durable():
         assert data[-1]["event_type"] == "llm.ai.response"
         assert data[-1]["content"]["type"] == "ai"
         assert data[-1]["content"]["content"] == "durable final answer"
+
+        stream_events = await event_store.list_events(
+            thread_id,
+            record.run_id,
+            event_types=["stream.metadata", "stream.values"],
+            user_id=str(user_id),
+        )
+        assert [row["event_type"] for row in stream_events] == ["stream.metadata", "stream.values"]
+        assert stream_events[0]["content"]["data"]["run_id"] == record.run_id
+        assert stream_events[1]["content"]["data"]["messages"][0]["content"] == "durable final answer"
     finally:
         await run_task
 

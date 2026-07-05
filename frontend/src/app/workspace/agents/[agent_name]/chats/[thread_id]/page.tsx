@@ -9,7 +9,11 @@ import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
-import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import {
+  ChatBox,
+  shouldShowWelcomeMode,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -79,10 +83,6 @@ export default function AgentChatPage() {
   visibleThreadIdRef.current = threadId;
 
   const { showNotification } = useNotification();
-
-  useEffect(() => {
-    setIsWelcomeMode(isNewThread);
-  }, [isNewThread]);
 
   const threadContext = useMemo(
     () => ({
@@ -157,6 +157,27 @@ export default function AgentChatPage() {
       }
     },
   });
+
+  useEffect(() => {
+    setIsWelcomeMode(
+      shouldShowWelcomeMode({
+        committedPathname: window.location.pathname,
+        hasMessages: thread.messages.length > 0,
+        hasPendingUsageMessages: pendingUsageMessages.length > 0,
+        isHistoryLoading,
+        isNewThread,
+        isStreamingOrLoading: thread.isLoading || isUploading,
+        pendingStartThreadId: pendingStartThreadIdRef.current,
+      }),
+    );
+  }, [
+    isHistoryLoading,
+    isNewThread,
+    isUploading,
+    pendingUsageMessages.length,
+    thread.isLoading,
+    thread.messages.length,
+  ]);
 
   useEffect(() => {
     const metadataAgentName = threadMetadata.data?.metadata?.agent_name;

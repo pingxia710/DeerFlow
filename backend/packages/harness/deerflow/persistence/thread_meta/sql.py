@@ -93,7 +93,7 @@ class ThreadMetaRepository(ThreadMetaStore):
 
         - ``require_existing=True`` (strict):
           Returns True **only** when the row exists AND
-          (``row.user_id == user_id`` OR ``row.user_id is None``).
+          ``row.user_id == user_id``.
           Use for **destructive / mutating** decorators (DELETE, PATCH,
           state-update) so a thread that has *already been deleted*
           cannot be re-targeted by any caller — closing the
@@ -105,7 +105,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             if row is None:
                 return not require_existing
             if row.user_id is None:
-                return True
+                return not require_existing
             return row.user_id == user_id
 
     async def search(

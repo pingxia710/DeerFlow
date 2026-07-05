@@ -154,3 +154,12 @@ async def test_explicit_none_bypasses_filter(store):
 
     row = await store.get("t-alpha", user_id=None)
     assert row is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_strict_access_denies_null_owner(store):
+    await store.create("legacy", user_id=None)
+
+    assert await store.check_access("legacy", "user-a") is True
+    assert await store.check_access("legacy", "user-a", require_existing=True) is False

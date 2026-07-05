@@ -118,6 +118,30 @@ Recommended Next Decision: NEEDS_MORE
     assert "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement." in envelope
 
 
+def test_handoff_envelope_marks_refs_as_unverified_index_hints():
+    prompt = """Source Role: Planner
+Target Role: Evidence
+Task/Question: inspect referenced artifacts
+EvidenceRefs: command: pytest tests/test_native_round_state.py -q; exit code: 0
+ArtifactRefs: outputs/findings.md
+
+Raw upstream notes must remain available.
+"""
+
+    handoff_prompt = task_tool_module._with_ai_handoff_envelope(
+        prompt,
+        description="inspect referenced artifacts",
+        subagent_type="evidence",
+    )
+    envelope, raw_prompt = handoff_prompt.split("\n\nTask Prompt\n", 1)
+
+    assert "EvidenceRefs: command: pytest tests/test_native_round_state.py -q; exit code: 0" in envelope
+    assert "ArtifactRefs: outputs/findings.md" in envelope
+    assert "EvidenceStrength: Unverified" in envelope
+    assert "index hints, not a replacement" in envelope
+    assert raw_prompt == prompt
+
+
 class _DummyScheduledTask:
     def add_done_callback(self, _callback):
         return None

@@ -148,6 +148,31 @@ def test_get_artifact_forces_download_for_unknown_binary(tmp_path, monkeypatch) 
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_get_artifact_download_streams_without_payload_read(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "large.bin"
+    artifact_path.write_bytes(b"\x00" * 1024)
+
+    def fail_read(*_args, **_kwargs):
+        raise AssertionError("download responses must stream with FileResponse")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, **_kwargs: artifact_path)
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+    monkeypatch.setattr(Path, "read_text", fail_read)
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.get_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/large.bin",
+            _make_request(),
+            download=True,
+        )
+    )
+
+    assert isinstance(response, FileResponse)
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+
+
 def test_get_artifact_forces_download_for_unknown_binary_in_skill_archive(tmp_path, monkeypatch) -> None:
     payload = b"\x00\x01\x02binary"
     skill_path = tmp_path / "sample.skill"

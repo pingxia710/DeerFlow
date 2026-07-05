@@ -8,6 +8,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
+  shouldShowWelcomeMode,
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
@@ -75,14 +76,6 @@ export default function ChatPage() {
   useEffect(() => {
     mountedRef.current = true;
   }, []);
-
-  // Keep welcome layout in sync when navigating between threads (sidebar
-  // clicks, "new chat" button).  Submitting in /chats/new flips the layout
-  // via onSend below — `isNewThread` stays true until onStart, so this effect
-  // is harmless during the submit transition.
-  useEffect(() => {
-    setIsWelcomeMode(isNewThread);
-  }, [isNewThread]);
 
   useEffect(() => {
     if (!isNewThread) {
@@ -156,6 +149,27 @@ export default function ChatPage() {
       }
     },
   });
+
+  useEffect(() => {
+    setIsWelcomeMode(
+      shouldShowWelcomeMode({
+        committedPathname: window.location.pathname,
+        hasMessages: thread.messages.length > 0,
+        hasPendingUsageMessages: pendingUsageMessages.length > 0,
+        isHistoryLoading,
+        isNewThread,
+        isStreamingOrLoading: thread.isLoading || isUploading,
+        pendingStartThreadId: pendingStartThreadIdRef.current,
+      }),
+    );
+  }, [
+    isHistoryLoading,
+    isNewThread,
+    isUploading,
+    pendingUsageMessages.length,
+    thread.isLoading,
+    thread.messages.length,
+  ]);
 
   useEffect(() => {
     const agentName = threadMetadata.data?.metadata?.agent_name;

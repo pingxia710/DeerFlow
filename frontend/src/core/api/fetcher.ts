@@ -24,6 +24,26 @@ export function isStateChangingMethod(method: string): boolean {
 
 const CSRF_COOKIE_PREFIX = "csrf_token=";
 
+export class UnauthorizedError extends Error {
+  readonly status = 401;
+
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+export function isUnauthorizedError(
+  error: unknown,
+): error is UnauthorizedError {
+  return (
+    error instanceof UnauthorizedError ||
+    (typeof error === "object" &&
+      error !== null &&
+      Reflect.get(error, "status") === 401)
+  );
+}
+
 /**
  * Read the ``csrf_token`` cookie set by the gateway at login.
  *
@@ -120,7 +140,7 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    throw new Error("Unauthorized");
+    throw new UnauthorizedError();
   }
 
   return res;

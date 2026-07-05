@@ -116,6 +116,13 @@ class AlwaysMissingCompletionRunStore(MemoryRunStore):
         return False
 
 
+class RejectingCompleteRunStore(MemoryRunStore):
+    """Memory run store that rejects lease terminal CAS."""
+
+    async def complete_run(self, run_id: str, **kwargs):
+        return False
+
+
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
     rows = {}
     for run_id in run_ids:
@@ -870,6 +877,114 @@ async def test_model_name_create_or_reject():
     fetched = await mgr.get(record.run_id)
     assert fetched is not None
     assert fetched.model_name == "anthropic.claude-sonnet-4-20250514-v1:0"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_reject_uses_active_slot_across_managers():
+    store = MemoryRunStore()
+    manager_a = RunManager(store=store, worker_id="worker-a")
+    manager_b = RunManager(store=store, worker_id="worker-b")
+
+    results = await asyncio.gather(
+        manager_a.create_or_reject("thread-lease", multitask_strategy="reject"),
+        manager_b.create_or_reject("thread-lease", multitask_strategy="reject"),
+        return_exceptions=True,
+    )
+
+    records = [result for result in results if isinstance(result, RunRecord)]
+    conflicts = [result for result in results if isinstance(result, ConflictError)]
+    assert len(records) == 1
+    assert len(conflicts) == 1
+    assert records[0].lease_token is not None
+    assert records[0].lease_generation is not None
+
+    inflight = await store.list_inflight()
+    assert [row["run_id"] for row in inflight] == [records[0].run_id]
+    assert inflight[0]["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_reject_uses_sql_active_slot_across_managers(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'run-manager-lease.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    try:
+        store = RunRepository(get_session_factory())
+        manager_a = RunManager(store=store, worker_id="worker-a")
+        manager_b = RunManager(store=store, worker_id="worker-b")
+
+        results = await asyncio.gather(
+            manager_a.create_or_reject("thread-lease", multitask_strategy="reject"),
+            manager_b.create_or_reject("thread-lease", multitask_strategy="reject"),
+            return_exceptions=True,
+        )
+
+        records = [result for result in results if isinstance(result, RunRecord)]
+        conflicts = [result for result in results if isinstance(result, ConflictError)]
+        assert len(records) == 1
+        assert len(conflicts) == 1
+        row = await store.get(records[0].run_id)
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["metadata"]["lease_token"] == records[0].lease_token
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
+async def test_lease_terminal_completion_releases_active_slot():
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    first = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    await manager.set_status(first.run_id, RunStatus.running)
+    await manager.set_status(first.run_id, RunStatus.success, terminal_reason="success")
+    second = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    stored_first = await store.get(first.run_id)
+    stored_second = await store.get(second.run_id)
+    assert stored_first is not None
+    assert stored_first["status"] == "success"
+    assert stored_first["terminal_reason"] == "success"
+    assert stored_second is not None
+    assert stored_second["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_failed_lease_terminal_cas_does_not_fallback_to_put():
+    store = RejectingCompleteRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    record = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success, terminal_reason="success")
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_cancel_store_only_lease_run_records_cancel_intent():
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="owner-worker")
+    other = RunManager(store=store, worker_id="other-worker")
+    record = await owner.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    assert await other.cancel(record.run_id, action="rollback") is True
+    intent = await store.consume_cancel_intent(
+        record.run_id,
+        lease_token=record.lease_token or "",
+        generation=record.lease_generation or 0,
+    )
+
+    assert intent is not None
+    assert intent.action == "rollback"
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "rolling_back"
 
 
 @pytest.mark.anyio

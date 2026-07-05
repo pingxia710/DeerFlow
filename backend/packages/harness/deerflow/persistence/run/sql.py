@@ -7,12 +7,13 @@ minutes -- we don't hold connections across long execution.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import delete, exists, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
@@ -74,6 +75,14 @@ class RunRepository(RunStore):
         if now.tzinfo is None:
             return now.replace(tzinfo=UTC)
         return now
+
+    @staticmethod
+    def _thread_lock_keys(thread_id: str) -> tuple[int, int]:
+        digest = hashlib.blake2b(thread_id.encode("utf-8"), digest_size=8, person=b"df_run").digest()
+        return (
+            int.from_bytes(digest[:4], "big", signed=True),
+            int.from_bytes(digest[4:], "big", signed=True),
+        )
 
     @staticmethod
     def _lease_expires_at(now: datetime, lease_expires_at: datetime | None) -> datetime:
@@ -426,6 +435,10 @@ class RunRepository(RunStore):
         token = lease_token or uuid4().hex
         async with self._sf() as session:
             async with session.begin():
+                if session.bind is not None and session.bind.dialect.name == "postgresql":
+                    key1, key2 = self._thread_lock_keys(thread_id)
+                    # ponytail: per-thread Postgres xact lock; replace with a DB constraint if active slots become first-class rows.
+                    await session.execute(text("SELECT pg_advisory_xact_lock(:key1, :key2)"), {"key1": key1, "key2": key2})
                 row = await session.get(RunRow, run_id)
                 if row is None or row.thread_id != thread_id or row.status != "pending":
                     return None

@@ -250,7 +250,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 18. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects base64 image data before the LLM call
 19. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
 20. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives
-21. **SubagentLimitMiddleware** - *(optional, if `subagent_enabled`)* Truncates excess `task` tool calls to enforce the `MAX_CONCURRENT_SUBAGENTS` limit
+21. **SubagentLimitMiddleware** - *(optional, if `subagent_enabled`)* Truncates excess `task` tool calls to enforce the `MAX_CONCURRENT_SUBAGENTS` limit and writes a model-visible warning so omitted delegations are not silent
 22. **LoopDetectionMiddleware** - *(optional, if `loop_detection.enabled`)* Detects repeated tool-call loops; hard-stop clears both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer
 23. **TokenBudgetMiddleware** - *(optional, if `token_budget.enabled`)* Enforces per-run token limits
 24. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before the safety/clarification tail
@@ -292,7 +292,7 @@ Configuration priority:
 
 ### Gateway API (`app/gateway/`)
 
-FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
+FastAPI application on port 8001 with health check at `GET /health` and Prometheus text metrics at `GET /metrics` (normal Gateway auth applies). Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled). Every HTTP response includes `X-Request-ID`, and Gateway writes a compact JSON `gateway.request` access log with request id, method, path, status, and duration.
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned.
 
@@ -301,7 +301,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json); API-managed stdio servers are command-allowlisted, and `@modelcontextprotocol/server-filesystem` cannot expose dangerous host paths such as `/`, home roots, credential dirs, or Docker sockets |
+| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json); API-managed stdio servers are local/dev/test only, command-allowlisted there, and `@modelcontextprotocol/server-filesystem` cannot expose dangerous host paths such as `/`, home roots, credential dirs, or Docker sockets |
 | **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; admin-only `PUT /{name}`, `POST /install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
@@ -346,7 +346,8 @@ metadata. The run artifact index is current-state oriented: duplicate
 Artifact provenance must preserve which event field supplied the path
 (`artifact_refs`, `artifacts`, `action_result.output_ref`, or
 `action_result.evidence_refs`) so Command Room can distinguish displayed
-outputs from evidence references.
+outputs from evidence references. Persisted artifact provenance always has a
+non-NULL `user_id`; legacy NULL/default rows are normalized by migration 0006.
 
 Native round state lives in `rounds`, `round_events`, and `task_lanes`.
 `RunManager` owns the mechanical lifecycle only: bind every new run to a
@@ -372,8 +373,9 @@ advisory context, not the old user goal as the current intent.
 - Trusted internal owner-header flows may claim only ownerless or synthetic
   `default` legacy threads; they must not reassign a thread already stamped with
   another real owner.
-- Legacy NULL-owner thread rows are permissive for `check_access()`, but
-  user-filtered metadata/event reads require an explicit owner match.
+- Legacy NULL-owner thread rows are permissive only for non-strict
+  `check_access()` compatibility; `require_existing=True` denies them until
+  an explicit migration/claim stamps an owner.
 - `JsonlRunEventStore` writes owner-scoped events to
   `{base_dir}/users/{user_id}/threads/{thread_id}/runs/{run_id}.jsonl`;
   ownerless legacy events remain under `{base_dir}/threads/...`, and
@@ -396,10 +398,18 @@ advisory context, not the old user goal as the current intent.
 - Background worker updates to `threads_meta` (title/status) must pass `RunRecord.user_id` explicitly; do not rely on ambient user ContextVars after the request handler returns.
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
 - Terminal transitions must persist `terminal_reason` through `RunStore.update_status()` and expose the same reason through store-only hydration; `run.terminal` events are the replay anchor, not a replacement for the run row field. SSE durable custom replay must include owner-scoped `run.terminal` alongside task events.
+- Cross-process lease checks live in `tests/test_run_store_multiprocess_lease.py`; SQLite runs by default, and CI also runs the Postgres path with a real service container. Local Postgres verification is opt-in via `DEER_FLOW_TEST_RUN_LEASE_POSTGRES_URL`.
+- `RunRepository.try_acquire_active_slot()` uses a per-thread Postgres transaction advisory lock before the active-slot CAS; do not remove it unless active slots move to a database-level uniqueness constraint.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - Runtime recovery reasons such as `boundary_stopped` and `worker_lost` are terminal statuses for store predicates and frontend recovery; store-only hydrated `RunRecord.status` may be a string, so response/serialization code should use `run_status_value()` instead of direct `.value`.
 - Inflight run checks should use `is_inflight_status()` so `pending`, `running`, `cancelling`, and `rolling_back` stay consistent across memory and store-only records.
+- Default `create_or_reject(..., multitask_strategy="reject")` must acquire the
+  persistent active-slot lease when the configured `RunStore` supports
+  `create_pending_run()` / `try_acquire_active_slot()`. The owning worker then
+  heartbeats the lease, terminal status uses `complete_run()` CAS, and
+  non-local cancellation writes a durable cancel intent for the owning worker to
+  consume.
 - `RunStore.list_inflight()` is the startup recovery source and must use the same inflight status set; do not limit it to only `pending`/`running`. Startup recovery thread-status writes must use each recovered `RunRecord.user_id`, not the `user_id=None` migration escape hatch.
 - `RunManager.get()` and `list_by_thread()` also perform conservative stale
   inflight recovery: a persisted inflight run older than the recovery timeout is
@@ -442,7 +452,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
-**Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`; six is the maximum release, not a required number of subtasks); default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
+**Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model` and adds a model-visible warning; six is the maximum release, not a required number of subtasks); default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_cancelled`/`task_timed_out`; task event/action_result fields are a frontend-backend contract pinned in `contracts/task_event_contract.json`, must be emitted to the live stream, and must be persisted through `RunJournal.record_task_event` so conversation switches can replay subtask state. Root run completion also writes a `run.terminal` lifecycle event with `status` and `terminal_reason` as the replay/timeline terminal anchor.
 **Handoff audit**: `task()` appends compact records to `audit/subagent_handoffs.jsonl` under the thread directory when possible. Records keep prompt/result/error hashes, character counts, usage, status, and compact extracted fields; raw prompts, worker output, and errors are intentionally omitted.
@@ -591,6 +601,10 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
 - The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router
 - `require_auth` / `require_permission` must resolve `request` from either keyword or positional FastAPI arguments and must honor `DEER_FLOW_AUTH_DISABLED=1`, so route-level decorators stay consistent with `AuthMiddleware` in local/test no-auth mode.
+- `DEER_FLOW_AUTH_DISABLED=1` is local/dev/test only. Staging/shared/production
+  startup must fail even if an old unsafe-ack environment variable is present;
+  never let anonymous requests become the synthetic admin user in shared
+  deployments.
 - `/docs`, `/redoc`, and `/openapi.json` are allowed through `AuthMiddleware`; their exposure is controlled by `GATEWAY_ENABLE_DOCS` so disabled docs return FastAPI's 404 instead of an auth-layer 401.
 - In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
 - Absolute `storage_path` in config opts out of per-user isolation
@@ -662,6 +676,7 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `migrations/_helpers.py` — `safe_add_column` / `safe_drop_column`
 - `migrations/versions/0001_baseline.py` — chain root, matches the schema `create_all` produces from `Base.metadata`
 - `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
+- `migrations/versions/0006_normalize_artifact_provenance_owner.py` — claims legacy artifact provenance owners, dedupes nullable-owner rows, and makes `artifact_provenance.user_id` non-null
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
 

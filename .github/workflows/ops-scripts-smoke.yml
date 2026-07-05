@@ -1,0 +1,43 @@
+name: Ops Scripts Smoke
+
+on:
+  push:
+    branches: ["main", "2.0.x-dev"]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/ops-scripts-smoke.yml"
+  pull_request:
+    branches: ["*"]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/ops-scripts-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check shell script syntax
+        shell: bash
+        run: |
+          shopt -s nullglob
+          scripts=(scripts/*.sh)
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+
+      - name: Check Python script syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          for script in sorted(Path("scripts").glob("*.py")):
+              py_compile.compile(str(script), doraise=True)
+          PY
+

@@ -16,6 +16,7 @@ internal checkpoint callbacks that are not exposed in the Python public API.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import inspect
 import logging
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+_LEASE_CONTROL_INTERVAL_SECONDS = 2.0
+_STREAM_FRAME_CATEGORY = "stream"
 
 
 def _build_runtime_context(
@@ -120,6 +123,32 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
+async def _publish_stream_frame(
+    bridge: StreamBridge,
+    event_store: Any | None,
+    *,
+    run_id: str,
+    thread_id: str,
+    user_id: str | None,
+    event: str,
+    data: Any,
+) -> None:
+    if event_store is not None:
+        try:
+            await event_store.put(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=f"stream.{event}",
+                category=_STREAM_FRAME_CATEGORY,
+                content={"event": event, "data": data},
+                metadata={"caller": "runtime"},
+                user_id=user_id,
+            )
+        except Exception:
+            logger.warning("Failed to persist stream frame for run %s event=%s", run_id, event, exc_info=True)
+    await bridge.publish(run_id, event, data)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -152,6 +181,8 @@ async def run_agent(
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     latest_command_room_ai_text = ""
+    owner_task = asyncio.current_task()
+    lease_control_task: asyncio.Task | None = None
 
     journal = None
 
@@ -185,6 +216,8 @@ async def run_agent(
 
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
+        if owner_task is not None and record.lease_token is not None:
+            lease_control_task = asyncio.create_task(_lease_control_loop(run_manager, record, owner_task))
 
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
@@ -205,10 +238,14 @@ async def run_agent(
                 logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
-        await bridge.publish(
-            run_id,
-            "metadata",
-            {
+        await _publish_stream_frame(
+            bridge,
+            event_store,
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=record.user_id,
+            event="metadata",
+            data={
                 "run_id": run_id,
                 "thread_id": thread_id,
             },
@@ -328,7 +365,15 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and single_mode == "values" else latest_command_room_ai_text
                 sse_event = _lg_mode_to_sse_event(single_mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                await _publish_stream_frame(
+                    bridge,
+                    event_store,
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    user_id=record.user_id,
+                    event=sse_event,
+                    data=serialize(chunk, mode=single_mode),
+                )
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
@@ -348,7 +393,15 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and mode == "values" else latest_command_room_ai_text
                 sse_event = _lg_mode_to_sse_event(mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                await _publish_stream_frame(
+                    bridge,
+                    event_store,
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    user_id=record.user_id,
+                    event=sse_event,
+                    data=serialize(chunk, mode=mode),
+                )
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -410,16 +463,25 @@ async def run_agent(
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg)
-        await bridge.publish(
-            run_id,
-            "error",
-            {
+        await _publish_stream_frame(
+            bridge,
+            event_store,
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=record.user_id,
+            event="error",
+            data={
                 "message": error_msg,
                 "name": type(exc).__name__,
             },
         )
 
     finally:
+        if lease_control_task is not None:
+            lease_control_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lease_control_task
+
         # Flush any buffered journal events and persist completion data
         if journal is not None:
             try:
@@ -465,6 +527,24 @@ async def _flush_journal_before_terminal_status(journal: Any | None, run_id: str
         await journal.flush()
     except Exception:
         logger.warning("Failed to flush journal before terminal status for run %s", run_id, exc_info=True)
+
+
+async def _lease_control_loop(run_manager: RunManager, record: RunRecord, owner_task: asyncio.Task) -> None:
+    while not owner_task.done():
+        await asyncio.sleep(_LEASE_CONTROL_INTERVAL_SECONDS)
+        if owner_task.done():
+            return
+        if not await run_manager.heartbeat_active_lease(record):
+            record.abort_action = "interrupt"
+            record.abort_event.set()
+            owner_task.cancel()
+            return
+        intent = await run_manager.consume_cancel_intent(record)
+        if intent is not None:
+            record.abort_action = intent.action
+            record.abort_event.set()
+            owner_task.cancel()
+            return
 
 
 async def _set_terminal_status(

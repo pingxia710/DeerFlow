@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus, is_inflight_status, is_terminal_status, run_status_value
+from .schemas import ACTIVE_RUN_STATUS_VALUES, DisconnectMode, RunStatus, is_inflight_status, is_terminal_status, run_status_value
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
@@ -33,6 +33,7 @@ _RETRYABLE_SQLITE_ERROR_CODES = {
 
 _STALE_INFLIGHT_TIMEOUT = timedelta(minutes=30)
 _STALE_INFLIGHT_ERROR = "Worker lost after no run progress before the recovery timeout."
+_ACTIVE_SLOT_LEASE_TTL = timedelta(seconds=30)
 
 
 def _is_retryable_persistence_error(exc: BaseException) -> bool:
@@ -131,6 +132,9 @@ class RunRecord:
     last_ai_message: str | None = None
     first_human_message: str | None = None
     round_id: str | None = None
+    lease_token: str | None = None
+    lease_generation: int | None = None
+    lease_owner_worker_id: str | None = None
 
 
 class RunManager:
@@ -148,6 +152,7 @@ class RunManager:
         round_store: Any | None = None,
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         terminal_cleanup_delay: float = 300,
+        worker_id: str | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -161,6 +166,7 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._terminal_cleanup_delay = terminal_cleanup_delay
         self._cleanup_tasks: set[asyncio.Task] = set()
+        self._worker_id = worker_id or f"run-manager-{uuid.uuid4().hex}"
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -192,13 +198,16 @@ class RunManager:
             return []
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
 
-    @staticmethod
-    def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
+    def _store_put_payload(self, record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
         metadata = dict(record.metadata or {})
         if record.round_id is not None:
             metadata["round_id"] = record.round_id
         if record.terminal_reason is not None:
             metadata["terminal_reason"] = record.terminal_reason
+        if record.lease_token is not None and record.lease_generation is not None:
+            metadata.setdefault("owner_worker_id", record.lease_owner_worker_id or self._worker_id)
+            metadata.setdefault("lease_token", record.lease_token)
+            metadata.setdefault("generation", record.lease_generation)
         payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
@@ -276,6 +285,66 @@ class RunManager:
             lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
         )
 
+    @staticmethod
+    def _record_has_lease(record: RunRecord) -> bool:
+        return record.lease_token is not None and record.lease_generation is not None
+
+    def _apply_lease_to_record(self, record: RunRecord, lease: Any) -> None:
+        record.lease_token = lease.lease_token
+        record.lease_generation = lease.generation
+        record.lease_owner_worker_id = lease.owner_worker_id
+        record.metadata = {
+            **(record.metadata or {}),
+            "owner_worker_id": lease.owner_worker_id,
+            "lease_token": lease.lease_token,
+            "generation": lease.generation,
+            "lease_expires_at": lease.lease_expires_at.isoformat(),
+            "lease_heartbeat_at": lease.lease_heartbeat_at.isoformat(),
+        }
+
+    async def _persist_new_run_with_active_slot(self, record: RunRecord) -> bool | None:
+        """Persist *record* and acquire the thread active slot.
+
+        Returns ``None`` when the configured store has no lease/CAS support,
+        ``False`` when another active slot won the race, and ``True`` when this
+        record owns the slot.
+        """
+        if self._store is None:
+            return None
+        try:
+            await self._bind_round_to_run(record)
+            payload = self._store_put_payload(record)
+            pending_kwargs = {k: v for k, v in payload.items() if k not in {"thread_id", "status"}}
+            await self._call_store_with_retry(
+                "create_pending_run",
+                record.run_id,
+                lambda: self._store.create_pending_run(record.run_id, thread_id=record.thread_id, **pending_kwargs),
+            )
+            lease = await self._call_store_with_retry(
+                "try_acquire_active_slot",
+                record.run_id,
+                lambda: self._store.try_acquire_active_slot(
+                    record.thread_id,
+                    record.run_id,
+                    owner_worker_id=self._worker_id,
+                    lease_expires_at=datetime.now(UTC) + _ACTIVE_SLOT_LEASE_TTL,
+                ),
+            )
+        except NotImplementedError:
+            try:
+                await self._store.delete(record.run_id)
+            except Exception:
+                logger.warning("Failed to delete lease-unsupported pending run %s", record.run_id, exc_info=True)
+            return None
+        if lease is None:
+            try:
+                await self._store.delete(record.run_id)
+            except Exception:
+                logger.warning("Failed to delete rejected pending run %s", record.run_id, exc_info=True)
+            return False
+        self._apply_lease_to_record(record, lease)
+        return True
+
     async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
         """Best-effort persist run record to backing store."""
         return await self._persist_snapshot_to_store(
@@ -287,6 +356,28 @@ class RunManager:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
             return True
+        if self._record_has_lease(record) and is_terminal_status(status):
+            try:
+                return bool(
+                    await self._call_store_with_retry(
+                        "complete_run",
+                        record.run_id,
+                        lambda: self._store.complete_run(
+                            record.run_id,
+                            from_statuses=ACTIVE_RUN_STATUS_VALUES,
+                            terminal_status=status.value,
+                            lease_token=record.lease_token or "",
+                            generation=record.lease_generation or 0,
+                            terminal_reason=terminal_reason,
+                            error=error,
+                        ),
+                    )
+                )
+            except NotImplementedError:
+                pass
+            except Exception:
+                logger.warning("Failed to persist lease terminal status for run %s", record.run_id, exc_info=True)
+                return False
         row_recovery_payload = self._store_put_payload(record, error=error)
         try:
             updated = await self._call_store_with_retry(
@@ -315,6 +406,11 @@ class RunManager:
             record_status = status
 
         metadata = row.get("metadata") or {}
+        lease_generation = metadata.get("generation", row.get("generation"))
+        try:
+            lease_generation = int(lease_generation) if lease_generation is not None else None
+        except (TypeError, ValueError):
+            lease_generation = None
         return RunRecord(
             run_id=row["run_id"],
             thread_id=row["thread_id"],
@@ -343,6 +439,9 @@ class RunManager:
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
             round_id=metadata.get("round_id") if isinstance(metadata.get("round_id"), str) else None,
+            lease_token=metadata.get("lease_token") or row.get("lease_token"),
+            lease_generation=lease_generation,
+            lease_owner_worker_id=metadata.get("owner_worker_id") or row.get("owner_worker_id"),
         )
 
     @staticmethod
@@ -460,6 +559,7 @@ class RunManager:
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         row_recovery_payload: dict[str, Any] | None = None
+        lease_payload: tuple[str, int, str, str | None] | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
@@ -470,29 +570,58 @@ class RunManager:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
                 row_recovery_payload = self._store_put_payload(record, error=kwargs.get("error"))
+                status_value = run_status_value(kwargs.get("status")) or run_status_value(record.status)
+                if self._record_has_lease(record) and status_value is not None and is_terminal_status(status_value):
+                    lease_payload = (record.lease_token or "", record.lease_generation or 0, status_value, record.terminal_reason)
         if self._store is None:
             return
-        try:
-            updated = await self._call_store_with_retry(
-                "update_run_completion",
-                run_id,
-                lambda: self._store.update_run_completion(run_id, **kwargs),
-            )
-            if updated is False:
-                if row_recovery_payload is None:
-                    logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
+        lease_backfilled = False
+        if lease_payload is not None:
+            lease_token, generation, terminal_status, terminal_reason = lease_payload
+            try:
+                updated = await self._call_store_with_retry(
+                    "backfill_completion_metadata",
+                    run_id,
+                    lambda: self._store.backfill_completion_metadata(
+                        run_id,
+                        terminal_status=terminal_status,
+                        lease_token=lease_token,
+                        generation=generation,
+                        terminal_reason=terminal_reason,
+                        metadata={k: v for k, v in kwargs.items() if k != "status"},
+                    ),
+                )
+                if updated is False:
+                    logger.warning("Lease completion backfill for %s affected no rows", run_id)
                     return
-                if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
-                    return
-                recovered = await self._call_store_with_retry(
+                lease_backfilled = True
+            except NotImplementedError:
+                pass
+            except Exception:
+                logger.warning("Failed to backfill lease completion for %s", run_id, exc_info=True)
+                return
+        if not lease_backfilled:
+            try:
+                updated = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
                     lambda: self._store.update_run_completion(run_id, **kwargs),
                 )
-                if recovered is False:
-                    logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
-        except Exception:
-            logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+                if updated is False:
+                    if row_recovery_payload is None:
+                        logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
+                        return
+                    if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
+                        return
+                    recovered = await self._call_store_with_retry(
+                        "update_run_completion",
+                        run_id,
+                        lambda: self._store.update_run_completion(run_id, **kwargs),
+                    )
+                    if recovered is False:
+                        logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
+            except Exception:
+                logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
         if record is not None:
             status_value = kwargs.get("status")
             try:
@@ -681,11 +810,64 @@ class RunManager:
                 record.terminal_reason = terminal_reason
             if error is not None:
                 record.error = error
-        await self._persist_status(record, status, error=error, terminal_reason=terminal_reason)
+        persisted = await self._persist_status(record, status, error=error, terminal_reason=terminal_reason)
+        if self._record_has_lease(record) and is_terminal_status(status) and not persisted:
+            logger.warning("Lease terminal status for run %s was not persisted; skipping follow-up store writes", run_id)
+            return
         await self._persist_round_state_for_status(record, status, error=error, terminal_reason=terminal_reason)
         if is_terminal_status(status):
             self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s -> %s", run_id, status.value)
+
+    async def heartbeat_active_lease(self, record: RunRecord) -> bool:
+        if self._store is None or not self._record_has_lease(record):
+            return True
+        try:
+            return bool(
+                await self._call_store_with_retry(
+                    "heartbeat_lease",
+                    record.run_id,
+                    lambda: self._store.heartbeat_lease(
+                        record.run_id,
+                        lease_token=record.lease_token or "",
+                        generation=record.lease_generation or 0,
+                        lease_expires_at=datetime.now(UTC) + _ACTIVE_SLOT_LEASE_TTL,
+                    ),
+                )
+            )
+        except NotImplementedError:
+            return True
+        except Exception:
+            logger.warning("Failed to heartbeat lease for run %s", record.run_id, exc_info=True)
+            return False
+
+    async def consume_cancel_intent(self, record: RunRecord) -> Any | None:
+        if self._store is None or not self._record_has_lease(record):
+            return None
+        try:
+            intent = await self._call_store_with_retry(
+                "consume_cancel_intent",
+                record.run_id,
+                lambda: self._store.consume_cancel_intent(
+                    record.run_id,
+                    lease_token=record.lease_token or "",
+                    generation=record.lease_generation or 0,
+                ),
+            )
+        except NotImplementedError:
+            return None
+        except Exception:
+            logger.warning("Failed to consume cancel intent for run %s", record.run_id, exc_info=True)
+            return None
+        if intent is None:
+            return None
+        async with self._lock:
+            live = self._runs.get(record.run_id)
+            if live is not None:
+                live.abort_action = intent.action
+                live.status = "rolling_back" if intent.action == "rollback" else "cancelling"
+                live.updated_at = _now_iso()
+        return intent
 
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
         """Best-effort persist model_name update to the backing store."""
@@ -725,6 +907,31 @@ class RunManager:
         Returns ``False`` only when the run is unknown to this worker or has
         reached a terminal state other than interrupted (completed, failed, etc.).
         """
+        if self._store is not None:
+            try:
+                cancel_result = await self._call_store_with_retry(
+                    "request_cancel",
+                    run_id,
+                    lambda: self._store.request_cancel(run_id, action, requested_by=self._worker_id),
+                )
+            except NotImplementedError:
+                cancel_result = None
+            if cancel_result is not None and cancel_result.accepted and cancel_result.terminal is False:
+                async with self._lock:
+                    record = self._runs.get(run_id)
+                    if record is not None and is_inflight_status(record.status):
+                        record.abort_action = action
+                        record.abort_event.set()
+                        if record.task is not None and not record.task.done():
+                            record.task.cancel()
+                        if self._record_has_lease(record):
+                            record.updated_at = _now_iso()
+                            logger.info("Run %s cancel intent recorded (action=%s)", run_id, action)
+                            return True
+                if run_id not in self._runs:
+                    logger.info("Run %s cancel intent recorded for non-local worker (action=%s)", run_id, action)
+                    return True
+
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -812,6 +1019,13 @@ class RunManager:
 
             if multitask_strategy == "reject" and (inflight or persisted_foreign_inflight):
                 raise ConflictError(f"Thread {thread_id} already has an active run")
+            if multitask_strategy in ("interrupt", "rollback") and persisted_foreign_inflight and self._store is not None:
+                for r in persisted_foreign_inflight:
+                    try:
+                        await self._store.request_cancel(r.run_id, multitask_strategy, requested_by=self._worker_id)
+                    except NotImplementedError:
+                        pass
+                raise ConflictError(f"Thread {thread_id} already has an active run; cancellation requested")
 
             # Only local in-memory runs are safe to interrupt/rollback here. Persisted-only
             # rows may belong to another worker or a stale process after restart; without a
@@ -844,10 +1058,16 @@ class RunManager:
             self._index_run_locked(record)
             persisted = False
             try:
-                await self._persist_new_run_to_store(record)
-                await self._bind_round_to_run(record)
-                await self._persist_new_run_to_store(record)
-                persisted = True
+                if multitask_strategy == "reject":
+                    active_slot = await self._persist_new_run_with_active_slot(record)
+                    if active_slot is False:
+                        raise ConflictError(f"Thread {thread_id} already has an active run")
+                    persisted = active_slot is True
+                if not persisted:
+                    await self._persist_new_run_to_store(record)
+                    await self._bind_round_to_run(record)
+                    await self._persist_new_run_to_store(record)
+                    persisted = True
             except Exception:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
                 if self._store is not None:

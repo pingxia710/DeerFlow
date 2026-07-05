@@ -16,6 +16,7 @@ from app.gateway.deps import require_admin_user
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers.mcp import (
     _ADMIN_REQUIRED_DETAIL,
+    _ENV_KEYS,
     _MCP_STDIO_COMMAND_ALLOWLIST_ENV,
     McpConfigUpdateRequest,
     McpOAuthConfigResponse,
@@ -26,6 +27,12 @@ from app.gateway.routers.mcp import (
     reset_mcp_tools_cache_endpoint,
     update_mcp_configuration,
 )
+
+
+def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
 
 # ---------------------------------------------------------------------------
 # _mask_server_config
@@ -409,6 +416,7 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
 
 
 def test_validate_mcp_update_allows_default_npx_stdio_command(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -423,7 +431,28 @@ def test_validate_mcp_update_allows_default_npx_stdio_command(monkeypatch):
     _validate_mcp_update_request(request)
 
 
+def test_validate_mcp_update_rejects_stdio_in_production(monkeypatch):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "github": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-github"],
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "stdio transport" in exc_info.value.detail
+
+
 def test_validate_mcp_update_rejects_filesystem_server_root_path(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -443,6 +472,7 @@ def test_validate_mcp_update_rejects_filesystem_server_root_path(monkeypatch):
 
 
 def test_validate_mcp_update_rejects_filesystem_server_docker_socket(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -462,6 +492,7 @@ def test_validate_mcp_update_rejects_filesystem_server_docker_socket(monkeypatch
 
 
 def test_validate_mcp_update_allows_filesystem_server_narrow_project_path(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -477,6 +508,7 @@ def test_validate_mcp_update_allows_filesystem_server_narrow_project_path(monkey
 
 
 def test_validate_mcp_update_rejects_shell_stdio_command(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -496,6 +528,7 @@ def test_validate_mcp_update_rejects_shell_stdio_command(monkeypatch):
 
 
 def test_validate_mcp_update_rejects_inline_shell_command(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -515,6 +548,7 @@ def test_validate_mcp_update_rejects_inline_shell_command(monkeypatch):
 
 
 def test_validate_mcp_update_rejects_path_with_allowed_basename(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.setenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, "npx")
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -534,6 +568,7 @@ def test_validate_mcp_update_rejects_path_with_allowed_basename(monkeypatch):
 
 
 def test_validate_mcp_update_uses_explicit_stdio_allowlist(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.setenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, "python,npx")
     request = McpConfigUpdateRequest(
         mcp_servers={
@@ -549,12 +584,28 @@ def test_validate_mcp_update_uses_explicit_stdio_allowlist(monkeypatch):
 
 
 def test_validate_mcp_update_ignores_remote_transports(monkeypatch):
+    _clear_runtime_env(monkeypatch)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
         mcp_servers={
             "remote": McpServerConfigResponse(
                 type="http",
                 command="/bin/bash",
+                url="https://mcp.example.com/mcp",
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+def test_validate_mcp_update_allows_remote_transport_in_production(monkeypatch):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "remote": McpServerConfigResponse(
+                type="http",
                 url="https://mcp.example.com/mcp",
             )
         }

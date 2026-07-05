@@ -31,7 +31,7 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.run import RunRepository
 
 pytestmark = pytest.mark.asyncio
-HEAD = "0005_native_round_state"
+HEAD = "0006_normalize_artifact_provenance_owner"
 
 
 def _seed_pre_3658_database(db_path: Path) -> None:

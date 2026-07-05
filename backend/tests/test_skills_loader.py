@@ -100,9 +100,11 @@ def test_bundled_command_room_role_skills_are_loadable_from_project_root(monkeyp
     skills_root = Path(__file__).resolve().parents[2] / "skills"
     assert skills_root.is_dir()
 
-    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
-    names = {skill.name for skill in skills}
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=True)
+    by_name = {skill.name: skill for skill in skills}
 
     role_skill_names = {skill for cfg in COMMAND_ROOM_ROLE_CONFIGS.values() for skill in (cfg.skills or [])}
-    assert "command-room-chair" in names
-    assert role_skill_names <= names
+    assert "command-room-chair" in by_name
+    assert role_skill_names <= set(by_name)
+    for skill_name in role_skill_names:
+        assert "Command Room" in by_name[skill_name].skill_file.read_text(encoding="utf-8")

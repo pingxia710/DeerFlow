@@ -79,7 +79,8 @@ class MemoryRunStore(RunStore):
         created_at=None,
     ):
         now = datetime.now(UTC).isoformat()
-        self._runs[run_id] = {
+        metadata = metadata or {}
+        row = {
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
@@ -87,12 +88,16 @@ class MemoryRunStore(RunStore):
             "model_name": model_name,
             "status": status,
             "multitask_strategy": multitask_strategy,
-            "metadata": metadata or {},
+            "metadata": metadata,
             "kwargs": kwargs or {},
             "error": error,
             "created_at": created_at or now,
             "updated_at": now,
         }
+        for key in ("owner_worker_id", "lease_token", "generation", "lease_expires_at", "lease_heartbeat_at"):
+            if key in metadata:
+                row[key] = metadata[key]
+        self._runs[run_id] = row
         self._index_run(run_id, thread_id)
 
     async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:

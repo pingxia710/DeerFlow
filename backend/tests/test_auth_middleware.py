@@ -314,26 +314,25 @@ def test_auth_disabled_skips_csrf_for_state_changing_requests(monkeypatch):
     assert res.json() == {"ok": True}
 
 
-def test_auth_disabled_hard_fails_in_shared_env_without_ack(monkeypatch):
+def test_auth_disabled_hard_fails_in_shared_env(monkeypatch):
     from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setenv("DEER_FLOW_ENV", "staging")
-    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", raising=False)
 
     with pytest.raises(RuntimeError, match="forbidden"):
         warn_if_auth_disabled_enabled()
 
 
-def test_auth_disabled_allowed_in_shared_env_with_explicit_ack(monkeypatch):
+def test_auth_disabled_ack_still_fails_in_shared_env(monkeypatch):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setenv("DEER_FLOW_ENV", "production")
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", "I_UNDERSTAND_AUTH_IS_DISABLED")
-    client = TestClient(_make_app())
 
-    res = client.get("/api/models")
-
-    assert res.status_code == 200
+    with pytest.raises(RuntimeError, match="forbidden"):
+        warn_if_auth_disabled_enabled()
 
 
 def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
@@ -350,7 +349,17 @@ def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
     assert "default" in caplog.text
 
 
-def test_auth_disabled_startup_warning_in_shared_env_with_ack(monkeypatch, caplog):
+def test_auth_disabled_is_not_effective_in_shared_env_even_with_ack(monkeypatch):
+    from app.gateway.auth_disabled import is_auth_disabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", "I_UNDERSTAND_AUTH_IS_DISABLED")
+
+    assert is_auth_disabled() is False
+
+
+def test_auth_disabled_startup_warning_not_emitted_when_shared_env_raises(monkeypatch, caplog):
     from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
@@ -358,9 +367,10 @@ def test_auth_disabled_startup_warning_in_shared_env_with_ack(monkeypatch, caplo
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_UNSAFE_ACK", "I_UNDERSTAND_AUTH_IS_DISABLED")
 
     with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
-        warn_if_auth_disabled_enabled()
+        with pytest.raises(RuntimeError, match="forbidden"):
+            warn_if_auth_disabled_enabled()
 
-    assert "authentication is bypassed" in caplog.text
+    assert "authentication is bypassed" not in caplog.text
 
 
 def test_protected_path_with_junk_cookie_rejected(client):

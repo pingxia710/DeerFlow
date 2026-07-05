@@ -15,11 +15,21 @@ logger = logging.getLogger(__name__)
 # Valid range for max_concurrent_subagents
 MIN_SUBAGENT_LIMIT = 2
 MAX_SUBAGENT_LIMIT = 6
+_LIMIT_WARNING = "Subagent limit: {dropped_count} task() call(s) were not dispatched because the per-turn limit is {max_concurrent}. Wait for current task results, then re-issue only omitted work if still needed."
 
 
 def _clamp_subagent_limit(value: int) -> int:
     """Clamp subagent limit to valid range [2, 6]."""
     return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
+
+
+def _append_limit_warning(content: object, *, dropped_count: int, max_concurrent: int) -> object:
+    warning = _LIMIT_WARNING.format(dropped_count=dropped_count, max_concurrent=max_concurrent)
+    if isinstance(content, str):
+        return f"{content}\n\n{warning}" if content else warning
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": warning}]
+    return warning
 
 
 class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
@@ -63,8 +73,17 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         dropped_count = len(indices_to_drop)
         logger.warning(f"Truncated {dropped_count} excess task tool call(s) from model response (limit: {self.max_concurrent})")
 
-        # Replace the AIMessage with truncated tool_calls (same id triggers replacement)
-        updated_msg = clone_ai_message_with_tool_calls(last_msg, truncated_tool_calls)
+        # Replace the AIMessage with truncated tool_calls (same id triggers replacement).
+        # The warning is model-visible; logs alone made dropped delegations silent.
+        updated_msg = clone_ai_message_with_tool_calls(
+            last_msg,
+            truncated_tool_calls,
+            content=_append_limit_warning(
+                getattr(last_msg, "content", ""),
+                dropped_count=dropped_count,
+                max_concurrent=self.max_concurrent,
+            ),
+        )
         return {"messages": [updated_msg]}
 
     @override

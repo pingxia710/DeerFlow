@@ -1,10 +1,14 @@
 import asyncio
+import json
 import logging
 import os
+import time
+from collections import defaultdict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
@@ -44,6 +48,10 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+REQUEST_ID_HEADER = "X-Request-ID"
+_METRICS_STARTED_AT = time.time()
+_REQUEST_COUNTS: dict[tuple[str, str, str], int] = defaultdict(int)
+_REQUEST_DURATION_SECONDS: dict[tuple[str, str, str], float] = defaultdict(float)
 
 # Upper bound (seconds) each lifespan shutdown hook is allowed to run.
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
@@ -118,6 +126,45 @@ def _assert_run_event_store_config_for_environment(config: AppConfig) -> None:
     database_backend = getattr(getattr(config, "database", None), "backend", "memory")
     if database_backend == "memory":
         raise RuntimeError("database.backend must be sqlite or postgres when run_events.backend='db' in staging/shared/production.")
+
+
+def _metric_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _route_template(request) -> str:
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return str(path or request.url.path)
+
+
+def _record_request_metric(request, *, status_code: int, duration_seconds: float) -> None:
+    key = (request.method, _route_template(request), f"{status_code // 100}xx")
+    _REQUEST_COUNTS[key] += 1
+    _REQUEST_DURATION_SECONDS[key] += duration_seconds
+
+
+def _render_metrics() -> str:
+    lines = [
+        "# HELP deerflow_gateway_uptime_seconds Gateway process uptime in seconds.",
+        "# TYPE deerflow_gateway_uptime_seconds gauge",
+        f"deerflow_gateway_uptime_seconds {time.time() - _METRICS_STARTED_AT:.6f}",
+        "# HELP deerflow_gateway_http_requests_total HTTP requests handled by Gateway.",
+        "# TYPE deerflow_gateway_http_requests_total counter",
+    ]
+    for (method, route, status_class), count in sorted(_REQUEST_COUNTS.items()):
+        labels = f'method="{_metric_label(method)}",route="{_metric_label(route)}",status_class="{_metric_label(status_class)}"'
+        lines.append(f"deerflow_gateway_http_requests_total{{{labels}}} {count}")
+    lines.extend(
+        [
+            "# HELP deerflow_gateway_http_request_duration_seconds_sum Total Gateway HTTP request duration in seconds.",
+            "# TYPE deerflow_gateway_http_request_duration_seconds_sum counter",
+        ]
+    )
+    for (method, route, status_class), total in sorted(_REQUEST_DURATION_SECONDS.items()):
+        labels = f'method="{_metric_label(method)}",route="{_metric_label(route)}",status_class="{_metric_label(status_class)}"'
+        lines.append(f"deerflow_gateway_http_request_duration_seconds_sum{{{labels}}} {total:.6f}")
+    return "\n".join(lines) + "\n"
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -417,6 +464,34 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ],
     )
 
+    @app.middleware("http")
+    async def request_id_middleware(request, call_next):
+        started = time.perf_counter()
+        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid4().hex
+        request.state.request_id = request_id
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            duration_seconds = time.perf_counter() - started
+            _record_request_metric(request, status_code=status_code, duration_seconds=duration_seconds)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "gateway.request",
+                        "request_id": request_id,
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status_code": status_code,
+                        "duration_ms": round(duration_seconds * 1000, 2),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
 
@@ -493,6 +568,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    @app.get("/metrics", tags=["health"])
+    async def metrics() -> Response:
+        return Response(_render_metrics(), media_type="text/plain; version=0.0.4")
 
     return app
 

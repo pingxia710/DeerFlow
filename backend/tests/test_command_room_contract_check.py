@@ -56,6 +56,27 @@ def test_self_attested_worker_output_only_evidence_cannot_support_pass():
     assert any("PASS requires concrete non-self-attested evidenceRefs" in error for error in errors)
 
 
+def test_output_ref_only_evidence_cannot_support_pass():
+    contract = _contract()
+    round_record = _valid_round(contract)
+    round_record["decisionSignals"]["decision"] = "PASS"
+    round_record["decisionSignals"]["evidenceRefs"] = ["output_ref: worker-output-123"]
+    round_record["verdict"] = round_record["decisionSignals"]
+    round_record["signals"][0].update(
+        {
+            "evidenceState": "SUPPORTED",
+            "selfAttestationOnly": False,
+            "evidenceRefs": ["output_ref: worker-output-123"],
+            "redlineTouched": False,
+            "recommendedDecision": "PASS",
+        }
+    )
+
+    errors = checker.validate_round(round_record, contract)
+
+    assert any("PASS requires concrete non-self-attested evidenceRefs" in error for error in errors)
+
+
 def test_target_role_and_round_advisory_gated_false_are_not_hard_gate_failures():
     contract = _contract()
     round_record = _valid_round(contract)

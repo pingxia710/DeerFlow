@@ -22,6 +22,8 @@ _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
 _DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST = frozenset({"npx", "uvx"})
 _SHELL_METACHARS = frozenset(";|&`$<>\n\r")
 _FILESYSTEM_MCP_PACKAGE = "@modelcontextprotocol/server-filesystem"
+_ENV_KEYS = ("DEER_FLOW_ENV", "ENVIRONMENT", "APP_ENV", "NODE_ENV")
+_SHARED_ENV_VALUES = frozenset({"prod", "production", "staging", "stage", "shared"})
 
 
 class McpOAuthConfigResponse(BaseModel):
@@ -95,6 +97,10 @@ def _allowed_stdio_commands() -> set[str]:
     return base | extra
 
 
+def _is_shared_environment() -> bool:
+    return any(os.environ.get(key, "").strip().lower() in _SHARED_ENV_VALUES for key in _ENV_KEYS)
+
+
 def _stdio_command_name(command: str | None, *, server_name: str) -> str:
     """Normalize and validate a stdio command field from the API boundary."""
     if command is None or not command.strip():
@@ -146,6 +152,11 @@ def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
         transport_type = (server.type or "stdio").lower()
         if transport_type != "stdio":
             continue
+        if _is_shared_environment():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(f"MCP server '{name}' uses stdio transport, which cannot be added or updated through the API in staging/shared/production."),
+            )
 
         command_name = _stdio_command_name(server.command, server_name=name)
         if command_name not in allowed_commands:

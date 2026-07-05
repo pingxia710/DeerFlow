@@ -74,7 +74,10 @@ explicitly verified.
 
 ## 1-2 Day Smoke
 
-Record one row per session in `docs/runtime/private-beta-smoke-log.md`.
+Record one row per session in `docs/runtime/private-beta-smoke-log.md`. Do not
+record duplicate heartbeat rows; add a row only for a new real-use session, a
+new run/test result, a new failure/warning, or a meaningful checkpoint that
+changes the evidence state.
 
 Minimum daily flow:
 

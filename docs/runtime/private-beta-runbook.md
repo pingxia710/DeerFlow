@@ -62,11 +62,15 @@ Before first beta boot on an existing data directory:
 
 ```bash
 cd backend
-PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run --user-id <owner-user-id>
+PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id <owner-user-id>
 ```
 
 Run without `--dry-run` only after the report assigns legacy data to the
-intended owner.
+intended owner and confirms it inspected the live database. Current local
+evidence showed the script looking for `backend/.deer-flow/deer-flow.db` while
+the active SQLite file was `backend/.deer-flow/data/deerflow.db`; treat SQL
+owner migration dry-run output as incomplete until that path is fixed or
+explicitly verified.
 
 ## 1-2 Day Smoke
 

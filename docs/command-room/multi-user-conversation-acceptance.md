@@ -425,6 +425,23 @@
 - **期望结果**：每条记录可见或可追踪 owner/thread/run/task/event/artifact id；错误响应包含 request id；不包含 secret。
 - **建议测试层级**：manual/API。
 
+## 测试映射 / 现有覆盖入口
+
+> 说明：以下为“验收项 ↔ 现有测试文件/命令”的候选验证入口，便于后续主线开发验收。未逐条声明已完全覆盖；没有明确后端测试覆盖的项标为“待补测试”或“需前端/E2E smoke”。建议按需运行单测命令，例如 `pytest backend/tests/test_threads_router.py`，或组合运行相关文件。
+
+| 验收主题 | 关联验收项 | 现有覆盖入口 / 候选验证入口 | 备注 |
+| --- | --- | --- | --- |
+| owner isolation / thread ownership | P0-01、P0-02、P1-02、P2-08 | `backend/tests/test_threads_router.py`；`backend/tests/test_stateless_runs_owner_isolation.py`；`backend/tests/test_gateway_services.py` | 重点复核跨 owner thread/run/message/event/artifact 查询、ID 枚举、gateway 服务层权限边界；SSE/Last-Event-ID 越权仍建议补安全 replay 或 E2E。 |
+| thread/run 三层历史与 pagination/replay | P0-06、P0-11、P1-03、P2-02、P2-09 | `backend/tests/test_thread_run_messages_pagination.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_run_event_store_pagination.py` | 覆盖入口偏 API 与存储分页；刷新后 UI 重建、真实 replay 展示仍需前端/E2E smoke。 |
+| run-local event ordering / `after_seq` cursor | P0-02、P1-03、P1-11、P2-02 | `backend/tests/test_run_event_store_pagination.py`；`backend/tests/test_runs_api_endpoints.py` | 重点验证 seq 单调、分页游标、从中间位置 replay；多 worker 重连需结合部署形态补 smoke。 |
+| `task_event` / `action_result` / message 分流 | P0-07、P0-08、P1-04、P1-05、P1-09、P2-03、P2-05 | `backend/tests/test_task_event_contract.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_thread_run_messages_pagination.py` | 后端契约可作为入口；前端分类展示、unknown event 降级、worker finding 证据回放需前端/E2E smoke。 |
+| artifact provenance / owner bucket lookup | P0-09、P1-06、P2-04、P2-08 | `backend/tests/test_artifact_provenance.py`；`backend/tests/test_gateway_services.py` | 重点复核 owner、thread/run/task/action/message provenance 与存储边界；artifact 失效/清理后的 UI 解释通常需补测试。 |
+| terminal status / `terminal_reason` / store-only replay | P0-10、P0-14、P1-07、P1-11、P1-12 | `backend/tests/test_run_manager.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_run_event_store_pagination.py`；`backend/tests/test_persistence_bootstrap_concurrency.py` | 重点验证 terminal_reason 持久化、迟到写不覆盖、wait/detail/timeline 一致；跨 worker lease/fencing 需按部署补并发或 E2E。 |
+| checkpoint run_id-not-key contract | P0-11、P1-08、P1-12 | `backend/tests/test_owner_checkpoint_contract.py`；`backend/tests/test_run_manager.py` | 明确 checkpoint 定位不把 `run_id` 当隔离键；rollback 审计和 UI 可解释性仍需补 API/E2E 覆盖。 |
+| 同一用户多会话并发与同 thread active-run 排他 | P0-03、P0-04、P1-01、P0-14 | `backend/tests/test_run_manager.py`；`backend/tests/test_runs_api_endpoints.py`；`backend/tests/test_persistence_bootstrap_concurrency.py` | 候选入口偏后端状态机/并发；真实双会话 stream 与多标签一致性需前端/E2E smoke。 |
+| 多会话切换前端 smoke | P0-05、P0-06、P1-01、P1-09、P2-01 | 待补测试；建议新增前端/E2E smoke，覆盖切 A→B→A、刷新 replay、分类展示、空 thread | 当前映射未发现明确前端测试入口；不应视为已自动化覆盖。 |
+| 主 AI round 上下文、边界与 secrets | P0-12、P0-13、P1-04、P1-10、P2-10 | `backend/tests/test_task_event_contract.py`；`backend/tests/test_gateway_services.py`；待补安全/脱敏测试 | 可从 task/event/gateway 契约切入；secrets 脱敏、边界授权记录、诊断字段不泄密需专项测试或 manual 验收。 |
+
 ## 最小通过标准建议
 
 - **P0 全部通过**：才可认为多用户/多会话工作底座满足基本安全、隔离、持久化和回放要求。

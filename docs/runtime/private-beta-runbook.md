@@ -30,6 +30,17 @@ run_events:
   track_token_usage: true
 ```
 
+Current code still uses the legacy `checkpointer` section for LangGraph store
+persistence. Without it, Gateway can boot with `database.backend: sqlite`, but
+startup logs `InMemoryStore` for the store. Until the store follows the unified
+`database` section, include:
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: .deer-flow/data/checkpoints.db
+```
+
 Use `postgres` instead of `sqlite` only when the database is already operated as
 a managed service. Do not raise worker count until a shared runtime/stream
 bridge/cancel signal exists.
@@ -40,6 +51,9 @@ bridge/cancel signal exists.
 - JSONL run events are local/single-process only, not private-beta production.
 - SSE reconnect can replay persisted terminal runs, but live in-flight stream
   ownership is still worker-local.
+- LangGraph store persistence still depends on the legacy `checkpointer`
+  section; `database` alone persists app tables/run events/checkpoints but does
+  not stop the store fallback to memory in current code.
 - Legacy ownerless rows need one-time migration/claim before judging old history
   visibility.
 - Artifact provenance is indexed best-effort from observed run artifact events;

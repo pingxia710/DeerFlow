@@ -35,6 +35,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `d0800a23` | existing local stack on `localhost:2026`; no new backend run created | existing data owner/legacy audit | needs follow-up | 11:44 CST read-only SQLite/filesystem audit: `threads_meta`, `runs`, and `artifact_provenance` had `0` null-owner rows and no owner mismatch across thread/run/artifact joins; `runs` still had `282` rows across `22` thread ids without matching `threads_meta`; legacy JSONL path `backend/.deer-flow/threads` still existed with `508` run JSONL files versus `9` owner-scoped user run JSONL files, so existing data still needs runbook dry-run/migration review before actual beta boot. |
 | 2026-07-05 | Codex    | `848f7650` | existing local stack on `localhost:2026`; no new backend run created | migration dry-run preflight | needs follow-up | 11:45 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run` exited `0` and made no git-visible changes, but skipped SQL owner migration because it looked for `backend/.deer-flow/deer-flow.db`; live SQLite data was at `backend/.deer-flow/data/deerflow.db` with `34` `threads_meta` rows and `521` `runs` rows. The dry-run would move `45` legacy thread dirs and `1` legacy `command-room` agent to `user_id=default`; actual beta migration needs the intended owner and the DB path mismatch fixed/reviewed first. |
 | 2026-07-05 | Codex    | `b94b88c5` | existing local stack on `localhost:2026`; system Google Chrome used; no backend run created | fresh new-chat UI smoke | pass | 12:02 CST local throwaway auth registration returned `201`; `/workspace/chats/new` loaded without redirect; `/api/channels/providers`, `/api/models`, `/api/skills`, `/api/suggestions/config`, and `/api/langgraph/threads/search` returned `200`; browser console had `0` warning/error/pageerror entries after filtering to warning/error; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`, so the check did not create a model run. |
+| 2026-07-05 | Codex    | `fabb0898` | isolated temp Gateway boot on `127.0.0.1:18002`; `ENVIRONMENT=production`; all worker envs `1`; safe local sandbox; SQLite app DB; DB run events; SQLite checkpointer/store | production-shaped gateway boot | pass; caveat documented | 12:06 CST isolated uvicorn boot returned `/health` `200`; temp app DB initialized `runs`, `run_events`, `threads_meta`, `users`, `artifact_provenance`, feedback/channel tables, and alembic stamp; temp checkpointer DB initialized `checkpoints`, `writes`, `store`, and `store_migrations`; process shut down cleanly. A prior minimal boot with `database.backend=sqlite` and no `checkpointer` also reached `/health`, but logged `InMemoryStore`, so `private-beta-runbook.md` now records that current code needs `checkpointer: sqlite` for LangGraph store persistence. Current `localhost:2026` stack stayed healthy and real DB run counts remained `error=63`, `interrupted=7`, `success=451`. |
 
 ## Notes
 
@@ -62,9 +63,9 @@ Use this file for the 1-2 day real-use smoke from
   while the process is alive keeps `/health` green but makes model/run config
   reads fail with `503 Configuration not available`.
 - Current ongoing observation is on the local development stack
-  (`ENVIRONMENT=development` on Gateway). Treat these rows as local real-use
-  smoke, not as a production-shaped private beta boot; use
-  `docs/runtime/private-beta-runbook.md` startup config before actual beta boot.
+  (`ENVIRONMENT=development` on Gateway). The 12:06 isolated boot validates the
+  production-shaped Gateway startup guard/config path only; it is not a full
+  nginx/frontend/model-run beta boot.
 
 ## Current Completion Audit
 
@@ -77,10 +78,10 @@ Use this file for the 1-2 day real-use smoke from
 - Private beta runbook: present in `docs/runtime/private-beta-runbook.md` with
   startup config, known limits, preflight, migration dry-run caveats, and 1-2
   day smoke steps.
-- Known limits/start config: recorded; current local smoke is explicitly
-  development-stack evidence, not a production-shaped boot. Existing data
-  migration remains incomplete until the DB path mismatch in the dry-run path is
-  resolved or explicitly verified.
+- Known limits/start config: recorded; the isolated production-shaped Gateway
+  boot passed with `checkpointer: sqlite`, `database.backend: sqlite`, and
+  `run_events.backend: db`. Existing data migration remains incomplete until
+  the DB path mismatch in the dry-run path is resolved or explicitly verified.
 - 1-2 day real-use smoke: not complete. Continue observing real sessions and
   keep provider stream failures as a separate blocker/fix line.
 

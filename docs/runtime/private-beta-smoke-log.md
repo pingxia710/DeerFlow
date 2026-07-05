@@ -92,9 +92,12 @@ Use this file for the 1-2 day real-use smoke from
 - Known limits/start config: recorded; the isolated production-shaped Gateway
   boot passed with `checkpointer: sqlite`, `database.backend: sqlite`, and
   `run_events.backend: db`; latest backend guard/security preflight at
-  `a8f42500` passed `25` tests with `1` warning. Existing data migration remains
-  incomplete because the latest dry-run still reports ownerless legacy thread
-  assignments and conflicts requiring owner review before applying changes.
+  `a8f42500` passed `25` tests with `1` warning. Current local observation stack
+  config was rechecked at `3b62d7b1`; it is intentionally local-only
+  (`run_events.backend=jsonl`, no `checkpointer`) and must not be confused with
+  the production-shaped beta config. Existing data migration remains incomplete
+  because the latest dry-run still reports ownerless legacy thread assignments
+  and conflicts requiring owner review before applying changes.
 - 1-2 day real-use smoke: not complete. The provider stream retry fix now has
   one real Command Room/Codex confirmation run plus a post-fix memory update
   success checkpoint, but the beta observation window still needs continued real

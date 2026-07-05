@@ -77,11 +77,12 @@ observed regressions.
 This section points to later observation evidence without changing the original
 seal baseline above.
 
-- Latest observation HEAD checked: `56616bad611eb9f8517b36e444bbe43947ba6a49`
+- Observation index anchor: `56616bad611eb9f8517b36e444bbe43947ba6a49`
   (`56616bad docs(runtime): record log health checkpoint`).
 - Authoritative ongoing log:
   `docs/runtime/private-beta-smoke-log.md`.
-- Latest checkpoint time: 2026-07-05 12:36 CST.
+- Later checkpoints continue in the smoke log; do not update this seal file for
+  every routine observation row.
 - Current local stack remained healthy: public nginx entry returned `200`,
   Gateway `/health` returned healthy, and DB run counts stayed
   `error=63`, `interrupted=7`, `success=452`, `running=0`.

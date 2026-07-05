@@ -277,3 +277,56 @@ async def test_native_round_routes_expose_rounds_and_task_lanes():
     assert tasks[0].task_id == "task-1"
     assert tasks[0].role == "planner"
     assert tasks[0].handoff == {"targetRole": "Planner", "taskOrQuestion": "plan", "evidenceStrength": "Unverified"}
+
+
+@pytest.mark.anyio
+async def test_runtime_snapshot_repairs_missing_task_lane_from_event_store():
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-projection", kwargs={"input": {"messages": [{"role": "user", "content": "run"}]}})
+    await event_store.put(thread_id=record.thread_id, run_id=record.run_id, event_type="task_started", category="event", content={"task_id": "task-1", "subagent_type": "planner", "status": "in_progress"})
+    await event_store.put(thread_id=record.thread_id, run_id=record.run_id, event_type="task_completed", category="event", content={"task_id": "task-1", "subagent_type": "planner", "status": "completed"})
+
+    repaired = await thread_runs._repair_task_event_projection_from_store(event_store=event_store, round_store=round_store, records=[record], round_rows=await round_store.list_by_thread(record.thread_id), task_lane_rows=[], user_id=None)
+
+    assert repaired is True
+    [lane] = await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id)
+    assert lane["task_id"] == "task-1"
+    assert lane["status"] == "completed"
+    assert len(await event_store.list_events(record.thread_id, record.run_id, limit=10)) == 2
+
+
+@pytest.mark.anyio
+async def test_projection_repair_skips_identity_mismatch_and_missing_round_mapping():
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-projection-skip", kwargs={"input": {"messages": [{"role": "user", "content": "run"}]}})
+    await event_store.put(thread_id=record.thread_id, run_id="other-run", event_type="task_completed", category="event", content={"task_id": "task-x", "status": "completed"})
+
+    repaired = await thread_runs._repair_task_event_projection_from_store(event_store=event_store, round_store=round_store, records=[record], round_rows=[], task_lane_rows=[], user_id=None)
+
+    assert repaired is False
+    assert await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id) == []
+
+
+@pytest.mark.anyio
+async def test_projection_repair_terminal_event_updates_active_lane_without_run_status_pass_and_is_idempotent():
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-projection-terminal", kwargs={"input": {"messages": [{"role": "user", "content": "run"}]}})
+    await round_store.record_task_events([{"type": "task_started", "thread_id": record.thread_id, "run_id": record.run_id, "task_id": "task-1", "status": "in_progress"}])
+    await event_store.put(thread_id=record.thread_id, run_id=record.run_id, event_type="task_completed", category="event", content={"task_id": "task-1", "status": "completed"})
+    event_count = len(await event_store.list_events(record.thread_id, record.run_id, limit=10))
+
+    for _ in range(2):
+        task_lanes = await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id)
+        await thread_runs._repair_task_event_projection_from_store(event_store=event_store, round_store=round_store, records=[record], round_rows=await round_store.list_by_thread(record.thread_id), task_lane_rows=task_lanes, user_id=None)
+
+    [lane] = await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id)
+    assert lane["status"] == "completed"
+    assert record.status == RunStatus.pending
+    assert "PASS" not in str(lane)
+    assert len(await event_store.list_events(record.thread_id, record.run_id, limit=10)) == event_count

@@ -266,6 +266,9 @@ class TaskLaneResponse(BaseModel):
     status: str
     result_ref: str | None = None
     evidence_ref: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
     handoff: dict[str, Any] | None = None
     error: str | None = None
     created_at: str = ""
@@ -1186,10 +1189,11 @@ def _account_proposal_by_id(proposals: list[dict[str, Any]], proposal_id: str) -
 
 async def _round_quality_context(thread_id: str, record: RunRecord, request: Request, *, user_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     round_store = get_round_state_store(request)
+    round_state = None
     round_context = record.metadata.get("round_context") if isinstance(record.metadata, dict) else None
-    round_state = dict(round_context) if isinstance(round_context, dict) else None
     task_lanes: list[dict[str, Any]] = []
     if round_store is None:
+        round_state = dict(round_context) if isinstance(round_context, dict) else None
         return round_state, task_lanes
     if hasattr(round_store, "list_by_thread"):
         rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=50)
@@ -1197,6 +1201,8 @@ async def _round_quality_context(thread_id: str, record: RunRecord, request: Req
             if row.get("round_id") == record.round_id or row.get("current_run_id") == record.run_id:
                 round_state = row
                 break
+    if round_state is None and isinstance(round_context, dict):
+        round_state = dict(round_context)
     if record.round_id and hasattr(round_store, "list_task_lanes_by_round"):
         task_lanes = await round_store.list_task_lanes_by_round(thread_id=thread_id, round_id=record.round_id, user_id=user_id, limit=100)
     return round_state, task_lanes
@@ -1221,8 +1227,8 @@ def _handoffs_from_task_lanes(task_lanes: list[dict[str, Any]]) -> list[dict[str
     return handoffs
 
 
-def _record_to_response(record: RunRecord) -> RunResponse:
-    round_context = record.metadata.get("round_context") if isinstance(record.metadata, dict) else None
+def _record_to_response(record: RunRecord, round_state: dict[str, Any] | None = None) -> RunResponse:
+    round_context = round_state or (record.metadata.get("round_context") if isinstance(record.metadata, dict) else None)
     round_context = round_context if isinstance(round_context, dict) else {}
     return RunResponse(
         run_id=record.run_id,

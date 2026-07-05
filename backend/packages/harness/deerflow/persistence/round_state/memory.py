@@ -39,6 +39,45 @@ def _assert_allowed_transition(previous: str, state: str) -> None:
         raise ValueError(f"Invalid round state transition: {previous} -> {state}")
 
 
+def _ref_text(ref: Any) -> str | None:
+    if isinstance(ref, str):
+        return ref.strip() or None
+    if isinstance(ref, dict):
+        for key in ("ref", "uri", "url", "path", "artifact_id", "id", "name"):
+            value = ref.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _collect_refs(*values: Any, limit: int = 50) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = _ref_text(value)
+        if text and text not in seen and len(refs) < limit:
+            seen.add(text)
+            refs.append(text)
+
+    for value in values:
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+    return refs
+
+
+def _task_ref_lists(event: dict[str, Any]) -> dict[str, list[str]]:
+    action_result = _safe_dict(event.get("action_result"))
+    handoff = _safe_dict(event.get("handoff_envelope"))
+    evidence_refs = _collect_refs(action_result.get("evidence_refs"), handoff.get("evidenceRefs"), handoff.get("evidence_refs"), event.get("evidence_refs"))
+    artifact_refs = _collect_refs(event.get("artifact_refs"), action_result.get("artifact_refs"), handoff.get("artifactRefs"), handoff.get("artifact_refs"))
+    output_refs = _collect_refs(action_result.get("output_ref"), action_result.get("output_refs"), handoff.get("outputRefs"), handoff.get("output_refs"), event.get("output_refs"))
+    return {"evidence_refs": evidence_refs, "artifact_refs": artifact_refs, "output_refs": output_refs}
+
+
 def _task_result_ref(event: dict[str, Any]) -> str | None:
     action_result = _safe_dict(event.get("action_result"))
     output_ref = action_result.get("output_ref")
@@ -102,8 +141,8 @@ class MemoryRoundStateStore:
         lanes = [lane for lane in self.task_lanes.values() if lane.get("round_id") == round_id]
         lanes.sort(key=lambda lane: str(lane.get("updated_at") or ""), reverse=True)
         return {
-            "artifact_refs": _dedupe_refs([lane.get("result_ref") for lane in lanes]),
-            "evidence_refs": _dedupe_refs([lane.get("evidence_ref") for lane in lanes]),
+            "artifact_refs": _dedupe_refs([ref for lane in lanes for ref in (lane.get("artifact_refs") or ([lane.get("result_ref")] if lane.get("result_ref") else []))]),
+            "evidence_refs": _dedupe_refs([ref for lane in lanes for ref in (lane.get("evidence_refs") or ([lane.get("evidence_ref")] if lane.get("evidence_ref") else []))]),
         }
 
     async def bind_run(
@@ -196,8 +235,12 @@ class MemoryRoundStateStore:
             )
             lane["status"] = str(event.get("status") or lane.get("status") or "in_progress")
             lane["role"] = event.get("subagent_type") or lane.get("role")
-            lane["result_ref"] = _task_result_ref(event) or lane.get("result_ref")
-            lane["evidence_ref"] = _task_evidence_ref(event) or lane.get("evidence_ref")
+            ref_lists = _task_ref_lists(event)
+            lane["result_ref"] = _task_result_ref(event) or (ref_lists["output_refs"][0] if ref_lists["output_refs"] else None) or lane.get("result_ref")
+            lane["evidence_ref"] = _task_evidence_ref(event) or (", ".join(ref_lists["evidence_refs"]) if ref_lists["evidence_refs"] else None) or lane.get("evidence_ref")
+            lane["evidence_refs"] = _dedupe_refs([*(lane.get("evidence_refs") or []), *ref_lists["evidence_refs"]])
+            lane["artifact_refs"] = _dedupe_refs([*(lane.get("artifact_refs") or []), *ref_lists["artifact_refs"]])
+            lane["output_refs"] = _dedupe_refs([*(lane.get("output_refs") or []), *ref_lists["output_refs"]])
             lane["handoff"] = _task_handoff(event) or lane.get("handoff")
             lane["error"] = event.get("error_preview") or lane.get("error")
             lane["updated_at"] = _now_iso()
@@ -213,6 +256,9 @@ class MemoryRoundStateStore:
                     "role": lane.get("role"),
                     "result_ref": lane.get("result_ref"),
                     "evidence_ref": lane.get("evidence_ref"),
+                    "evidence_refs": lane.get("evidence_refs") or [],
+                    "artifact_refs": lane.get("artifact_refs") or [],
+                    "output_refs": lane.get("output_refs") or [],
                     "handoff": lane.get("handoff"),
                 },
             )

@@ -502,3 +502,9 @@
 - Deliberately skipped: no RunManager/run store/stream persistence/checkpoint/rollback/lease/permission-model/Target Role auto-chain/skill-loading-policy changes.
 
 - 2026-07-04: 整理 artifact URL encoding/base URL fallback 测试，合并重复 artifacts-utils 覆盖；验证 `npm test -- tests/unit/core/artifacts/utils.test.ts` 9/9 通过，`pnpm exec prettier --check tests/unit/core/artifacts/utils.test.ts src/core/artifacts/utils.ts` 通过。
+
+## P1 handoff evidence ledger minimal landing
+
+- Added native task-lane list fields for evidence/artifact/output refs while retaining legacy single `evidence_ref`/`result_ref` compatibility.
+- Clarified round-state read boundary: API quality context now prefers native round-state rows and uses `RunRecord.metadata.round_context` only as fallback/bootstrap.
+- Updated command-room operating rules in AGENTS/skill docs: parallelize independent work, AI-first discovery, DeerFlow edits in isolated worktrees, durable evidence, advisory-only signals, no automatic PASS/FAIL/dispatch/rework.

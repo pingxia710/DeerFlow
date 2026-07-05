@@ -96,17 +96,23 @@
 
 对主线影响：正向信号。当前 HEAD 上 run manager、runs API、thread run messages pagination、threads router 的核心专项未复现失败。
 
+## 最新状态：配置隔离已修复并验证
+
+上述后端全量 `60 failed + 19 errors` 记录保留为历史基线/已解释问题：当时失败主因是 pytest 读取了本机真实 `/Users/pingxia/projects/deer-flow/config.yaml`，其中危险 home root mount 触发 `AppConfig` 沙箱安全校验，导致依赖 app config 的测试级联失败。
+
+用户已提交 `5d6541c4 test: isolate backend app config in pytest`，使 backend pytest 默认隔离到临时安全 config/project root/home，避免读取真实本机 `config.yaml`。后续只读小批次复测结果：
+
+- `python -m pytest tests/test_memory_router.py tests/test_task_tool_core_logic.py tests/test_client.py::TestArtifactHardening tests/test_gateway_docs_toggle.py tests/test_oidc_auth.py -q --tb=short --disable-warnings`：`90 passed, 2 warnings`。
+- `pytest tests/test_deployment_security_guards.py -q`：`19 passed, 1 warning`。
+- `pytest tests/test_gateway_docs_toggle.py tests/test_gateway_services.py -q --tb=short --disable-warnings`：`70 passed, 2 warnings`。
+
+结论：配置污染错误在上述小批次复测中未复现，也未再出现 dangerous home root mount 阻断。不要据此声称后端全量 pytest 已通过；如果需要更新全量测试基线，仍需在当前 HEAD 上重新运行完整后端 pytest。
+
 ## 建议下一步
 
-1. 先固定测试环境：用测试专用 config 或临时环境变量避免读取当前危险 home root mount 配置；不要改生产/个人 `.env` 或输出 secret。
-2. 在干净配置下重跑失败分组的最小集合，优先顺序：
-   - `tests/test_memory_router.py`
-   - `tests/test_task_tool_core_logic.py`
-   - `tests/test_client.py::TestArtifactHardening`
-   - `tests/test_gateway_docs_toggle.py`
-   - `tests/test_oidc_auth.py`
-3. 将“配置阻断型失败”和“真实逻辑失败”分开建 issue/任务，避免后续多 Agent 重复修同一红灯。
-4. 处理 Git 风险前，先决定本地 `main` ahead 111 是否作为新基线；若不是，应从明确 topic/worktree 分支继续，避免覆盖现有 runtime/owner/thread/security 改动。
+1. 若要刷新本文的全量失败/通过基线，在 `5d6541c4` 之后重新运行完整后端 `python -m pytest -q --tb=short --disable-warnings`。
+2. 继续将历史“配置阻断型失败”和后续可能出现的真实逻辑失败分开记录，避免后续多 Agent 重复修同一红灯。
+3. 处理 Git 风险前，先决定本地 `main` ahead 状态是否作为新基线；若不是，应从明确 topic/worktree 分支继续，避免覆盖现有 runtime/owner/thread/security 改动。
 
 ## 证据位置
 

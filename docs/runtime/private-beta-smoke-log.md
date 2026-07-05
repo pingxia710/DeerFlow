@@ -62,6 +62,21 @@ Use this file for the 1-2 day real-use smoke from
   smoke, not as a production-shaped private beta boot; use
   `docs/runtime/private-beta-runbook.md` startup config before actual beta boot.
 
+## Current Completion Audit
+
+- Seal evidence: archived in
+  `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; latest observation
+  checkpoint is `d94c1a5b`.
+- Frontend targeted tests: covered by `message-merge.test.ts` and
+  `thread-history.spec.ts`; latest recorded preflight passed `63` unit tests and
+  `16` E2E tests.
+- Private beta runbook: present in `docs/runtime/private-beta-runbook.md` with
+  startup config, known limits, preflight, and 1-2 day smoke steps.
+- Known limits/start config: recorded; current local smoke is explicitly
+  development-stack evidence, not a production-shaped boot.
+- 1-2 day real-use smoke: not complete. Continue observing real sessions and
+  keep provider stream failures as a separate blocker/fix line.
+
 ## Open Follow-Ups
 
 - Provider stream reliability: real Command Room runs

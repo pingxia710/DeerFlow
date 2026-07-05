@@ -519,3 +519,37 @@ def test_action_result_evidence_requires_runtime_observable_ref(tmp_path):
     assert signal["strong"] is True
     assert "command-output-or-exit-code" in signal["strong_reasons"]
     assert "trusted observable evidence" in record["roundBrief"]["evidence_status"]
+
+
+def test_handoff_target_role_and_needs_more_are_advisory_not_auto_dispatch_or_gate(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-1",
+        agent_name="command-room",
+        user_id="user-1",
+        user_message="advisory handoff",
+        final_text="Verdict: PASS",
+        audit_records=[
+            {
+                "status": "completed",
+                "task_id": "planner-task",
+                "subagent_type": "planner",
+                "description": "planner advice",
+                "handoff_packet": {
+                    "sourceRole": "Planner",
+                    "targetRole": "Evidence",
+                    "taskOrQuestion": "consider whether more proof is needed",
+                    "evidenceRefs": "none",
+                    "evidenceStrength": "Unverified",
+                    "recommendedNextDecision": "NEEDS_MORE",
+                },
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert [item["laneId"] for item in record["dispatchPlan"]] == ["planner-task"]
+    packet = record["dispatchPlan"][0]["handoffPacket"]
+    assert packet["targetRole"] == "Evidence"
+    assert packet["recommendedNextDecision"] == "NEEDS_MORE"
+    assert record["decisionSignals"]["decision"] == "PASS"

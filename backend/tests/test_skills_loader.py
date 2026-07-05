@@ -91,3 +91,18 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
 
     assert shared.category == "custom"
     assert shared.description == "Custom version"
+
+
+def test_bundled_command_room_role_skills_are_loadable_from_project_root(monkeypatch):
+    """Built-in Command Room roles reference skills that must exist in bundled storage."""
+    from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
+
+    skills_root = Path(__file__).resolve().parents[2] / "skills"
+    assert skills_root.is_dir()
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+    names = {skill.name for skill in skills}
+
+    role_skill_names = {skill for cfg in COMMAND_ROOM_ROLE_CONFIGS.values() for skill in (cfg.skills or [])}
+    assert "command-room-chair" in names
+    assert role_skill_names <= names

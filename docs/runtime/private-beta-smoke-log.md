@@ -25,6 +25,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `2461dec0` | existing local stack on `localhost:2026`; real Command Room usage observed while smoke continued | provider stream reliability | needs follow-up | Same thread run `163c309f-e6d0-4d3c-82e8-d75791dbf5b5` also ended as `error` with `Codex API stream ended without response.completed event`; JSONL contained `run.end` and `run.terminal status=error`; final DB status counts were `error=63`, `interrupted=7`, `success=451` |
 | 2026-07-05 | Codex    | `ab4365cb` | existing local stack on `localhost:2026`; no new run created | persisted evidence checkpoint | pass; needs follow-up | 11:06 CST checkpoint: worktree clean; `/health` healthy; DB status counts `error=63`, `interrupted=7`, `success=451`, `running=0`; switch runs `72984a3d-439f-45b0-8998-7735c3019b69` / `5f2786a5-19a1-4bb6-8aac-8083dedf32ea` remained `success`, each JSONL had `run.terminal`, own marker present, opposite marker absent; artifact provenance row for `d1a8e6bc-019b-45b8-990d-394865600d8a` remained `available=1`, `display_policy=inline`, `mime_type=text/plain`, `size_bytes=49`, sha256 `d02f09b551b46118fcbd89c350c03927dff9adbc8c1e9471e9efcedd7cefa18e`, and the file still existed with matching hash |
 | 2026-07-05 | Codex    | `ab2a71bc` | frontend E2E mock backend only; no new backend run created | frontend route-switch history regression | pass; suite has unrelated failure | Added `thread-history.spec.ts` coverage for existing chat A→B→reload→A history isolation. Targeted command passed: `pnpm exec playwright test tests/e2e/thread-history.spec.ts -g "switching existing chats and reloading keeps histories isolated"` (`1 passed`). Full file command `pnpm exec playwright test tests/e2e/thread-history.spec.ts` returned `15 passed`, `1 failed`; failure was pre-existing `deleting the active newly created chat returns to the new chat screen` timeout at `page.waitForURL("**/workspace/chats/new")`, not the new route-switch case. |
+| 2026-07-05 | Codex    | `1119fc29` | frontend E2E mock backend only; no new backend run created | frontend thread-history E2E convergence | pass | Rechecked the prior full-file failure. The failing test expected deleted-thread deep links to redirect to `/workspace/chats/new`, but the current missing-thread contract keeps the URL and renders an empty chat state. Updated the assertion to match that contract. Targeted delete test passed (`1 passed`), and full `pnpm exec playwright test tests/e2e/thread-history.spec.ts` passed (`16 passed`). |
 
 ## Notes
 
@@ -68,9 +69,6 @@ Use this file for the 1-2 day real-use smoke from
 - Frontend warning: real model smoke still logged one React
   uncontrolled-to-controlled warning; no duplicate-key warning after the
   restored-message fix.
-- Frontend E2E gap: `thread-history.spec.ts` route-switch history isolation has
-  targeted coverage, but the full file still has a separate timeout in
-  `deleting the active newly created chat returns to the new chat screen`.
 - Workstation startup boundary: this local process depends on the temp
   `DEER_FLOW_CONFIG_PATH` noted above because the workstation config uses
   trusted host mounts.

@@ -539,7 +539,9 @@ test.describe("Thread history", () => {
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
 
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
-    await page.waitForURL("**/workspace/chats/new");
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+    );
     await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });

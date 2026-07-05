@@ -1,4 +1,5 @@
 from deerflow.agents.middlewares.round_context_middleware import (
+    CommandRoomRoundContextMiddleware,
     format_account_ledger_for_model,
     format_capability_snapshot_for_model,
     format_quality_signals_for_model,
@@ -19,6 +20,18 @@ from deerflow.command_room.quality import build_quality_signal, record_quality_s
 from deerflow.command_room.review import build_review_invocation, complete_review_invocation, record_review_invocation
 from deerflow.command_room.round_record import record_command_room_round
 from deerflow.subagents.audit import record_subagent_handoff
+
+
+class _Runtime:
+    context = {
+        "thread_id": "thread-brief",
+        "round_context": {
+            "round_id": "round-brief",
+            "state": "closed",
+            "current_run_id": "run-brief",
+            "evidence_refs": ["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
+        },
+    }
 
 
 def _record(agent_name="command-room", signals=True, required=True):
@@ -232,6 +245,23 @@ def test_account_ledger_format_short_internal_context(tmp_path, monkeypatch):
     formatted = format_account_ledger_for_model([proposal.as_dict()], [decision.as_dict()])
     assert formatted is not None
     assert "not automatically applied" in formatted
+
+
+def test_round_context_includes_compact_chair_brief(monkeypatch):
+    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
+    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: {"version": 1})
+
+    text = middleware._context_text(_Runtime())
+
+    assert text is not None
+    assert "Internal Chair Operating Brief" in text
+    assert "thread_id=thread-brief; run_id=run-brief; round_id=round-brief" in text
+    assert "capability_snapshot_version=1" in text
+    assert "evidence: total=1" in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+    assert "needs_rework" not in lowered
 
 
 def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):

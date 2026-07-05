@@ -14,6 +14,7 @@ from .account_ledger import (
     record_account_update_proposal,
 )
 from .action_result_adapter import action_result_from_value
+from .brief import ChairOperatingBrief, build_chair_operating_brief, format_chair_operating_brief_for_model
 from .handoff import HandoffEnvelope, handoff_envelope_from_packet, handoff_envelope_to_audit_dict
 from .quality import QualitySignal, build_quality_signal, compact_quality_signals, list_quality_signals, record_quality_signal
 from .review import (
@@ -50,6 +51,9 @@ __all__ = [
     "RoundItemStatus",
     "summarize_round",
     "action_result_from_value",
+    "ChairOperatingBrief",
+    "build_chair_operating_brief",
+    "format_chair_operating_brief_for_model",
     "ACCOUNT_DECISIONS",
     "ACCOUNT_TYPES",
     "AccountDecision",

@@ -26,6 +26,7 @@ _CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
 _QUALITY_SIGNALS_HEADER = "[Internal AI Quality Signals]"
 _REVIEW_INVOCATIONS_HEADER = "[Internal AI Review Invocations]"
 _ACCOUNT_LEDGER_HEADER = "[Internal AI Account Ledger]"
+_CHAIR_BRIEF_HEADER = "[Internal Chair Operating Brief]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -290,15 +291,18 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         self.agent_name = agent_name
         self.app_config = app_config
 
-    def _capability_text(self, thread_id: str | None, user_id: str | None) -> str | None:
+    def _capability_snapshot(self, thread_id: str | None, user_id: str | None) -> dict[str, Any] | None:
         try:
             from deerflow.capabilities import build_capability_snapshot
             from deerflow.config import get_app_config
 
             config = self.app_config or get_app_config()
-            return format_capability_snapshot_for_model(build_capability_snapshot(config, thread_id=thread_id, user_id=user_id))
+            return build_capability_snapshot(config, thread_id=thread_id, user_id=user_id)
         except Exception:
             return None
+
+    def _capability_text(self, thread_id: str | None, user_id: str | None) -> str | None:
+        return format_capability_snapshot_for_model(self._capability_snapshot(thread_id, user_id))
 
     def _context_text(self, runtime: Runtime | None) -> str | None:
         if self.agent_name != "command-room":
@@ -306,25 +310,54 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         ctx = getattr(runtime, "context", None) or {}
         thread_id = ctx.get("thread_id") if isinstance(ctx, Mapping) else None
         user_id = get_effective_user_id()
+        thread_id_text = str(thread_id) if thread_id else None
+        native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
+        current_run_id = native_context.get("current_run_id") if isinstance(native_context, Mapping) else None
+        round_id = native_context.get("round_id") if isinstance(native_context, Mapping) else None
+        native_evidence_refs = _as_list(native_context.get("evidence_refs"), limit=20) if isinstance(native_context, Mapping) else []
+        snapshot = self._capability_snapshot(thread_id_text, user_id)
+        from deerflow.command_room.account_ledger import list_account_decisions, list_account_proposals
+        from deerflow.command_room.brief import build_chair_operating_brief, format_chair_operating_brief_for_model
+        from deerflow.command_room.quality import list_quality_signals
+        from deerflow.command_room.review import list_review_invocations
+
+        quality_rows = list_quality_signals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
+        review_rows = list_review_invocations(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
+        proposal_rows = list_account_proposals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
+        decision_rows = list_account_decisions(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
         parts: list[str] = []
-        capability_text = self._capability_text(str(thread_id) if thread_id else None, user_id)
+        if thread_id_text:
+            brief = build_chair_operating_brief(
+                thread_id=thread_id_text,
+                run_id=str(current_run_id or ""),
+                round_id=str(round_id) if round_id else None,
+                capability_snapshot=snapshot,
+                evidence={"evidence_refs": [{"ref": ref, "round_id": str(round_id) if round_id else None} for ref in native_evidence_refs]},
+                quality_signals=quality_rows,
+                review_invocations=review_rows,
+                account_proposals=proposal_rows,
+                account_decisions=decision_rows,
+            )
+            brief_text = format_chair_operating_brief_for_model(brief)
+            if brief_text:
+                parts.append(brief_text)
+        capability_text = format_capability_snapshot_for_model(snapshot)
         if capability_text:
             parts.append(capability_text)
-        native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
         if isinstance(native_context, Mapping):
             text = format_native_round_context_for_model(native_context)
             if text:
                 parts.append(text)
-        quality_text = latest_quality_signals_for_thread(str(thread_id) if thread_id else None, user_id)
+        quality_text = format_quality_signals_for_model(quality_rows)
         if quality_text:
             parts.append(quality_text)
-        review_text = latest_review_invocations_for_thread(str(thread_id) if thread_id else None, user_id)
+        review_text = format_review_invocations_for_model(review_rows)
         if review_text:
             parts.append(review_text)
-        account_text = latest_account_ledger_for_thread(str(thread_id) if thread_id else None, user_id)
+        account_text = format_account_ledger_for_model(proposal_rows, decision_rows)
         if account_text:
             parts.append(account_text)
-        legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, user_id)
+        legacy_text = latest_round_context_for_thread(thread_id_text, user_id)
         if legacy_text:
             parts.append(legacy_text)
         return "\n\n".join(parts) if parts else None
@@ -341,6 +374,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             _QUALITY_SIGNALS_HEADER,
             _REVIEW_INVOCATIONS_HEADER,
             _ACCOUNT_LEDGER_HEADER,
+            _CHAIR_BRIEF_HEADER,
         )
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request

@@ -45,10 +45,12 @@ from deerflow.capabilities import build_capability_snapshot
 from deerflow.command_room.account_ledger import (
     build_account_decision,
     build_account_update_proposal,
+    list_account_decisions,
     list_account_proposals,
     record_account_decision,
     record_account_update_proposal,
 )
+from deerflow.command_room.brief import build_chair_operating_brief
 from deerflow.command_room.evidence import normalize_evidence_ref
 from deerflow.command_room.quality import build_quality_signal, list_quality_signals, record_quality_signal
 from deerflow.command_room.review import (
@@ -415,6 +417,24 @@ class RunQualityContextResponse(BaseModel):
     quality_signal_summary: dict[str, Any] = Field(default_factory=dict)
     quality_verdict: None = None
     auto_rework: bool = False
+
+
+class ChairOperatingBriefResponse(BaseModel):
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    task_id: str | None = None
+    generated_at: str
+    capability_snapshot_version: int | None = None
+    handoff_count: int = 0
+    latest_handoff: dict[str, Any] | None = None
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    quality_signals: list[dict[str, Any]] = Field(default_factory=list)
+    review_invocations: list[dict[str, Any]] = Field(default_factory=list)
+    account_proposals: list[dict[str, Any]] = Field(default_factory=list)
+    account_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    known_gaps: list[str] = Field(default_factory=list)
+    source_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -966,6 +986,8 @@ def _handoffs_from_task_lanes(task_lanes: list[dict[str, Any]]) -> list[dict[str
         handoffs.append(
             {
                 "task_id": lane.get("task_id"),
+                "run_id": lane.get("run_id"),
+                "round_id": lane.get("round_id"),
                 "role": lane.get("role"),
                 "status": lane.get("status"),
                 "handoff": handoff,
@@ -1742,6 +1764,44 @@ async def get_run_quality_context(
         quality_verdict=None,
         auto_rework=False,
     )
+
+
+@router.get("/{thread_id}/runs/{run_id}/chair-brief", response_model=ChairOperatingBriefResponse)
+@require_permission("runs", "read", owner_check=True)
+async def get_run_chair_brief(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    round_id: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
+    evidence_limit: int = Query(default=500, le=2000),
+    source_limit: int = Query(default=50, ge=1, le=200),
+) -> ChairOperatingBriefResponse:
+    """Return a compact AI-readable read model for Chair/lead AI."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    evidence = await _run_evidence_payload(thread_id, run_id, record, request, user_id=user_id, limit=evidence_limit)
+    _, task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+    signals = list_quality_signals(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, task_id=task_id, limit=source_limit)
+    invocations = list_review_invocations(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, task_id=task_id, limit=source_limit)
+    proposals = list_account_proposals(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, task_id=task_id, limit=source_limit)
+    decisions = list_account_decisions(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=source_limit)
+    brief = build_chair_operating_brief(
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=round_id or record.round_id,
+        task_id=task_id,
+        filter_round_id=round_id,
+        capability_snapshot=build_capability_snapshot(config, thread_id=thread_id, user_id=user_id),
+        handoffs=_handoffs_from_task_lanes(task_lanes),
+        evidence=evidence,
+        quality_signals=signals,
+        review_invocations=invocations,
+        account_proposals=proposals,
+        account_decisions=decisions,
+    )
+    return ChairOperatingBriefResponse.model_validate(brief.as_dict())
 
 
 @router.post("/{thread_id}/runs/{run_id}/quality-signals", response_model=QualitySignalResponse)

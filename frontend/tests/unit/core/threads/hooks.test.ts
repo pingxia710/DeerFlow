@@ -175,7 +175,7 @@ test("resolveVisibleTaskRunningThreadId only accepts the current live thread", a
   ).toBe("thread-b");
 });
 
-test("shouldReleaseQueuedThreadMessage waits for explicit stream completion", async () => {
+test("shouldReleaseQueuedThreadMessage releases after completion even if user switched threads", async () => {
   const { shouldReleaseQueuedThreadMessage } =
     await import("@/core/threads/hooks");
 
@@ -191,6 +191,13 @@ test("shouldReleaseQueuedThreadMessage waits for explicit stream completion", as
   ).toBe(false);
   expect(
     shouldReleaseQueuedThreadMessage({ ...base, streamFinished: true }),
+  ).toBe(true);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      ...base,
+      streamFinished: true,
+      currentViewThreadId: "thread-b",
+    }),
   ).toBe(true);
 });
 

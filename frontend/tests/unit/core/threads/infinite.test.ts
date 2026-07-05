@@ -21,6 +21,9 @@ import {
   setManualThreadTitleLock,
   threadRunsQueryKey,
   upsertThreadInInfiniteCache,
+  upsertThreadInSearchCache,
+  getBackgroundRunProbeDelay,
+  shouldStopBackgroundRunProbe,
 } from "@/core/threads/hooks";
 import {
   threadContextUsageQueryKey,
@@ -500,15 +503,53 @@ describe("upsertThreadInInfiniteCache", () => {
       pageParams: [0],
     });
     // Simulate an onCreated upsert that races with a thread already in cache:
-    // the cache copy should win for title/metadata (it represents later state),
-    // but no duplicate row should appear.
+    // the upsert copy should win for fresh status/title/updated_at, but no
+    // duplicate row should appear.
     upsertThreadInInfiniteCache(client, {
       ...makeThread("a", "New title"),
+      updated_at: "2025-02-01T00:00:00Z",
       status: "busy",
     });
     const cache = readCache(client);
     const ids = cache?.pages[0]?.map((t) => t.thread_id);
     expect(ids).toEqual(["a", "b"]);
-    expect(cache?.pages[0]?.[0]?.values.title).toBe("Old title");
+    expect(cache?.pages[0]?.[0]?.values.title).toBe("New title");
+    expect(cache?.pages[0]?.[0]?.status).toBe("busy");
+    expect(cache?.pages[0]?.[0]?.updated_at).toBe("2025-02-01T00:00:00Z");
+  });
+});
+
+describe("upsertThreadInSearchCache", () => {
+  test("fresh upsert fields win over stale array cache entries", () => {
+    const client = new QueryClient();
+    client.setQueryData(["threads", "search"], [makeThread("a", "Old title")]);
+
+    upsertThreadInSearchCache(client, {
+      ...makeThread("a", "New title"),
+      updated_at: "2025-03-01T00:00:00Z",
+      status: "busy",
+    });
+
+    const cache = client.getQueryData<AgentThread[]>(["threads", "search"]);
+    expect(cache?.map((t) => t.thread_id)).toEqual(["a"]);
+    expect(cache?.[0]?.values.title).toBe("New title");
+    expect(cache?.[0]?.status).toBe("busy");
+    expect(cache?.[0]?.updated_at).toBe("2025-03-01T00:00:00Z");
+  });
+});
+
+describe("background run probe policy", () => {
+  test("backs off with a capped delay", () => {
+    expect(getBackgroundRunProbeDelay(1)).toBe(5000);
+    expect(getBackgroundRunProbeDelay(2)).toBe(10000);
+    expect(getBackgroundRunProbeDelay(10)).toBe(30000);
+  });
+
+  test("stops on max attempts and auth/not-found errors", () => {
+    expect(shouldStopBackgroundRunProbe(12)).toBe(true);
+    expect(shouldStopBackgroundRunProbe(1, { status: 401 })).toBe(true);
+    expect(shouldStopBackgroundRunProbe(1, { statusCode: 403 })).toBe(true);
+    expect(shouldStopBackgroundRunProbe(1, { status: 404 })).toBe(true);
+    expect(shouldStopBackgroundRunProbe(1, { status: 500 })).toBe(false);
   });
 });

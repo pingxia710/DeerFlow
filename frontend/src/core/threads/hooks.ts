@@ -106,7 +106,11 @@ const INACTIVE_THREAD_STATUSES = new Set([
   "rollback_failed",
 ]);
 const BACKGROUND_RUN_PROBE_DELAY_MS = 5000;
+const BACKGROUND_RUN_PROBE_MAX_DELAY_MS = 30000;
+const BACKGROUND_RUN_PROBE_MAX_ATTEMPTS = 12;
+const BACKGROUND_RUN_PROBE_STOP_STATUS_CODES = new Set([401, 403, 404]);
 const backgroundRunProbeTimers = new Map<string, number>();
+const backgroundRunProbeAttempts = new Map<string, number>();
 
 type QueuedMessageReleaseState = {
   isLoading: boolean;
@@ -206,7 +210,7 @@ export function shouldReleaseQueuedThreadMessage({
     streamFinished &&
     !sendInFlight &&
     Boolean(queuedThreadId) &&
-    queuedThreadId === currentViewThreadId
+    Boolean(currentViewThreadId)
   );
 }
 
@@ -1353,15 +1357,15 @@ export function upsertThreadInSearchCache(
           return t;
         }
         return {
-          ...thread,
           ...t,
+          ...thread,
           metadata: {
-            ...(thread.metadata ?? {}),
             ...(t.metadata ?? {}),
+            ...(thread.metadata ?? {}),
           },
           values: {
-            ...thread.values,
             ...t.values,
+            ...thread.values,
           },
         };
       });
@@ -1387,15 +1391,15 @@ export function upsertThreadInInfiniteCache(
         page.map((t) =>
           t.thread_id === thread.thread_id
             ? {
-                ...thread,
                 ...t,
+                ...thread,
                 metadata: {
-                  ...(thread.metadata ?? {}),
                   ...(t.metadata ?? {}),
+                  ...(thread.metadata ?? {}),
                 },
                 values: {
-                  ...thread.values,
                   ...t.values,
+                  ...thread.values,
                 },
               }
             : t,
@@ -1578,6 +1582,33 @@ function backgroundRunProbeKey(threadId: string, runId: string) {
   return `${threadId}:${runId}`;
 }
 
+function getErrorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+  const status =
+    Reflect.get(error, "status") ?? Reflect.get(error, "statusCode");
+  return typeof status === "number" ? status : undefined;
+}
+
+export function shouldStopBackgroundRunProbe(
+  attempt: number,
+  error?: unknown,
+): boolean {
+  const status = getErrorStatusCode(error);
+  return (
+    attempt >= BACKGROUND_RUN_PROBE_MAX_ATTEMPTS ||
+    (status !== undefined && BACKGROUND_RUN_PROBE_STOP_STATUS_CODES.has(status))
+  );
+}
+
+export function getBackgroundRunProbeDelay(attempt: number): number {
+  return Math.min(
+    BACKGROUND_RUN_PROBE_DELAY_MS * 2 ** Math.max(0, attempt - 1),
+    BACKGROUND_RUN_PROBE_MAX_DELAY_MS,
+  );
+}
+
 export function stopBackgroundRunProbe(
   threadId: string | null | undefined,
   runId: string | null | undefined,
@@ -1591,6 +1622,7 @@ export function stopBackgroundRunProbe(
     window.clearTimeout(timer);
     backgroundRunProbeTimers.delete(key);
   }
+  backgroundRunProbeAttempts.delete(key);
 }
 
 export function startBackgroundRunProbe({
@@ -1611,6 +1643,12 @@ export function startBackgroundRunProbe({
   if (backgroundRunProbeTimers.has(key)) {
     return;
   }
+  const attempt = (backgroundRunProbeAttempts.get(key) ?? 0) + 1;
+  if (shouldStopBackgroundRunProbe(attempt)) {
+    backgroundRunProbeAttempts.delete(key);
+    return;
+  }
+  backgroundRunProbeAttempts.set(key, attempt);
 
   const timer = window.setTimeout(() => {
     void (async () => {
@@ -1628,17 +1666,23 @@ export function startBackgroundRunProbe({
             run.status,
           )
         ) {
+          backgroundRunProbeAttempts.delete(key);
           return;
         }
-      } catch {
+      } catch (error) {
         if (backgroundRunProbeTimers.get(key) !== timer) {
           return;
         }
         backgroundRunProbeTimers.delete(key);
+        if (shouldStopBackgroundRunProbe(attempt, error)) {
+          backgroundRunProbeAttempts.delete(key);
+          clearThreadActivity(threadId);
+          return;
+        }
       }
       startBackgroundRunProbe({ queryClient, threadId, runId });
     })();
-  }, BACKGROUND_RUN_PROBE_DELAY_MS);
+  }, getBackgroundRunProbeDelay(attempt));
 
   backgroundRunProbeTimers.set(key, timer);
 }
@@ -2139,10 +2183,6 @@ export function useThreadStream({
     streamRunIdRef.current = null;
     sendInFlightRef.current = false;
     streamFinishedRef.current = true;
-    queuedMessagesRef.current = keepQueuedMessagesForThread(
-      queuedMessagesRef.current,
-      normalizedThreadId,
-    );
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
@@ -2220,6 +2260,13 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      if (threadId === "new" && message.files.length > 0) {
+        sendInFlightRef.current = false;
+        toast.error("Please start the chat before adding attachments.");
+        return Promise.reject(
+          new Error("Attachments require a saved thread before upload."),
+        );
+      }
       if (thread.isLoading) {
         if (message.files.length > 0) {
           sendInFlightRef.current = false;

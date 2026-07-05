@@ -79,12 +79,16 @@ Minimum acceptance:
   `{base_dir}/deer-flow.db` fallback, and supports explicit `--db-path`.
 - Running dry-run still makes no filesystem or SQL changes.
 - Beta-owner review remains separate from the DB-path fix: latest dry-run
-  evidence at 2026-07-05 12:32 CST inspected
+  evidence at 2026-07-05 12:59 CST inspected
   `backend/.deer-flow/data/deerflow.db`, found `35` thread ownership records,
-  kept SQL null-owner counts at zero, made no git-visible changes, and still
-  reported `21` ownerless legacy thread dirs, `15` conflict thread dirs, and
-  `1` legacy `command-room` agent that need intended-owner review before any
-  non-dry-run migration.
+  kept SQL null-owner counts at zero for `threads_meta`, `runs`, `run_events`,
+  and `artifact_provenance`, made no git-visible changes, created no
+  `migration-conflicts` directory entries, and still reported `21` ownerless
+  legacy thread dirs, `15` conflict thread dirs, and `1` legacy `command-room`
+  agent that need intended-owner review before any non-dry-run migration.
+  A read-only join check also still found `282` historical `runs` rows without
+  matching `threads_meta` owner records, so this data directory is not ready to
+  treat as migration-complete.
 
 Useful checks:
 

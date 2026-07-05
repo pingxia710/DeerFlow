@@ -68,8 +68,8 @@ Use this file for the 1-2 day real-use smoke from
 ## Current Completion Audit
 
 - Seal evidence: archived in
-  `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; latest observation
-  checkpoint is `f4d786f7`.
+  `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; the latest rows in
+  this log are the authoritative observation checkpoints.
 - Frontend targeted tests: covered by `message-merge.test.ts` and
   `thread-history.spec.ts`; latest recorded preflight passed `63` unit tests and
   `16` E2E tests at `d0800a23`.

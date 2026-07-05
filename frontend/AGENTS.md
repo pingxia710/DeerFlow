@@ -97,6 +97,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   older rows without the display contract.
 - History message ordering must treat run-message `seq` as run-local. Rebuild
   history by run list order first, then by `seq` within each run.
+- Run responses may include `round_id`/`round_state`. When the latest run's
+  `round_id` changes, default history should reset to the current round/current
+  run; older runs are explicit load-more/manual history, not automatic context.
 - Thread history refreshes should be driven by run-list changes and explicit
   run IDs such as terminal transitions, not timer/focus polling of recent active
   runs.

@@ -37,6 +37,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `b94b88c5` | existing local stack on `localhost:2026`; system Google Chrome used; no backend run created | fresh new-chat UI smoke | pass | 12:02 CST local throwaway auth registration returned `201`; `/workspace/chats/new` loaded without redirect; `/api/channels/providers`, `/api/models`, `/api/skills`, `/api/suggestions/config`, and `/api/langgraph/threads/search` returned `200`; browser console had `0` warning/error/pageerror entries after filtering to warning/error; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`, so the check did not create a model run. |
 | 2026-07-05 | Codex    | `fabb0898` | isolated temp Gateway boot on `127.0.0.1:18002`; `ENVIRONMENT=production`; all worker envs `1`; safe local sandbox; SQLite app DB; DB run events; SQLite checkpointer/store | production-shaped gateway boot | pass; caveat documented | 12:06 CST isolated uvicorn boot returned `/health` `200`; temp app DB initialized `runs`, `run_events`, `threads_meta`, `users`, `artifact_provenance`, feedback/channel tables, and alembic stamp; temp checkpointer DB initialized `checkpoints`, `writes`, `store`, and `store_migrations`; process shut down cleanly. A prior minimal boot with `database.backend=sqlite` and no `checkpointer` also reached `/health`, but logged `InMemoryStore`, so `private-beta-runbook.md` now records that current code needs `checkpointer: sqlite` for LangGraph store persistence. Current `localhost:2026` stack stayed healthy and real DB run counts remained `error=63`, `interrupted=7`, `success=451`. |
 | 2026-07-05 | Codex    | `3b253bcf` | existing local stack on `localhost:2026`; no backend run created | migration dry-run path verification | pass; migration still not applied | 12:10 CST command `cd backend && PYTHONPATH=. uv run python scripts/migrate_user_isolation.py --dry-run --user-id default` inspected `/Users/pingxia/projects/deer-flow/backend/.deer-flow/data/deerflow.db`, found `34` thread ownership records, and made no git-visible changes; SQL null-owner counts remained `threads_meta=0`, `runs=0`, `run_events=0`; DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`. Dry-run still reported `45` legacy thread-dir actions, including `15` conflicts and `21` ownerless threads that would be assigned to `default`, plus `1` legacy `command-room` agent, so actual migration still needs owner/conflict review before running without `--dry-run`. |
+| 2026-07-05 | Codex    | `71fd3940` | no new backend run created; provider unit/contract fix only | provider stream reliability code fix | pass; needs real-use confirmation | 12:13 CST code-level fix changed Codex provider stream handling so a stream ending without `response.completed` raises typed `CodexStreamIncompleteError` and is retried inside the provider retry budget; `httpx.ReadError` and `httpx.RemoteProtocolError` are also included in that retry path. Validation passed: `tests/test_codex_provider.py tests/test_cli_auth_providers.py` `38 passed, 1 warning`; `tests/test_llm_error_handling_middleware.py` `28 passed, 1 warning`; ruff passed for touched provider/tests; `/health` healthy and DB run counts remained `error=63`, `interrupted=7`, `success=451`, `running=0`. Real Command Room/Codex provider confirmation is still pending. |
 
 ## Notes
 
@@ -85,7 +86,8 @@ Use this file for the 1-2 day real-use smoke from
   the latest dry-run still reports ownerless legacy thread assignments and
   conflicts requiring owner review before applying changes.
 - 1-2 day real-use smoke: not complete. Continue observing real sessions and
-  keep provider stream failures as a separate blocker/fix line.
+  confirm the provider stream retry fix in a real Command Room/Codex provider
+  session.
 
 ## Open Follow-Ups
 
@@ -100,7 +102,9 @@ handoffs.
   `163c309f-e6d0-4d3c-82e8-d75791dbf5b5` ended with
   `Codex API stream ended without response.completed event`; memory updates also
   showed `httpx.RemoteProtocolError` / incomplete chunked read. Observed runs
-  reached terminal `error` and did not remain stuck busy.
+  reached terminal `error` and did not remain stuck busy. A code-level retry fix
+  is in place; keep this open until the next real-use session confirms no
+  recurrence.
 - Cancel status naming: active-run cancel recovered the UI but surfaced terminal
   status as `interrupted`, not `cancelled`.
 - Frontend warning: real model smoke still logged one React

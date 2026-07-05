@@ -5,7 +5,10 @@ new evidence is produced.
 
 ## Provider Stream Reliability
 
-Evidence:
+Status: code-level retry fix added; keep this line open until the next real
+Command Room run confirms no recurrence.
+
+Original evidence:
 
 - Runs `0e582444-dee2-4190-a65b-e7ad68c754fa`,
   `54ee1cae-9cca-4be9-a637-5700d3598e22`,
@@ -15,16 +18,20 @@ Evidence:
   `Codex API stream ended without response.completed event`.
 - Observed invariant: terminal state persisted and no run stayed `running`.
 
-Likely narrow entry point:
+Changed entry point:
 
 - `backend/packages/harness/deerflow/models/openai_codex_provider.py`
 - `backend/tests/test_codex_provider.py`
+- `backend/tests/test_cli_auth_providers.py`
 
 Minimum acceptance:
 
 - Stream ending without `response.completed` is either retried within the
   provider retry budget or surfaced as a typed transient provider failure.
 - Existing terminal persistence invariant remains true: no stuck `running` run.
+- Real-use confirmation: the next Command Room/Codex provider session should
+  not reproduce this failure, or should show the retry attempts before a typed
+  terminal failure.
 
 Useful checks:
 

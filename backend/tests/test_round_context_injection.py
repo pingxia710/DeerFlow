@@ -1,8 +1,11 @@
 from deerflow.agents.middlewares.round_context_middleware import (
     format_capability_snapshot_for_model,
+    format_quality_signals_for_model,
     format_round_context_for_model,
+    latest_quality_signals_for_thread,
     latest_round_context_for_thread,
 )
+from deerflow.command_room.quality import build_quality_signal, record_quality_signal
 from deerflow.command_room.round_record import record_command_room_round
 from deerflow.subagents.audit import record_subagent_handoff
 
@@ -75,6 +78,46 @@ def test_capability_snapshot_format_includes_tools_and_stop_before_risks():
     lowered = text.lower()
     assert "pass" not in lowered
     assert "fail" not in lowered
+
+
+def test_quality_signals_format_short_internal_context(tmp_path, monkeypatch):
+    thread_id = "thread-quality"
+    user_id = "user-quality"
+    fake_thread_dir = tmp_path / "thread"
+
+    class Paths:
+        def thread_dir(self, thread_id, user_id=None):
+            return fake_thread_dir
+
+    monkeypatch.setattr("deerflow.command_room.quality.get_paths", lambda: Paths())
+
+    signal = build_quality_signal(
+        thread_id=thread_id,
+        run_id="run-1",
+        round_id="round-1",
+        task_id="task-1",
+        author_role="opposition",
+        recommendation="needs_revision",
+        rationale="Needs a narrower evidence check. " + ("x" * 400),
+        evidence_refs=["summary only"],
+    )
+    record_quality_signal(signal, user_id=user_id)
+
+    text = latest_quality_signals_for_thread(thread_id, user_id)
+    assert text is not None
+    assert "Internal AI Quality Signals" in text
+    assert "recommendation=needs_revision" in text
+    assert "target=Chair" in text
+    assert "task_id=task-1" in text
+    assert "EvidenceRefs: summary only" in text
+    assert "x" * 300 not in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+
+    formatted = format_quality_signals_for_model([signal.as_dict()])
+    assert formatted is not None
+    assert "Chair decides next steps" in formatted
 
 
 def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):

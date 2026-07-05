@@ -675,6 +675,7 @@ The command-room lead is an LLM coordinator: it dispatches one or more worker la
 Sub-agent task progress is also persisted into run history, so switching conversations can restore task status without relying only on the live stream.
 DeerFlow also records native round state (`open`, `executing`, `validating`, `waiting_user`, `closed`, `blocked`) and task lanes for lifecycle visibility; this state machine only tracks run/task associations, artifact/evidence refs, and current intent, and does not make quality or PASS/FAIL decisions.
 Run evidence is exposed through `GET /api/threads/{thread_id}/runs/{run_id}/evidence` as redacted `EvidenceRef` records derived from run events, artifacts, logs, and command-output summaries; the API labels source kind and mechanical strength only.
+The AI quality loop data plane exposes `GET /api/threads/{thread_id}/runs/{run_id}/quality-context` for handoffs, evidence, capability facts, round state, and existing AI-authored quality signals, plus `POST /api/threads/{thread_id}/runs/{run_id}/quality-signals` to store recommendations such as `needs_more_evidence` or `needs_revision` for Chair/lead AI review; it does not create a program-side reviewer, verdict, or rework trigger.
 User-facing command-room replies stay natural by default; internal audit is not a visible product surface.
 
 ### Sandbox & File System

@@ -20,7 +20,7 @@ import mimetypes
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import AliasChoices, BaseModel, Field, model_validator
@@ -28,6 +28,7 @@ from pydantic import AliasChoices, BaseModel, Field, model_validator
 from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_checkpointer,
+    get_config,
     get_feedback_repo,
     get_round_state_store,
     get_run_event_store,
@@ -40,7 +41,10 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
+from deerflow.capabilities import build_capability_snapshot
 from deerflow.command_room.evidence import normalize_evidence_ref
+from deerflow.command_room.quality import build_quality_signal, list_quality_signals, record_quality_signal
+from deerflow.config.app_config import AppConfig
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
 from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
@@ -242,6 +246,56 @@ class TaskLaneResponse(BaseModel):
     error: str | None = None
     created_at: str = ""
     updated_at: str = ""
+
+
+QualityRecommendation = Literal["continue", "needs_more_evidence", "needs_revision", "escalate", "stop"]
+
+
+class QualitySignalCreateRequest(BaseModel):
+    round_id: str | None = None
+    task_id: str | None = None
+    author_role: str = Field(..., min_length=1, max_length=64)
+    recommendation: QualityRecommendation
+    rationale: str = Field(..., min_length=1, max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list)
+    capability_refs: list[str] = Field(default_factory=list)
+    capability_snapshot_version: int | None = None
+    target_role: str = Field(default="Chair", min_length=1, max_length=64)
+
+
+class QualitySignalResponse(BaseModel):
+    signal_id: str
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    task_id: str | None = None
+    author_role: str
+    recommendation: QualityRecommendation
+    rationale: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    capability_refs: list[str] = Field(default_factory=list)
+    capability_snapshot_version: int | None = None
+    target_role: str = "Chair"
+    created_at: str
+    ai_authored: bool = True
+    programmatic_decision: bool = False
+    quality_verdict: None = None
+    auto_rework: bool = False
+    schema_version: int = 1
+
+
+class RunQualityContextResponse(BaseModel):
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    round_state: dict[str, Any] | None = None
+    handoffs: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    capability_snapshot: dict[str, Any] = Field(default_factory=dict)
+    quality_signals: list[QualitySignalResponse] = Field(default_factory=list)
+    quality_signal_summary: dict[str, Any] = Field(default_factory=dict)
+    quality_verdict: None = None
+    auto_rework: bool = False
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -720,6 +774,71 @@ def _run_evidence_refs_from_events(events: list[dict[str, Any]], *, thread_id: s
             content_sha256=artifact.get("sha256") if isinstance(artifact.get("sha256"), str) else None,
         )
     return refs
+
+
+async def _run_evidence_payload(thread_id: str, run_id: str, record: RunRecord, request: Request, *, user_id: str, limit: int) -> dict[str, Any]:
+    event_store = get_run_event_store(request)
+    list_events_kwargs: dict[str, Any] = {"event_types": _RUN_EVIDENCE_EVENT_TYPES, "limit": limit}
+    if _supports_user_id_keyword(event_store.list_events):
+        list_events_kwargs["user_id"] = user_id
+    events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
+    evidence_refs = _run_evidence_refs_from_events(events, thread_id=thread_id, run_id=run_id, round_id=record.round_id)
+    return {
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "round_id": record.round_id,
+        "evidence_refs": evidence_refs,
+        "summary": _run_evidence_summary(evidence_refs),
+    }
+
+
+def _quality_signal_summary(signals: list[dict[str, Any]]) -> dict[str, Any]:
+    by_recommendation: dict[str, int] = {}
+    for signal in signals:
+        recommendation = str(signal.get("recommendation") or "unknown")
+        by_recommendation[recommendation] = by_recommendation.get(recommendation, 0) + 1
+    return {
+        "total": len(signals),
+        "by_recommendation": by_recommendation,
+        "ai_authored": True,
+        "quality_verdict": None,
+        "auto_rework": False,
+    }
+
+
+async def _round_quality_context(thread_id: str, record: RunRecord, request: Request, *, user_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    round_store = get_round_state_store(request)
+    round_context = record.metadata.get("round_context") if isinstance(record.metadata, dict) else None
+    round_state = dict(round_context) if isinstance(round_context, dict) else None
+    task_lanes: list[dict[str, Any]] = []
+    if round_store is None:
+        return round_state, task_lanes
+    if hasattr(round_store, "list_by_thread"):
+        rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=50)
+        for row in rows:
+            if row.get("round_id") == record.round_id or row.get("current_run_id") == record.run_id:
+                round_state = row
+                break
+    if record.round_id and hasattr(round_store, "list_task_lanes_by_round"):
+        task_lanes = await round_store.list_task_lanes_by_round(thread_id=thread_id, round_id=record.round_id, user_id=user_id, limit=100)
+    return round_state, task_lanes
+
+
+def _handoffs_from_task_lanes(task_lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    handoffs: list[dict[str, Any]] = []
+    for lane in task_lanes:
+        handoff = lane.get("handoff")
+        if not isinstance(handoff, dict):
+            continue
+        handoffs.append(
+            {
+                "task_id": lane.get("task_id"),
+                "role": lane.get("role"),
+                "status": lane.get("status"),
+                "handoff": handoff,
+            }
+        )
+    return handoffs
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -1458,19 +1577,76 @@ async def list_run_evidence(
     """Return AI-readable, redacted evidence refs derived from run events."""
     user_id = get_request_storage_user_id(request)
     record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
-    event_store = get_run_event_store(request)
-    list_events_kwargs: dict[str, Any] = {"event_types": _RUN_EVIDENCE_EVENT_TYPES, "limit": limit}
-    if _supports_user_id_keyword(event_store.list_events):
-        list_events_kwargs["user_id"] = user_id
-    events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
-    evidence_refs = _run_evidence_refs_from_events(events, thread_id=thread_id, run_id=run_id, round_id=record.round_id)
-    return {
-        "thread_id": thread_id,
-        "run_id": run_id,
-        "round_id": record.round_id,
-        "evidence_refs": evidence_refs,
-        "summary": _run_evidence_summary(evidence_refs),
-    }
+    return await _run_evidence_payload(thread_id, run_id, record, request, user_id=user_id, limit=limit)
+
+
+@router.get("/{thread_id}/runs/{run_id}/quality-context", response_model=RunQualityContextResponse)
+@require_permission("runs", "read", owner_check=True)
+async def get_run_quality_context(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    evidence_limit: int = Query(default=500, le=2000),
+    signal_limit: int = Query(default=50, ge=1, le=200),
+) -> RunQualityContextResponse:
+    """Return AI-readable quality-loop context for a run."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    evidence = await _run_evidence_payload(thread_id, run_id, record, request, user_id=user_id, limit=evidence_limit)
+    round_state, task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+    signals = list_quality_signals(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=signal_limit)
+    return RunQualityContextResponse(
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=record.round_id,
+        round_state=round_state,
+        handoffs=_handoffs_from_task_lanes(task_lanes),
+        evidence=evidence,
+        capability_snapshot=build_capability_snapshot(config, thread_id=thread_id, user_id=user_id),
+        quality_signals=[QualitySignalResponse.model_validate(signal) for signal in signals],
+        quality_signal_summary=_quality_signal_summary(signals),
+        quality_verdict=None,
+        auto_rework=False,
+    )
+
+
+@router.post("/{thread_id}/runs/{run_id}/quality-signals", response_model=QualitySignalResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_quality_signal(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    body: QualitySignalCreateRequest,
+    config: AppConfig = Depends(get_config),
+) -> QualitySignalResponse:
+    """Save an AI-authored quality signal for Chair/lead AI review."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="quality signal round_id does not match run round_id")
+    snapshot_version = body.capability_snapshot_version
+    if snapshot_version is None:
+        snapshot = build_capability_snapshot(config, thread_id=thread_id, user_id=user_id)
+        snapshot_version = snapshot.get("version") if isinstance(snapshot.get("version"), int) else None
+    try:
+        signal = build_quality_signal(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            task_id=body.task_id,
+            author_role=body.author_role,
+            recommendation=body.recommendation,
+            rationale=body.rationale,
+            evidence_refs=body.evidence_refs,
+            capability_refs=body.capability_refs,
+            capability_snapshot_version=snapshot_version,
+            target_role=body.target_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_quality_signal(signal, user_id=user_id)
+    return QualitySignalResponse.model_validate(signal.as_dict())
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

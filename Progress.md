@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-05 — Phase 4 AI review invocation records
+
+- Added `ReviewInvocation` as a compact AI-authored record for why Chair/lead asks `evidence_checker`, `opposition`, `synthesis_checker`, or `reviewer` to inspect a focused question, plus the returned short summary and evidence refs.
+- Added owner-scoped thread audit storage at `audit/review_invocations.jsonl`; completion appends a new snapshot for the same `invocation_id` rather than mutating prior audit rows.
+- Added `GET/POST /api/threads/{thread_id}/runs/{run_id}/review-invocations` and `POST /api/threads/{thread_id}/runs/{run_id}/review-invocations/{invocation_id}/complete`.
+- Extended command-room round context injection with compact review invocation state only: reviewer role, status, focus, target role, and result summary.
+- Validation: `cd backend && uv run pytest tests/test_command_room_quality_signal.py tests/test_run_quality_loop_api.py tests/test_round_context_injection.py tests/test_subagent_handoff_audit.py -q` passed with 23 tests; `cd backend && uv run pytest tests/test_command_room_review_invocation.py tests/test_run_review_invocation_api.py -q` passed with 5 tests; targeted `ruff check` passed for changed Python files.
+- Deliberately skipped: no automatic reviewer/opposition dispatch, no program verdict, no automatic rework, no UI, no Browser replay, no external dependency, and no `task()` public return change.
+
 ## 2026-07-05 — Phase 3 AI-readable quality loop data plane
 
 - Added `QualitySignal` as a compact AI-authored recommendation record with `continue`, `needs_more_evidence`, `needs_revision`, `escalate`, and `stop`; it deliberately has `quality_verdict: null`, `auto_rework: false`, and `programmatic_decision: false`.

@@ -1,11 +1,14 @@
 from deerflow.agents.middlewares.round_context_middleware import (
     format_capability_snapshot_for_model,
     format_quality_signals_for_model,
+    format_review_invocations_for_model,
     format_round_context_for_model,
     latest_quality_signals_for_thread,
+    latest_review_invocations_for_thread,
     latest_round_context_for_thread,
 )
 from deerflow.command_room.quality import build_quality_signal, record_quality_signal
+from deerflow.command_room.review import build_review_invocation, complete_review_invocation, record_review_invocation
 from deerflow.command_room.round_record import record_command_room_round
 from deerflow.subagents.audit import record_subagent_handoff
 
@@ -116,6 +119,56 @@ def test_quality_signals_format_short_internal_context(tmp_path, monkeypatch):
     assert "fail" not in lowered
 
     formatted = format_quality_signals_for_model([signal.as_dict()])
+    assert formatted is not None
+    assert "Chair decides next steps" in formatted
+
+
+def test_review_invocations_format_short_internal_context(tmp_path, monkeypatch):
+    thread_id = "thread-review"
+    user_id = "user-review"
+    fake_thread_dir = tmp_path / "thread"
+
+    class Paths:
+        def thread_dir(self, thread_id, user_id=None):
+            return fake_thread_dir
+
+    monkeypatch.setattr("deerflow.command_room.review.get_paths", lambda: Paths())
+
+    invocation = build_review_invocation(
+        thread_id=thread_id,
+        run_id="run-1",
+        round_id="round-1",
+        task_id="task-1",
+        requested_by_role="lead",
+        reviewer_role="synthesis_checker",
+        reason="Need a compact synthesis review. " + ("r" * 400),
+        focus="Check whether the synthesis preserves evidence boundaries. " + ("f" * 400),
+    )
+    completed = complete_review_invocation(
+        invocation,
+        result_summary="The synthesis needs one more concrete ref. " + ("x" * 400),
+        result_evidence_refs=["findings.md"],
+    )
+    record_review_invocation(invocation, user_id=user_id)
+    record_review_invocation(completed, user_id=user_id)
+
+    text = latest_review_invocations_for_thread(thread_id, user_id)
+    assert text is not None
+    assert "Internal AI Review Invocations" in text
+    assert "reviewer=synthesis_checker" in text
+    assert "status=completed" in text
+    assert "target=Chair" in text
+    assert "task_id=task-1" in text
+    assert "focus: Check whether the synthesis preserves evidence boundaries." in text
+    assert "result_summary: The synthesis needs one more concrete ref." in text
+    assert "f" * 300 not in text
+    assert "r" * 300 not in text
+    assert "auto_rework" not in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+
+    formatted = format_review_invocations_for_model([completed.as_dict()])
     assert formatted is not None
     assert "Chair decides next steps" in formatted
 

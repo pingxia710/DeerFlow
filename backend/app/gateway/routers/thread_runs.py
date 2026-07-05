@@ -44,6 +44,13 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.capabilities import build_capability_snapshot
 from deerflow.command_room.evidence import normalize_evidence_ref
 from deerflow.command_room.quality import build_quality_signal, list_quality_signals, record_quality_signal
+from deerflow.command_room.review import (
+    build_review_invocation,
+    complete_review_invocation,
+    list_review_invocations,
+    record_review_invocation,
+    review_invocation_from_dict,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
@@ -281,6 +288,51 @@ class QualitySignalResponse(BaseModel):
     programmatic_decision: bool = False
     quality_verdict: None = None
     auto_rework: bool = False
+    schema_version: int = 1
+
+
+ReviewerRole = Literal["evidence_checker", "opposition", "synthesis_checker", "reviewer"]
+ReviewInvocationStatus = Literal["requested", "completed", "cancelled"]
+
+
+class ReviewInvocationCreateRequest(BaseModel):
+    round_id: str | None = None
+    task_id: str | None = None
+    requested_by_role: str = Field(..., min_length=1, max_length=64)
+    reviewer_role: ReviewerRole
+    reason: str = Field(..., min_length=1, max_length=4000)
+    focus: str = Field(..., min_length=1, max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list)
+    handoff_refs: list[str] = Field(default_factory=list)
+    quality_signal_refs: list[str] = Field(default_factory=list)
+    target_role: str = Field(default="Chair", min_length=1, max_length=64)
+
+
+class ReviewInvocationCompleteRequest(BaseModel):
+    result_summary: str = Field(..., min_length=1, max_length=4000)
+    result_evidence_refs: list[str] = Field(default_factory=list)
+
+
+class ReviewInvocationResponse(BaseModel):
+    invocation_id: str
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    task_id: str | None = None
+    requested_by_role: str
+    reviewer_role: ReviewerRole
+    reason: str
+    focus: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    handoff_refs: list[str] = Field(default_factory=list)
+    quality_signal_refs: list[str] = Field(default_factory=list)
+    status: ReviewInvocationStatus
+    result_summary: str | None = None
+    result_evidence_refs: list[str] = Field(default_factory=list)
+    target_role: str = "Chair"
+    created_at: str
+    completed_at: str | None = None
+    ai_authored: bool = True
     schema_version: int = 1
 
 
@@ -804,6 +856,13 @@ def _quality_signal_summary(signals: list[dict[str, Any]]) -> dict[str, Any]:
         "quality_verdict": None,
         "auto_rework": False,
     }
+
+
+def _review_invocation_by_id(invocations: list[dict[str, Any]], invocation_id: str) -> dict[str, Any] | None:
+    for invocation in invocations:
+        if invocation.get("invocation_id") == invocation_id:
+            return invocation
+    return None
 
 
 async def _round_quality_context(thread_id: str, record: RunRecord, request: Request, *, user_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -1647,6 +1706,82 @@ async def create_quality_signal(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     record_quality_signal(signal, user_id=user_id)
     return QualitySignalResponse.model_validate(signal.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/review-invocations", response_model=list[ReviewInvocationResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_review_invocations(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[ReviewInvocationResponse]:
+    """List AI-authored review invocation records for a run."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    invocations = list_review_invocations(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=limit)
+    return [ReviewInvocationResponse.model_validate(invocation) for invocation in invocations]
+
+
+@router.post("/{thread_id}/runs/{run_id}/review-invocations", response_model=ReviewInvocationResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_review_invocation(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    body: ReviewInvocationCreateRequest,
+) -> ReviewInvocationResponse:
+    """Save an AI-authored request for a review role to inspect a focused question."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="review invocation round_id does not match run round_id")
+    try:
+        invocation = build_review_invocation(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            task_id=body.task_id,
+            requested_by_role=body.requested_by_role,
+            reviewer_role=body.reviewer_role,
+            reason=body.reason,
+            focus=body.focus,
+            evidence_refs=body.evidence_refs,
+            handoff_refs=body.handoff_refs,
+            quality_signal_refs=body.quality_signal_refs,
+            target_role=body.target_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_review_invocation(invocation, user_id=user_id)
+    return ReviewInvocationResponse.model_validate(invocation.as_dict())
+
+
+@router.post("/{thread_id}/runs/{run_id}/review-invocations/{invocation_id}/complete", response_model=ReviewInvocationResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def complete_run_review_invocation(
+    thread_id: str,
+    run_id: str,
+    invocation_id: str,
+    request: Request,
+    body: ReviewInvocationCompleteRequest,
+) -> ReviewInvocationResponse:
+    """Append the reviewer result summary for an existing invocation."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    rows = list_review_invocations(thread_id=thread_id, user_id=user_id, run_id=run_id, limit=200)
+    row = _review_invocation_by_id(rows, invocation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Review invocation {invocation_id} not found")
+    invocation = review_invocation_from_dict(row)
+    if invocation.status != "requested":
+        raise HTTPException(status_code=409, detail=f"Review invocation {invocation_id} is already {invocation.status}")
+    try:
+        completed = complete_review_invocation(invocation, result_summary=body.result_summary, result_evidence_refs=body.result_evidence_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_review_invocation(completed, user_id=user_id)
+    return ReviewInvocationResponse.model_validate(completed.as_dict())
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

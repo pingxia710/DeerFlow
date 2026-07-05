@@ -24,6 +24,7 @@ _INTERNAL_CONTEXT_HEADER = "[Internal Command Room Round signals]"
 _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
 _CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
 _QUALITY_SIGNALS_HEADER = "[Internal AI Quality Signals]"
+_REVIEW_INVOCATIONS_HEADER = "[Internal AI Review Invocations]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -204,6 +205,46 @@ def latest_quality_signals_for_thread(thread_id: str | None, user_id: str | None
     return format_quality_signals_for_model(list_quality_signals(thread_id=thread_id, user_id=user_id, limit=3))
 
 
+def format_review_invocations_for_model(invocations: list[Mapping[str, Any]] | None) -> str | None:
+    if not invocations:
+        return None
+    from deerflow.command_room.review import compact_review_invocations
+
+    compact = compact_review_invocations([dict(invocation) for invocation in invocations], limit=3)
+    if not compact:
+        return None
+    lines = [
+        _REVIEW_INVOCATIONS_HEADER,
+        "AI-authored review requests only. Chair decides next steps; no automatic reviewer dispatch or rework.",
+    ]
+    for invocation in compact:
+        parts = [
+            f"reviewer={invocation.get('reviewer_role')}",
+            f"status={invocation.get('status')}",
+            f"target={invocation.get('target_role') or 'Chair'}",
+        ]
+        if invocation.get("round_id"):
+            parts.append(f"round_id={invocation.get('round_id')}")
+        if invocation.get("task_id"):
+            parts.append(f"task_id={invocation.get('task_id')}")
+        lines.append("; ".join(parts))
+        focus = invocation.get("focus")
+        if isinstance(focus, str) and focus.strip():
+            lines.append(f"focus: {focus.strip()}")
+        result_summary = invocation.get("result_summary")
+        if isinstance(result_summary, str) and result_summary.strip():
+            lines.append(f"result_summary: {result_summary.strip()}")
+    return "\n".join(lines)
+
+
+def latest_review_invocations_for_thread(thread_id: str | None, user_id: str | None = None) -> str | None:
+    if not thread_id:
+        return None
+    from deerflow.command_room.review import list_review_invocations
+
+    return format_review_invocations_for_model(list_review_invocations(thread_id=thread_id, user_id=user_id, limit=3))
+
+
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
     """Append latest Round signals as an internal SystemMessage for Command Room."""
 
@@ -239,6 +280,9 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         quality_text = latest_quality_signals_for_thread(str(thread_id) if thread_id else None, user_id)
         if quality_text:
             parts.append(quality_text)
+        review_text = latest_review_invocations_for_thread(str(thread_id) if thread_id else None, user_id)
+        if review_text:
+            parts.append(review_text)
         legacy_text = latest_round_context_for_thread(str(thread_id) if thread_id else None, user_id)
         if legacy_text:
             parts.append(legacy_text)
@@ -249,7 +293,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        headers = (_INTERNAL_CONTEXT_HEADER, _NATIVE_ROUND_CONTEXT_HEADER, _CAPABILITY_CONTEXT_HEADER, _QUALITY_SIGNALS_HEADER)
+        headers = (_INTERNAL_CONTEXT_HEADER, _NATIVE_ROUND_CONTEXT_HEADER, _CAPABILITY_CONTEXT_HEADER, _QUALITY_SIGNALS_HEADER, _REVIEW_INVOCATIONS_HEADER)
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
@@ -269,7 +313,9 @@ __all__ = [
     "format_capability_snapshot_for_model",
     "format_native_round_context_for_model",
     "format_quality_signals_for_model",
+    "format_review_invocations_for_model",
     "format_round_context_for_model",
     "latest_quality_signals_for_thread",
+    "latest_review_invocations_for_thread",
     "latest_round_context_for_thread",
 ]

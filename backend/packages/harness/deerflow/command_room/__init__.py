@@ -3,6 +3,16 @@
 from .action_result_adapter import action_result_from_value
 from .handoff import HandoffEnvelope, handoff_envelope_from_packet, handoff_envelope_to_audit_dict
 from .quality import QualitySignal, build_quality_signal, compact_quality_signals, list_quality_signals, record_quality_signal
+from .review import (
+    REVIEWER_ROLES,
+    ReviewInvocation,
+    build_review_invocation,
+    compact_review_invocations,
+    complete_review_invocation,
+    list_review_invocations,
+    record_review_invocation,
+    review_invocation_from_dict,
+)
 from .round import ActionResult, NextRound, Round, RoundAction, RoundItemStatus, summarize_round
 from .round_context import (
     RoundContextSignals,
@@ -42,6 +52,14 @@ __all__ = [
     "compact_quality_signals",
     "list_quality_signals",
     "record_quality_signal",
+    "REVIEWER_ROLES",
+    "ReviewInvocation",
+    "build_review_invocation",
+    "compact_review_invocations",
+    "complete_review_invocation",
+    "list_review_invocations",
+    "record_review_invocation",
+    "review_invocation_from_dict",
     "HandoffEnvelope",
     "handoff_envelope_from_packet",
     "handoff_envelope_to_audit_dict",

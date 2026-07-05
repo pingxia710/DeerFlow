@@ -11,6 +11,7 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `7b0317aa` | existing local stack on `localhost:2026`; real model run via UI | model run + refresh recovery | pass after fix | Found duplicate restored messages during `codex-run-smoke-20260705T020448Z-195602`; fixed in `7b0317aa`; retest `codex-dom-smoke-20260705T021600Z-373729` run `fe5773a5-9d29-4bdc-9e86-05aaec58b4f3` reached `success`, marker appeared once in user bubble and once in AI bubble before/after reload, duplicate-key warnings `0` |
 | 2026-07-05 | Codex    | `14acaff2` | existing local stack on `localhost:2026` | cancel active run | pass | `codex-cancel-ui-20260705T022019Z-838205` run `3ed6ac9f-83f1-4db4-9bc1-d6ad277f3176`; cancel API returned `202`; terminal status `interrupted`; textarea enabled after reload; duplicate-key warnings `0`; console errors `0` |
 | 2026-07-05 | Codex    | `14acaff2` | stack restarted with `scripts/serve.sh --dev --daemon --skip-install`; temp local `DEER_FLOW_CONFIG_PATH` used for trusted sandbox mount override, then removed | terminal run replay after restart | pass | Before restart: `codex-replay-smoke-20260705T022655Z-444948` run `70b631dc-3542-4a59-a68e-f5261b3bfa39` reached `success`; after stack restart and login, run API still `success`, messages API `3` rows, marker visible once in user bubble and once in AI bubble, duplicate-key warnings `0` |
+| 2026-07-05 | Codex    | `6c6c934d` | existing local stack on `localhost:2026`; restored missing temp `DEER_FLOW_CONFIG_PATH` for this workstation's trusted local sandbox mount override | artifact provenance + download | pass | API run `codex-artifact-api-20260705023920-a85a1f` / `d1a8e6bc-019b-45b8-990d-394865600d8a` reached `success`; `/runs/{run_id}/artifacts` returned one runtime-observed `artifact.presented` entry from `present_files` with `available=true`, `display_policy=inline`, `mime_type=text/plain`, `size_bytes=49`, sha256 `d02f09b551b46118fcbd89c350c03927dff9adbc8c1e9471e9efcedd7cefa18e`; artifact download returned `200`, `X-Content-Type-Options: nosniff`, marker matched |
 
 ## Notes
 
@@ -33,3 +34,7 @@ Use this file for the 1-2 day real-use smoke from
 - Direct raw `uvicorn` restart did not preserve the local trusted sandbox mount
   override; use the project launcher or an explicit local `DEER_FLOW_CONFIG_PATH`
   when testing restart against this workstation config.
+- The current gateway process still references
+  `/tmp/deerflow-gateway-restart-smoke-config.yaml`. Removing that temp config
+  while the process is alive keeps `/health` green but makes model/run config
+  reads fail with `503 Configuration not available`.

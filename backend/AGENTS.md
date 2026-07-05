@@ -308,7 +308,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; best-effort cancels owner-scoped active runs and clears their local stream buffers before deleting persisted runs/events/feedback/metadata; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts with `X-Content-Type-Options: nosniff`; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) and unknown binary artifacts are forced as download attachments; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
-| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream with optional `after_seq` replay cursor; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens; `GET /../context-usage` - latest lightweight model-context snapshots |
+| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run and bind it to native round state; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs with `round_id`/`round_state`; `GET /../rounds` - list native rounds; `GET /../rounds/{round_id}/tasks` - list task lanes for a round; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream with optional `after_seq` replay cursor; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens; `GET /../context-usage` - latest lightweight model-context snapshots |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list current-user feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete current-user specific feedback |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 
@@ -347,6 +347,18 @@ Artifact provenance must preserve which event field supplied the path
 (`artifact_refs`, `artifacts`, `action_result.output_ref`, or
 `action_result.evidence_refs`) so Command Room can distinguish displayed
 outputs from evidence references.
+
+Native round state lives in `rounds`, `round_events`, and `task_lanes`.
+`RunManager` owns the mechanical lifecycle only: bind every new run to a
+round, enforce the native transition set (`open`, `executing`, `validating`,
+`waiting_user`, `closed`, `blocked`), close successful runs, block failed or
+cancelled runs, and record task lanes plus artifact/evidence refs from
+`RunJournal.record_task_event()`. `GET /api/threads/{id}/rounds` and
+`GET /api/threads/{id}/rounds/{round_id}/tasks` are the read path for this
+mechanical state. It must not choose the next role, judge quality, auto
+PASS/FAIL, or trigger rework. When a closed round receives a follow-up run,
+create a new child round and inherit only the previous `next_action` summary as
+advisory context, not the old user goal as the current intent.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`

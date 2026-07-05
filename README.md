@@ -669,6 +669,7 @@ This is how DeerFlow handles tasks that take minutes to hours: a research task m
 For `command-room` runs, DeerFlow can keep compact internal audit records under the thread audit directory without exposing them in the chat UI.
 The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output.
 Sub-agent task progress is also persisted into run history, so switching conversations can restore task status without relying only on the live stream.
+DeerFlow also records native round state (`open`, `executing`, `validating`, `waiting_user`, `closed`, `blocked`) and task lanes for lifecycle visibility; this state machine only tracks run/task associations, artifact/evidence refs, and current intent, and does not make quality or PASS/FAIL decisions.
 User-facing command-room replies stay natural by default; internal audit is not a visible product surface.
 
 ### Sandbox & File System

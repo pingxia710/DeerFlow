@@ -278,12 +278,35 @@ class RuntimeSnapshotRunMessages(BaseModel):
     has_more: bool = False
 
 
+class RuntimeSnapshotRecoveredRunResponse(BaseModel):
+    run_id: str
+    terminal_reason: str | None = None
+
+
+class RuntimeSnapshotStaleInflightRecoveryResponse(BaseModel):
+    recovered: bool = False
+    recovered_count: int = 0
+    run_ids: list[str] = Field(default_factory=list)
+    terminal_reason: str | None = None
+    runs: list[RuntimeSnapshotRecoveredRunResponse] = Field(default_factory=list)
+
+
+class RuntimeSnapshotSelfHealResponse(BaseModel):
+    repaired: bool = False
+
+
+class RuntimeSnapshotRecoveryResponse(BaseModel):
+    stale_inflight: RuntimeSnapshotStaleInflightRecoveryResponse | None = None
+    snapshot_self_heal: RuntimeSnapshotSelfHealResponse | None = None
+
+
 class ThreadRuntimeSnapshotResponse(BaseModel):
     thread_id: str
     runs: list[RunResponse] = Field(default_factory=list)
     run_messages: list[RuntimeSnapshotRunMessages] = Field(default_factory=list)
     rounds: list[RoundResponse] = Field(default_factory=list)
     task_lanes: list[TaskLaneResponse] = Field(default_factory=list)
+    recovery: RuntimeSnapshotRecoveryResponse | None = None
 
 
 QualityRecommendation = Literal["continue", "needs_more_evidence", "needs_revision", "escalate", "stop"]
@@ -1692,8 +1715,9 @@ async def get_thread_runtime_snapshot(
     """Return one recovery snapshot for thread runtime state."""
     user_id = get_request_storage_user_id(request)
     run_mgr = get_run_manager(request)
+    stale_recovered_records: list[RunRecord] = []
     if hasattr(run_mgr, "recover_stale_inflight_runs"):
-        await run_mgr.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
+        stale_recovered_records = await run_mgr.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=run_limit)
     await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
 
@@ -1712,6 +1736,7 @@ async def get_thread_runtime_snapshot(
     rounds: list[RoundResponse] = []
     task_lanes: list[TaskLaneResponse] = []
     round_store = get_round_state_store(request)
+    snapshot_self_heal_repaired = False
     if round_store is not None and hasattr(round_store, "list_by_thread"):
         round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
         task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
@@ -1728,6 +1753,7 @@ async def get_thread_runtime_snapshot(
             task_lane_rows=task_lane_rows,
         )
         if repaired:
+            snapshot_self_heal_repaired = True
             round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
             task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
                 round_store,
@@ -1739,12 +1765,37 @@ async def get_thread_runtime_snapshot(
         rounds = [RoundResponse.model_validate(row) for row in round_rows]
         task_lanes = [TaskLaneResponse.model_validate(row) for row in task_lane_rows]
 
+    recovery: RuntimeSnapshotRecoveryResponse | None = None
+    if stale_recovered_records or snapshot_self_heal_repaired:
+        stale_recovery = None
+        if stale_recovered_records:
+            terminal_reasons = [_run_terminal_reason(record) for record in stale_recovered_records]
+            terminal_reason = terminal_reasons[0] if len(set(terminal_reasons)) == 1 else None
+            stale_recovery = RuntimeSnapshotStaleInflightRecoveryResponse(
+                recovered=True,
+                recovered_count=len(stale_recovered_records),
+                run_ids=[record.run_id for record in stale_recovered_records],
+                terminal_reason=terminal_reason,
+                runs=[
+                    RuntimeSnapshotRecoveredRunResponse(
+                        run_id=record.run_id,
+                        terminal_reason=_run_terminal_reason(record),
+                    )
+                    for record in stale_recovered_records
+                ],
+            )
+        recovery = RuntimeSnapshotRecoveryResponse(
+            stale_inflight=stale_recovery,
+            snapshot_self_heal=RuntimeSnapshotSelfHealResponse(repaired=True) if snapshot_self_heal_repaired else None,
+        )
+
     return ThreadRuntimeSnapshotResponse(
         thread_id=thread_id,
         runs=[_record_to_response(record) for record in records],
         run_messages=run_messages,
         rounds=rounds,
         task_lanes=task_lanes,
+        recovery=recovery,
     )
 
 

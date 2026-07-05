@@ -28,6 +28,7 @@ import {
   mergeFetchedRunMessages,
   mergeMessages,
   partitionKnownRunIds,
+  readThreadRuntimeSnapshotResponse,
   readRunMessagesPageResponse,
   resetLoadedRunStateForRefresh,
   removeSetItems,
@@ -180,6 +181,47 @@ test("runtime snapshot applies task lanes only for the latest native round", () 
   expect(latestRoundId).toBe("round-new");
   expect(restored?.[0]?.status).toBe("running");
   expect(lanes.map((lane) => lane.task_id)).toEqual(["task-new"]);
+});
+
+test("runtime snapshot recovery telemetry is additive", async () => {
+  const snapshot = await readThreadRuntimeSnapshotResponse(
+    new Response(
+      JSON.stringify({
+        thread_id: "thread-1",
+        runs: [{ run_id: "run-1", status: "running" }],
+        rounds: [
+          {
+            thread_id: "thread-1",
+            round_id: "round-1",
+            current_run_id: "run-1",
+            state: "closed",
+          },
+        ],
+        run_messages: [],
+        task_lanes: [],
+        recovery: {
+          stale_inflight: {
+            recovered: true,
+            recovered_count: 1,
+            run_ids: ["run-1"],
+            terminal_reason: "worker_lost",
+            runs: [{ run_id: "run-1", terminal_reason: "worker_lost" }],
+          },
+          snapshot_self_heal: { repaired: true },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+  );
+
+  const restored = applyNativeRoundsToSnapshotRuns(
+    snapshot.runs,
+    snapshot.rounds,
+  );
+
+  expect(snapshot.recovery?.stale_inflight?.run_ids).toEqual(["run-1"]);
+  expect(snapshot.recovery?.snapshot_self_heal?.repaired).toBe(true);
+  expect(restored?.[0]?.status).toBe("success");
 });
 
 test("thread switching gates live state, history, and queued messages by visible thread", () => {

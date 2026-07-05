@@ -1199,6 +1199,17 @@ export type RuntimeRoundSnapshot = {
   closed_at?: string | null;
 };
 
+type RuntimeSnapshotRecovery = {
+  stale_inflight?: {
+    recovered?: boolean;
+    recovered_count?: number;
+    run_ids?: string[];
+    terminal_reason?: string | null;
+    runs?: Array<{ run_id: string; terminal_reason?: string | null }>;
+  } | null;
+  snapshot_self_heal?: { repaired?: boolean } | null;
+};
+
 export type ThreadRunTerminalNotice = {
   runId: string;
   status: string;
@@ -1212,6 +1223,7 @@ type ThreadRuntimeSnapshotResponse = {
   rounds?: RuntimeRoundSnapshot[];
   run_messages: Array<RunMessagesPageResponse & { run_id: string }>;
   task_lanes?: TaskLaneSnapshot[];
+  recovery?: RuntimeSnapshotRecovery | null;
 };
 
 type RuntimeSnapshotRunMessagesPage =

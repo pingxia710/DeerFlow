@@ -292,6 +292,7 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     assert body["run_messages"][1]["data"][0]["content"]["content"] == "older question"
     assert body["rounds"][0]["round_id"] == "round-1"
     assert body["task_lanes"][0]["task_id"] == "task-1"
+    assert body.get("recovery") is None
     assert round_store.seen_user_id == user_id
 
 
@@ -326,6 +327,8 @@ def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
     assert body["rounds"][0]["state"] == "blocked"
     assert body["task_lanes"][0]["status"] == "failed"
     assert body["task_lanes"][0]["error"] == "Parent run ended before this task lane completed: worker_lost."
+    assert body["recovery"]["stale_inflight"] is None
+    assert body["recovery"]["snapshot_self_heal"] == {"repaired": True}
     assert round_store.set_run_state_calls[0]["state"] == "blocked"
     assert round_store.set_run_state_calls[0]["event_type"] == "round.blocked"
     assert round_store.record_task_events_calls[0][0]["event_type"] == "task_failed"
@@ -356,6 +359,12 @@ def test_runtime_snapshot_recovers_stale_store_only_inflight_run():
     assert body["runs"][0]["run_id"] == "stale-run"
     assert body["runs"][0]["status"] == "error"
     assert body["runs"][0]["terminal_reason"] == "worker_lost"
+    assert body["recovery"]["snapshot_self_heal"] is None
+    assert body["recovery"]["stale_inflight"]["recovered"] is True
+    assert body["recovery"]["stale_inflight"]["recovered_count"] == 1
+    assert body["recovery"]["stale_inflight"]["run_ids"] == ["stale-run"]
+    assert body["recovery"]["stale_inflight"]["terminal_reason"] == "worker_lost"
+    assert body["recovery"]["stale_inflight"]["runs"] == [{"run_id": "stale-run", "terminal_reason": "worker_lost"}]
     stored = asyncio.run(run_store.get("stale-run", user_id=user_id))
     assert stored["status"] == "error"
     assert stored["terminal_reason"] == "worker_lost"

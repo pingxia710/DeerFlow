@@ -9,6 +9,8 @@ Use this file for the 1-2 day real-use smoke from
 | 2026-07-05 | Codex    | `b6d7c1b3` | no service boot; preflight only                                 | preflight   | pass    | backend guard `25 passed`; frontend history `62 passed` |
 | 2026-07-05 | Codex    | `05e76ab4` | existing local stack on `localhost:2026`; Gateway `:8001`; frontend `:6001`; port `3000` occupied by unrelated `hiveops-web` | API + UI empty-thread smoke | pass | `/health` 200; register/thread/search/runs/messages API smoke 200; browser loaded and reloaded `codex-ui-smoke-20260705T020246Z-250995` with no console warnings/errors |
 | 2026-07-05 | Codex    | `7b0317aa` | existing local stack on `localhost:2026`; real model run via UI | model run + refresh recovery | pass after fix | Found duplicate restored messages during `codex-run-smoke-20260705T020448Z-195602`; fixed in `7b0317aa`; retest `codex-dom-smoke-20260705T021600Z-373729` run `fe5773a5-9d29-4bdc-9e86-05aaec58b4f3` reached `success`, marker appeared once in user bubble and once in AI bubble before/after reload, duplicate-key warnings `0` |
+| 2026-07-05 | Codex    | `14acaff2` | existing local stack on `localhost:2026` | cancel active run | pass | `codex-cancel-ui-20260705T022019Z-838205` run `3ed6ac9f-83f1-4db4-9bc1-d6ad277f3176`; cancel API returned `202`; terminal status `interrupted`; textarea enabled after reload; duplicate-key warnings `0`; console errors `0` |
+| 2026-07-05 | Codex    | `14acaff2` | stack restarted with `scripts/serve.sh --dev --daemon --skip-install`; temp local `DEER_FLOW_CONFIG_PATH` used for trusted sandbox mount override, then removed | terminal run replay after restart | pass | Before restart: `codex-replay-smoke-20260705T022655Z-444948` run `70b631dc-3542-4a59-a68e-f5261b3bfa39` reached `success`; after stack restart and login, run API still `success`, messages API `3` rows, marker visible once in user bubble and once in AI bubble, duplicate-key warnings `0` |
 
 ## Notes
 
@@ -26,3 +28,8 @@ Use this file for the 1-2 day real-use smoke from
 - The model-run smoke still logs one React uncontrolled-to-controlled warning;
   it did not block run completion or refresh recovery, but should remain on the
   observation list.
+- Cancel currently settles as `interrupted`, not `cancelled`; UI recovery passed,
+  but the terminal status naming should be kept visible during beta.
+- Direct raw `uvicorn` restart did not preserve the local trusted sandbox mount
+  override; use the project launcher or an explicit local `DEER_FLOW_CONFIG_PATH`
+  when testing restart against this workstation config.

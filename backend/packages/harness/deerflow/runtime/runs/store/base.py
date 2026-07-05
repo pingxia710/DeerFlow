@@ -2,7 +2,7 @@
 
 RunManager depends on this interface. Implementations:
 - MemoryRunStore: in-memory dict (development, tests)
-- Future: RunRepository backed by SQLAlchemy ORM
+- RunRepository: SQLAlchemy ORM
 
 All methods accept an optional user_id for user isolation.
 When user_id is None, no user filtering is applied (single-user mode).
@@ -165,8 +165,9 @@ class RunStore(abc.ABC):
     async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:
         """Create a pending run row for lease/CAS callers.
 
-        This is a convenience contract over ``put``. It is not wired into
-        RunManager yet.
+        RunManager uses this before acquiring the thread active slot, so a
+        store that supports leases must keep this row eligible for
+        ``try_acquire_active_slot``.
         """
         await self.put(run_id, thread_id=thread_id, status="pending", **kwargs)
         row = await self.get(run_id)

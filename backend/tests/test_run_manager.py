@@ -5,6 +5,8 @@ import contextlib
 import logging
 import re
 import sqlite3
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -121,6 +123,23 @@ class RejectingCompleteRunStore(MemoryRunStore):
 
     async def complete_run(self, run_id: str, **kwargs):
         return False
+
+
+class RecordingRecoveryRunStore(MemoryRunStore):
+    """Memory run store that records manager-level expired lease recovery calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_expired_calls = 0
+        self.recover_calls: list[tuple[str, int]] = []
+
+    async def list_expired_active_leases(self, now: datetime):
+        self.list_expired_calls += 1
+        return await super().list_expired_active_leases(now)
+
+    async def recover_expired_lease(self, run_id: str, *, generation: int, **kwargs):
+        self.recover_calls.append((run_id, generation))
+        return await super().recover_expired_lease(run_id, generation=generation, **kwargs)
 
 
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
@@ -504,6 +523,34 @@ async def test_list_by_thread_recovers_stale_store_only_inflight_run():
     assert rows[0].terminal_reason == "worker_lost"
     assert stored["status"] == "error"
     assert stored["terminal_reason"] == "worker_lost"
+
+
+@pytest.mark.anyio
+async def test_recover_stale_inflight_runs_uses_expired_active_lease_api():
+    """Manager recovery must call the lease recovery API, not only stale updated_at fallback."""
+    store = RecordingRecoveryRunStore()
+    now = datetime.now(UTC)
+    await store.create_pending_run("expired-run", thread_id="thread-lease")
+    lease = await store.try_acquire_active_slot(
+        "thread-lease",
+        "expired-run",
+        owner_worker_id="worker-a",
+        lease_expires_at=now - timedelta(seconds=1),
+        now=now,
+    )
+    assert lease is not None
+    manager = RunManager(store=store)
+
+    recovered = await manager.recover_stale_inflight_runs(thread_id="thread-lease")
+
+    stored = await store.get("expired-run")
+    assert store.list_expired_calls == 1
+    assert store.recover_calls == [("expired-run", lease.generation)]
+    assert [record.run_id for record in recovered] == ["expired-run"]
+    assert recovered[0].status == RunStatus.error
+    assert recovered[0].terminal_reason == "lease_expired_recovered"
+    assert stored is not None
+    assert stored["status"] == "error"
 
 
 @pytest.mark.anyio
@@ -962,8 +1009,31 @@ async def test_failed_lease_terminal_cas_does_not_fallback_to_put():
     await manager.set_status(record.run_id, RunStatus.success, terminal_reason="success")
 
     stored = await store.get(record.run_id)
+    assert record.status == RunStatus.running
     assert stored is not None
     assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_failed_lease_terminal_cas_leaves_run_recoverable_by_expired_lease():
+    store = RejectingCompleteRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    record = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success, terminal_reason="success")
+    lease = store._active_slots["thread-lease"]
+    store._active_slots["thread-lease"] = replace(lease, lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    recovered = await manager.recover_stale_inflight_runs(thread_id="thread-lease")
+
+    stored = await store.get(record.run_id)
+    assert [run.run_id for run in recovered] == [record.run_id]
+    assert record.status == RunStatus.error
+    assert record.terminal_reason == "lease_expired_recovered"
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert stored["terminal_reason"] == "lease_expired_recovered"
 
 
 @pytest.mark.anyio
@@ -998,10 +1068,15 @@ async def test_create_or_reject_interrupt_persists_interrupted_status_to_store()
     new = await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
 
     stored_old = await store.get(old.run_id)
+    stored_new = await store.get(new.run_id)
     assert new.run_id != old.run_id
+    assert new.lease_token is not None
+    assert new.lease_generation is not None
     assert old.status == RunStatus.interrupted
     assert stored_old is not None
     assert stored_old["status"] == "interrupted"
+    assert stored_new is not None
+    assert stored_new["status"] == "running"
 
 
 @pytest.mark.anyio
@@ -1061,10 +1136,31 @@ async def test_create_or_reject_rollback_persists_interrupted_status_to_store():
     new = await manager.create_or_reject("thread-1", multitask_strategy="rollback")
 
     stored_old = await store.get(old.run_id)
+    stored_new = await store.get(new.run_id)
     assert new.run_id != old.run_id
+    assert new.lease_token is not None
+    assert new.lease_generation is not None
     assert old.status == RunStatus.interrupted
     assert stored_old is not None
     assert stored_old["status"] == "interrupted"
+    assert stored_new is not None
+    assert stored_new["status"] == "running"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_create_or_reject_interrupt_and_rollback_conflict_when_active_slot_is_held(strategy: str):
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    old = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
+
+    with pytest.raises(ConflictError):
+        await manager.create_or_reject("thread-lease", multitask_strategy=strategy)
+
+    inflight = await store.list_inflight()
+    assert old.abort_event.is_set() is False
+    assert [row["run_id"] for row in inflight] == [old.run_id]
+    assert inflight[0]["lease_token"] == old.lease_token
 
 
 @pytest.mark.anyio

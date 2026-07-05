@@ -28,8 +28,9 @@ class _FakeRunManager:
     recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", user_id=None)]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
-    def __init__(self, *, store):
+    def __init__(self, *, store, round_store=None):
         self.store = store
+        self.round_store = round_store
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
         self.shutdown_calls: int = 0

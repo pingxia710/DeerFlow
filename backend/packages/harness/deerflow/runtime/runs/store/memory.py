@@ -1,6 +1,6 @@
-"""In-memory RunStore. Used when database.backend=memory (default) and in tests.
+"""In-memory RunStore with the same active-slot lease/CAS contract as SQL.
 
-Equivalent to the original RunManager._runs dict behavior.
+Used when database.backend=memory (default) and in tests.
 """
 
 from __future__ import annotations

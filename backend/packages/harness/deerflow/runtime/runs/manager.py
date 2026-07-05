@@ -307,7 +307,9 @@ class RunManager:
 
         Returns ``None`` when the configured store has no lease/CAS support,
         ``False`` when another active slot won the race, and ``True`` when this
-        record owns the slot.
+        record owns the slot. Supported stores transition the persisted row to
+        ``running`` while the in-memory worker still moves through
+        ``pending -> running`` via ``set_status``.
         """
         if self._store is None:
             return None
@@ -792,6 +794,10 @@ class RunManager:
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, terminal_reason: str | None = None) -> None:
         """Transition a run to a new status."""
+        previous_status: RunStatus | str | None = None
+        previous_error: str | None = None
+        previous_terminal_reason: str | None = None
+        previous_updated_at: str | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -804,6 +810,10 @@ class RunManager:
             if is_terminal_status(record.status) and record.terminal_reason is not None and terminal_reason not in {None, record.terminal_reason}:
                 logger.info("Ignoring late terminal_reason overwrite for terminal run %s: %s -> %s", run_id, record.terminal_reason, terminal_reason)
                 return
+            previous_status = record.status
+            previous_error = record.error
+            previous_terminal_reason = record.terminal_reason
+            previous_updated_at = record.updated_at
             record.status = status
             record.updated_at = _now_iso()
             if terminal_reason is not None:
@@ -812,7 +822,14 @@ class RunManager:
                 record.error = error
         persisted = await self._persist_status(record, status, error=error, terminal_reason=terminal_reason)
         if self._record_has_lease(record) and is_terminal_status(status) and not persisted:
-            logger.warning("Lease terminal status for run %s was not persisted; skipping follow-up store writes", run_id)
+            async with self._lock:
+                live = self._runs.get(run_id)
+                if live is record and live.status == status:
+                    live.status = previous_status if previous_status is not None else live.status
+                    live.error = previous_error
+                    live.terminal_reason = previous_terminal_reason
+                    live.updated_at = previous_updated_at or live.updated_at
+            logger.warning("Lease terminal status for run %s was not persisted; restored in-memory status for recovery", run_id)
             return
         await self._persist_round_state_for_status(record, status, error=error, terminal_reason=terminal_reason)
         if is_terminal_status(status):
@@ -992,11 +1009,13 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
     ) -> RunRecord:
-        """Atomically check for inflight runs and create a new one.
+        """Atomically check for inflight runs and create a leased new run.
 
         For ``reject`` strategy, raises ``ConflictError`` if thread
-        already has a pending/running run.  For ``interrupt``/``rollback``,
-        cancels inflight runs before creating.
+        already has an inflight run. For ``interrupt``/``rollback``, only local
+        legacy inflight runs without an active-slot owner may be cancelled after
+        the new run acquires the slot. If an existing active slot is still held,
+        the new run is rejected instead of being inserted with a plain ``put``.
 
         This method holds the lock across both the check and the insert,
         eliminating the TOCTOU race in separate ``has_inflight`` + ``create``.
@@ -1027,10 +1046,10 @@ class RunManager:
                         pass
                 raise ConflictError(f"Thread {thread_id} already has an active run; cancellation requested")
 
-            # Only local in-memory runs are safe to interrupt/rollback here. Persisted-only
-            # rows may belong to another worker or a stale process after restart; without a
-            # worker lease/generation we cannot safely kill them, so they remain a fail-safe
-            # conflict for reject and are left untouched for interrupt/rollback.
+            # Persisted-only rows may belong to another worker. Interrupt/rollback
+            # records the cancel intent, then returns Conflict; the next run must
+            # wait until the owner releases the active slot or lease recovery marks
+            # it terminal.
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 logger.info(
@@ -1058,7 +1077,7 @@ class RunManager:
             self._index_run_locked(record)
             persisted = False
             try:
-                if multitask_strategy == "reject":
+                if self._store is not None:
                     active_slot = await self._persist_new_run_with_active_slot(record)
                     if active_slot is False:
                         raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -1099,6 +1118,95 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    async def _recover_expired_active_leases(
+        self,
+        *,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        error: str,
+    ) -> list[RunRecord]:
+        if self._store is None:
+            return []
+        now_dt = datetime.now(UTC)
+        try:
+            leases = await self._call_store_with_retry(
+                "list_expired_active_leases",
+                "*",
+                lambda: self._store.list_expired_active_leases(now_dt),
+            )
+        except NotImplementedError:
+            return []
+        except Exception:
+            logger.warning("Failed to list expired active leases for recovery", exc_info=True)
+            return []
+
+        recovered: list[RunRecord] = []
+        for lease in leases:
+            if thread_id is not None and lease.thread_id != thread_id:
+                continue
+            if run_id is not None and lease.run_id != run_id:
+                continue
+            if user_id is not None:
+                try:
+                    row = await self._store.get(lease.run_id, user_id=user_id)
+                except Exception:
+                    logger.warning("Failed to verify expired lease owner for run %s", lease.run_id, exc_info=True)
+                    continue
+                if row is None:
+                    continue
+            try:
+                updated = await self._call_store_with_retry(
+                    "recover_expired_lease",
+                    lease.run_id,
+                    lambda: self._store.recover_expired_lease(
+                        lease.run_id,
+                        generation=lease.generation,
+                        terminal_status=RunStatus.error.value,
+                        recovery_worker_id=self._worker_id,
+                        now=now_dt,
+                        error=error,
+                    ),
+                )
+            except NotImplementedError:
+                return recovered
+            except Exception:
+                logger.warning("Failed to recover expired lease for run %s", lease.run_id, exc_info=True)
+                continue
+            if not updated:
+                continue
+
+            try:
+                row = await self._store.get(lease.run_id, user_id=user_id)
+            except Exception:
+                logger.warning("Failed to hydrate recovered lease run %s", lease.run_id, exc_info=True)
+                continue
+            if row is None:
+                continue
+            try:
+                record = self._record_from_store(row)
+            except Exception:
+                logger.warning("Failed to map recovered lease run %s", lease.run_id, exc_info=True)
+                continue
+
+            async with self._lock:
+                live_record = self._runs.get(lease.run_id)
+                if live_record is not None:
+                    live_record.abort_action = "interrupt"
+                    live_record.abort_event.set()
+                    if live_record.task is not None and not live_record.task.done():
+                        live_record.task.cancel()
+                    live_record.status = record.status
+                    live_record.error = record.error
+                    live_record.terminal_reason = record.terminal_reason
+                    live_record.updated_at = record.updated_at
+                    record = live_record
+            recovered.append(record)
+
+        if recovered:
+            logger.warning("Recovered %d expired active lease(s)", len(recovered))
+        return recovered
+
     async def reconcile_orphaned_inflight_runs(
         self,
         *,
@@ -1116,6 +1224,7 @@ class RunManager:
         """
         if self._store is None:
             return []
+        recovered = await self._recover_expired_active_leases(error=error)
         try:
             rows = await self._call_store_with_retry(
                 "list_inflight",
@@ -1124,9 +1233,8 @@ class RunManager:
             )
         except Exception:
             logger.warning("Failed to list orphaned inflight runs for reconciliation", exc_info=True)
-            return []
+            return recovered
 
-        recovered: list[RunRecord] = []
         now = _now_iso()
         for row in rows:
             try:
@@ -1165,6 +1273,7 @@ class RunManager:
         """Mark persisted inflight runs stale when no local worker can own them."""
         if self._store is None:
             return []
+        recovered = await self._recover_expired_active_leases(thread_id=thread_id, run_id=run_id, user_id=user_id, error=error)
         cutoff = _parse_run_timestamp(before) or (datetime.now(UTC) - _STALE_INFLIGHT_TIMEOUT)
         try:
             rows = await self._call_store_with_retry(
@@ -1174,9 +1283,8 @@ class RunManager:
             )
         except Exception:
             logger.warning("Failed to list stale inflight runs for recovery", exc_info=True)
-            return []
+            return recovered
 
-        recovered: list[RunRecord] = []
         now = _now_iso()
         for row in rows:
             if thread_id is not None and row.get("thread_id") != thread_id:

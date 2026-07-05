@@ -98,7 +98,7 @@ Use this file for the 1-2 day real-use smoke from
   `docs/runtime/private-beta-seal-evidence-2026-07-05.md`; the latest rows in
   this log are the authoritative observation checkpoints.
 - Frontend targeted tests: covered by `message-merge.test.ts` and
-  `thread-history.spec.ts`; latest recorded preflight at `a1b9b489` passed `63`
+  `thread-history.spec.ts`; latest recorded preflight at `d4b219b9` passed `63`
   unit tests and `16` E2E tests.
 - Private beta runbook: present in `docs/runtime/private-beta-runbook.md` with
   startup config, known limits, preflight, migration dry-run caveats, and 1-2
@@ -106,7 +106,7 @@ Use this file for the 1-2 day real-use smoke from
 - Known limits/start config: recorded; the isolated production-shaped Gateway
   boot passed with `checkpointer: sqlite`, `database.backend: sqlite`, and
   `run_events.backend: db`; latest backend guard/security preflight at
-  `a8f42500` passed `25` tests with `1` warning. Current local observation stack
+  `d4b219b9` passed `25` tests with `1` warning. Current local observation stack
   config was rechecked at `3b62d7b1`; it is intentionally local-only
   (`run_events.backend=jsonl`, no `checkpointer`) and must not be confused with
   the production-shaped beta config. Existing data migration remains incomplete:

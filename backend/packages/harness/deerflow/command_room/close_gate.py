@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .evidence import analyze_evidence_ref
+from .lane_reconciliation import build_lane_reconciliation_facts
 from .round_lifecycle import build_round_lifecycle_hint
 
 _ACTIVE_LANE_STATUSES = {"planned", "dispatched", "running"}
@@ -39,6 +40,7 @@ class CloseGateReport:
     unknowns: list[str] = field(default_factory=list)
     next_check_hint: str | None = None
     round_lifecycle_hint: dict[str, Any] = field(default_factory=dict)
+    lane_reconciliation: dict[str, Any] = field(default_factory=dict)
     programmatic_decision: bool = False
     auto_dispatch: bool = False
     quality_verdict: None = None
@@ -192,6 +194,11 @@ def build_close_gate_report(
         review_invocations=scoped_reviews,
         chair_decisions=scoped_decisions,
     )
+    lane_reconciliation = build_lane_reconciliation_facts(
+        planned_lanes=scoped_lanes,
+        task_lanes=scoped_tasks,
+        pending_handoffs=scoped_handoffs,
+    )
     return CloseGateReport(
         thread_id=thread_id,
         run_id=run_id,
@@ -209,6 +216,7 @@ def build_close_gate_report(
         unknowns=unknowns,
         next_check_hint=next_check_hint,
         round_lifecycle_hint=lifecycle_hint.as_dict(),
+        lane_reconciliation=lane_reconciliation.as_dict(),
     )
 
 

@@ -16,13 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.round_state.model import RoundEventRow, RoundRow, TaskLaneRow
 from deerflow.utils.time import coerce_iso
 
-ROUND_STATES = frozenset({"open", "executing", "validating", "waiting_user", "closed", "blocked"})
+ROUND_STATES = frozenset({"open", "executing", "validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"})
 TERMINAL_ROUND_STATES = frozenset({"closed", "blocked"})
 ALLOWED_ROUND_TRANSITIONS = {
-    "open": frozenset({"executing", "validating", "waiting_user", "closed", "blocked"}),
-    "executing": frozenset({"validating", "waiting_user", "closed", "blocked"}),
-    "validating": frozenset({"executing", "waiting_user", "closed", "blocked"}),
-    "waiting_user": frozenset({"executing", "closed", "blocked"}),
+    "open": frozenset({"executing", "validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
+    "executing": frozenset({"validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
+    "validating": frozenset({"executing", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
+    "waiting_user": frozenset({"executing", "awaiting_chair_decision", "closed", "blocked"}),
+    "awaiting_chair_decision": frozenset({"executing", "waiting_user", "closed", "blocked"}),
     "closed": frozenset({"closed"}),
     "blocked": frozenset({"blocked"}),
 }

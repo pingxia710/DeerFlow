@@ -833,7 +833,7 @@ def _terminal_round_target(record: RunRecord) -> tuple[str, str] | None:
     if not is_terminal_status(status):
         return None
     if status == RunStatus.success.value:
-        return "closed", "round.closed"
+        return "awaiting_chair_decision", "run.completed"
     return "blocked", "round.blocked"
 
 

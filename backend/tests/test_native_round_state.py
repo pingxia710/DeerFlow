@@ -14,7 +14,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 
 @pytest.mark.anyio
-async def test_closed_round_followup_starts_new_round_with_next_action_only():
+async def test_completed_run_round_followup_starts_new_round_with_next_action_only():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
@@ -33,46 +33,46 @@ async def test_closed_round_followup_starts_new_round_with_next_action_only():
 
     assert first.round_id
     assert second.round_id
-    assert second.round_id != first.round_id
+    assert second.round_id == first.round_id
     context = second.metadata["round_context"]
-    assert context["parent_round_id"] == first.round_id
+    assert context["parent_round_id"] is None
     assert context["current_intent"] == "好的，下一步"
     assert context["accepted_next_action"] == "Next: implement native state."
 
 
 @pytest.mark.anyio
-async def test_closed_round_state_is_mechanical_not_quality_verdict_or_authorization():
+async def test_success_run_round_state_awaits_chair_decision_not_quality_verdict_or_authorization():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
     first = await manager.create_or_reject(
-        "thread-closed-contract",
+        "thread-awaiting-decision-contract",
         kwargs={"input": {"messages": [{"role": "user", "content": "inspect system"}]}},
     )
     await manager.set_status(first.run_id, RunStatus.running)
     await manager.set_status(first.run_id, RunStatus.success, terminal_reason="success")
     await manager.update_run_completion(first.run_id, status="success", last_ai_message="Next: inspect refs.")
 
-    rounds = await round_store.list_by_thread("thread-closed-contract")
+    rounds = await round_store.list_by_thread("thread-awaiting-decision-contract")
     first_round = next(round for round in rounds if round["round_id"] == first.round_id)
-    assert first_round["state"] == "closed"
+    assert first_round["state"] == "awaiting_chair_decision"
     assert "PASS" not in str(first_round)
     assert "quality_verdict" not in first_round
     assert "verdict" not in first_round
 
     second = await manager.create_or_reject(
-        "thread-closed-contract",
+        "thread-awaiting-decision-contract",
         kwargs={"input": {"messages": [{"role": "user", "content": "continue"}]}},
     )
 
-    assert second.round_id != first.round_id
+    assert second.round_id == first.round_id
     context = second.metadata["round_context"]
-    assert context["parent_round_id"] == first.round_id
+    assert context["parent_round_id"] is None
     assert context["accepted_next_action"] == "Next: inspect refs."
     assert second.status != RunStatus.running
     assert not round_store.task_lanes
 
-    second_round = next(round for round in await round_store.list_by_thread("thread-closed-contract") if round["round_id"] == second.round_id)
+    second_round = next(round for round in await round_store.list_by_thread("thread-awaiting-decision-contract") if round["round_id"] == second.round_id)
     assert second_round["state"] not in {"executing", "validating"}
 
 

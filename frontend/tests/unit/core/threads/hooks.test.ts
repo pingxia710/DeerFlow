@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type { Run } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { afterEach, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
 import type { Subtask } from "@/core/tasks";
 import type { SubtaskUpdate } from "@/core/tasks/context";
+import type { RunMessage } from "@/core/threads/types";
 
 interface TaskEventContractCase {
   event_type: string;
@@ -46,6 +47,23 @@ function readTaskEventFixture(name: string): Record<string, unknown> {
       "utf-8",
     ),
   ) as Record<string, unknown>;
+}
+
+function makeRunMessage(
+  runId: string,
+  seq: number,
+  content: Message,
+  overrides: Partial<Omit<RunMessage, "run_id" | "seq" | "content">> = {},
+): RunMessage {
+  return {
+    run_id: runId,
+    seq,
+    created_at: `2024-01-01T00:00:${String(seq).padStart(2, "0")}.000Z`,
+    metadata: { caller: "lead_agent" },
+    display: { visible_in_chat: true, reason: "test" },
+    content,
+    ...overrides,
+  };
 }
 
 function makeLocalStorage(): Storage {
@@ -1416,6 +1434,128 @@ test("buildVisibleHistoryMessages excludes task_event run messages", async () =>
   expect(buildVisibleHistoryMessages(rows as never, new Set(), [])).toEqual([
     expect.objectContaining({ content: "visible" }),
   ]);
+});
+
+test("buildVisibleHistoryMessages keeps same message id from different runs", async () => {
+  const { buildVisibleHistoryMessages } = await import("@/core/threads/hooks");
+  const rows = [
+    makeRunMessage("run-a", 1, {
+      id: "shared-message",
+      type: "ai",
+      content: "run A visible",
+    } as Message),
+    makeRunMessage("run-b", 1, {
+      id: "shared-message",
+      type: "ai",
+      content: "run B visible",
+    } as Message),
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["run A visible", "run B visible"]);
+});
+
+test("buildVisibleHistoryMessages keeps same tool call id from different runs", async () => {
+  const { buildVisibleHistoryMessages } = await import("@/core/threads/hooks");
+  const rows = [
+    makeRunMessage("run-a", 1, {
+      id: "tool-message-a",
+      type: "ai",
+      content: "run A tool result",
+      tool_call_id: "shared-tool-call",
+    } as Message),
+    makeRunMessage("run-b", 1, {
+      id: "tool-message-b",
+      type: "ai",
+      content: "run B tool result",
+      tool_call_id: "shared-tool-call",
+    } as Message),
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["run A tool result", "run B tool result"]);
+});
+
+test("mergeMessages keeps visible same-run message over hidden control message", async () => {
+  const { mergeMessages } = await import("@/core/threads/hooks");
+
+  expect(
+    mergeMessages(
+      [],
+      [
+        {
+          id: "same-run-message",
+          type: "ai",
+          content: "hidden control",
+          additional_kwargs: {
+            deerflow_run_id: "run-a",
+            hide_from_ui: true,
+          },
+        } as Message,
+        {
+          id: "same-run-message",
+          type: "ai",
+          content: "visible reply",
+          additional_kwargs: { deerflow_run_id: "run-a" },
+        } as Message,
+      ],
+      [],
+    ).map((message) => message.content),
+  ).toEqual(["visible reply"]);
+});
+
+test("mergeMessages does not let unscoped live messages remove run-scoped history", async () => {
+  const { buildVisibleHistoryMessages, mergeMessages } =
+    await import("@/core/threads/hooks");
+  const history = buildVisibleHistoryMessages(
+    [
+      makeRunMessage("run-a", 1, {
+        id: "shared-message",
+        type: "ai",
+        content: "history from run A",
+      } as Message),
+    ],
+    new Set(),
+    [],
+  );
+
+  expect(
+    mergeMessages(
+      history,
+      [
+        {
+          id: "shared-message",
+          type: "ai",
+          content: "live without run id",
+        } as Message,
+      ],
+      [],
+    ).map((message) => message.content),
+  ).toEqual(["history from run A", "live without run id"]);
+});
+
+test("buildVisibleHistoryMessages hides rows with visible_in_chat false", async () => {
+  const { buildVisibleHistoryMessages } = await import("@/core/threads/hooks");
+  const rows = [
+    makeRunMessage(
+      "run-a",
+      1,
+      {
+        id: "hidden-message",
+        type: "ai",
+        content: "should stay hidden",
+      } as Message,
+      { display: { visible_in_chat: false, reason: "control" } },
+    ),
+  ];
+
+  expect(buildVisibleHistoryMessages(rows, new Set(), [])).toEqual([]);
 });
 
 test("mergeSubtaskUpdate does not regress terminal task events back to running", async () => {

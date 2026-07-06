@@ -383,7 +383,7 @@ function messageIdentity(message: Message): string | undefined {
   if (typeof historyIdentity === "string" && historyIdentity.length > 0) {
     return `history:${historyIdentity}`;
   }
-  return baseMessageIdentity(message);
+  return runScopedBaseMessageIdentity(message) ?? baseMessageIdentity(message);
 }
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
@@ -494,12 +494,12 @@ function isMessageContent(value: RunMessage["content"]): value is Message {
 
 function runMessageIdentity(message: RunMessage): string | undefined {
   return isMessageContent(message.content)
-    ? messageIdentity(message.content)
+    ? baseMessageIdentity(message.content)
     : undefined;
 }
 
 function historyMessageFromRunMessage(message: VisibleRunMessage): Message {
-  const identity = messageIdentity(message.content);
+  const identity = baseMessageIdentity(message.content);
   const result = {
     ...message.content,
     additional_kwargs: {
@@ -1446,21 +1446,16 @@ export function mergeMessages(
     }
   }
 
-  const threadMessageIds = new Set(
+  const liveRunScopedMessageIds = new Set(
     threadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
-      .map(baseMessageIdentity)
+      .map(runScopedBaseMessageIdentity)
       .filter(isNonEmptyString),
   );
   const liveMessageByRunScopedIdentity = new Map<string, Message>();
-  const liveMessageByBaseIdentity = new Map<string, Message>();
   for (const message of threadMessages) {
     if (isHiddenFromUIMessage(message)) {
       continue;
-    }
-    const baseIdentity = baseMessageIdentity(message);
-    if (baseIdentity) {
-      liveMessageByBaseIdentity.set(baseIdentity, message);
     }
     const identity = runScopedBaseMessageIdentity(message);
     if (identity) {
@@ -1477,22 +1472,11 @@ export function mergeMessages(
     if (!msg) {
       continue;
     }
-    const identity = baseMessageIdentity(msg);
-    if (identity && threadMessageIds.has(identity)) {
+    const identity = runScopedBaseMessageIdentity(msg);
+    if (identity && liveRunScopedMessageIds.has(identity)) {
       cutoff = i;
     } else {
       break;
-    }
-  }
-
-  const historyBaseIdentityCounts = new Map<string, number>();
-  for (const message of historyMessages.slice(0, cutoff)) {
-    const identity = baseMessageIdentity(message);
-    if (identity) {
-      historyBaseIdentityCounts.set(
-        identity,
-        (historyBaseIdentityCounts.get(identity) ?? 0) + 1,
-      );
     }
   }
 
@@ -1501,14 +1485,9 @@ export function mergeMessages(
     .slice(0, cutoff)
     .map((message) => {
       const runScopedIdentity = runScopedBaseMessageIdentity(message);
-      const baseIdentity = baseMessageIdentity(message);
-      const liveMessage =
-        (runScopedIdentity
-          ? liveMessageByRunScopedIdentity.get(runScopedIdentity)
-          : undefined) ??
-        (baseIdentity && historyBaseIdentityCounts.get(baseIdentity) === 1
-          ? liveMessageByBaseIdentity.get(baseIdentity)
-          : undefined);
+      const liveMessage = runScopedIdentity
+        ? liveMessageByRunScopedIdentity.get(runScopedIdentity)
+        : undefined;
       if (!liveMessage) {
         return message;
       }

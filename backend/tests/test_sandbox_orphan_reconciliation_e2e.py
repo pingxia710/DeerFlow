@@ -64,6 +64,13 @@ def cleanup_test_containers():
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=10)
 
 
+@pytest.fixture(autouse=True)
+def force_docker_backend_runtime(monkeypatch):
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+
+    monkeypatch.setattr(LocalContainerBackend, "_detect_runtime", lambda self: "docker")
+
+
 @pytest.mark.skipif(not _docker_available(), reason="Docker not available")
 class TestOrphanReconciliationE2E:
     """E2E tests for orphan container reconciliation."""

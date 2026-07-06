@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0007_round_handoff_envelope"
+HEAD = "0008_task_lane_ref_lists"
 BASELINE = "0001_baseline"
 
 

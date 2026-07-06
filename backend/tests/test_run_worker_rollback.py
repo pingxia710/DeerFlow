@@ -278,7 +278,7 @@ async def test_run_agent_success_path_persists_terminal_runtime_state_without_sn
 
     rounds = await round_store.list_by_thread("thread-main-path", user_id="owner-1")
     assert rounds[0]["round_id"] == record.round_id
-    assert rounds[0]["state"] == "closed"
+    assert rounds[0]["state"] == "awaiting_chair_decision"
     lanes = await round_store.list_task_lanes_by_round(
         thread_id="thread-main-path",
         round_id=record.round_id,

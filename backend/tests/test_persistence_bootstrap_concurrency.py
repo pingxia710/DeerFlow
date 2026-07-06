@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0007_round_handoff_envelope"
+HEAD = "0008_task_lane_ref_lists"
 
 
 def _url(tmp_path: Path) -> str:

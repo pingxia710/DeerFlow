@@ -127,6 +127,29 @@ def test_start_container_logs_redacted_env_values(monkeypatch, caplog):
     assert "visible-value" not in log_output
 
 
+def test_detect_runtime_falls_back_to_docker_when_apple_container_ps_is_unavailable(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["container", "--version"]:
+            return SimpleNamespace(stdout="container CLI version 1.0.0\n", stderr="", returncode=0)
+        if cmd[:2] == ["container", "ps"]:
+            return SimpleNamespace(stdout="", stderr="Plugin 'container-ps' not found", returncode=64)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+
+    assert backend.runtime == "docker"
+
+
 def _capture_start_container_command(monkeypatch, backend: LocalContainerBackend, runtime: str = "docker") -> list[str]:
     monkeypatch.setattr(backend, "_runtime", runtime)
     captured_cmd: list[str] = []

@@ -253,8 +253,28 @@ class LocalContainerBackend(SandboxBackend):
                     check=True,
                     timeout=5,
                 )
-                logger.info(f"Detected Apple Container: {result.stdout.strip()}")
-                return "container"
+                version = result.stdout.strip()
+                probe = subprocess.run(
+                    [
+                        "container",
+                        "ps",
+                        "--filter",
+                        f"name={self._container_prefix}-",
+                        "--format",
+                        "{{.Names}}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if probe.returncode == 0:
+                    logger.info(f"Detected Apple Container: {version}")
+                    return "container"
+                logger.info(
+                    "Apple Container detected but container ps is unavailable; falling back to Docker (returncode=%s, stderr=%s)",
+                    probe.returncode,
+                    (probe.stderr or "").strip() or "<empty>",
+                )
             except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 logger.info("Apple Container not available, falling back to Docker")
 

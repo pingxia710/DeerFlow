@@ -131,6 +131,17 @@
       ]
     },
     {
+      "event": "custom",
+      "keys": [
+        "event_type",
+        "run_id",
+        "status",
+        "terminal_reason",
+        "thread_id",
+        "type"
+      ]
+    },
+    {
       "event": "end",
       "keys": null
     }

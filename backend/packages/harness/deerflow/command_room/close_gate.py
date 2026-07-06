@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .evidence import analyze_evidence_ref
+from .round_lifecycle import build_round_lifecycle_hint
 
 _ACTIVE_LANE_STATUSES = {"planned", "dispatched", "running"}
 _FAILED_OR_BLOCKED_STATUSES = {"failed", "blocked"}
@@ -37,6 +38,7 @@ class CloseGateReport:
     warnings: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     next_check_hint: str | None = None
+    round_lifecycle_hint: dict[str, Any] = field(default_factory=dict)
     programmatic_decision: bool = False
     auto_dispatch: bool = False
     quality_verdict: None = None
@@ -181,6 +183,15 @@ def build_close_gate_report(
         unknowns.append("round_state was not provided.")
 
     next_check_hint = "review_open_items" if warnings or unknowns else "chair_review_no_programmatic_verdict"
+    lifecycle_hint = build_round_lifecycle_hint(
+        round_id=round_id,
+        round_state=round_state,
+        pending_handoffs=scoped_handoffs,
+        planned_lanes=scoped_lanes,
+        task_lanes=scoped_tasks,
+        review_invocations=scoped_reviews,
+        chair_decisions=scoped_decisions,
+    )
     return CloseGateReport(
         thread_id=thread_id,
         run_id=run_id,
@@ -197,6 +208,7 @@ def build_close_gate_report(
         warnings=warnings,
         unknowns=unknowns,
         next_check_hint=next_check_hint,
+        round_lifecycle_hint=lifecycle_hint.as_dict(),
     )
 
 

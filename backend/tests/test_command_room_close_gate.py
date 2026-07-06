@@ -18,6 +18,8 @@ def test_close_gate_reports_open_items_without_programmatic_verdict():
     assert report.programmatic_decision is False
     assert report.auto_dispatch is False
     assert report.quality_verdict is None
+    assert report.round_lifecycle_hint["next_state_hint"] == "waiting_user"
+    assert report.round_lifecycle_hint["programmatic_decision"] is False
     assert len(report.open_pending_handoffs) == 1
     assert len(report.active_planned_lanes) == 1
     assert len(report.active_task_lanes) == 1

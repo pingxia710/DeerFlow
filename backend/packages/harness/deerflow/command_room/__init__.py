@@ -67,6 +67,7 @@ from .round_context import (
     record_action_result_from_event,
     round_context_signals,
 )
+from .round_lifecycle import RoundLifecycleHint, build_round_lifecycle_hint
 from .round_record import (
     evaluate_decision_signals,
     evaluate_verdict_gate,
@@ -87,7 +88,9 @@ __all__ = [
     "build_chair_operating_brief",
     "format_chair_operating_brief_for_model",
     "CloseGateReport",
+    "RoundLifecycleHint",
     "build_close_gate_report",
+    "build_round_lifecycle_hint",
     "ACCOUNT_DECISIONS",
     "ACCOUNT_TYPES",
     "AccountDecision",

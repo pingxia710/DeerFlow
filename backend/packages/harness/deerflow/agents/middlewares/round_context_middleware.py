@@ -17,6 +17,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.command_room.context_compaction import ContextBlock, compact_command_room_context_blocks
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -428,7 +429,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             if thread_id_text
             else []
         )
-        parts: list[str] = []
+        parts: list[ContextBlock] = []
         if thread_id_text:
             brief = build_chair_operating_brief(
                 thread_id=thread_id_text,
@@ -443,35 +444,35 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             )
             brief_text = format_chair_operating_brief_for_model(brief)
             if brief_text:
-                parts.append(brief_text)
+                parts.append(ContextBlock(name="chair_brief", priority=30, content=brief_text))
         capability_text = format_capability_snapshot_for_model(snapshot)
         if capability_text:
-            parts.append(capability_text)
+            parts.append(ContextBlock(name="capability", priority=45, content=capability_text))
         if isinstance(native_context, Mapping):
             text = format_native_round_context_for_model(native_context)
             if text:
-                parts.append(text)
+                parts.append(ContextBlock(name="native_round", priority=10, content=text))
         quality_text = format_quality_signals_for_model(quality_rows)
         if quality_text:
-            parts.append(quality_text)
+            parts.append(ContextBlock(name="quality", priority=60, content=quality_text))
         review_text = format_review_invocations_for_model(review_rows)
         if review_text:
-            parts.append(review_text)
+            parts.append(ContextBlock(name="review", priority=61, content=review_text))
         account_text = format_account_ledger_for_model(proposal_rows, decision_rows)
         if account_text:
-            parts.append(account_text)
+            parts.append(ContextBlock(name="account", priority=70, content=account_text))
         role_state_text = format_role_states_for_model(role_state_rows)
         if role_state_text:
-            parts.append(role_state_text)
+            parts.append(ContextBlock(name="role_state", priority=40, content=role_state_text))
         pending_handoff_text = format_pending_handoffs_for_model(pending_handoff_rows)
         if pending_handoff_text:
-            parts.append(pending_handoff_text)
+            parts.append(ContextBlock(name="pending_handoffs", priority=20, content=pending_handoff_text))
         # Native round_state is the lifecycle authority; legacy RoundRecord is
         # appended only as an audit/signals projection and must not override it.
         legacy_text = latest_round_context_for_thread(thread_id_text, user_id)
         if legacy_text:
-            parts.append(legacy_text)
-        return "\n\n".join(parts) if parts else None
+            parts.append(ContextBlock(name="close_gate", priority=15, content=legacy_text))
+        return compact_command_room_context_blocks(parts) if parts else None
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         text = self._context_text(request.runtime)

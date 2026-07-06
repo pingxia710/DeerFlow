@@ -92,7 +92,10 @@ export default function NewAgentPage() {
       mode: "flash",
       is_bootstrap: true,
     },
-    onFinish() {
+    onFinish(_state, meta) {
+      if (meta.threadId !== threadId) {
+        return;
+      }
       if (!agent && setupAgentStatus === "requested") {
         setSetupAgentStatus("idle");
       }

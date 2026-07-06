@@ -534,7 +534,10 @@ describe("run history reconciliation", () => {
     const client = new QueryClient();
     const threadId = "task-terminal-thread";
     const runId = "task-terminal-run";
-    const refreshed: string[][] = [];
+    const refreshed: Array<{
+      threadId: string | null | undefined;
+      runIds: string[];
+    }> = [];
     client.setQueryData(threadRunsQueryKey(threadId), "cached");
     client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
 
@@ -547,7 +550,11 @@ describe("run history reconciliation", () => {
           thread_id: threadId,
           run_id: runId,
         },
-        (runIds) => refreshed.push([...(runIds ?? [])]),
+        (params) =>
+          refreshed.push({
+            threadId: params?.threadId,
+            runIds: [...(params?.runIds ?? [])],
+          }),
       ),
     ).toBe(true);
 
@@ -558,14 +565,17 @@ describe("run history reconciliation", () => {
       client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
         ?.isInvalidated,
     ).toBe(true);
-    expect(refreshed).toEqual([[runId]]);
+    expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
   });
 
   test("run terminal events clear local running state and refresh that run", () => {
     const client = new QueryClient();
     const threadId = "terminal-reconcile-thread";
     const runId = "terminal-reconcile-run";
-    const refreshed: string[][] = [];
+    const refreshed: Array<{
+      threadId: string | null | undefined;
+      runIds: string[];
+    }> = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
     markThreadBusyInCaches(client, threadId);
 
@@ -580,7 +590,11 @@ describe("run history reconciliation", () => {
           status: "success",
           terminal_reason: "success",
         },
-        (runIds) => refreshed.push([...(runIds ?? [])]),
+        (params) =>
+          refreshed.push({
+            threadId: params?.threadId,
+            runIds: [...(params?.runIds ?? [])],
+          }),
       ),
     ).toBe(true);
 
@@ -589,7 +603,7 @@ describe("run history reconciliation", () => {
     expect(
       client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
     ).toBe("idle");
-    expect(refreshed).toEqual([[runId]]);
+    expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
 
     clearThreadActivity(threadId);
   });
@@ -598,7 +612,10 @@ describe("run history reconciliation", () => {
     const client = new QueryClient();
     const threadId = "terminal-timeout-thread";
     const runId = "terminal-timeout-run";
-    const refreshed: string[][] = [];
+    const refreshed: Array<{
+      threadId: string | null | undefined;
+      runIds: string[];
+    }> = [];
     const settled: unknown[] = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
     markThreadBusyInCaches(client, threadId);
@@ -614,7 +631,11 @@ describe("run history reconciliation", () => {
           status: "timeout",
           terminal_reason: "timeout",
         },
-        (runIds) => refreshed.push([...(runIds ?? [])]),
+        (params) =>
+          refreshed.push({
+            threadId: params?.threadId,
+            runIds: [...(params?.runIds ?? [])],
+          }),
         (terminal) => settled.push(terminal),
       ),
     ).toBe(true);
@@ -632,7 +653,7 @@ describe("run history reconciliation", () => {
     expect(
       client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
     ).toBe("timeout");
-    expect(refreshed).toEqual([[runId]]);
+    expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
 
     clearThreadActivity(threadId);
   });

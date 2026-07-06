@@ -180,3 +180,42 @@ test("settleRunningSubtasksForRun marks same-run active task cards failed on tim
     otherThread: { status: "in_progress" },
   });
 });
+
+test("clearSubtasksForThreadInState removes only target-thread tasks", async () => {
+  const { clearSubtasksForThreadInState } =
+    await import("@/core/tasks/context");
+  const tasks = {
+    target: {
+      id: "task-target",
+      threadId: "thread-a",
+      runId: "run-a",
+      subagent_type: "executor",
+      description: "target",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+    otherThread: {
+      id: "task-other",
+      threadId: "thread-b",
+      runId: "run-b",
+      subagent_type: "executor",
+      description: "other",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+    unscoped: {
+      id: "task-unscoped",
+      runId: "run-a",
+      subagent_type: "executor",
+      description: "legacy",
+      prompt: "work",
+      status: "in_progress" as const,
+    },
+  };
+
+  expect(clearSubtasksForThreadInState(tasks, "thread-a")).toEqual({
+    otherThread: tasks.otherThread,
+    unscoped: tasks.unscoped,
+  });
+  expect(clearSubtasksForThreadInState(tasks, "missing-thread")).toBe(tasks);
+});

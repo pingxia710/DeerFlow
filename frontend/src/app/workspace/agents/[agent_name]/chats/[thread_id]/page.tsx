@@ -143,7 +143,12 @@ export default function AgentChatPage() {
       setThreadId(createdThreadId);
       setIsNewThread(false);
     },
-    onFinish: (state) => {
+    onFinish: (state, meta) => {
+      // Finish side effects are scoped to the visible chat; background thread
+      // completion should not rewrite the current chat UI or notification text.
+      if (meta.threadId !== visibleThreadIdRef.current) {
+        return;
+      }
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages[state.messages.length - 1];

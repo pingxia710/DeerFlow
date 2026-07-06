@@ -31,8 +31,10 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
+import { clearThreadModelName } from "../settings/store";
 import {
   type SubtaskUpdate,
+  useClearSubtasksForThread,
   useSettleRunningSubtasksForRun,
   useUpdateSubtask,
 } from "../tasks/context";
@@ -63,6 +65,11 @@ export type ToolEndEvent = {
   data: unknown;
 };
 
+export type ThreadStreamFinishMeta = {
+  threadId: string | null;
+  runId: string | null;
+};
+
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
@@ -70,7 +77,7 @@ export type ThreadStreamOptions = {
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
-  onFinish?: (state: AgentThreadState) => void;
+  onFinish?: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
 };
 
@@ -240,6 +247,16 @@ export function keepQueuedMessagesForThread<T extends { threadId: string }>(
     return [];
   }
   return messages.filter((message) => message.threadId === threadId);
+}
+
+export function getQueuedMessagesForVisibleThreadWithDropCount<
+  T extends { threadId: string },
+>(messages: T[], threadId: string | null | undefined) {
+  const next = keepQueuedMessagesForThread(messages, threadId);
+  return {
+    messages: next,
+    dropCount: messages.length - next.length,
+  };
 }
 
 export function setManualThreadTitleLock(threadId: string, title: string) {
@@ -1872,7 +1889,66 @@ export function getVisibleThreadError<T>(
   return isStreamErrorRecovering ? undefined : error;
 }
 
-type RefreshRuns = (runIds?: Iterable<string>) => void;
+export function shouldShowStreamErrorToast(
+  recoveryRun: StreamErrorRecoveryRun | null,
+) {
+  return recoveryRun === null;
+}
+
+export function shouldRefreshRunHistoryForThread(
+  requestThreadId: string | null | undefined,
+  currentThreadId: string | null | undefined,
+) {
+  return !requestThreadId || requestThreadId === currentThreadId;
+}
+
+export function resolveThreadStreamFinishMeta({
+  run,
+  streamThreadId,
+  streamRunId,
+}: {
+  run?: { thread_id?: string | null; run_id?: string | null } | null;
+  streamThreadId?: string | null;
+  streamRunId?: string | null;
+}): ThreadStreamFinishMeta {
+  return {
+    threadId: run?.thread_id ?? streamThreadId ?? null,
+    runId: run?.run_id ?? streamRunId ?? null,
+  };
+}
+
+export function shouldTreatTerminalEventAsCurrentStream(
+  eventThreadId: string | null | undefined,
+  eventRunId: string | null | undefined,
+  streamThreadId: string | null | undefined,
+  streamRunId: string | null | undefined,
+) {
+  return Boolean(
+    eventThreadId &&
+    eventRunId &&
+    streamThreadId &&
+    streamRunId &&
+    eventThreadId === streamThreadId &&
+    eventRunId === streamRunId,
+  );
+}
+
+export type RefreshRunsParams = {
+  threadId?: string | null;
+  runIds?: Iterable<string>;
+};
+
+type RefreshRuns = (params?: RefreshRunsParams) => void;
+
+function isLegacyRefreshRunsParams(value: unknown): value is Iterable<string> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Symbol.iterator in value &&
+    !("threadId" in value) &&
+    !("runIds" in value)
+  );
+}
 
 export function reconcileTaskEventRunHistory(
   queryClient: QueryClient,
@@ -1901,7 +1977,7 @@ export function reconcileTaskEventRunHistory(
   void queryClient.invalidateQueries({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
-  refreshRuns([runId]);
+  refreshRuns({ threadId, runIds: [runId] });
   return true;
 }
 
@@ -1932,7 +2008,10 @@ export function reconcileTerminalRunHistory(
   ) {
     invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
   }
-  refreshRuns([runTerminalEvent.run_id]);
+  refreshRuns({
+    threadId: runTerminalEvent.thread_id,
+    runIds: [runTerminalEvent.run_id],
+  });
   return true;
 }
 
@@ -2017,16 +2096,34 @@ export function stopBackgroundRunProbe(
   threadId: string | null | undefined,
   runId: string | null | undefined,
 ) {
-  if (typeof window === "undefined" || !threadId || !runId) {
+  if (!threadId || !runId) {
     return;
   }
   const key = backgroundRunProbeKey(threadId, runId);
   const timer = backgroundRunProbeTimers.get(key);
-  if (timer !== undefined) {
+  if (timer !== undefined && typeof window !== "undefined") {
     window.clearTimeout(timer);
+  }
+  backgroundRunProbeTimers.delete(key);
+  backgroundRunProbeAttempts.delete(key);
+}
+
+export function stopBackgroundRunProbesForThread(threadId: string) {
+  const prefix = `${threadId}:`;
+  for (const [key, timer] of backgroundRunProbeTimers) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    if (typeof window !== "undefined") {
+      window.clearTimeout(timer);
+    }
     backgroundRunProbeTimers.delete(key);
   }
-  backgroundRunProbeAttempts.delete(key);
+  for (const key of backgroundRunProbeAttempts.keys()) {
+    if (key.startsWith(prefix)) {
+      backgroundRunProbeAttempts.delete(key);
+    }
+  }
 }
 
 export function startBackgroundRunProbe({
@@ -2517,6 +2614,16 @@ export function useThreadStream({
           settleRunSubtasks,
         )
       ) {
+        if (
+          shouldTreatTerminalEventAsCurrentStream(
+            terminalEvent.thread_id,
+            terminalEvent.run_id,
+            streamThreadIdRef.current,
+            streamRunIdRef.current,
+          )
+        ) {
+          streamFinishedRef.current = true;
+        }
         if (streamErrorRecoveryRunRef.current?.runId === terminalEvent.run_id) {
           setStreamErrorRecoveryRun(null);
         }
@@ -2563,7 +2670,9 @@ export function useThreadStream({
         setPendingSupersededRunIds(new Set());
         setPendingSupersededMessageIds(new Set());
       }
-      toast.error(getStreamErrorMessage(error));
+      if (shouldShowStreamErrorToast(recoveryRun)) {
+        toast.error(getStreamErrorMessage(error));
+      }
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2579,8 +2688,13 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
-      const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
-      const streamRunId = run?.run_id ?? streamRunIdRef.current;
+      const finishMeta = resolveThreadStreamFinishMeta({
+        run,
+        streamThreadId: streamThreadIdRef.current,
+        streamRunId: streamRunIdRef.current,
+      });
+      const streamThreadId = finishMeta.threadId;
+      const streamRunId = finishMeta.runId;
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
         stopBackgroundRunProbe(streamThreadId, streamRunId);
@@ -2590,7 +2704,7 @@ export function useThreadStream({
         markThreadFinished(streamThreadId);
       }
       streamFinishedRef.current = true;
-      listeners.current.onFinish?.(state.values);
+      listeners.current.onFinish?.(state.values, finishMeta);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2692,10 +2806,16 @@ export function useThreadStream({
     // Intentional: queued follow-ups are tied to the visible chat. On route
     // changes we drop hidden-thread queued sends so a stale stream end cannot
     // submit them into the current window.
-    queuedMessagesRef.current = keepQueuedMessagesForThread(
-      queuedMessagesRef.current,
-      currentViewThreadId,
-    );
+    const { messages, dropCount } =
+      getQueuedMessagesForVisibleThreadWithDropCount(
+        queuedMessagesRef.current,
+        currentViewThreadId,
+      );
+    queuedMessagesRef.current = messages;
+    if (dropCount > 0) {
+      // TODO(i18n): move this short-term queue-cancel copy into translations.
+      toast("Queued message for the previous chat was cancelled.");
+    }
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
       setOptimisticMessages([]);
       setOptimisticThreadTarget(null);
@@ -3740,10 +3860,20 @@ export function useThreadHistory(
   }, []);
 
   const refreshRuns = useCallback(
-    (runIds?: Iterable<string>) => {
+    (params?: RefreshRunsParams) => {
+      const legacyRunIds = isLegacyRefreshRunsParams(params)
+        ? params
+        : undefined;
+      const requestThreadId = legacyRunIds ? undefined : params?.threadId;
+      if (
+        !shouldRefreshRunHistoryForThread(requestThreadId, threadIdRef.current)
+      ) {
+        return;
+      }
       if (!enabled) {
         return;
       }
+      const runIds = legacyRunIds ?? params?.runIds;
       const { known: ids, pending } = partitionKnownRunIds(
         runIds ?? [],
         runsRef.current,
@@ -3816,9 +3946,9 @@ export function useThreadHistory(
       ...pendingRefreshRunIds,
     ];
     if (refreshRunIds.length > 0) {
-      refreshRuns(refreshRunIds);
+      refreshRuns({ threadId, runIds: refreshRunIds });
     }
-  }, [enabled, refreshRuns, runsData]);
+  }, [enabled, refreshRuns, runsData, threadId]);
 
   const hasThreadId = Boolean(threadId);
   const hasUnloadedRuns = Boolean(
@@ -3911,15 +4041,68 @@ export function filterInfiniteThreadsCache(
   };
 }
 
+export function clearThreadSingletonState(threadId: string) {
+  clearThreadActivity(threadId);
+  manualThreadTitleLocks.delete(threadId);
+  stopBackgroundRunProbesForThread(threadId);
+}
+
+function isDeletedThreadClientQueryKey(
+  queryKey: readonly unknown[],
+  threadId: string,
+) {
+  if (
+    queryKey[0] === "thread" &&
+    queryKey[1] === threadId &&
+    (queryKey[2] === "runs" || queryKey[2] === "runtime-snapshot")
+  ) {
+    return true;
+  }
+  if (
+    queryKey[0] === "thread" &&
+    queryKey[1] === "metadata" &&
+    queryKey[2] === threadId
+  ) {
+    return true;
+  }
+  if (queryKey[0] === "thread-token-usage" && queryKey[1] === threadId) {
+    return true;
+  }
+  if (queryKey[0] === "thread-context-usage" && queryKey[1] === threadId) {
+    return true;
+  }
+  if (
+    queryKey[0] === "uploads" &&
+    queryKey[1] === "list" &&
+    queryKey[2] === threadId
+  ) {
+    return true;
+  }
+  if (
+    queryKey[0] === "thread" &&
+    queryKey[1] === threadId &&
+    queryKey[2] === "run" &&
+    typeof queryKey[3] === "string"
+  ) {
+    return true;
+  }
+  return (
+    queryKey[0] === "artifact" &&
+    typeof queryKey[1] === "string" &&
+    queryKey[2] === threadId
+  );
+}
+
 export function clearDeletedThreadClientState(
   queryClient: QueryClient,
   threadId: string,
 ) {
-  clearThreadActivity(threadId);
-  queryClient.removeQueries({ queryKey: threadRunsQueryKey(threadId) });
-  queryClient.removeQueries({ queryKey: ["thread", "metadata", threadId] });
-  queryClient.removeQueries({ queryKey: threadTokenUsageQueryKey(threadId) });
-  queryClient.removeQueries({ queryKey: threadContextUsageQueryKey(threadId) });
+  clearThreadSingletonState(threadId);
+  clearThreadModelName(threadId);
+  queryClient.removeQueries({
+    predicate: (query) =>
+      isDeletedThreadClientQueryKey(query.queryKey, threadId),
+  });
 }
 
 export function useInfiniteThreads(
@@ -4058,6 +4241,7 @@ export function useRunDetail(threadId: string, runId: string) {
 
 export function useDeleteThread() {
   const queryClient = useQueryClient();
+  const clearSubtasksForThread = useClearSubtasksForThread();
   const apiClient = getAPIClient();
   return useMutation({
     mutationFn: async ({
@@ -4086,6 +4270,7 @@ export function useDeleteThread() {
     },
     onSuccess(_, { threadId }) {
       clearDeletedThreadClientState(queryClient, threadId);
+      clearSubtasksForThread(threadId);
       queryClient.setQueriesData(
         {
           queryKey: ["threads", "search"],

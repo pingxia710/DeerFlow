@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { expect, test } from "@rstest/core";
+import { afterEach, expect, test, rs } from "@rstest/core";
+import { QueryClient } from "@tanstack/react-query";
 
 import type { Subtask } from "@/core/tasks";
 import type { SubtaskUpdate } from "@/core/tasks/context";
@@ -45,6 +46,60 @@ function readTaskEventFixture(name: string): Record<string, unknown> {
     ),
   ) as Record<string, unknown>;
 }
+
+function makeLocalStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: rs.fn(() => values.clear()),
+    getItem: rs.fn((key: string) => values.get(key) ?? null),
+    key: rs.fn((index: number) => [...values.keys()][index] ?? null),
+    removeItem: rs.fn((key: string) => {
+      values.delete(key);
+    }),
+    setItem: rs.fn((key: string, value: string) => {
+      values.set(key, value);
+    }),
+  } as Storage;
+}
+
+function stubBrowserWindow(storage = makeLocalStorage()) {
+  rs.stubGlobal("localStorage", storage);
+  rs.stubGlobal("window", {
+    addEventListener: rs.fn(),
+    clearTimeout: globalThis.clearTimeout,
+    localStorage: storage,
+    location: { origin: "http://localhost:2026" },
+    removeEventListener: rs.fn(),
+    setTimeout: globalThis.setTimeout,
+  });
+  return storage;
+}
+
+async function loadThreadHooksWithRunProbe(
+  getRun: (threadId: string, runId: string) => Promise<unknown>,
+) {
+  rs.resetModules();
+  rs.doMock("@/core/api", () => ({
+    clearReconnectRun: rs.fn(),
+    getAPIClient: () => ({
+      runs: {
+        get: getRun,
+      },
+    }),
+  }));
+  return import("@/core/threads/hooks");
+}
+
+afterEach(() => {
+  rs.useRealTimers();
+  rs.restoreAllMocks();
+  rs.unstubAllGlobals();
+  rs.doUnmock("@/core/api");
+  rs.resetModules();
+});
 
 test("resolveAssistantId uses the custom agent name when present", async () => {
   const { resolveAssistantId } = await import("@/core/threads/hooks");
@@ -160,6 +215,138 @@ test("shouldShowThreadHistory hides history from another visible thread", async 
   expect(shouldShowThreadHistory("thread-b", "thread-b")).toBe(true);
 });
 
+test("run status helpers classify terminal and inflight statuses", async () => {
+  const { isActiveRunStatus, isTerminalRunStatus } =
+    await import("@/core/threads/hooks");
+  const terminalStatuses = [
+    "success",
+    "error",
+    "timeout",
+    "interrupted",
+    "cancelled",
+    "timed_out",
+    "boundary_stopped",
+    "worker_lost",
+    "rolled_back",
+    "rollback_failed",
+  ];
+  const activeStatuses = ["pending", "running", "cancelling", "rolling_back"];
+
+  for (const status of terminalStatuses) {
+    expect(isTerminalRunStatus(status)).toBe(true);
+    expect(isActiveRunStatus(status)).toBe(false);
+  }
+  for (const status of activeStatuses) {
+    expect(isActiveRunStatus(status)).toBe(true);
+    expect(isTerminalRunStatus(status)).toBe(false);
+  }
+});
+
+test("shouldRefreshRunHistoryForThread rejects explicit refreshes for another thread", async () => {
+  const { shouldRefreshRunHistoryForThread } =
+    await import("@/core/threads/hooks");
+
+  expect(shouldRefreshRunHistoryForThread("thread-a", "thread-b")).toBe(false);
+  expect(shouldRefreshRunHistoryForThread("thread-b", "thread-b")).toBe(true);
+  expect(shouldRefreshRunHistoryForThread(null, "thread-b")).toBe(true);
+  expect(shouldRefreshRunHistoryForThread(undefined, "thread-b")).toBe(true);
+});
+
+test("reconcileTaskEventRunHistory passes event thread id to refreshRuns", async () => {
+  const {
+    reconcileTaskEventRunHistory,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "task-event-thread";
+  const runId = "task-event-run";
+  const refreshed: Array<{
+    threadId: string | null | undefined;
+    runIds: string[];
+  }> = [];
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(
+    reconcileTaskEventRunHistory(
+      client,
+      {
+        type: "task_completed",
+        task_id: "task-1",
+        thread_id: threadId,
+        run_id: runId,
+      },
+      (params) =>
+        refreshed.push({
+          threadId: params?.threadId,
+          runIds: [...(params?.runIds ?? [])],
+        }),
+    ),
+  ).toBe(true);
+
+  expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
+  expect(
+    client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("reconcileTerminalRunHistory passes event thread id to refreshRuns", async () => {
+  const { reconcileTerminalRunHistory } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "terminal-event-thread";
+  const runId = "terminal-event-run";
+  const refreshed: Array<{
+    threadId: string | null | undefined;
+    runIds: string[];
+  }> = [];
+
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: threadId,
+        run_id: runId,
+        status: "success",
+        terminal_reason: "success",
+      },
+      (params) =>
+        refreshed.push({
+          threadId: params?.threadId,
+          runIds: [...(params?.runIds ?? [])],
+        }),
+    ),
+  ).toBe(true);
+
+  expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
+});
+
+test("resolveThreadStreamFinishMeta returns onFinish thread and run metadata", async () => {
+  const { resolveThreadStreamFinishMeta } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    resolveThreadStreamFinishMeta({
+      run: { thread_id: "thread-from-run", run_id: "run-from-run" },
+      streamThreadId: "thread-from-ref",
+      streamRunId: "run-from-ref",
+    }),
+  ).toEqual({ threadId: "thread-from-run", runId: "run-from-run" });
+  expect(
+    resolveThreadStreamFinishMeta({
+      run: null,
+      streamThreadId: "thread-from-ref",
+      streamRunId: "run-from-ref",
+    }),
+  ).toEqual({ threadId: "thread-from-ref", runId: "run-from-ref" });
+});
+
 test("resolveVisibleTaskRunningThreadId only accepts the current live thread", async () => {
   const { resolveVisibleTaskRunningThreadId } =
     await import("@/core/threads/hooks");
@@ -207,12 +394,88 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
   ).toBe(false);
 });
 
+test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned stream run", async () => {
+  const {
+    shouldReleaseQueuedThreadMessage,
+    shouldTreatTerminalEventAsCurrentStream,
+  } = await import("@/core/threads/hooks");
+  const terminalEvent = { thread_id: "thread-a", run_id: "run-a" };
+
+  expect(
+    shouldTreatTerminalEventAsCurrentStream(
+      terminalEvent.thread_id,
+      terminalEvent.run_id,
+      "thread-a",
+      "run-a",
+    ),
+  ).toBe(true);
+  expect(
+    shouldTreatTerminalEventAsCurrentStream(
+      terminalEvent.thread_id,
+      terminalEvent.run_id,
+      "thread-b",
+      "run-a",
+    ),
+  ).toBe(false);
+  expect(
+    shouldTreatTerminalEventAsCurrentStream(
+      terminalEvent.thread_id,
+      terminalEvent.run_id,
+      "thread-a",
+      "run-b",
+    ),
+  ).toBe(false);
+
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      isLoading: false,
+      streamFinished: shouldTreatTerminalEventAsCurrentStream(
+        terminalEvent.thread_id,
+        terminalEvent.run_id,
+        "thread-a",
+        "run-a",
+      ),
+      sendInFlight: false,
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-a",
+    }),
+  ).toBe(true);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      isLoading: false,
+      streamFinished: shouldTreatTerminalEventAsCurrentStream(
+        terminalEvent.thread_id,
+        terminalEvent.run_id,
+        "thread-b",
+        "run-a",
+      ),
+      sendInFlight: false,
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-a",
+    }),
+  ).toBe(false);
+});
+
 test("getVisibleThreadError hides transient stream errors while recovery owns the run", async () => {
   const { getVisibleThreadError } = await import("@/core/threads/hooks");
   const error = new Error("network stream dropped");
 
   expect(getVisibleThreadError(error, true)).toBeUndefined();
   expect(getVisibleThreadError(error, false)).toBe(error);
+});
+
+test("shouldShowStreamErrorToast suppresses ordinary stream error toast during recovery", async () => {
+  const { shouldShowStreamErrorToast } = await import("@/core/threads/hooks");
+
+  expect(
+    shouldShowStreamErrorToast({ threadId: "thread-a", runId: "run-a" }),
+  ).toBe(false);
+});
+
+test("shouldShowStreamErrorToast keeps ordinary stream error toast when recovery fails", async () => {
+  const { shouldShowStreamErrorToast } = await import("@/core/threads/hooks");
+
+  expect(shouldShowStreamErrorToast(null)).toBe(true);
 });
 
 test("keepQueuedMessagesForThread intentionally drops queued sends from other chats on view switch", async () => {
@@ -232,6 +495,31 @@ test("keepQueuedMessagesForThread intentionally drops queued sends from other ch
   );
 });
 
+test("getQueuedMessagesForVisibleThreadWithDropCount reports hidden-thread queue drops", async () => {
+  const { getQueuedMessagesForVisibleThreadWithDropCount } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    getQueuedMessagesForVisibleThreadWithDropCount(
+      [
+        { threadId: "thread-a", text: "from a" },
+        { threadId: "thread-b", text: "from b" },
+        { threadId: "thread-c", text: "from c" },
+      ],
+      "thread-b",
+    ),
+  ).toEqual({
+    messages: [{ threadId: "thread-b", text: "from b" }],
+    dropCount: 2,
+  });
+  expect(
+    getQueuedMessagesForVisibleThreadWithDropCount(
+      [{ threadId: "thread-a", text: "from a" }],
+      null,
+    ),
+  ).toEqual({ messages: [], dropCount: 1 });
+});
+
 test("readRunMessagesPageResponse preserves HTTP status on history load errors", async () => {
   const { getThreadHistoryLoadErrorKind, readRunMessagesPageResponse } =
     await import("@/core/threads/hooks");
@@ -248,6 +536,173 @@ test("readRunMessagesPageResponse preserves HTTP status on history load errors",
   expect(getThreadHistoryLoadErrorKind({ status: 403 })).toBe("forbidden");
   expect(getThreadHistoryLoadErrorKind({ status: 404 })).toBe("not-found");
   expect(getThreadHistoryLoadErrorKind(new Error("network"))).toBe("failed");
+});
+
+test("clearDeletedThreadClientState removes deleted thread scoped caches and thread model", async () => {
+  const storage = stubBrowserWindow();
+  const client = new QueryClient();
+  const threadId = "deleted-thread";
+  const otherThreadId = "other-thread";
+  const {
+    clearDeletedThreadClientState,
+    getManualThreadTitleLock,
+    setManualThreadTitleLock,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const { threadContextUsageQueryKey, threadTokenUsageQueryKey } =
+    await import("@/core/threads/token-usage");
+  const { THREAD_MODEL_KEY_PREFIX } = await import("@/core/settings/local");
+  const { getThreadModelSnapshot, updateThreadSettings } =
+    await import("@/core/settings/store");
+
+  updateThreadSettings(threadId, "context", { model_name: "model-a" });
+  setManualThreadTitleLock(threadId, "Locked title");
+  client.setQueryData(["threads", "search"], ["global-search"]);
+  client.setQueryData(threadRunsQueryKey(threadId), ["stale-runs"]);
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), {
+    thread_id: threadId,
+  });
+  client.setQueryData(["thread", "metadata", threadId, false], {
+    thread_id: threadId,
+  });
+  client.setQueryData(threadTokenUsageQueryKey(threadId), { total_tokens: 1 });
+  client.setQueryData(threadContextUsageQueryKey(threadId), {
+    latest: { estimated_tokens: 1 },
+  });
+  client.setQueryData(["uploads", "list", threadId], ["stale-upload"]);
+  client.setQueryData(["thread", threadId, "run", "run-1"], {
+    run_id: "run-1",
+  });
+  client.setQueryData(["artifact", "report.md", threadId, false], {
+    content: "stale",
+  });
+  client.setQueryData(threadRunsQueryKey(otherThreadId), ["other-runs"]);
+  client.setQueryData(["thread", otherThreadId, "run", "run-2"], {
+    run_id: "run-2",
+  });
+  client.setQueryData(threadRuntimeSnapshotQueryKey(otherThreadId), {
+    thread_id: otherThreadId,
+  });
+  client.setQueryData(["uploads", "list", otherThreadId], ["other-upload"]);
+  client.setQueryData(["artifact", "report.md", otherThreadId, false], {
+    content: "other",
+  });
+
+  clearDeletedThreadClientState(client, threadId);
+
+  expect(client.getQueryData(["threads", "search"])).toEqual(["global-search"]);
+  expect(client.getQueryData(threadRunsQueryKey(threadId))).toBeUndefined();
+  expect(
+    client.getQueryData(threadRuntimeSnapshotQueryKey(threadId)),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(["thread", "metadata", threadId, false]),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(threadTokenUsageQueryKey(threadId)),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(threadContextUsageQueryKey(threadId)),
+  ).toBeUndefined();
+  expect(client.getQueryData(["uploads", "list", threadId])).toBeUndefined();
+  expect(
+    client.getQueryData(["thread", threadId, "run", "run-1"]),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(["artifact", "report.md", threadId, false]),
+  ).toBeUndefined();
+  expect(client.getQueryData(threadRunsQueryKey(otherThreadId))).toEqual([
+    "other-runs",
+  ]);
+  expect(
+    client.getQueryData(["thread", otherThreadId, "run", "run-2"]),
+  ).toEqual({
+    run_id: "run-2",
+  });
+  expect(
+    client.getQueryData(threadRuntimeSnapshotQueryKey(otherThreadId)),
+  ).toEqual({ thread_id: otherThreadId });
+  expect(client.getQueryData(["uploads", "list", otherThreadId])).toEqual([
+    "other-upload",
+  ]);
+  expect(
+    client.getQueryData(["artifact", "report.md", otherThreadId, false]),
+  ).toEqual({ content: "other" });
+  expect(getManualThreadTitleLock(threadId)).toBeUndefined();
+  expect(storage.getItem(`${THREAD_MODEL_KEY_PREFIX}${threadId}`)).toBeNull();
+  expect(getThreadModelSnapshot(threadId)).toBeUndefined();
+});
+
+test("stopBackgroundRunProbesForThread clears same-thread probes only", async () => {
+  rs.useFakeTimers();
+  stubBrowserWindow();
+  const getRun = rs.fn(async (_threadId: string, runId: string) => ({
+    run_id: runId,
+    status: "success",
+  }));
+  const { startBackgroundRunProbe, stopBackgroundRunProbesForThread } =
+    await loadThreadHooksWithRunProbe(getRun);
+  const client = new QueryClient();
+
+  startBackgroundRunProbe({
+    queryClient: client,
+    threadId: "thread-a",
+    runId: "run-1",
+  });
+  startBackgroundRunProbe({
+    queryClient: client,
+    threadId: "thread-a",
+    runId: "run-2",
+  });
+  startBackgroundRunProbe({
+    queryClient: client,
+    threadId: "thread-b",
+    runId: "run-1",
+  });
+
+  stopBackgroundRunProbesForThread("thread-a");
+  await rs.advanceTimersByTimeAsync(5000);
+
+  expect(getRun).toHaveBeenCalledTimes(1);
+  expect(getRun).toHaveBeenCalledWith("thread-b", "run-1");
+});
+
+test("deleted thread background probe does not write cache after fetch returns", async () => {
+  rs.useFakeTimers();
+  stubBrowserWindow();
+  const threadId = "late-deleted-thread";
+  const runId = "late-run";
+  let resolveRun!: (run: unknown) => void;
+  const runPromise = new Promise<unknown>((resolve) => {
+    resolveRun = resolve;
+  });
+  const getRun = rs.fn(() => runPromise);
+  const {
+    clearDeletedThreadClientState,
+    getThreadActivitySnapshot,
+    startBackgroundRunProbe,
+  } = await loadThreadHooksWithRunProbe(getRun);
+  const client = new QueryClient();
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: threadId, status: "busy", values: {}, metadata: {} }],
+  );
+
+  startBackgroundRunProbe({ queryClient: client, threadId, runId });
+  await rs.advanceTimersByTimeAsync(5000);
+  expect(getRun).toHaveBeenCalledTimes(1);
+
+  clearDeletedThreadClientState(client, threadId);
+  resolveRun({ run_id: runId, status: "success" });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(
+    client.getQueryData<Array<{ status: string }>>(["threads", "search"])?.[0]
+      ?.status,
+  ).toBe("busy");
+  expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
 });
 
 test("shouldShowThreadRunningStatus trusts backend terminal status over stale local running state", async () => {

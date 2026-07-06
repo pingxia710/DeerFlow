@@ -148,3 +148,12 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
 
   emitChange();
 }
+
+export function clearThreadModelName(threadId: string) {
+  ensureBaseSettingsLoaded();
+  ensureStorageListenerRegistered();
+
+  threadModelNames.delete(threadId);
+  saveThreadModelName(threadId, undefined);
+  emitChange();
+}

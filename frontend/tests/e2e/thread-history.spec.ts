@@ -267,6 +267,45 @@ test.describe("Thread history", () => {
     await expect(sidebar.getByText("Second conversation")).toHaveCount(0);
   });
 
+  test("deleting the active existing chat removes it and prevents stale history from returning", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("Response in thread First conversation"),
+    ).toBeVisible({ timeout: 15_000 });
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const activeThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "First conversation",
+      })
+      .first();
+    await expect(activeThreadItem).toBeVisible();
+    await activeThreadItem.hover();
+    await activeThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+
+    await page.waitForURL("**/workspace/chats/new");
+    await expect(sidebar.getByText("First conversation")).toHaveCount(0);
+    await expect(
+      page.getByText("Response in thread First conversation"),
+    ).toHaveCount(0);
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+
+    await expect(
+      page.getByText("Response in thread First conversation"),
+    ).toHaveCount(0);
+    await expect(sidebar.getByText("First conversation")).toHaveCount(0);
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  });
+
   test("new chat does not show previous thread messages after client-side navigation", async ({
     page,
   }) => {
@@ -458,6 +497,13 @@ test.describe("Thread history", () => {
     ).toBeVisible();
   });
 
+  // TODO(e2e): cover A streaming -> switch B -> B streaming -> A terminal late
+  // once the stream mock can hold multiple runs open and emit custom terminal
+  // events without brittle timing.
+  // TODO(e2e): cover terminal runtime snapshot vs stale active runs once
+  // mockLangGraphAPI owns /api/threads/:id/runtime-snapshot ordering.
+  // TODO(e2e): cover queued follow-up cancellation after switching chats once
+  // the stream mock can hold a run open without brittle timing.
   test("new chat resets immediately after a history-only thread URL update", async ({
     page,
   }) => {

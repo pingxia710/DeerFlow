@@ -168,6 +168,23 @@ export function settleRunningSubtasksForRun(
   return changed ? nextTasks : tasks;
 }
 
+export function clearSubtasksForThreadInState(
+  tasks: Record<string, Subtask>,
+  threadId: string,
+) {
+  let changed = false;
+  const nextTasks: Record<string, Subtask> = {};
+  for (const [storageKey, task] of Object.entries(tasks)) {
+    if (task.threadId === threadId) {
+      changed = true;
+      continue;
+    }
+    nextTasks[storageKey] = task;
+  }
+
+  return changed ? nextTasks : tasks;
+}
+
 export function useSettleRunningSubtasksForRun() {
   const { setTasks } = useSubtaskContext();
 
@@ -175,6 +192,19 @@ export function useSettleRunningSubtasksForRun() {
     (terminal: RunTerminalSubtaskUpdate) => {
       setTasks((currentTasks) =>
         settleRunningSubtasksForRun(currentTasks, terminal),
+      );
+    },
+    [setTasks],
+  );
+}
+
+export function useClearSubtasksForThread() {
+  const { setTasks } = useSubtaskContext();
+
+  return useCallback(
+    (threadId: string) => {
+      setTasks((currentTasks) =>
+        clearSubtasksForThreadInState(currentTasks, threadId),
       );
     },
     [setTasks],

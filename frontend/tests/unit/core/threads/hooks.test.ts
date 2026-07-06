@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import type { Run } from "@langchain/langgraph-sdk";
 import { afterEach, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
@@ -240,6 +241,109 @@ test("run status helpers classify terminal and inflight statuses", async () => {
     expect(isActiveRunStatus(status)).toBe(true);
     expect(isTerminalRunStatus(status)).toBe(false);
   }
+});
+
+test("mergeRunsWithTerminalPrecedence keeps snapshot terminal evidence over stale queried active runs", async () => {
+  const { isActiveRunStatus, mergeRunsWithTerminalPrecedence } =
+    await import("@/core/threads/hooks");
+  const terminalStatuses = [
+    "success",
+    "error",
+    "timeout",
+    "interrupted",
+    "cancelled",
+    "timed_out",
+    "boundary_stopped",
+    "worker_lost",
+    "rolled_back",
+    "rollback_failed",
+  ];
+
+  for (const status of terminalStatuses) {
+    const result = mergeRunsWithTerminalPrecedence({
+      snapshotRuns: [
+        {
+          run_id: `run-${status}`,
+          status,
+          terminal_reason: `reason-${status}`,
+        } as unknown as Run,
+      ],
+      queriedRuns: [
+        { run_id: `run-${status}`, status: "running" } as unknown as Run,
+      ],
+    });
+
+    expect(result?.[0]).toMatchObject({
+      run_id: `run-${status}`,
+      status,
+      terminal_reason: `reason-${status}`,
+    });
+    expect(isActiveRunStatus(result?.[0]?.status)).toBe(false);
+  }
+});
+
+test("mergeRunsWithTerminalPrecedence keeps queried terminal evidence over snapshot active runs", async () => {
+  const { mergeRunsWithTerminalPrecedence } =
+    await import("@/core/threads/hooks");
+
+  const result = mergeRunsWithTerminalPrecedence({
+    snapshotRuns: [
+      { run_id: "run-success", status: "running" } as unknown as Run,
+      { run_id: "run-error", status: "rolling_back" } as unknown as Run,
+    ],
+    queriedRuns: [
+      {
+        run_id: "run-success",
+        status: "success",
+        terminal_reason: "success",
+      } as unknown as Run,
+      {
+        run_id: "run-error",
+        status: "error",
+        terminal_reason: "failed",
+      } as unknown as Run,
+    ],
+  });
+
+  expect(result).toEqual([
+    expect.objectContaining({
+      run_id: "run-success",
+      status: "success",
+      terminal_reason: "success",
+    }),
+    expect.objectContaining({
+      run_id: "run-error",
+      status: "error",
+      terminal_reason: "failed",
+    }),
+  ]);
+});
+
+test("mergeRunsWithTerminalPrecedence preserves queried new runs and snapshot-only runs", async () => {
+  const { mergeRunsWithTerminalPrecedence } =
+    await import("@/core/threads/hooks");
+
+  const result = mergeRunsWithTerminalPrecedence({
+    snapshotRuns: [
+      {
+        run_id: "snapshot-only",
+        status: "success",
+        terminal_reason: "success",
+      } as unknown as Run,
+    ],
+    queriedRuns: [
+      { run_id: "queried-new", status: "running" } as unknown as Run,
+    ],
+  });
+
+  expect(result).toEqual([
+    expect.objectContaining({ run_id: "queried-new", status: "running" }),
+    expect.objectContaining({
+      run_id: "snapshot-only",
+      status: "success",
+      terminal_reason: "success",
+    }),
+  ]);
 });
 
 test("shouldRefreshRunHistoryForThread rejects explicit refreshes for another thread", async () => {

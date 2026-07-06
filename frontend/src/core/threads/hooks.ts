@@ -3437,6 +3437,62 @@ export function applyNativeRoundsToSnapshotRuns(
   return changed ? nextRuns : runs;
 }
 
+export function mergeRunsWithTerminalPrecedence({
+  snapshotRuns,
+  queriedRuns,
+  rounds,
+}: {
+  snapshotRuns?: Run[];
+  queriedRuns?: Run[];
+  rounds?: RuntimeRoundSnapshot[];
+}): Run[] | undefined {
+  const roundedSnapshotRuns = applyNativeRoundsToSnapshotRuns(
+    snapshotRuns,
+    rounds,
+  );
+  const roundedQueriedRuns = applyNativeRoundsToSnapshotRuns(
+    queriedRuns,
+    rounds,
+  );
+  if (!roundedQueriedRuns) {
+    return roundedSnapshotRuns;
+  }
+  if (!roundedSnapshotRuns) {
+    return roundedQueriedRuns;
+  }
+
+  const snapshotByRunId = new Map(
+    roundedSnapshotRuns.map((run) => [run.run_id, run]),
+  );
+  const queriedRunIds = new Set(roundedQueriedRuns.map((run) => run.run_id));
+  const mergedRuns = roundedQueriedRuns.map((queriedRun) => {
+    const snapshotRun = snapshotByRunId.get(queriedRun.run_id);
+    if (!snapshotRun) {
+      return queriedRun;
+    }
+    if (
+      isTerminalRunStatus(snapshotRun.status) &&
+      isActiveRunStatus(queriedRun.status)
+    ) {
+      return snapshotRun;
+    }
+    if (
+      isTerminalRunStatus(queriedRun.status) &&
+      isActiveRunStatus(snapshotRun.status)
+    ) {
+      return queriedRun;
+    }
+    return queriedRun;
+  });
+
+  for (const snapshotRun of roundedSnapshotRuns) {
+    if (!queriedRunIds.has(snapshotRun.run_id)) {
+      mergedRuns.push(snapshotRun);
+    }
+  }
+  return mergedRuns;
+}
+
 export function latestRoundIdFromSnapshot(
   runs: Run[] | undefined,
   rounds: RuntimeRoundSnapshot[] | undefined,
@@ -3548,10 +3604,11 @@ export function useThreadHistory(
   updateSubtaskRef.current = updateSubtask;
   const runsData = useMemo(
     () =>
-      applyNativeRoundsToSnapshotRuns(
-        runs.data ?? snapshot.data?.runs,
-        snapshot.data?.rounds,
-      ),
+      mergeRunsWithTerminalPrecedence({
+        snapshotRuns: snapshot.data?.runs,
+        queriedRuns: runs.data,
+        rounds: snapshot.data?.rounds,
+      }),
     [runs.data, snapshot.data?.rounds, snapshot.data?.runs],
   );
 

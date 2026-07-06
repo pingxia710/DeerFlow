@@ -125,6 +125,13 @@ _RUN_EVIDENCE_EVENT_TYPES = [
 ]
 _TERMINAL_ROUND_STATES = frozenset({"closed", "blocked"})
 _ACTIVE_TASK_LANE_STATUSES = frozenset({"in_progress", "running", "pending", "executing"})
+_TASK_EVENT_PROJECTION_TYPES = frozenset({"task_started", "task_completed", "task_failed", "task_cancelled", "task_timed_out"})
+_TASK_EVENT_TERMINAL_STATUS_BY_TYPE = {
+    "task_completed": "completed",
+    "task_failed": "failed",
+    "task_cancelled": "cancelled",
+    "task_timed_out": "timed_out",
+}
 _TASK_LANE_TERMINAL_EVENT_BY_STATUS = {
     "completed": "task_completed",
     "failed": "task_failed",
@@ -701,6 +708,79 @@ async def _list_runtime_snapshot_task_lane_rows(
         task_lane_rows.extend(rows or [])
         remaining -= len(rows or [])
     return task_lane_rows
+
+
+def _task_projection_event_content(event: dict[str, Any]) -> dict[str, Any]:
+    content = event.get("content")
+    if isinstance(content, dict):
+        payload = dict(content)
+    else:
+        payload = {}
+    payload.setdefault("thread_id", event.get("thread_id"))
+    payload.setdefault("run_id", event.get("run_id"))
+    payload.setdefault("type", event.get("event_type"))
+    payload.setdefault("event_type", event.get("event_type"))
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        payload.setdefault("task_id", metadata.get("task_id"))
+    payload["projection_repair"] = True
+    payload["source"] = "runtime_snapshot_event_projection_repair"
+    payload["observed_by"] = "system-observed"
+    payload["source_event_seq"] = event.get("seq")
+    return payload
+
+
+async def _repair_task_event_projection_from_store(
+    *,
+    event_store: Any,
+    round_store: Any,
+    records: list[RunRecord],
+    round_rows: list[dict[str, Any]],
+    task_lane_rows: list[dict[str, Any]],
+    user_id: str | None,
+) -> bool:
+    if not hasattr(event_store, "list_events") or not hasattr(round_store, "record_task_events"):
+        return False
+    round_run_ids = {row.get("current_run_id") for row in round_rows if isinstance(row.get("current_run_id"), str)}
+    if not round_run_ids:
+        return False
+    lanes_by_task = {(lane.get("run_id"), lane.get("task_id")): lane for lane in task_lane_rows}
+    repair_events: list[dict[str, Any]] = []
+    for record in records:
+        if record.run_id not in round_run_ids:
+            continue
+        kwargs: dict[str, Any] = {"event_types": _TASK_EVENT_PROJECTION_TYPES, "limit": 500}
+        if _supports_user_id_keyword(event_store.list_events):
+            kwargs["user_id"] = user_id
+        try:
+            events = await event_store.list_events(record.thread_id, record.run_id, **kwargs)
+        except Exception:
+            logger.warning("Failed to read task events for runtime snapshot projection repair", exc_info=True)
+            continue
+        latest_by_task: dict[str, dict[str, Any]] = {}
+        for event in events or []:
+            payload = _task_projection_event_content(event)
+            task_id = payload.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            latest_by_task[task_id] = payload
+        for task_id, payload in latest_by_task.items():
+            event_type = str(payload.get("type") or payload.get("event_type") or "")
+            terminal_status = _TASK_EVENT_TERMINAL_STATUS_BY_TYPE.get(event_type)
+            if terminal_status is not None:
+                payload["status"] = terminal_status
+            lane = lanes_by_task.get((record.run_id, task_id))
+            needs_repair = lane is None or not lane.get("status") or (terminal_status is not None and lane.get("status") in _ACTIVE_TASK_LANE_STATUSES)
+            if needs_repair:
+                repair_events.append(payload)
+    if not repair_events:
+        return False
+    try:
+        await round_store.record_task_events(repair_events)
+    except Exception:
+        logger.warning("Failed to repair task event projection from runtime snapshot", exc_info=True)
+        return False
+    return True
 
 
 async def _repair_terminal_runtime_snapshot_rows(
@@ -1752,13 +1832,29 @@ async def get_thread_runtime_snapshot(
             user_id=user_id,
             limit=task_lane_limit,
         )
+        event_projection_repaired = await _repair_task_event_projection_from_store(
+            event_store=get_run_event_store(request),
+            round_store=round_store,
+            records=records,
+            round_rows=round_rows,
+            task_lane_rows=task_lane_rows,
+            user_id=user_id,
+        )
+        if event_projection_repaired:
+            task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
+                round_store,
+                thread_id=thread_id,
+                round_rows=round_rows,
+                user_id=user_id,
+                limit=task_lane_limit,
+            )
         repaired = await _repair_terminal_runtime_snapshot_rows(
             round_store=round_store,
             records=records,
             round_rows=round_rows,
             task_lane_rows=task_lane_rows,
         )
-        if repaired:
+        if event_projection_repaired or repaired:
             snapshot_self_heal_repaired = True
             round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
             task_lane_rows = await _list_runtime_snapshot_task_lane_rows(

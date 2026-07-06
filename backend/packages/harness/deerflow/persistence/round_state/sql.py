@@ -53,6 +53,45 @@ def _row_to_dict(row: RoundRow) -> dict[str, Any]:
     return data
 
 
+def _ref_text(ref: Any) -> str | None:
+    if isinstance(ref, str):
+        return ref.strip() or None
+    if isinstance(ref, dict):
+        for key in ("ref", "uri", "url", "path", "artifact_id", "id", "name"):
+            value = ref.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _collect_refs(*values: Any, limit: int = 50) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = _ref_text(value)
+        if text and text not in seen and len(refs) < limit:
+            seen.add(text)
+            refs.append(text)
+
+    for value in values:
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+    return refs
+
+
+def _task_ref_lists(event: dict[str, Any]) -> dict[str, list[str]]:
+    action_result = _safe_dict(event.get("action_result"))
+    handoff = _safe_dict(event.get("handoff_envelope"))
+    evidence_refs = _collect_refs(action_result.get("evidence_refs"), handoff.get("evidenceRefs"), handoff.get("evidence_refs"), event.get("evidence_refs"))
+    artifact_refs = _collect_refs(event.get("artifact_refs"), action_result.get("artifact_refs"), handoff.get("artifactRefs"), handoff.get("artifact_refs"))
+    output_refs = _collect_refs(action_result.get("output_ref"), action_result.get("output_refs"), handoff.get("outputRefs"), handoff.get("output_refs"), event.get("output_refs"))
+    return {"evidence_refs": evidence_refs, "artifact_refs": artifact_refs, "output_refs": output_refs}
+
+
 def _task_result_ref(event: dict[str, Any]) -> str | None:
     action_result = _safe_dict(event.get("action_result"))
     output_ref = action_result.get("output_ref")
@@ -109,6 +148,9 @@ def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
 def _task_lane_to_dict(row: TaskLaneRow) -> dict[str, Any]:
     data = row.to_dict()
     data["handoff"] = data.pop("handoff_json", None)
+    data["evidence_refs"] = data.pop("evidence_refs_json", None) or ([] if data.get("evidence_ref") is None else [data.get("evidence_ref")])
+    data["artifact_refs"] = data.pop("artifact_refs_json", None) or ([] if data.get("result_ref") is None else [data.get("result_ref")])
+    data["output_refs"] = data.pop("output_refs_json", None) or ([] if data.get("result_ref") is None else [data.get("result_ref")])
     for key in ("created_at", "updated_at"):
         if isinstance(data.get(key), datetime):
             data[key] = coerce_iso(data[key])
@@ -156,9 +198,9 @@ class RoundStateRepository:
         return await session.scalar(stmt)
 
     async def _round_refs(self, session: AsyncSession, round_id: str) -> dict[str, list[str]]:
-        rows = (await session.execute(select(TaskLaneRow.result_ref, TaskLaneRow.evidence_ref).where(TaskLaneRow.round_id == round_id).order_by(TaskLaneRow.updated_at.desc()).limit(50))).all()
-        artifact_refs = _dedupe_refs([row[0] for row in rows])
-        evidence_refs = _dedupe_refs([row[1] for row in rows])
+        rows = (await session.execute(select(TaskLaneRow.artifact_refs_json, TaskLaneRow.evidence_refs_json).where(TaskLaneRow.round_id == round_id).order_by(TaskLaneRow.updated_at.desc()).limit(50))).all()
+        artifact_refs = _dedupe_refs([ref for row in rows for ref in ((row[0] if isinstance(row[0], list) else [row[0]]) if row[0] else [])])
+        evidence_refs = _dedupe_refs([ref for row in rows for ref in ((row[1] if isinstance(row[1], list) else [row[1]]) if row[1] else [])])
         return {"artifact_refs": artifact_refs, "evidence_refs": evidence_refs}
 
     async def bind_run(
@@ -301,8 +343,12 @@ class RoundStateRepository:
                         )
                         session.add(lane)
                     lane.status = str(event.get("status") or lane.status)
-                    lane.result_ref = _task_result_ref(event) or lane.result_ref
-                    lane.evidence_ref = _task_evidence_ref(event) or lane.evidence_ref
+                    ref_lists = _task_ref_lists(event)
+                    lane.result_ref = _task_result_ref(event) or (ref_lists["output_refs"][0] if ref_lists["output_refs"] else None) or lane.result_ref
+                    lane.evidence_ref = _task_evidence_ref(event) or (", ".join(ref_lists["evidence_refs"]) if ref_lists["evidence_refs"] else None) or lane.evidence_ref
+                    lane.evidence_refs_json = _dedupe_refs([*(lane.evidence_refs_json or []), *ref_lists["evidence_refs"]]) or lane.evidence_refs_json
+                    lane.artifact_refs_json = _dedupe_refs([*(lane.artifact_refs_json or []), *ref_lists["artifact_refs"]]) or lane.artifact_refs_json
+                    lane.output_refs_json = _dedupe_refs([*(lane.output_refs_json or []), *ref_lists["output_refs"]]) or lane.output_refs_json
                     lane.handoff_json = _task_handoff(event) or lane.handoff_json
                     lane.error = _clip(event.get("error_preview"), 2000) or lane.error
                     lane.updated_at = _now()
@@ -319,6 +365,9 @@ class RoundStateRepository:
                             "role": lane.role,
                             "result_ref": lane.result_ref,
                             "evidence_ref": lane.evidence_ref,
+                            "evidence_refs": lane.evidence_refs_json or [],
+                            "artifact_refs": lane.artifact_refs_json or [],
+                            "output_refs": lane.output_refs_json or [],
                             "handoff": lane.handoff_json,
                         },
                     )

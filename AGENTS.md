@@ -266,3 +266,11 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+
+## Command-room implementation guardrails
+
+- Run discovery AI-first: inspect repo/docs/tests before asking the user; ask only for missing decisions that cannot be inferred safely.
+- Parallelize independent reads/checks and keep subtasks short-lived; persist durable evidence in refs, diffs, tests, and Progress notes.
+- DeerFlow code changes must be made in an independent worktree/branch; never modify `main`, merge `main`, push, read secrets, or touch unrelated projects without explicit approval.
+- Native handoffs/evidence/artifacts are advisory records. Missing refs are facts to expose, not programmatic PASS/FAIL, dispatch, rework, or round-status decisions.
+- Strong evidence means concrete file paths, commits, command outputs, test counts, and known risks. Keep AGENTS guidance and `Progress.md` synchronized when operating rules change.

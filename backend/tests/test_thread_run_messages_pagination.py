@@ -328,7 +328,13 @@ def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
     assert body["task_lanes"][0]["status"] == "failed"
     assert body["task_lanes"][0]["error"] == "Parent run ended before this task lane completed: worker_lost."
     assert body["recovery"]["stale_inflight"] is None
-    assert body["recovery"]["snapshot_self_heal"] == {"repaired": True}
+    assert body["recovery"]["snapshot_self_heal"] == {
+        "repaired": True,
+        "round_count": 1,
+        "task_lane_count": 1,
+        "rounds": [{"run_id": "run-terminal", "round_id": "round-stale", "state": "blocked"}],
+        "task_lanes": [{"run_id": "run-terminal", "round_id": "round-stale", "task_id": "task-stale", "status": "failed"}],
+    }
     assert round_store.set_run_state_calls[0]["state"] == "blocked"
     assert round_store.set_run_state_calls[0]["event_type"] == "round.blocked"
     assert round_store.record_task_events_calls[0][0]["event_type"] == "task_failed"

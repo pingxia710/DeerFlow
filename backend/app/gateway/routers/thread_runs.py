@@ -360,6 +360,7 @@ class ThreadRuntimeSnapshotResponse(BaseModel):
     run_messages: list[RuntimeSnapshotRunMessages] = Field(default_factory=list)
     rounds: list[RoundResponse] = Field(default_factory=list)
     task_lanes: list[TaskLaneResponse] = Field(default_factory=list)
+    close_gates: list[dict[str, Any]] = Field(default_factory=list)
     recovery: RuntimeSnapshotRecoveryResponse | None = None
 
 
@@ -2100,6 +2101,54 @@ async def get_thread_runtime_snapshot(
         rounds = [RoundResponse.model_validate(row) for row in round_rows]
         task_lanes = [TaskLaneResponse.model_validate(row) for row in task_lane_rows]
 
+    close_gates: list[dict[str, Any]] = []
+    for record in records:
+        round_state, close_gate_task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+        evidence_payload = await _run_evidence_payload(thread_id, record.run_id, record, request, user_id=user_id, limit=200)
+        report: CloseGateReport = build_close_gate_report(
+            thread_id=thread_id,
+            run_id=record.run_id,
+            round_id=record.round_id,
+            pending_handoffs=list_pending_handoffs(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                limit=500,
+            ),
+            planned_lanes=list_planned_lanes(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            task_lanes=close_gate_task_lanes,
+            review_invocations=list_review_invocations(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            quality_signals=list_quality_signals(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            chair_decisions=list_chair_decisions(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            evidence_refs=evidence_payload.get("evidence_refs", []),
+            round_state=round_state,
+        )
+        close_gates.append(report.as_dict())
+
     recovery: RuntimeSnapshotRecoveryResponse | None = None
     if stale_recovered_records or snapshot_self_heal.repaired:
         stale_recovery = None
@@ -2130,6 +2179,7 @@ async def get_thread_runtime_snapshot(
         run_messages=run_messages,
         rounds=rounds,
         task_lanes=task_lanes,
+        close_gates=close_gates,
         recovery=recovery,
     )
 

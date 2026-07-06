@@ -15,6 +15,7 @@ from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
 from deerflow.command_room.handoff import handoff_envelope_from_packet, handoff_envelope_to_audit_dict
+from deerflow.command_room.pending_handoff import build_pending_handoff, record_pending_handoff
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -406,6 +407,39 @@ def _suggested_handoff_receiver(result: str | None) -> str | None:
     return target_role or None
 
 
+def _record_output_pending_handoff(
+    *,
+    thread_id: str | None,
+    run_id: str | None,
+    round_id: str | None,
+    task_id: str,
+    user_id: str | None,
+    subagent_type: str,
+    result: str | None,
+) -> None:
+    """Record a worker's next-role suggestion without dispatching it."""
+
+    if not thread_id or not run_id or not result:
+        return
+    try:
+        packet = extract_handoff_packet(result, description="", subagent_type=subagent_type)
+        envelope = handoff_envelope_from_packet(packet, raw_input=result)
+        if not envelope.target_role:
+            return
+        if not envelope.source_role:
+            envelope = replace(envelope, source_role=subagent_type)
+        pending = build_pending_handoff(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=round_id,
+            task_id=task_id,
+            envelope=envelope,
+        )
+        record_pending_handoff(pending, user_id=user_id)
+    except Exception:
+        logger.debug("Failed to record pending Command Room handoff", exc_info=True)
+
+
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
@@ -509,6 +543,8 @@ async def task_tool(
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
     run_id = parent_context.get("run_id")
+    round_context = parent_context.get("round_context") if isinstance(parent_context.get("round_context"), dict) else {}
+    round_id = round_context.get("round_id")
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -712,6 +748,15 @@ async def task_tool(
                 suggested_receiver = _suggested_handoff_receiver(result.result)
                 if suggested_receiver:
                     # Target Role is advisory metadata for the Chair/main AI. Do not redispatch here.
+                    _record_output_pending_handoff(
+                        thread_id=thread_id if isinstance(thread_id, str) else None,
+                        run_id=run_id if isinstance(run_id, str) else None,
+                        round_id=round_id if isinstance(round_id, str) else None,
+                        task_id=task_id,
+                        user_id=user_id,
+                        subagent_type=subagent_type,
+                        result=result.result,
+                    )
                     return f"Task Succeeded. Suggested next receiver (advisory only): {suggested_receiver}. Chair/main AI decides. Result: {result_text}"
                 return f"Task Succeeded. Result: {result_text}"
             elif result.status == SubagentStatus.FAILED:

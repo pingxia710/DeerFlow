@@ -2,12 +2,16 @@ from deerflow.agents.middlewares.round_context_middleware import (
     CommandRoomRoundContextMiddleware,
     format_account_ledger_for_model,
     format_capability_snapshot_for_model,
+    format_pending_handoffs_for_model,
     format_quality_signals_for_model,
     format_review_invocations_for_model,
+    format_role_states_for_model,
     format_round_context_for_model,
     latest_account_ledger_for_thread,
+    latest_pending_handoffs_for_thread,
     latest_quality_signals_for_thread,
     latest_review_invocations_for_thread,
+    latest_role_states_for_thread,
     latest_round_context_for_thread,
 )
 from deerflow.command_room.account_ledger import (
@@ -16,8 +20,11 @@ from deerflow.command_room.account_ledger import (
     record_account_decision,
     record_account_update_proposal,
 )
+from deerflow.command_room.handoff import HandoffEnvelope
+from deerflow.command_room.pending_handoff import build_pending_handoff, record_pending_handoff
 from deerflow.command_room.quality import build_quality_signal, record_quality_signal
 from deerflow.command_room.review import build_review_invocation, complete_review_invocation, record_review_invocation
+from deerflow.command_room.role_state import build_role_state, record_role_state
 from deerflow.command_room.round_record import record_command_room_round
 from deerflow.subagents.audit import record_subagent_handoff
 
@@ -260,9 +267,100 @@ def test_account_ledger_format_short_internal_context(tmp_path, monkeypatch):
     assert "not automatically applied" in formatted
 
 
+def test_role_state_format_short_internal_context(tmp_path, monkeypatch):
+    thread_id = "thread-role-state"
+    user_id = "user-role-state"
+    fake_thread_dir = tmp_path / "thread"
+
+    class Paths:
+        def thread_dir(self, thread_id, user_id=None):
+            return fake_thread_dir
+
+    monkeypatch.setattr("deerflow.command_room.role_state.get_paths", lambda: Paths())
+
+    state = build_role_state(
+        thread_id=thread_id,
+        run_id="run-1",
+        round_id="round-1",
+        role_name="Evidence",
+        summary="Evidence role should keep refs compact. " + ("x" * 400),
+        current_focus="Check the run snapshot evidence.",
+        open_questions=["Which reload path still needs coverage?"],
+        accepted_signals=["Worker self-claims stay weak."],
+        evidence_refs=["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
+    )
+    record_role_state(state, user_id=user_id)
+
+    text = latest_role_states_for_thread(thread_id, user_id)
+    assert text is not None
+    assert "Internal AI Role State" in text
+    assert "role=evidence" in text
+    assert "summary: Evidence role should keep refs compact." in text
+    assert "current_focus: Check the run snapshot evidence." in text
+    assert "open_questions: Which reload path still needs coverage?" in text
+    assert "accepted_signals: Worker self-claims stay weak." in text
+    assert "x" * 300 not in text
+    assert "auto_dispatch" not in text
+    lowered = text.lower()
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+
+    formatted = format_role_states_for_model([state.as_dict()])
+    assert formatted is not None
+    assert "Chair-accepted AI role memory only" in formatted
+
+
+def test_pending_handoffs_format_short_internal_context(tmp_path, monkeypatch):
+    thread_id = "thread-pending-handoff"
+    user_id = "user-pending-handoff"
+    fake_thread_dir = tmp_path / "thread"
+
+    class Paths:
+        def thread_dir(self, thread_id, user_id=None):
+            return fake_thread_dir
+
+    monkeypatch.setattr("deerflow.command_room.pending_handoff.get_paths", lambda: Paths())
+
+    handoff = build_pending_handoff(
+        thread_id=thread_id,
+        run_id="run-1",
+        round_id="round-1",
+        task_id="task-1",
+        envelope=HandoffEnvelope(
+            source_role="planner",
+            target_role="Evidence",
+            task_or_question="Inspect concrete evidence refs.",
+            evidence_refs=["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
+            evidence_strength="Strong",
+            raw_input_sha256="abc123",
+        ),
+    )
+    record_pending_handoff(handoff, user_id=user_id)
+
+    text = latest_pending_handoffs_for_thread(thread_id, user_id, run_id="run-1")
+    assert text is not None
+    assert "Internal Pending AI Handoffs" in text
+    assert f"handoff_id={handoff.handoff_id}" in text
+    assert "source=planner" in text
+    assert "target=Evidence" in text
+    assert "status=pending" in text
+    assert "task_or_question: Inspect concrete evidence refs." in text
+    assert "EvidenceRefs: command: pytest tests/test_round_context_injection.py -q; exit code: 0" in text
+    lowered = text.lower()
+    assert "automatic dispatch" in lowered
+    assert "pass" not in lowered
+    assert "fail" not in lowered
+
+    formatted = format_pending_handoffs_for_model([handoff.as_dict()])
+    assert formatted is not None
+    assert "Chair decides" in formatted
+
+
 def test_round_context_includes_compact_chair_brief(monkeypatch):
     middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
     monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: {"version": 1})
+    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
 
     text = middleware._context_text(_Runtime())
 
@@ -284,6 +382,8 @@ def test_round_context_chair_brief_no_data_does_not_block(monkeypatch):
     monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
     monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
     monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
 
     text = middleware._context_text(_RuntimeNoData())
 
@@ -315,6 +415,8 @@ def test_native_round_context_precedes_legacy_round_record(monkeypatch):
     monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
     monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
     monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
+    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
     monkeypatch.setattr(
         "deerflow.agents.middlewares.round_context_middleware.latest_round_context_for_thread",
         lambda thread_id, user_id=None: "[Internal Command Room Round signals]\nstate: closed\nrun_id: run-legacy",

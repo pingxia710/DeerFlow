@@ -17,6 +17,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.command_room.context_compaction import ContextBlock, compact_command_room_context_blocks
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -27,6 +28,8 @@ _QUALITY_SIGNALS_HEADER = "[Internal AI Quality Signals]"
 _REVIEW_INVOCATIONS_HEADER = "[Internal AI Review Invocations]"
 _ACCOUNT_LEDGER_HEADER = "[Internal AI Account Ledger]"
 _CHAIR_BRIEF_HEADER = "[Internal Chair Operating Brief]"
+_ROLE_STATE_HEADER = "[Internal AI Role State]"
+_PENDING_HANDOFFS_HEADER = "[Internal Pending AI Handoffs]"
 
 
 def _as_list(value: Any, *, limit: int = 3) -> list[str]:
@@ -284,6 +287,93 @@ def latest_account_ledger_for_thread(thread_id: str | None, user_id: str | None 
     )
 
 
+def format_role_states_for_model(states: list[Mapping[str, Any]] | None) -> str | None:
+    if not states:
+        return None
+    from deerflow.command_room.role_state import compact_role_states
+
+    compact = compact_role_states([dict(state) for state in states], limit=5)
+    if not compact:
+        return None
+    lines = [
+        _ROLE_STATE_HEADER,
+        "Chair-accepted AI role memory only. It is advisory and must not auto-dispatch work.",
+    ]
+    for state in compact:
+        parts = [
+            f"role={state.get('role_name')}",
+            f"updated_by={state.get('updated_by_role') or 'chair'}",
+            f"target={state.get('target_role') or 'Chair'}",
+        ]
+        if state.get("round_id"):
+            parts.append(f"round_id={state.get('round_id')}")
+        lines.append("; ".join(parts))
+        summary = state.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            lines.append(f"summary: {summary.strip()}")
+        focus = state.get("current_focus")
+        if isinstance(focus, str) and focus.strip():
+            lines.append(f"current_focus: {focus.strip()}")
+        questions = _as_list(state.get("open_questions"), limit=3)
+        if questions:
+            lines.append("open_questions: " + "; ".join(questions))
+        signals = _as_list(state.get("accepted_signals"), limit=3)
+        if signals:
+            lines.append("accepted_signals: " + "; ".join(signals))
+    return "\n".join(lines)
+
+
+def latest_role_states_for_thread(thread_id: str | None, user_id: str | None = None) -> str | None:
+    if not thread_id:
+        return None
+    from deerflow.command_room.role_state import list_role_states
+
+    return format_role_states_for_model(list_role_states(thread_id=thread_id, user_id=user_id, limit=5))
+
+
+def format_pending_handoffs_for_model(handoffs: list[Mapping[str, Any]] | None) -> str | None:
+    if not handoffs:
+        return None
+    from deerflow.command_room.pending_handoff import compact_pending_handoffs
+
+    compact = compact_pending_handoffs([dict(handoff) for handoff in handoffs], limit=5)
+    if not compact:
+        return None
+    lines = [
+        _PENDING_HANDOFFS_HEADER,
+        "AI-authored next-role suggestions only. Chair decides; no automatic dispatch.",
+    ]
+    for handoff in compact:
+        parts = [
+            f"handoff_id={handoff.get('handoff_id')}",
+            f"source={handoff.get('source_role')}",
+            f"target={handoff.get('target_role')}",
+            f"status={handoff.get('status')}",
+        ]
+        if handoff.get("task_id"):
+            parts.append(f"task_id={handoff.get('task_id')}")
+        lines.append("; ".join(parts))
+        task_or_question = handoff.get("task_or_question")
+        if isinstance(task_or_question, str) and task_or_question.strip():
+            lines.append(f"task_or_question: {task_or_question.strip()}")
+        evidence_refs = _as_list(handoff.get("evidence_refs"), limit=3)
+        if evidence_refs:
+            lines.append("EvidenceRefs: " + "; ".join(evidence_refs))
+    return "\n".join(lines)
+
+
+def latest_pending_handoffs_for_thread(
+    thread_id: str | None,
+    user_id: str | None = None,
+    run_id: str | None = None,
+) -> str | None:
+    if not thread_id:
+        return None
+    from deerflow.command_room.pending_handoff import list_pending_handoffs
+
+    return format_pending_handoffs_for_model(list_pending_handoffs(thread_id=thread_id, user_id=user_id, run_id=run_id, status="pending", limit=5))
+
+
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
     """Append latest Round signals as an internal SystemMessage for Command Room."""
 
@@ -318,14 +408,28 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         snapshot = self._capability_snapshot(thread_id_text, user_id)
         from deerflow.command_room.account_ledger import list_account_decisions, list_account_proposals
         from deerflow.command_room.brief import build_chair_operating_brief, format_chair_operating_brief_for_model
+        from deerflow.command_room.pending_handoff import list_pending_handoffs
         from deerflow.command_room.quality import list_quality_signals
         from deerflow.command_room.review import list_review_invocations
+        from deerflow.command_room.role_state import list_role_states
 
         quality_rows = list_quality_signals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
         review_rows = list_review_invocations(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
         proposal_rows = list_account_proposals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
         decision_rows = list_account_decisions(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
-        parts: list[str] = []
+        role_state_rows = list_role_states(thread_id=thread_id_text, user_id=user_id, limit=5) if thread_id_text else []
+        pending_handoff_rows = (
+            list_pending_handoffs(
+                thread_id=thread_id_text,
+                user_id=user_id,
+                run_id=str(current_run_id) if current_run_id else None,
+                status="pending",
+                limit=5,
+            )
+            if thread_id_text
+            else []
+        )
+        parts: list[ContextBlock] = []
         if thread_id_text:
             brief = build_chair_operating_brief(
                 thread_id=thread_id_text,
@@ -340,29 +444,35 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             )
             brief_text = format_chair_operating_brief_for_model(brief)
             if brief_text:
-                parts.append(brief_text)
+                parts.append(ContextBlock(name="chair_brief", priority=30, content=brief_text))
         capability_text = format_capability_snapshot_for_model(snapshot)
         if capability_text:
-            parts.append(capability_text)
+            parts.append(ContextBlock(name="capability", priority=45, content=capability_text))
         if isinstance(native_context, Mapping):
             text = format_native_round_context_for_model(native_context)
             if text:
-                parts.append(text)
+                parts.append(ContextBlock(name="native_round", priority=10, content=text))
         quality_text = format_quality_signals_for_model(quality_rows)
         if quality_text:
-            parts.append(quality_text)
+            parts.append(ContextBlock(name="quality", priority=60, content=quality_text))
         review_text = format_review_invocations_for_model(review_rows)
         if review_text:
-            parts.append(review_text)
+            parts.append(ContextBlock(name="review", priority=61, content=review_text))
         account_text = format_account_ledger_for_model(proposal_rows, decision_rows)
         if account_text:
-            parts.append(account_text)
+            parts.append(ContextBlock(name="account", priority=70, content=account_text))
+        role_state_text = format_role_states_for_model(role_state_rows)
+        if role_state_text:
+            parts.append(ContextBlock(name="role_state", priority=40, content=role_state_text))
+        pending_handoff_text = format_pending_handoffs_for_model(pending_handoff_rows)
+        if pending_handoff_text:
+            parts.append(ContextBlock(name="pending_handoffs", priority=20, content=pending_handoff_text))
         # Native round_state is the lifecycle authority; legacy RoundRecord is
         # appended only as an audit/signals projection and must not override it.
         legacy_text = latest_round_context_for_thread(thread_id_text, user_id)
         if legacy_text:
-            parts.append(legacy_text)
-        return "\n\n".join(parts) if parts else None
+            parts.append(ContextBlock(name="close_gate", priority=15, content=legacy_text))
+        return compact_command_room_context_blocks(parts) if parts else None
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         text = self._context_text(request.runtime)
@@ -377,6 +487,8 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             _REVIEW_INVOCATIONS_HEADER,
             _ACCOUNT_LEDGER_HEADER,
             _CHAIR_BRIEF_HEADER,
+            _ROLE_STATE_HEADER,
+            _PENDING_HANDOFFS_HEADER,
         )
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
@@ -397,11 +509,15 @@ __all__ = [
     "format_account_ledger_for_model",
     "format_capability_snapshot_for_model",
     "format_native_round_context_for_model",
+    "format_pending_handoffs_for_model",
     "format_quality_signals_for_model",
+    "format_role_states_for_model",
     "format_review_invocations_for_model",
     "format_round_context_for_model",
     "latest_account_ledger_for_thread",
+    "latest_pending_handoffs_for_thread",
     "latest_quality_signals_for_thread",
+    "latest_role_states_for_thread",
     "latest_review_invocations_for_thread",
     "latest_round_context_for_thread",
 ]

@@ -51,7 +51,27 @@ from deerflow.command_room.account_ledger import (
     record_account_update_proposal,
 )
 from deerflow.command_room.brief import build_chair_operating_brief
+from deerflow.command_room.close_gate import CloseGateReport, build_close_gate_report
 from deerflow.command_room.evidence import normalize_evidence_ref
+from deerflow.command_room.pending_handoff import (
+    PendingHandoffStatus,
+    list_pending_handoffs,
+    resolve_pending_handoff,
+)
+from deerflow.command_room.plan import (
+    LaneStatus,
+    build_chair_decision,
+    build_planned_lane,
+    build_round_plan,
+    latest_round_plan,
+    list_chair_decisions,
+    list_planned_lanes,
+    list_round_plans,
+    record_chair_decision,
+    record_planned_lane,
+    record_round_plan,
+    update_planned_lane_status,
+)
 from deerflow.command_room.quality import build_quality_signal, list_quality_signals, record_quality_signal
 from deerflow.command_room.review import (
     build_review_invocation,
@@ -60,6 +80,7 @@ from deerflow.command_room.review import (
     record_review_invocation,
     review_invocation_from_dict,
 )
+from deerflow.command_room.role_state import build_role_state, list_role_states, record_role_state
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
@@ -100,6 +121,12 @@ _SENSITIVE_RUN_ERROR_MARKERS = (
     "api key",
     "password",
 )
+_PROVIDER_TRANSIENT_RUN_ERROR_MARKERS = (
+    "codex api stream ended without response.completed event",
+    "codexstreamincompleteerror",
+    "response.completed",
+)
+_PUBLIC_PROVIDER_TRANSIENT_RUN_ERROR = "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
 _MAX_PUBLIC_RUN_ERROR_CHARS = 200
 _RUN_ERROR_EXCEPTION_RE = re.compile(r"^[A-Za-z_][\w.]*?(?:Error|Exception):\s*(?P<message>.+)$")
 _RUN_ERROR_TRACEBACK_FRAME_PREFIXES = (
@@ -301,8 +328,25 @@ class RuntimeSnapshotStaleInflightRecoveryResponse(BaseModel):
     runs: list[RuntimeSnapshotRecoveredRunResponse] = Field(default_factory=list)
 
 
+class RuntimeSnapshotSelfHealRoundResponse(BaseModel):
+    run_id: str
+    round_id: str
+    state: str
+
+
+class RuntimeSnapshotSelfHealTaskLaneResponse(BaseModel):
+    run_id: str
+    round_id: str
+    task_id: str
+    status: str
+
+
 class RuntimeSnapshotSelfHealResponse(BaseModel):
     repaired: bool = False
+    round_count: int = 0
+    task_lane_count: int = 0
+    rounds: list[RuntimeSnapshotSelfHealRoundResponse] = Field(default_factory=list)
+    task_lanes: list[RuntimeSnapshotSelfHealTaskLaneResponse] = Field(default_factory=list)
 
 
 class RuntimeSnapshotRecoveryResponse(BaseModel):
@@ -316,6 +360,7 @@ class ThreadRuntimeSnapshotResponse(BaseModel):
     run_messages: list[RuntimeSnapshotRunMessages] = Field(default_factory=list)
     rounds: list[RoundResponse] = Field(default_factory=list)
     task_lanes: list[TaskLaneResponse] = Field(default_factory=list)
+    close_gates: list[dict[str, Any]] = Field(default_factory=list)
     recovery: RuntimeSnapshotRecoveryResponse | None = None
 
 
@@ -460,6 +505,153 @@ class AccountDecisionResponse(BaseModel):
     schema_version: int = 1
 
 
+class RoleStateCreateRequest(BaseModel):
+    round_id: str | None = None
+    role_name: str = Field(..., min_length=1, max_length=64)
+    summary: str = Field(..., min_length=1, max_length=4000)
+    current_focus: str | None = Field(default=None, max_length=4000)
+    open_questions: list[str] = Field(default_factory=list)
+    accepted_signals: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    updated_by_role: str = Field(default="chair", min_length=1, max_length=64)
+    target_role: str = Field(default="Chair", min_length=1, max_length=64)
+
+
+class RoleStateResponse(BaseModel):
+    state_id: str
+    thread_id: str
+    role_name: str
+    summary: str
+    current_focus: str | None = None
+    open_questions: list[str] = Field(default_factory=list)
+    accepted_signals: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    run_id: str | None = None
+    round_id: str | None = None
+    updated_by_role: str
+    target_role: str = "Chair"
+    updated_at: str
+    ai_authored: bool = True
+    programmatic_decision: bool = False
+    auto_dispatch: bool = False
+    schema_version: int = 1
+
+
+class RoundPlanCreateRequest(BaseModel):
+    round_id: str | None = None
+    goal: str = Field(..., min_length=1, max_length=4000)
+    boundary: str | None = Field(default=None, max_length=4000)
+    evidence_standard: str | None = Field(default=None, max_length=4000)
+    capability_release: list[str] = Field(default_factory=list)
+    status: str = Field(default="planned", max_length=64)
+    dispatch_plan: str | None = Field(default=None, max_length=4000)
+    planned_lanes: list[dict[str, Any]] = Field(default_factory=list)
+    created_by_role: str = Field(default="chair", min_length=1, max_length=64)
+
+
+class RoundPlanResponse(RoundPlanCreateRequest):
+    plan_id: str
+    thread_id: str
+    run_id: str
+    created_at: str
+    updated_at: str
+    ai_authored: bool = True
+    programmatic_decision: bool = False
+    auto_dispatch: bool = False
+    schema_version: int = 1
+
+
+class PlannedLaneCreateRequest(BaseModel):
+    round_id: str | None = None
+    target_role: str = Field(..., min_length=1, max_length=64)
+    reason: str = Field(..., min_length=1, max_length=4000)
+    expected_evidence: str | None = Field(default=None, max_length=4000)
+    status: LaneStatus = "planned"
+    linked_task_id: str | None = Field(default=None, max_length=128)
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
+
+
+class PlannedLaneUpdateRequest(BaseModel):
+    status: LaneStatus
+    linked_task_id: str | None = Field(default=None, max_length=128)
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
+
+
+class PlannedLaneResponse(PlannedLaneCreateRequest):
+    lane_id: str
+    thread_id: str
+    run_id: str
+    created_at: str
+    updated_at: str
+    dispatched_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    ai_authored: bool = True
+    programmatic_decision: bool = False
+    auto_dispatch: bool = False
+    schema_version: int = 1
+
+
+class ChairDecisionCreateRequest(BaseModel):
+    round_id: str | None = None
+    decision_type: str = Field(..., min_length=1, max_length=64)
+    status: Literal["recorded", "resolved", "superseded"] = "recorded"
+    decision: str = Field(..., min_length=1, max_length=4000)
+    reason: str = Field(..., min_length=1, max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list)
+    affected_lanes: list[str] = Field(default_factory=list)
+    handoffs: list[str] = Field(default_factory=list)
+    created_by_role: str = Field(default="chair", min_length=1, max_length=64)
+
+
+class ChairDecisionResponse(ChairDecisionCreateRequest):
+    decision_id: str
+    thread_id: str
+    run_id: str
+    created_at: str
+    ai_authored: bool = True
+    programmatic_decision: bool = False
+    auto_dispatch: bool = False
+    schema_version: int = 1
+
+
+class PendingHandoffResolveRequest(BaseModel):
+    status: Literal["accepted", "dismissed", "superseded"]
+    resolved_by_role: str = Field(default="chair", min_length=1, max_length=64)
+    resolution_note: str | None = Field(default=None, max_length=4000)
+
+
+class PendingHandoffResponse(BaseModel):
+    handoff_id: str
+    thread_id: str
+    run_id: str
+    round_id: str | None = None
+    task_id: str | None = None
+    source_role: str
+    target_role: str
+    task_or_question: str
+    status: PendingHandoffStatus
+    handoff: dict[str, Any] = Field(default_factory=dict)
+    evidence_strength: str = "Unverified"
+    evidence_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    resolved_by_role: str | None = None
+    resolution_note: str | None = None
+    ai_authored: bool = True
+    programmatic_dispatch: bool = False
+    auto_dispatch: bool = False
+    schema_version: int = 1
+
+
 class RunQualityContextResponse(BaseModel):
     thread_id: str
     run_id: str
@@ -598,11 +790,18 @@ def run_error_for_response(error: str | None) -> str | None:
     if not error:
         return None
     text = error.strip()
+    if _is_provider_transient_run_error(text):
+        return _PUBLIC_PROVIDER_TRANSIENT_RUN_ERROR
     if "\n" in text:
         return _public_run_error_from_multiline(text) or "Run failed"
     if not _is_public_run_error_text(text):
         return "Run failed"
     return text
+
+
+def _is_provider_transient_run_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _PROVIDER_TRANSIENT_RUN_ERROR_MARKERS)
 
 
 def _is_public_run_error_text(text: str) -> bool:
@@ -623,6 +822,8 @@ def _public_run_error_from_multiline(text: str) -> str | None:
         if not match:
             continue
         message = match.group("message").strip()
+        if _is_provider_transient_run_error(message):
+            return _PUBLIC_PROVIDER_TRANSIENT_RUN_ERROR
         if _is_public_run_error_text(message):
             return message
         return None
@@ -634,7 +835,7 @@ def _terminal_round_target(record: RunRecord) -> tuple[str, str] | None:
     if not is_terminal_status(status):
         return None
     if status == RunStatus.success.value:
-        return "closed", "round.closed"
+        return "awaiting_chair_decision", "run.completed"
     return "blocked", "round.blocked"
 
 
@@ -789,12 +990,12 @@ async def _repair_terminal_runtime_snapshot_rows(
     records: list[RunRecord],
     round_rows: list[dict[str, Any]],
     task_lane_rows: list[dict[str, Any]],
-) -> bool:
+) -> RuntimeSnapshotSelfHealResponse:
+    recovery = RuntimeSnapshotSelfHealResponse()
     terminal_records = {record.run_id: record for record in records if is_terminal_status(record.status)}
     if not terminal_records:
-        return False
+        return recovery
 
-    repaired = False
     if hasattr(round_store, "set_run_state"):
         for row in round_rows:
             run_id = row.get("current_run_id")
@@ -827,12 +1028,27 @@ async def _repair_terminal_runtime_snapshot_rows(
             except Exception:
                 logger.warning("Failed to repair terminal round snapshot state for run %s", sanitize_log_param(run_id), exc_info=True)
                 continue
-            repaired = repaired or updated is not None
+            if updated is None:
+                continue
+            round_id = updated.get("round_id") if isinstance(updated, dict) else row.get("round_id")
+            updated_state = updated.get("state") if isinstance(updated, dict) else state
+            if isinstance(round_id, str) and isinstance(updated_state, str):
+                recovery.rounds.append(
+                    RuntimeSnapshotSelfHealRoundResponse(
+                        run_id=run_id,
+                        round_id=round_id,
+                        state=updated_state,
+                    )
+                )
 
     if not hasattr(round_store, "record_task_events"):
-        return repaired
+        recovery.round_count = len(recovery.rounds)
+        recovery.task_lane_count = len(recovery.task_lanes)
+        recovery.repaired = recovery.round_count > 0
+        return recovery
 
     task_events: list[dict[str, Any]] = []
+    task_lane_recoveries: list[RuntimeSnapshotSelfHealTaskLaneResponse] = []
     for lane in task_lane_rows:
         lane_status = lane.get("status")
         if lane_status not in _ACTIVE_TASK_LANE_STATUSES:
@@ -847,6 +1063,16 @@ async def _repair_terminal_runtime_snapshot_rows(
         terminal_status = _terminal_task_lane_status(record)
         if terminal_status is None:
             continue
+        round_id = lane.get("round_id")
+        if isinstance(round_id, str):
+            task_lane_recoveries.append(
+                RuntimeSnapshotSelfHealTaskLaneResponse(
+                    run_id=run_id,
+                    round_id=round_id,
+                    task_id=task_id,
+                    status=terminal_status,
+                )
+            )
         event_type = _TASK_LANE_TERMINAL_EVENT_BY_STATUS[terminal_status]
         error_preview = _terminal_task_lane_error(record)
         task_events.append(
@@ -873,13 +1099,20 @@ async def _repair_terminal_runtime_snapshot_rows(
             }
         )
     if not task_events:
-        return repaired
+        recovery.round_count = len(recovery.rounds)
+        recovery.task_lane_count = len(recovery.task_lanes)
+        recovery.repaired = recovery.round_count > 0
+        return recovery
     try:
         await round_store.record_task_events(task_events)
     except Exception:
         logger.warning("Failed to repair terminal task lane snapshot state", exc_info=True)
-        return repaired
-    return True
+    else:
+        recovery.task_lanes.extend(task_lane_recoveries)
+    recovery.round_count = len(recovery.rounds)
+    recovery.task_lane_count = len(recovery.task_lanes)
+    recovery.repaired = recovery.round_count > 0 or recovery.task_lane_count > 0
+    return recovery
 
 
 def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str | None) -> dict[str, Any]:
@@ -1822,7 +2055,7 @@ async def get_thread_runtime_snapshot(
     rounds: list[RoundResponse] = []
     task_lanes: list[TaskLaneResponse] = []
     round_store = get_round_state_store(request)
-    snapshot_self_heal_repaired = False
+    snapshot_self_heal = RuntimeSnapshotSelfHealResponse()
     if round_store is not None and hasattr(round_store, "list_by_thread"):
         round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
         task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
@@ -1848,14 +2081,15 @@ async def get_thread_runtime_snapshot(
                 user_id=user_id,
                 limit=task_lane_limit,
             )
-        repaired = await _repair_terminal_runtime_snapshot_rows(
+        snapshot_self_heal = await _repair_terminal_runtime_snapshot_rows(
             round_store=round_store,
             records=records,
             round_rows=round_rows,
             task_lane_rows=task_lane_rows,
         )
-        if event_projection_repaired or repaired:
-            snapshot_self_heal_repaired = True
+        if event_projection_repaired:
+            snapshot_self_heal.repaired = True
+        if snapshot_self_heal.repaired:
             round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
             task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
                 round_store,
@@ -1867,8 +2101,56 @@ async def get_thread_runtime_snapshot(
         rounds = [RoundResponse.model_validate(row) for row in round_rows]
         task_lanes = [TaskLaneResponse.model_validate(row) for row in task_lane_rows]
 
+    close_gates: list[dict[str, Any]] = []
+    for record in records:
+        round_state, close_gate_task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+        evidence_payload = await _run_evidence_payload(thread_id, record.run_id, record, request, user_id=user_id, limit=200)
+        report: CloseGateReport = build_close_gate_report(
+            thread_id=thread_id,
+            run_id=record.run_id,
+            round_id=record.round_id,
+            pending_handoffs=list_pending_handoffs(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                limit=500,
+            ),
+            planned_lanes=list_planned_lanes(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            task_lanes=close_gate_task_lanes,
+            review_invocations=list_review_invocations(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            quality_signals=list_quality_signals(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            chair_decisions=list_chair_decisions(
+                thread_id=thread_id,
+                user_id=user_id,
+                run_id=record.run_id,
+                round_id=record.round_id,
+                limit=500,
+            ),
+            evidence_refs=evidence_payload.get("evidence_refs", []),
+            round_state=round_state,
+        )
+        close_gates.append(report.as_dict())
+
     recovery: RuntimeSnapshotRecoveryResponse | None = None
-    if stale_recovered_records or snapshot_self_heal_repaired:
+    if stale_recovered_records or snapshot_self_heal.repaired:
         stale_recovery = None
         if stale_recovered_records:
             terminal_reasons = [_run_terminal_reason(record) for record in stale_recovered_records]
@@ -1888,7 +2170,7 @@ async def get_thread_runtime_snapshot(
             )
         recovery = RuntimeSnapshotRecoveryResponse(
             stale_inflight=stale_recovery,
-            snapshot_self_heal=RuntimeSnapshotSelfHealResponse(repaired=True) if snapshot_self_heal_repaired else None,
+            snapshot_self_heal=snapshot_self_heal if snapshot_self_heal.repaired else None,
         )
 
     return ThreadRuntimeSnapshotResponse(
@@ -1897,6 +2179,7 @@ async def get_thread_runtime_snapshot(
         run_messages=run_messages,
         rounds=rounds,
         task_lanes=task_lanes,
+        close_gates=close_gates,
         recovery=recovery,
     )
 
@@ -1907,6 +2190,30 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     record = await resolve_thread_run(thread_id, run_id, request)
     return _record_to_response(record)
+
+
+@router.get("/{thread_id}/runs/{run_id}/close-gate", response_model=dict[str, Any])
+@require_permission("runs", "read", owner_check=True)
+async def get_close_gate_report(thread_id: str, run_id: str, request: Request) -> dict[str, Any]:
+    """Return read-only Round Close Gate facts for a run."""
+    record = await resolve_thread_run(thread_id, run_id, request)
+    user_id = get_request_storage_user_id(request)
+    round_state, task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+    evidence_payload = await _run_evidence_payload(thread_id, run_id, record, request, user_id=user_id, limit=200)
+    report: CloseGateReport = build_close_gate_report(
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=record.round_id,
+        pending_handoffs=list_pending_handoffs(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        planned_lanes=list_planned_lanes(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        task_lanes=task_lanes,
+        review_invocations=list_review_invocations(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        quality_signals=list_quality_signals(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        chair_decisions=list_chair_decisions(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        evidence_refs=evidence_payload.get("evidence_refs", []),
+        round_state=round_state,
+    )
+    return report.as_dict()
 
 
 @router.post("/{thread_id}/runs/{run_id}/cancel")
@@ -2372,6 +2679,233 @@ async def create_account_decision(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     record_account_decision(decision, user_id=user_id)
     return AccountDecisionResponse.model_validate(decision.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/role-states", response_model=list[RoleStateResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_role_states(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    role_name: str | None = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[RoleStateResponse]:
+    """List latest Chair-accepted AI role state summaries for this thread."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    states = list_role_states(thread_id=thread_id, user_id=user_id, role_name=role_name, limit=limit)
+    return [RoleStateResponse.model_validate(state) for state in states]
+
+
+@router.post("/{thread_id}/runs/{run_id}/role-states", response_model=RoleStateResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_role_state(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    body: RoleStateCreateRequest,
+) -> RoleStateResponse:
+    """Save a Chair-accepted role memory summary without dispatching work."""
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="role state round_id does not match run round_id")
+    try:
+        state = build_role_state(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            role_name=body.role_name,
+            summary=body.summary,
+            current_focus=body.current_focus,
+            open_questions=body.open_questions,
+            accepted_signals=body.accepted_signals,
+            evidence_refs=body.evidence_refs,
+            artifact_refs=body.artifact_refs,
+            updated_by_role=body.updated_by_role,
+            target_role=body.target_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_role_state(state, user_id=user_id)
+    return RoleStateResponse.model_validate(state.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/round-plans", response_model=list[RoundPlanResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_round_plans(thread_id: str, run_id: str, request: Request, round_id: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200)) -> list[RoundPlanResponse]:
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    return [RoundPlanResponse.model_validate(p) for p in list_round_plans(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, limit=limit)]
+
+
+@router.get("/{thread_id}/runs/{run_id}/round-plan", response_model=RoundPlanResponse | None)
+@require_permission("runs", "read", owner_check=True)
+async def get_latest_run_round_plan(thread_id: str, run_id: str, request: Request, round_id: str | None = Query(default=None)) -> RoundPlanResponse | None:
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    plan = latest_round_plan(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id)
+    return RoundPlanResponse.model_validate(plan) if plan else None
+
+
+@router.post("/{thread_id}/runs/{run_id}/round-plans", response_model=RoundPlanResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_run_round_plan(thread_id: str, run_id: str, request: Request, body: RoundPlanCreateRequest) -> RoundPlanResponse:
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="round plan round_id does not match run round_id")
+    try:
+        plan = build_round_plan(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            goal=body.goal,
+            boundary=body.boundary,
+            evidence_standard=body.evidence_standard,
+            capability_release=body.capability_release,
+            status=body.status,
+            dispatch_plan=body.dispatch_plan,
+            planned_lanes=body.planned_lanes,
+            created_by_role=body.created_by_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_round_plan(plan, user_id=user_id)
+    return RoundPlanResponse.model_validate(plan.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/planned-lanes", response_model=list[PlannedLaneResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_planned_lanes(
+    thread_id: str, run_id: str, request: Request, round_id: str | None = Query(default=None), status: LaneStatus | None = Query(default=None), limit: int = Query(default=100, ge=1, le=200)
+) -> list[PlannedLaneResponse]:
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    return [PlannedLaneResponse.model_validate(lane) for lane in list_planned_lanes(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, status=status, limit=limit)]
+
+
+@router.post("/{thread_id}/runs/{run_id}/planned-lanes", response_model=PlannedLaneResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_run_planned_lane(thread_id: str, run_id: str, request: Request, body: PlannedLaneCreateRequest) -> PlannedLaneResponse:
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="planned lane round_id does not match run round_id")
+    try:
+        lane = build_planned_lane(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            target_role=body.target_role,
+            reason=body.reason,
+            expected_evidence=body.expected_evidence,
+            status=body.status,
+            linked_task_id=body.linked_task_id,
+            evidence_refs=body.evidence_refs,
+            artifact_refs=body.artifact_refs,
+            output_refs=body.output_refs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_planned_lane(lane, user_id=user_id)
+    return PlannedLaneResponse.model_validate(lane.as_dict())
+
+
+@router.post("/{thread_id}/runs/{run_id}/planned-lanes/{lane_id}/status", response_model=PlannedLaneResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def update_run_planned_lane_status(thread_id: str, run_id: str, lane_id: str, request: Request, body: PlannedLaneUpdateRequest) -> PlannedLaneResponse:
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    try:
+        lane = update_planned_lane_status(
+            thread_id=thread_id, user_id=user_id, run_id=run_id, lane_id=lane_id, status=body.status, linked_task_id=body.linked_task_id, evidence_refs=body.evidence_refs, artifact_refs=body.artifact_refs, output_refs=body.output_refs
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if lane is None:
+        raise HTTPException(status_code=404, detail=f"Planned lane {lane_id} not found")
+    return PlannedLaneResponse.model_validate(lane.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/chair-decisions", response_model=list[ChairDecisionResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_chair_decisions(thread_id: str, run_id: str, request: Request, round_id: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=200)) -> list[ChairDecisionResponse]:
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    return [ChairDecisionResponse.model_validate(d) for d in list_chair_decisions(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, limit=limit)]
+
+
+@router.post("/{thread_id}/runs/{run_id}/chair-decisions", response_model=ChairDecisionResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def create_run_chair_decision(thread_id: str, run_id: str, request: Request, body: ChairDecisionCreateRequest) -> ChairDecisionResponse:
+    user_id = get_request_storage_user_id(request)
+    record = await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    if body.round_id and record.round_id and body.round_id != record.round_id:
+        raise HTTPException(status_code=400, detail="chair decision round_id does not match run round_id")
+    try:
+        decision = build_chair_decision(
+            thread_id=thread_id,
+            run_id=run_id,
+            round_id=body.round_id or record.round_id,
+            decision_type=body.decision_type,
+            status=body.status,
+            decision=body.decision,
+            reason=body.reason,
+            evidence_refs=body.evidence_refs,
+            affected_lanes=body.affected_lanes,
+            handoffs=body.handoffs,
+            created_by_role=body.created_by_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record_chair_decision(decision, user_id=user_id)
+    return ChairDecisionResponse.model_validate(decision.as_dict())
+
+
+@router.get("/{thread_id}/runs/{run_id}/pending-handoffs", response_model=list[PendingHandoffResponse])
+@require_permission("runs", "read", owner_check=True)
+async def list_run_pending_handoffs(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    status: PendingHandoffStatus | None = Query(default="pending"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[PendingHandoffResponse]:
+    """List AI-authored next-role handoff suggestions; this never dispatches them."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    handoffs = list_pending_handoffs(thread_id=thread_id, user_id=user_id, run_id=run_id, status=status, limit=limit)
+    return [PendingHandoffResponse.model_validate(handoff) for handoff in handoffs]
+
+
+@router.post("/{thread_id}/runs/{run_id}/pending-handoffs/{handoff_id}/resolve", response_model=PendingHandoffResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def resolve_run_pending_handoff(
+    thread_id: str,
+    run_id: str,
+    handoff_id: str,
+    request: Request,
+    body: PendingHandoffResolveRequest,
+) -> PendingHandoffResponse:
+    """Mark an AI-authored handoff suggestion handled by Chair without running it."""
+    user_id = get_request_storage_user_id(request)
+    await _resolve_thread_run_for_user(thread_id, run_id, request, user_id=user_id)
+    try:
+        resolved = resolve_pending_handoff(
+            thread_id=thread_id,
+            user_id=user_id,
+            run_id=run_id,
+            handoff_id=handoff_id,
+            status=body.status,
+            resolved_by_role=body.resolved_by_role,
+            resolution_note=body.resolution_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if resolved is None:
+        raise HTTPException(status_code=404, detail=f"Pending handoff {handoff_id} not found")
+    return PendingHandoffResponse.model_validate(resolved.as_dict())
 
 
 @router.get("/{thread_id}/runs/{run_id}/review-invocations", response_model=list[ReviewInvocationResponse])

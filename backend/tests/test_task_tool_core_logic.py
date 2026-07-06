@@ -84,6 +84,11 @@ async def _no_sleep(_: float) -> None:
     return None
 
 
+@pytest.fixture(autouse=True)
+def _no_pending_handoff_disk_writes(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "record_pending_handoff", lambda *args, **kwargs: None)
+
+
 def test_with_ai_handoff_envelope_preserves_explicit_fields():
     prompt = """Source Role: Planner
 Target Role: Boundary
@@ -434,6 +439,7 @@ def test_task_tool_returns_explicit_ai_handoff_to_chair_without_auto_running_nex
     events = []
     captured_prompts = []
     handoff_records = []
+    pending_handoffs = []
     get_available_tools = MagicMock(return_value=["tool-a"])
 
     class DummyExecutor:
@@ -467,6 +473,7 @@ Planner Raw Judgment:
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: handoff_records.append(kwargs))
+    monkeypatch.setattr(task_tool_module, "record_pending_handoff", lambda handoff, **kwargs: pending_handoffs.append((handoff, kwargs)))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
@@ -488,6 +495,14 @@ Planner Raw Judgment:
     assert [event["type"] for event in events] == ["task_started", "task_completed"]
     assert [record["status"] for record in handoff_records] == ["started", "completed"]
     assert len(handoff_records) == 2
+    assert len(pending_handoffs) == 1
+    pending, kwargs = pending_handoffs[0]
+    assert pending.target_role == "opposition"
+    assert pending.task_or_question == "attack the plan before Chair decides"
+    assert pending.status == "pending"
+    assert pending.programmatic_dispatch is False
+    assert pending.auto_dispatch is False
+    assert kwargs == {"user_id": "test-user-autouse"}
 
 
 @pytest.mark.parametrize("target_role", ["planner", "boundary", "evidence", "fact-finder", "opposition", "chair"])

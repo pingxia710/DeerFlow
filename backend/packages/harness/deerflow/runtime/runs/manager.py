@@ -547,8 +547,8 @@ class RunManager:
             state = "executing"
             event_type = "run.executing"
         elif status == RunStatus.success:
-            state = "closed"
-            event_type = "round.closed"
+            state = "awaiting_chair_decision"
+            event_type = "run.completed"
         elif is_terminal_status(status):
             state = "blocked"
             event_type = "round.blocked"

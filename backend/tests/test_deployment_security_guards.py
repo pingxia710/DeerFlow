@@ -122,6 +122,28 @@ def test_run_error_response_hides_traceback_without_public_message():
     assert run_error_for_response(error) == "Run failed"
 
 
+def test_run_error_response_hides_codex_stream_incomplete_detail():
+    error = "LLM request failed: Codex API stream ended without response.completed event"
+
+    public_error = run_error_for_response(error)
+
+    assert public_error is not None
+    assert "temporarily unavailable" in public_error
+    assert "response.completed" not in public_error
+
+
+def test_run_error_response_hides_codex_stream_incomplete_traceback_detail():
+    error = """Traceback (most recent call last):
+  File "/private/app.py", line 1, in <module>
+CodexStreamIncompleteError: Codex API stream ended without response.completed event"""
+
+    public_error = run_error_for_response(error)
+
+    assert public_error is not None
+    assert "temporarily unavailable" in public_error
+    assert "response.completed" not in public_error
+
+
 def test_dangerous_sandbox_settings_allowed_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv("NODE_ENV", "development")

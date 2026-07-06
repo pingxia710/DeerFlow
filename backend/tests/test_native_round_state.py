@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.routers import thread_runs
 from deerflow.agents.middlewares.round_context_middleware import format_native_round_context_for_model
+from deerflow.command_room.plan import build_planned_lane, list_planned_lanes, record_planned_lane
 from deerflow.persistence.base import Base
 from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -14,7 +15,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 
 @pytest.mark.anyio
-async def test_closed_round_followup_starts_new_round_with_next_action_only():
+async def test_completed_run_round_followup_starts_new_round_with_next_action_only():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
@@ -33,46 +34,46 @@ async def test_closed_round_followup_starts_new_round_with_next_action_only():
 
     assert first.round_id
     assert second.round_id
-    assert second.round_id != first.round_id
+    assert second.round_id == first.round_id
     context = second.metadata["round_context"]
-    assert context["parent_round_id"] == first.round_id
+    assert context["parent_round_id"] is None
     assert context["current_intent"] == "好的，下一步"
     assert context["accepted_next_action"] == "Next: implement native state."
 
 
 @pytest.mark.anyio
-async def test_closed_round_state_is_mechanical_not_quality_verdict_or_authorization():
+async def test_success_run_round_state_awaits_chair_decision_not_quality_verdict_or_authorization():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
     first = await manager.create_or_reject(
-        "thread-closed-contract",
+        "thread-awaiting-decision-contract",
         kwargs={"input": {"messages": [{"role": "user", "content": "inspect system"}]}},
     )
     await manager.set_status(first.run_id, RunStatus.running)
     await manager.set_status(first.run_id, RunStatus.success, terminal_reason="success")
     await manager.update_run_completion(first.run_id, status="success", last_ai_message="Next: inspect refs.")
 
-    rounds = await round_store.list_by_thread("thread-closed-contract")
+    rounds = await round_store.list_by_thread("thread-awaiting-decision-contract")
     first_round = next(round for round in rounds if round["round_id"] == first.round_id)
-    assert first_round["state"] == "closed"
+    assert first_round["state"] == "awaiting_chair_decision"
     assert "PASS" not in str(first_round)
     assert "quality_verdict" not in first_round
     assert "verdict" not in first_round
 
     second = await manager.create_or_reject(
-        "thread-closed-contract",
+        "thread-awaiting-decision-contract",
         kwargs={"input": {"messages": [{"role": "user", "content": "continue"}]}},
     )
 
-    assert second.round_id != first.round_id
+    assert second.round_id == first.round_id
     context = second.metadata["round_context"]
-    assert context["parent_round_id"] == first.round_id
+    assert context["parent_round_id"] is None
     assert context["accepted_next_action"] == "Next: inspect refs."
     assert second.status != RunStatus.running
     assert not round_store.task_lanes
 
-    second_round = next(round for round in await round_store.list_by_thread("thread-closed-contract") if round["round_id"] == second.round_id)
+    second_round = next(round for round in await round_store.list_by_thread("thread-awaiting-decision-contract") if round["round_id"] == second.round_id)
     assert second_round["state"] not in {"executing", "validating"}
 
 
@@ -110,6 +111,67 @@ async def test_task_event_updates_task_lane_outside_visible_history():
     assert round_store.task_lanes[("thread-1", "run-1", "task-1")]["status"] == "in_progress"
     [row] = await event_store.list_messages_by_run("thread-1", "run-1")
     assert row["content"]["round_id"] == round_info["round_id"]
+
+
+@pytest.mark.anyio
+async def test_task_event_updates_linked_planned_lane_without_affecting_task_lane(tmp_path, monkeypatch):
+    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    round_info = await round_store.bind_run(thread_id="thread-linked", run_id="run-linked", current_intent="start")
+    lane = build_planned_lane(
+        thread_id="thread-linked",
+        run_id="run-linked",
+        round_id=round_info["round_id"],
+        target_role="Evidence",
+        reason="Find proof",
+        linked_task_id="task-linked",
+    )
+    record_planned_lane(lane, base_dir=tmp_path / "audit")
+    journal = RunJournal("run-linked", "thread-linked", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
+
+    journal.record_task_event({"type": "task_completed", "task_id": "task-linked", "thread_id": "thread-linked", "run_id": "run-linked", "status": "completed"})
+    await journal.flush()
+
+    rows = list_planned_lanes(thread_id="thread-linked", user_id=None, run_id="run-linked", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
+    assert rows[0]["status"] == "completed"
+    assert ("thread-linked", "run-linked", "task-linked") in round_store.task_lanes
+
+
+@pytest.mark.anyio
+async def test_task_event_without_matching_linked_planned_lane_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    round_info = await round_store.bind_run(thread_id="thread-missing", run_id="run-missing", current_intent="start")
+    lane = build_planned_lane(thread_id="thread-missing", run_id="run-missing", round_id=round_info["round_id"], target_role="Evidence", reason="Find proof", linked_task_id="task-existing")
+    record_planned_lane(lane, base_dir=tmp_path / "audit")
+    journal = RunJournal("run-missing", "thread-missing", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
+
+    journal.record_task_event({"type": "task_completed", "task_id": "task-other", "thread_id": "thread-missing", "run_id": "run-missing", "status": "completed"})
+    await journal.flush()
+
+    rows = list_planned_lanes(thread_id="thread-missing", user_id=None, run_id="run-missing", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "planned"
+    assert rows[0]["linked_task_id"] == "task-existing"
+
+
+@pytest.mark.anyio
+async def test_task_event_maps_timed_out_to_blocked_planned_lane(tmp_path, monkeypatch):
+    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    round_info = await round_store.bind_run(thread_id="thread-blocked", run_id="run-blocked", current_intent="start")
+    lane = build_planned_lane(thread_id="thread-blocked", run_id="run-blocked", round_id=round_info["round_id"], target_role="Evidence", reason="Find proof", linked_task_id="task-timeout")
+    record_planned_lane(lane, base_dir=tmp_path / "audit")
+    journal = RunJournal("run-blocked", "thread-blocked", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
+
+    journal.record_task_event({"type": "task_timed_out", "task_id": "task-timeout", "thread_id": "thread-blocked", "run_id": "run-blocked", "status": "timed_out"})
+    await journal.flush()
+
+    rows = list_planned_lanes(thread_id="thread-blocked", user_id=None, run_id="run-blocked", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
+    assert rows[0]["status"] == "blocked"
 
 
 @pytest.mark.anyio

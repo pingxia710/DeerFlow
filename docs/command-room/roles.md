@@ -4,8 +4,9 @@ Command Room roles are long-running AI governance roles. Their identity, memory,
 decisions, open questions, and process state persist across rounds. A concrete
 model call may still be ephemeral.
 
-Role skills live under `skills/custom/command-room-*`. Role state lives under
-`docs/command-room/state/`.
+Role skills live under `skills/custom/command-room-*`. Role state templates
+live under `docs/command-room/state/`; Chair-accepted runtime role summaries
+are owner-scoped thread audit records in `role_state.jsonl`.
 Risk-class activation lives in `docs/command-room/run-protocol.md`.
 Thin AI-to-AI handoff continuity also lives there.
 Role/process/loop/round control lives in `docs/command-room/ai-control-protocol.md`.
@@ -61,3 +62,6 @@ automatically trigger governance.
 
 Update role state only when durable cross-round knowledge changes. Do not store
 secrets, raw private data, raw audit logs, or noisy turn-by-turn summaries.
+Unresolved `Target Role` / next-task suggestions may be recorded in
+`pending_handoffs.jsonl` for Chair review, but program logic must not dispatch
+them automatically.

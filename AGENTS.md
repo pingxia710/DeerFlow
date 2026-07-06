@@ -151,7 +151,9 @@ These apply repo-wide; module guides own the module-specific detail.
   rewrite payloads, judge project quality, or trigger governance from its own
   content judgment.
   Role definitions live in `docs/command-room/roles.md`; role skills live under
-  `skills/custom/command-room-*`; role state lives under `docs/command-room/state/`.
+  `skills/custom/command-room-*`; role state templates live under
+  `docs/command-room/state/`, while Chair-accepted runtime role summaries live
+  in owner-scoped thread audit `role_state.jsonl`.
   Runtime role subagents are `planner`, `boundary`, `evidence`, `opposition`,
   `recorder`, plus angle roles `project-steward`, `debt-curator`,
   `freshness-keeper`, `capability-governor`, `learning-curator`, and
@@ -162,7 +164,9 @@ These apply repo-wide; module guides own the module-specific detail.
   workflows changed. The same protocol defines the thin AI-to-AI handoff runtime:
   AI output becomes the next AI input while program logic only preserves the
   envelope, order, permissions, and trace. `Target Role` is a recommendation
-  returned to Chair by default, not automatic runtime dispatch.
+  returned to Chair by default, not automatic runtime dispatch; unresolved
+  next-role suggestions may be recorded as owner-scoped `pending_handoffs.jsonl`
+  entries for Chair review only.
   Important handoffs may also carry `EvidenceStrength`, `Handoff File`, and
   `ArtifactRefs` such as `spec.md` or `findings.md`; files are shared state on
   disk, not hidden shared model context. These round files live in the current

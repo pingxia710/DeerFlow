@@ -9,6 +9,7 @@ import {
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   getManualThreadTitleLock,
+  getStreamErrorMessage,
   getThreadActivitySnapshot,
   hasTerminalStreamErrorRecoveryRun,
   INFINITE_THREADS_PAGE_SIZE,
@@ -24,6 +25,7 @@ import {
   reconcileTerminalRunHistory,
   setManualThreadTitleLock,
   shouldKeepStreamErrorRecoveryRun,
+  shouldCommitStreamStartFromError,
   shouldReleaseQueuedThreadMessage,
   threadRunsQueryKey,
   threadRuntimeSnapshotQueryKey,
@@ -375,6 +377,41 @@ describe("stream error recovery", () => {
     ).toBe(true);
 
     clearThreadActivity(threadId);
+  });
+
+  test("commits stream start from error only when run metadata is available", () => {
+    expect(
+      shouldCommitStreamStartFromError({
+        started: false,
+        threadId: "thread-from-error",
+        runId: "run-from-error",
+      }),
+    ).toBe(true);
+    expect(
+      shouldCommitStreamStartFromError({
+        started: true,
+        threadId: "thread-from-error",
+        runId: "run-from-error",
+      }),
+    ).toBe(false);
+    expect(
+      shouldCommitStreamStartFromError({
+        started: false,
+        threadId: "thread-from-error",
+        runId: null,
+      }),
+    ).toBe(false);
+  });
+
+  test("hides Codex stream incomplete details in visible stream errors", () => {
+    const message = getStreamErrorMessage(
+      new Error(
+        "LLM request failed: Codex API stream ended without response.completed event",
+      ),
+    );
+
+    expect(message).toContain("temporarily unavailable");
+    expect(message).not.toContain("response.completed");
   });
 
   test("stream recovery refreshes snapshot and lets queued follow-up conditions settle", () => {

@@ -341,9 +341,14 @@ class _ConnectError(Exception):
     """Local stand-in for httpx.ConnectError — same class name, no httpx dependency."""
 
 
+class _CodexStreamIncompleteError(Exception):
+    """Local stand-in for CodexStreamIncompleteError — matched by class name."""
+
+
 _ReadError.__name__ = "ReadError"
 _RemoteProtocolError.__name__ = "RemoteProtocolError"
 _ConnectError.__name__ = "ConnectError"
+_CodexStreamIncompleteError.__name__ = "CodexStreamIncompleteError"
 
 
 def test_classify_error_read_error_is_retriable() -> None:
@@ -368,6 +373,15 @@ def test_classify_error_connect_error_is_retriable() -> None:
     middleware = _build_middleware()
     exc = _ConnectError("[Errno 61] Connection refused")
     exc.__class__.__name__ = "ConnectError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_codex_stream_incomplete_error_is_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _CodexStreamIncompleteError("Codex API stream ended without response.completed event")
+    exc.__class__.__name__ = "CodexStreamIncompleteError"
     retriable, reason = middleware._classify_error(exc)
     assert retriable is True
     assert reason == "transient"
@@ -674,6 +688,17 @@ def test_user_message_for_read_error_uses_generic_transient_copy() -> None:
 
     assert "temporarily unavailable" in message
     assert "streaming response was interrupted" not in message
+
+
+def test_user_message_for_codex_stream_incomplete_uses_generic_transient_copy() -> None:
+    middleware = _build_middleware()
+    exc = _CodexStreamIncompleteError("Codex API stream ended without response.completed event")
+    exc.__class__.__name__ = "CodexStreamIncompleteError"
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "temporarily unavailable" in message
+    assert "response.completed" not in message
 
 
 def test_user_message_for_generic_transient_keeps_legacy_copy() -> None:

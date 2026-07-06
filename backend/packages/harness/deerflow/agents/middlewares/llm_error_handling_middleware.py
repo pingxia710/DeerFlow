@@ -204,6 +204,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "APITimeoutError",
             "APIConnectionError",
             "ConnectError",  # httpx.ConnectError: local proxy/upstream refused connection
+            "CodexStreamIncompleteError",  # Codex provider: stream ended before response.completed
             "ConnectTimeout",
             "InternalServerError",
             "ReadError",  # httpx.ReadError: connection dropped mid-stream

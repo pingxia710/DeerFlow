@@ -115,6 +115,8 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
         "middleware_stack",
         "filesystem_permissions",
         "agent_harness_profiles",
+        "capability_release",
+        "capability_center",
     ):
         assert field in snapshot
 
@@ -130,6 +132,42 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
     assert snapshot["sandbox"]["environment"] == {"SANDBOX_TOKEN": "***"}
     assert snapshot["skill_catalog_sources"][0]["name"] == "official"
     assert snapshot["skill_catalog_sources"][0]["trustLevel"] == "official"
+
+    center_dumped = json.dumps(snapshot["capability_center"])
+    for secret in ("sk-live-secret", "ghp_secret", "Bearer real-token", "client-secret", "refresh-secret", "sandbox-secret"):
+        assert secret not in center_dumped
+
+
+def test_capability_center_exposes_advisory_facts_without_decisions(tmp_path: Path):
+    snapshot = build_capability_snapshot(_app_config(tmp_path), thread_id="thread-1")
+    center = snapshot["capability_center"]
+
+    assert center["advisory_only"] is True
+    assert center["stop_before"] == snapshot["approval_policy"]["stop_before"]
+    assert "credential or raw sensitive-data disclosure" in center["stop_before"]
+    assert set(center["evidence_refs"]) >= {
+        "deerflow.capabilities.snapshot",
+        "config.tools",
+        "config.sandbox",
+        "skill_storage",
+        "lead_agent.build_middlewares",
+    }
+    assert center["current_release"]["thread_scoped"] is True
+    assert center["current_release"]["program_decides_next_step"] is False
+    assert center["permission_facts"]["approval_requirements"] == {
+        "mcp_config_admin_required": True,
+        "global_skill_management_admin_required": True,
+        "thread_owner_check_required": True,
+    }
+    assert center["permission_facts"]["program_makes_next_step_decisions"] is False
+    assert center["non_decisions"] == {
+        "program_makes_next_step_decisions": False,
+        "auto_authorize": False,
+        "auto_reject": False,
+        "auto_pass_fail": False,
+        "auto_dispatch": False,
+        "auto_rework": False,
+    }
 
 
 def test_capability_snapshot_labels_tools_skills_middleware_and_policy(tmp_path: Path):

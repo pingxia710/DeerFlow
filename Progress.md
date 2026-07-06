@@ -108,7 +108,7 @@
 - Source signal: Obsidian note `知识库/抖音/Loop比模型更重要/...7654899046544444687...md` says the useful pattern is not a stronger model alone, but a loop where planning, generation, and judging iterate against clear acceptance rules.
 - Direction fit: This maps to DeerFlow Command Room's round model: define Goal/Boundary/Evidence Standard, dispatch useful sub-AIs only when they add signal, then synthesize and verify with concrete evidence.
 - Prompt update: `backend/packages/harness/deerflow/agents/lead_agent/prompt.py` now tells `command-room` to make each round's acceptance/evidence standard concrete before execution, then compare `action_result`, command/test output, artifact paths, logs, or source refs back to that standard before completion.
-- Path hygiene fix in the same prompt area: thread-specific local paths were replaced with stable `/mnt/user-data/*` and `/mnt/acp-workspace` guidance so generated prompts do not bake in a stale thread id.
+- Path hygiene fix in the same prompt area: thread-specific local paths were replaced with stable `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/319f6c6b-538d-4624-9713-25f2b9466a4f/user-data/*` and `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/319f6c6b-538d-4624-9713-25f2b9466a4f/acp-workspace` guidance so generated prompts do not bake in a stale thread id.
 - Rule sync: root `AGENTS.md`, `backend/AGENTS.md`, and `skills/custom/naxus-round/SKILL.md` now carry the same acceptance/evidence-standard rule.
 - Validation: `cd backend && uv run pytest tests/test_lead_agent_prompt.py -q` passed with `24 passed`; `cd backend && uv run ruff check packages/harness/deerflow/agents/lead_agent/prompt.py tests/test_lead_agent_prompt.py` passed; `git diff --check` passed.
 - Deliberately skipped: no new planner/generator/judge runtime, no extra default reviewer/opposition workflow, and no new project skill. Existing Round + subagent + Evidence Signal machinery is enough for this iteration.
@@ -275,7 +275,7 @@
 
 - Previous anonymous access to Feishu Wiki/Doc/Base links could misclassify private resources as unreadable.
 - Added/loaded the `feishu-cli-boundary` skill and related subagent guidance; Feishu links now default to private handling.
-- Prefer `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules//cli/scripts/run.js ... --as user` for the local authorized user-mode path.
+- Prefer `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules/cli/scripts/run.js ... --as user` for the local authorized user-mode path.
 - Verified the local authorization path can read Feishu documents that anonymous web access could not read.
 - Future failures should be classified by link type, identity, tenant, permission, and command shape.
 - Red lines: do not record or output token, webhook, chat_id, Authorization, Bearer, cookie, passwords, private keys, or `.env` contents; real send/write-table/permission/route changes or large-scale outbound actions require confirmation per the skill boundary.
@@ -364,7 +364,7 @@
 - Added a regression assertion so the embedded client passes the unified `MAX_CONCURRENT_SUBAGENTS` value into the prompt by default.
 - Updated `backend/AGENTS.md` to say `MAX_CONCURRENT_SUBAGENTS = 6` and clarify that six is a maximum capability release, not a requirement to always create six subtasks.
 - Validation: `cd backend && uv run pytest tests/test_client.py::TestEnsureAgent::test_creates_agent tests/test_client.py::TestEnsureAgent::test_command_room_client_uses_agent_config_boundaries tests/test_subagent_limit_middleware.py tests/test_lead_agent_model_resolution.py::test_make_lead_agent_reads_runtime_options_from_context -q` passed with 18 tests; targeted `ruff check` passed; precise search found no remaining `MAX_CONCURRENT_SUBAGENTS = 3`, client default `3`, or hardcoded "执行 3 个子任务" strings in runtime/frontend docs under the checked paths.
-- Note: a broader `test_client.py` run still has an unrelated existing artifact-path test failure around absolute `.deer-flow/...` paths versus `/mnt/user-data/...` virtual paths.
+- Note: a broader `test_client.py` run still has an unrelated existing artifact-path test failure around absolute `.deer-flow/...` paths versus `/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/319f6c6b-538d-4624-9713-25f2b9466a4f/user-data/...` virtual paths.
 
 ## 2026-07-03 — Chair code reading and thinking budget landing
 
@@ -508,3 +508,8 @@
 - Added native task-lane list fields for evidence/artifact/output refs while retaining legacy single `evidence_ref`/`result_ref` compatibility.
 - Clarified round-state read boundary: API quality context now prefers native round-state rows and uses `RunRecord.metadata.round_context` only as fallback/bootstrap.
 - Updated command-room operating rules in AGENTS/skill docs: parallelize independent work, AI-first discovery, DeerFlow edits in isolated worktrees, durable evidence, advisory-only signals, no automatic PASS/FAIL/dispatch/rework.
+
+## 2026-07-05 - Capability Boundary Center
+
+- Added `capability_center` to the AI-readable capability snapshot with current release facts, normalized stop-before boundaries, permission facts, stable evidence refs, and explicit advisory-only/non-decision flags.
+- Locked regressions for field presence, legacy compatibility, stop-before reuse, non-secret exposure, and no automatic authorize/reject/PASS/FAIL/dispatch/rework decisions.

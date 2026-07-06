@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-06 — Command Room P1/P2 operating plane closure
+
+- Integrated runtime snapshot self-heal detail telemetry so `recovery.snapshot_self_heal` reports repaired round/task counts and low-sensitive row IDs/status while preserving the old `repaired` flag.
+- Added owner-scoped Command Room role state and pending handoff audit records, with run APIs and compact internal context injection. Role state is Chair-accepted memory; pending handoffs are AI-authored next-role suggestions for Chair review only.
+- Wired the task tool to record completed worker outputs with `Target Role` as pending handoff suggestions without dispatching the next role.
+- Hardened Codex provider stream-incomplete handling by treating `CodexStreamIncompleteError` as transient, hiding the internal `response.completed` detail from user-facing error copy, and committing new-chat route state when an error still carries run metadata.
+- Validation: backend targeted tests passed with 251 tests and 2 dependency warnings; frontend targeted tests passed with 127 tests; backend `ruff check .`, backend `ruff format --check .`, frontend `pnpm check`, `git diff --check`, and `git diff --cached --check` passed.
+- Deliberately skipped: no UI management surface, no metrics/dashboard/alerting, no automatic dispatch/rework/quality verdict, no production/live mutation, and no push.
+
 ## 2026-07-05 — Runtime chat recovery hardening
 
 - Hardened the chat recovery path around the current user goal: visible history now relies on the backend display contract, runtime snapshot hydration, per-run message pages, task-lane recovery, terminal notices for terminal runs without visible AI replies, and known-run stream-error recovery instead of clearing chat state on transient stream disconnects.

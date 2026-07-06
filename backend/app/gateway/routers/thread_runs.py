@@ -51,6 +51,7 @@ from deerflow.command_room.account_ledger import (
     record_account_update_proposal,
 )
 from deerflow.command_room.brief import build_chair_operating_brief
+from deerflow.command_room.close_gate import CloseGateReport, build_close_gate_report
 from deerflow.command_room.evidence import normalize_evidence_ref
 from deerflow.command_room.pending_handoff import (
     PendingHandoffStatus,
@@ -2139,6 +2140,30 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     record = await resolve_thread_run(thread_id, run_id, request)
     return _record_to_response(record)
+
+
+@router.get("/{thread_id}/runs/{run_id}/close-gate", response_model=dict[str, Any])
+@require_permission("runs", "read", owner_check=True)
+async def get_close_gate_report(thread_id: str, run_id: str, request: Request) -> dict[str, Any]:
+    """Return read-only Round Close Gate facts for a run."""
+    record = await resolve_thread_run(thread_id, run_id, request)
+    user_id = get_request_storage_user_id(request)
+    round_state, task_lanes = await _round_quality_context(thread_id, record, request, user_id=user_id)
+    evidence_payload = await _run_evidence_payload(thread_id, run_id, record, request, user_id=user_id, limit=200)
+    report: CloseGateReport = build_close_gate_report(
+        thread_id=thread_id,
+        run_id=run_id,
+        round_id=record.round_id,
+        pending_handoffs=list_pending_handoffs(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        planned_lanes=list_planned_lanes(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        task_lanes=task_lanes,
+        review_invocations=list_review_invocations(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        quality_signals=list_quality_signals(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        chair_decisions=list_chair_decisions(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=record.round_id, limit=500),
+        evidence_refs=evidence_payload.get("evidence_refs", []),
+        round_state=round_state,
+    )
+    return report.as_dict()
 
 
 @router.post("/{thread_id}/runs/{run_id}/cancel")

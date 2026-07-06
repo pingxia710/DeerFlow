@@ -15,6 +15,7 @@ from .account_ledger import (
 )
 from .action_result_adapter import action_result_from_value
 from .brief import ChairOperatingBrief, build_chair_operating_brief, format_chair_operating_brief_for_model
+from .close_gate import CloseGateReport, build_close_gate_report
 from .handoff import HandoffEnvelope, handoff_envelope_from_packet, handoff_envelope_to_audit_dict
 from .pending_handoff import (
     PENDING_HANDOFF_STATUSES,
@@ -85,6 +86,8 @@ __all__ = [
     "ChairOperatingBrief",
     "build_chair_operating_brief",
     "format_chair_operating_brief_for_model",
+    "CloseGateReport",
+    "build_close_gate_report",
     "ACCOUNT_DECISIONS",
     "ACCOUNT_TYPES",
     "AccountDecision",

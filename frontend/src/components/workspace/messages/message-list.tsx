@@ -91,6 +91,13 @@ function getMessageHistoryTime(message: Message) {
   return Number.isFinite(time) ? time : undefined;
 }
 
+function getMessageRunId(message: Message) {
+  const value =
+    message.additional_kwargs?.deerflow_run_id ??
+    message.additional_kwargs?.run_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 function getMessagesHistoryStartTime(messages: Message[]) {
   let startTime: number | undefined;
   for (const message of messages) {
@@ -666,10 +673,12 @@ export function MessageList({
                       group.messages,
                       groupIsLoading,
                     );
+                    const runId = getMessageRunId(message);
                     const startedAt = getMessageHistoryTime(message);
                     const task: Subtask = {
                       id: taskId,
                       threadId,
+                      ...(runId ? { runId } : {}),
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
@@ -686,11 +695,17 @@ export function MessageList({
               } else if (message.type === "tool") {
                 const taskId = message.tool_call_id;
                 if (taskId) {
+                  const runId = getMessageRunId(message);
                   const parsed = parseSubtaskResult(
                     extractTextFromMessage(message),
                     message.additional_kwargs,
                   );
-                  updateSubtask({ id: taskId, threadId, ...parsed });
+                  updateSubtask({
+                    id: taskId,
+                    threadId,
+                    ...(runId ? { runId } : {}),
+                    ...parsed,
+                  });
                 }
               }
             }
@@ -730,10 +745,12 @@ export function MessageList({
               const taskIds = message.tool_calls?.flatMap((toolCall) =>
                 toolCall.name === "task" && toolCall.id ? [toolCall.id] : [],
               );
+              const runId = getMessageRunId(message);
               for (const taskId of taskIds ?? []) {
                 results.push(
                   <SubtaskCard
                     key={"task-group-" + taskId}
+                    runId={runId}
                     taskId={taskId}
                     threadId={threadId}
                     isLoading={groupIsLoading}

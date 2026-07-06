@@ -65,18 +65,20 @@ function restoreAnchorTop(
 
 export function SubtaskCard({
   className,
+  runId,
   taskId,
   threadId,
   isLoading,
 }: {
   className?: string;
+  runId?: string | null;
   taskId: string;
   threadId: string;
   isLoading: boolean;
 }) {
   const { t } = useI18n();
   const { scrollRef, stopScroll } = useStickToBottomContext();
-  const task = useSubtask(taskId, threadId)!;
+  const task = useSubtask({ id: taskId, threadId, runId })!;
   const resultPreview = useMemo(
     () => task.result?.replace(/\s+/g, " ").trim() ?? "",
     [task.result],

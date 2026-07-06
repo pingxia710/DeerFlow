@@ -104,6 +104,8 @@ export default function ChatPage() {
     isHistoryLoading,
     historyError,
     terminalNotice,
+    recoveryStatus,
+    retryRecovery,
     hasMoreHistory,
     loadMoreHistory,
   } = useThreadStream({
@@ -313,6 +315,8 @@ export default function ChatPage() {
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
                   terminalNotice={terminalNotice}
+                  recoveryStatus={recoveryStatus}
+                  onRetryRecovery={retryRecovery}
                   tokenUsageInlineMode={tokenUsageInlineMode}
                   canRegenerate={
                     !isNewThread &&

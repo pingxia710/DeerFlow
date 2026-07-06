@@ -62,6 +62,20 @@ def test_command_room_capability_governor_skill_defines_boundary_signal():
     assert "Target Role: Chair" in text
 
 
+def test_command_room_fact_finder_skill_defines_read_only_sources_and_boundaries():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = _read_custom_skill_or_skip(repo_root, "command-room-fact-finder")
+
+    assert "read-only" in text
+    assert "Source Priority" in text
+    assert "Confirmed facts" in text
+    assert "Reasonable inferences" in text
+    assert "Conflicts" in text
+    assert "Still unknown" in text
+    assert "Chair/main AI decides" in text
+    assert "Do not decide" in text
+
+
 def test_command_room_chair_skill_defines_capability_decision():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
@@ -515,6 +529,7 @@ class TestRegistryCustomAgentLookup:
             ("planner", "command-room-planner"),
             ("boundary", "command-room-boundary"),
             ("evidence", "command-room-evidence"),
+            ("fact-finder", "command-room-fact-finder"),
             ("opposition", "command-room-opposition"),
             ("recorder", "command-room-recorder"),
             ("project-steward", "command-room-project-steward"),
@@ -551,18 +566,18 @@ class TestRegistryCustomAgentLookup:
         load_subagents_config_from_dict(
             {
                 "custom_agents": {
-                    "capability-governor": {
-                        "description": "Local capability governor",
-                        "system_prompt": "Use local capability governor.",
+                    "fact-finder": {
+                        "description": "Local fact finder",
+                        "system_prompt": "Use local fact finder.",
                         "skills": [],
                     },
                 },
             }
         )
 
-        config = get_subagent_config("capability-governor")
-        assert config.description == "Local capability governor"
-        assert config.system_prompt == "Use local capability governor."
+        config = get_subagent_config("fact-finder")
+        assert config.description == "Local fact finder"
+        assert config.system_prompt == "Use local fact finder."
         assert config.skills == []
 
     def test_custom_agent_with_override(self):

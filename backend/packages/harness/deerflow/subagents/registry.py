@@ -13,6 +13,7 @@ _CUSTOM_OVERRIDABLE_BUILTINS = {
     "planner",
     "boundary",
     "evidence",
+    "fact-finder",
     "opposition",
     "recorder",
     "project-steward",

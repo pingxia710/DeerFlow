@@ -3097,6 +3097,30 @@ export function useThreadStream({
     messages: mergedMessages,
   } as typeof thread;
 
+  const recoveryStatus = hasVisibleStreamErrorRecovery
+    ? ({
+        state: "repairing",
+        runId: streamErrorRecoveryRun?.runId ?? null,
+      } as const)
+    : historyError
+      ? ({
+          state: "failed",
+          reason: getStreamErrorMessage(historyError),
+        } as const)
+      : terminalNotice
+        ? ({
+            state: "terminal",
+            reason:
+              terminalNotice.terminalReason ??
+              terminalNotice.error ??
+              terminalNotice.status,
+          } as const)
+        : streamErrorRecoveryRun === null &&
+            !thread.isLoading &&
+            thread.error === undefined
+          ? null
+          : null;
+
   return {
     thread: mergedThread,
     pendingUsageMessages,
@@ -3106,6 +3130,8 @@ export function useThreadStream({
     isHistoryLoading,
     historyError,
     terminalNotice,
+    recoveryStatus,
+    retryRecovery: loadMoreHistory,
     hasMoreHistory,
     loadMoreHistory,
   } as const;

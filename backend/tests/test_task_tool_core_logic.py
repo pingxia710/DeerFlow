@@ -490,7 +490,7 @@ Planner Raw Judgment:
     assert len(handoff_records) == 2
 
 
-@pytest.mark.parametrize("target_role", ["planner", "boundary", "evidence", "opposition", "chair"])
+@pytest.mark.parametrize("target_role", ["planner", "boundary", "evidence", "fact-finder", "opposition", "chair"])
 def test_task_tool_treats_command_room_target_role_as_advisory_signal_without_redispatch(monkeypatch, target_role):
     runtime = _make_runtime()
     events = []
@@ -509,7 +509,7 @@ def test_task_tool_treats_command_room_target_role_as_advisory_signal_without_re
         result=f"AI Handoff Envelope\nTarget Role: {target_role}\nTask/Question: check redlines\nRecommended Next Decision: NEEDS_MORE\n",
     )
 
-    role_names = ["planner", "boundary", "evidence", "opposition", "recorder"]
+    role_names = ["planner", "boundary", "evidence", "fact-finder", "opposition", "recorder"]
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
     monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda app_config=None: role_names)
@@ -582,6 +582,52 @@ def test_task_tool_smoke_uses_real_command_room_role_registry(monkeypatch):
     ]
     assert [item[3] for item in captured_prompts] == ["tc-real-roles"]
     assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["planner"]
+
+
+def test_task_tool_smoke_uses_real_command_room_fact_finder_registry(monkeypatch):
+    from deerflow.config.subagents_config import load_subagents_config_from_dict
+
+    load_subagents_config_from_dict({})
+    runtime = _make_runtime()
+    events = []
+    captured_prompts = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            self.config = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            captured_prompts.append((self.config.name, self.config.skills, prompt, task_id))
+            return task_id or "generated-task-id"
+
+    result = _make_result(FakeSubagentStatus.COMPLETED, result="done")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=["tool-a"]))
+
+    try:
+        output = _run_task_tool(
+            runtime=runtime,
+            description="find facts",
+            prompt="inspect refs",
+            subagent_type="fact-finder",
+            tool_call_id="tc-fact-finder",
+        )
+    finally:
+        load_subagents_config_from_dict({})
+
+    assert output == "Task Succeeded. Result: done"
+    assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
+        ("fact-finder", ["command-room-fact-finder"]),
+    ]
+    assert [item[3] for item in captured_prompts] == ["tc-fact-finder"]
+    assert [event["subagent_type"] for event in events if event["type"] == "task_started"] == ["fact-finder"]
 
 
 def test_task_tool_smoke_uses_real_command_room_angle_role_registry(monkeypatch):

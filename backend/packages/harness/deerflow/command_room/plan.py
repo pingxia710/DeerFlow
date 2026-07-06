@@ -355,6 +355,60 @@ def update_planned_lane_status(
     return lane
 
 
+def find_planned_lane_by_linked_task_id(
+    *,
+    thread_id: str,
+    user_id: str | None,
+    linked_task_id: str,
+    run_id: str | None = None,
+    round_id: str | None = None,
+    base_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    task_id = _clean_optional(linked_task_id, 128)
+    if task_id is None:
+        return None
+    rows = list_planned_lanes(thread_id=thread_id, user_id=user_id, run_id=run_id, round_id=round_id, status=None, limit=1000, base_dir=base_dir)
+    matches = [row for row in rows if row.get("linked_task_id") == task_id]
+    return matches[-1] if matches else None
+
+
+def update_planned_lane_status_by_linked_task_id(
+    *,
+    thread_id: str,
+    user_id: str | None,
+    run_id: str | None,
+    linked_task_id: str,
+    status: str,
+    round_id: str | None = None,
+    evidence_refs: list[str] | None = None,
+    artifact_refs: list[str] | None = None,
+    output_refs: list[str] | None = None,
+    base_dir: Path | None = None,
+) -> PlannedLane | None:
+    row = find_planned_lane_by_linked_task_id(
+        thread_id=thread_id,
+        user_id=user_id,
+        run_id=run_id,
+        round_id=round_id,
+        linked_task_id=linked_task_id,
+        base_dir=base_dir,
+    )
+    if row is None:
+        return None
+    return update_planned_lane_status(
+        thread_id=thread_id,
+        user_id=user_id,
+        run_id=run_id,
+        lane_id=str(row["lane_id"]),
+        status=status,
+        linked_task_id=linked_task_id,
+        evidence_refs=evidence_refs,
+        artifact_refs=artifact_refs,
+        output_refs=output_refs,
+        base_dir=base_dir,
+    )
+
+
 def compact_round_plans(plans: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
     return [
         {
@@ -419,6 +473,8 @@ __all__ = [
     "list_planned_lanes",
     "list_chair_decisions",
     "update_planned_lane_status",
+    "find_planned_lane_by_linked_task_id",
+    "update_planned_lane_status_by_linked_task_id",
     "compact_round_plans",
     "compact_planned_lanes",
     "compact_chair_decisions",

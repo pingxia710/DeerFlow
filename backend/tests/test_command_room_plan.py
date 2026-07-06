@@ -6,6 +6,7 @@ from deerflow.command_room.plan import (
     build_chair_decision,
     build_planned_lane,
     build_round_plan,
+    find_planned_lane_by_linked_task_id,
     latest_round_plan,
     list_chair_decisions,
     list_planned_lanes,
@@ -14,6 +15,7 @@ from deerflow.command_room.plan import (
     record_planned_lane,
     record_round_plan,
     update_planned_lane_status,
+    update_planned_lane_status_by_linked_task_id,
 )
 
 
@@ -63,6 +65,92 @@ def test_planned_lane_build_record_list_update_status_and_filter_is_advisory(tmp
     completed = list_planned_lanes(thread_id="thread-1", user_id="user-1", run_id="run-1", status="completed", base_dir=tmp_path)
     assert [row["lane_id"] for row in completed] == [lane1.lane_id]
     assert all(row["auto_dispatch"] is False and row["programmatic_decision"] is False for row in rows)
+
+
+def test_update_planned_lane_status_by_linked_task_id_updates_latest_matching_lane(tmp_path) -> None:
+    older = build_planned_lane(
+        thread_id="thread-1",
+        run_id="run-1",
+        round_id="round-1",
+        target_role="Evidence",
+        reason="Older linked lane",
+        linked_task_id="task-1",
+        evidence_refs=["existing-ref"],
+        artifact_refs=["existing-artifact"],
+    )
+    newer = build_planned_lane(
+        thread_id="thread-1",
+        run_id="run-1",
+        round_id="round-1",
+        target_role="Boundary",
+        reason="Newer linked lane",
+        linked_task_id="task-1",
+        output_refs=["existing-output"],
+    )
+    other = build_planned_lane(
+        thread_id="thread-1",
+        run_id="run-1",
+        round_id="round-1",
+        target_role="General",
+        reason="Different linked lane",
+        linked_task_id="task-2",
+    )
+    record_planned_lane(older, user_id="user-1", base_dir=tmp_path)
+    record_planned_lane(newer, user_id="user-1", base_dir=tmp_path)
+    record_planned_lane(other, user_id="user-1", base_dir=tmp_path)
+
+    found = find_planned_lane_by_linked_task_id(thread_id="thread-1", user_id="user-1", run_id="run-1", linked_task_id="task-1", base_dir=tmp_path)
+    assert found is not None
+    assert found["lane_id"] == newer.lane_id
+
+    updated = update_planned_lane_status_by_linked_task_id(
+        thread_id="thread-1",
+        user_id="user-1",
+        run_id="run-1",
+        round_id="round-1",
+        linked_task_id="task-1",
+        status="completed",
+        evidence_refs=["new-ref", "new-ref"],
+        artifact_refs=["new-artifact"],
+        output_refs=["new-output"],
+        base_dir=tmp_path,
+    )
+
+    assert updated is not None
+    assert updated.lane_id == newer.lane_id
+    assert updated.status == "completed"
+    assert updated.linked_task_id == "task-1"
+    assert updated.evidence_refs == ["new-ref"]
+    assert updated.artifact_refs == ["new-artifact"]
+    assert updated.output_refs == ["existing-output", "new-output"]
+    _assert_advisory(updated.as_dict())
+    rows = list_planned_lanes(thread_id="thread-1", user_id="user-1", run_id="run-1", base_dir=tmp_path)
+    assert {row["lane_id"]: row["status"] for row in rows} == {older.lane_id: "planned", newer.lane_id: "completed", other.lane_id: "planned"}
+    assert all(row["auto_dispatch"] is False and row["programmatic_decision"] is False for row in rows)
+
+
+def test_update_planned_lane_status_by_linked_task_id_missing_returns_none_without_creating(tmp_path) -> None:
+    lane = build_planned_lane(thread_id="thread-1", run_id="run-1", target_role="Evidence", reason="Find proof", linked_task_id="task-1")
+    record_planned_lane(lane, user_id="user-1", base_dir=tmp_path)
+
+    updated = update_planned_lane_status_by_linked_task_id(
+        thread_id="thread-1",
+        user_id="user-1",
+        run_id="run-1",
+        linked_task_id="missing-task",
+        status="completed",
+        evidence_refs=["ref-1"],
+        base_dir=tmp_path,
+    )
+
+    assert updated is None
+    assert find_planned_lane_by_linked_task_id(thread_id="thread-1", user_id="user-1", run_id="run-1", linked_task_id="missing-task", base_dir=tmp_path) is None
+    rows = list_planned_lanes(thread_id="thread-1", user_id="user-1", run_id="run-1", base_dir=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["lane_id"] == lane.lane_id
+    assert rows[0]["status"] == "planned"
+    assert rows[0]["evidence_refs"] == []
+    _assert_advisory(rows[0])
 
 
 def test_illegal_planned_lane_status_raises_value_error(tmp_path) -> None:

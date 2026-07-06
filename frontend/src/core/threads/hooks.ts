@@ -90,6 +90,14 @@ type ThreadActivitySnapshot = {
   finished: ReadonlySet<string>;
 };
 
+const PUBLIC_PROVIDER_TRANSIENT_ERROR_MESSAGE =
+  "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation.";
+const PROVIDER_TRANSIENT_ERROR_MARKERS = [
+  "codex api stream ended without response.completed event",
+  "codexstreamincompleteerror",
+  "response.completed",
+];
+
 export type StreamErrorRecoveryRun = {
   threadId: string;
   runId: string;
@@ -787,6 +795,28 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     actionResultStatus: lane.status,
     notify: true,
   };
+  const refs: Record<string, unknown> = {};
+  for (const key of [
+    "result_ref",
+    "evidence_ref",
+    "evidence_refs",
+    "artifact_refs",
+    "output_refs",
+    "handoff",
+  ] as const) {
+    const value = lane[key];
+    if (value !== undefined && value !== null) {
+      refs[key] = value;
+    }
+  }
+  update.metadata = {
+    ...(lane.metadata ?? {}),
+    ...(Object.keys(refs).length > 0 ? { refs } : {}),
+  };
+  update.details = {
+    ...(lane.details ?? {}),
+    ...(Object.keys(refs).length > 0 ? { refs } : {}),
+  };
   if (lane.created_at) {
     update.startedAt = taskEventStartedAt(lane.created_at);
   }
@@ -1185,6 +1215,12 @@ export type TaskLaneSnapshot = {
   status: string;
   result_ref?: string | null;
   evidence_ref?: string | null;
+  evidence_refs?: unknown;
+  artifact_refs?: unknown;
+  output_refs?: unknown;
+  handoff?: unknown;
+  metadata?: Record<string, unknown> | null;
+  details?: Record<string, unknown> | null;
   error?: string | null;
   created_at?: string;
 };
@@ -1207,7 +1243,18 @@ type RuntimeSnapshotRecovery = {
     terminal_reason?: string | null;
     runs?: Array<{ run_id: string; terminal_reason?: string | null }>;
   } | null;
-  snapshot_self_heal?: { repaired?: boolean } | null;
+  snapshot_self_heal?: {
+    repaired?: boolean;
+    round_count?: number;
+    task_lane_count?: number;
+    rounds?: Array<{ run_id: string; round_id: string; state: string }>;
+    task_lanes?: Array<{
+      run_id: string;
+      round_id: string;
+      task_id: string;
+      status: string;
+    }>;
+  } | null;
 };
 
 export type ThreadRunTerminalNotice = {
@@ -1786,6 +1833,18 @@ export function applyStreamErrorRecovery({
   return { threadId, runId };
 }
 
+export function shouldCommitStreamStartFromError({
+  started,
+  threadId,
+  runId,
+}: {
+  started: boolean;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+}) {
+  return !started && Boolean(threadId && runId);
+}
+
 export function isThreadRecoveringFromStreamError(
   recoveryRun: StreamErrorRecoveryRun | null,
   threadId: string | null | undefined,
@@ -2033,27 +2092,38 @@ export function startBackgroundRunProbe({
   backgroundRunProbeTimers.set(key, timer);
 }
 
-function getStreamErrorMessage(error: unknown): string {
+export function getStreamErrorMessage(error: unknown): string {
+  const sanitize = (message: string) =>
+    isProviderTransientErrorMessage(message)
+      ? PUBLIC_PROVIDER_TRANSIENT_ERROR_MESSAGE
+      : message;
   if (typeof error === "string" && error.trim()) {
-    return error;
+    return sanitize(error);
   }
   if (error instanceof Error && error.message.trim()) {
-    return error.message;
+    return sanitize(error.message);
   }
   if (typeof error === "object" && error !== null) {
     const message = Reflect.get(error, "message");
     if (typeof message === "string" && message.trim()) {
-      return message;
+      return sanitize(message);
     }
     const nestedError = Reflect.get(error, "error");
     if (nestedError instanceof Error && nestedError.message.trim()) {
-      return nestedError.message;
+      return sanitize(nestedError.message);
     }
     if (typeof nestedError === "string" && nestedError.trim()) {
-      return nestedError;
+      return sanitize(nestedError);
     }
   }
   return "Request failed.";
+}
+
+function isProviderTransientErrorMessage(message: string) {
+  const lowered = message.toLowerCase();
+  return PROVIDER_TRANSIENT_ERROR_MARKERS.some((marker) =>
+    lowered.includes(marker),
+  );
 }
 
 async function readResponseErrorMessage(
@@ -2469,6 +2539,15 @@ export function useThreadStream({
     onError(error, run) {
       const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
       const streamRunId = run?.run_id ?? streamRunIdRef.current;
+      if (
+        shouldCommitStreamStartFromError({
+          started: startedRef.current,
+          threadId: streamThreadId,
+          runId: streamRunId,
+        })
+      ) {
+        handleStreamStart(streamThreadId!, streamRunId!);
+      }
       const recoveryRun = applyStreamErrorRecovery({
         queryClient,
         threadId: streamThreadId,
@@ -3169,7 +3248,7 @@ function terminalRunPatchForRoundState(state: string):
     }
   | undefined {
   if (state === "closed") {
-    return { status: "success", terminalReason: "success" };
+    return undefined;
   }
   if (state === "blocked") {
     return { status: "error", terminalReason: "blocked" };

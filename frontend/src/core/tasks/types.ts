@@ -14,4 +14,6 @@ export interface Subtask {
   error?: string;
   actionResultStatus?: string;
   terminalReason?: string;
+  metadata?: Record<string, unknown>;
+  details?: Record<string, unknown>;
 }

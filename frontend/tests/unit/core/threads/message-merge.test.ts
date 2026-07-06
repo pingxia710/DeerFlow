@@ -94,7 +94,7 @@ test("threadRuntimeSnapshotQueryKey keeps snapshot cache separate from run lists
   ]);
 });
 
-test("native runtime snapshot rounds settle stale active run metadata", () => {
+test("native runtime snapshot closed round does not imply run success", () => {
   const restored = applyNativeRoundsToSnapshotRuns(
     [
       { run_id: "run-closed", status: "running" },
@@ -124,7 +124,7 @@ test("native runtime snapshot rounds settle stale active run metadata", () => {
   );
 
   expect(restored?.map((run) => run.status)).toEqual([
-    "success",
+    "running",
     "error",
     "interrupted",
   ]);
@@ -173,14 +173,26 @@ test("runtime snapshot applies task lanes only for the latest native round", () 
         round_id: "round-new",
         task_id: "task-new",
         status: "in_progress",
+        evidence_refs: ["ev-1"],
+        artifact_refs: ["art-1"],
+        output_refs: ["out-1"],
+        handoff: { target_role: "evidence" },
       },
     ],
     latestRoundId,
   );
+  const update = taskLaneSubtaskUpdate(lanes[0]!);
 
   expect(latestRoundId).toBe("round-new");
   expect(restored?.[0]?.status).toBe("running");
   expect(lanes.map((lane) => lane.task_id)).toEqual(["task-new"]);
+  expect(update.metadata?.refs).toEqual({
+    evidence_refs: ["ev-1"],
+    artifact_refs: ["art-1"],
+    output_refs: ["out-1"],
+    handoff: { target_role: "evidence" },
+  });
+  expect(update.details?.refs).toEqual(update.metadata?.refs);
 });
 
 test("runtime snapshot recovery telemetry is additive", async () => {
@@ -207,7 +219,20 @@ test("runtime snapshot recovery telemetry is additive", async () => {
             terminal_reason: "worker_lost",
             runs: [{ run_id: "run-1", terminal_reason: "worker_lost" }],
           },
-          snapshot_self_heal: { repaired: true },
+          snapshot_self_heal: {
+            repaired: true,
+            round_count: 1,
+            task_lane_count: 1,
+            rounds: [{ run_id: "run-1", round_id: "round-1", state: "closed" }],
+            task_lanes: [
+              {
+                run_id: "run-1",
+                round_id: "round-1",
+                task_id: "task-1",
+                status: "completed",
+              },
+            ],
+          },
         },
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
@@ -221,7 +246,11 @@ test("runtime snapshot recovery telemetry is additive", async () => {
 
   expect(snapshot.recovery?.stale_inflight?.run_ids).toEqual(["run-1"]);
   expect(snapshot.recovery?.snapshot_self_heal?.repaired).toBe(true);
-  expect(restored?.[0]?.status).toBe("success");
+  expect(snapshot.recovery?.snapshot_self_heal?.round_count).toBe(1);
+  expect(snapshot.recovery?.snapshot_self_heal?.task_lanes?.[0]?.task_id).toBe(
+    "task-1",
+  );
+  expect(restored?.[0]?.status).toBe("running");
 });
 
 test("thread switching gates live state, history, and queued messages by visible thread", () => {

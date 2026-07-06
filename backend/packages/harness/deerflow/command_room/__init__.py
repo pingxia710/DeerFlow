@@ -16,6 +16,36 @@ from .account_ledger import (
 from .action_result_adapter import action_result_from_value
 from .brief import ChairOperatingBrief, build_chair_operating_brief, format_chair_operating_brief_for_model
 from .handoff import HandoffEnvelope, handoff_envelope_from_packet, handoff_envelope_to_audit_dict
+from .pending_handoff import (
+    PENDING_HANDOFF_STATUSES,
+    PendingHandoff,
+    build_pending_handoff,
+    compact_pending_handoffs,
+    list_pending_handoffs,
+    pending_handoff_from_dict,
+    record_pending_handoff,
+    resolve_pending_handoff,
+)
+from .plan import (
+    LANE_STATUSES,
+    ChairDecision,
+    PlannedLane,
+    RoundPlan,
+    build_chair_decision,
+    build_planned_lane,
+    build_round_plan,
+    compact_chair_decisions,
+    compact_planned_lanes,
+    compact_round_plans,
+    latest_round_plan,
+    list_chair_decisions,
+    list_planned_lanes,
+    list_round_plans,
+    record_chair_decision,
+    record_planned_lane,
+    record_round_plan,
+    update_planned_lane_status,
+)
 from .quality import QualitySignal, build_quality_signal, compact_quality_signals, list_quality_signals, record_quality_signal
 from .review import (
     REVIEWER_ROLES,
@@ -27,6 +57,7 @@ from .review import (
     record_review_invocation,
     review_invocation_from_dict,
 )
+from .role_state import RoleState, build_role_state, compact_role_states, list_role_states, record_role_state, role_state_from_dict
 from .round import ActionResult, NextRound, Round, RoundAction, RoundItemStatus, summarize_round
 from .round_context import (
     RoundContextSignals,
@@ -75,6 +106,24 @@ __all__ = [
     "extract_verdict",
     "latest_command_room_round",
     "record_command_room_round",
+    "LANE_STATUSES",
+    "ChairDecision",
+    "PlannedLane",
+    "RoundPlan",
+    "build_chair_decision",
+    "build_planned_lane",
+    "build_round_plan",
+    "compact_chair_decisions",
+    "compact_planned_lanes",
+    "compact_round_plans",
+    "latest_round_plan",
+    "list_chair_decisions",
+    "list_planned_lanes",
+    "list_round_plans",
+    "record_chair_decision",
+    "record_planned_lane",
+    "record_round_plan",
+    "update_planned_lane_status",
     "QualitySignal",
     "build_quality_signal",
     "compact_quality_signals",
@@ -91,4 +140,18 @@ __all__ = [
     "HandoffEnvelope",
     "handoff_envelope_from_packet",
     "handoff_envelope_to_audit_dict",
+    "PENDING_HANDOFF_STATUSES",
+    "PendingHandoff",
+    "build_pending_handoff",
+    "compact_pending_handoffs",
+    "list_pending_handoffs",
+    "pending_handoff_from_dict",
+    "record_pending_handoff",
+    "resolve_pending_handoff",
+    "RoleState",
+    "build_role_state",
+    "compact_role_states",
+    "list_role_states",
+    "record_role_state",
+    "role_state_from_dict",
 ]

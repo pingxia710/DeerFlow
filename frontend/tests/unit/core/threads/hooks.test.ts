@@ -1236,7 +1236,11 @@ test("run terminal settles task card after started and running events without ta
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   let tasks: Record<string, Subtask> = {};
   const update = (task: SubtaskUpdate) => {
-    const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+    const storageKey = getSubtaskStorageKey({
+      id: task.id,
+      threadId: task.threadId,
+      runId: task.runId,
+    });
     tasks = {
       ...tasks,
       [storageKey]: mergeSubtaskUpdate(tasks[storageKey], task),
@@ -1248,7 +1252,11 @@ test("run terminal settles task card after started and running events without ta
     thread_id: "thread-1",
     run_id: "run-1",
   };
-  const storageKey = getSubtaskStorageKey("task-terminal", "thread-1");
+  const storageKey = getSubtaskStorageKey({
+    id: "task-terminal",
+    threadId: "thread-1",
+    runId: "run-1",
+  });
 
   expect(
     applyTaskEventToSubtask(
@@ -1289,6 +1297,76 @@ test("run terminal settles task card after started and running events without ta
     status: "failed",
     actionResultStatus: "timeout",
     terminalReason: "timeout",
+  });
+});
+
+test("late task events update only their own run-scoped subtask", async () => {
+  const { getSubtaskStorageKey, mergeSubtaskUpdate } =
+    await import("@/core/tasks/context");
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  let tasks: Record<string, Subtask> = {};
+  const update = (task: SubtaskUpdate) => {
+    const storageKey = getSubtaskStorageKey({
+      id: task.id,
+      threadId: task.threadId,
+      runId: task.runId,
+    });
+    tasks = {
+      ...tasks,
+      [storageKey]: mergeSubtaskUpdate(tasks[storageKey], task),
+    };
+  };
+  const runAKey = getSubtaskStorageKey({
+    id: "shared-task",
+    threadId: "thread-1",
+    runId: "run-a",
+  });
+  const runBKey = getSubtaskStorageKey({
+    id: "shared-task",
+    threadId: "thread-1",
+    runId: "run-b",
+  });
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "shared-task",
+        thread_id: "thread-1",
+        run_id: "run-b",
+        status: "in_progress",
+        description: "run B task",
+        subagent_type: "executor",
+        prompt: "work B",
+      },
+      update,
+    ),
+  ).toBe(true);
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "shared-task",
+        thread_id: "thread-1",
+        run_id: "run-a",
+        status: "completed",
+        result_preview: "run A done",
+      },
+      update,
+    ),
+  ).toBe(true);
+
+  expect(tasks[runAKey]).toMatchObject({
+    runId: "run-a",
+    status: "completed",
+    result: "run A done",
+  });
+  expect(tasks[runBKey]).toMatchObject({
+    runId: "run-b",
+    status: "in_progress",
+    description: "run B task",
   });
 });
 

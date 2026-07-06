@@ -805,6 +805,7 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     id: lane.task_id,
     threadId: lane.thread_id,
     runId: lane.run_id,
+    ...(lane.round_id ? { roundId: lane.round_id } : {}),
     status,
     subagent_type: lane.role ?? "task",
     description,

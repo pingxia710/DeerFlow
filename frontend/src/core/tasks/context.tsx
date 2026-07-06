@@ -28,11 +28,70 @@ export type RunTerminalSubtaskUpdate = {
   terminalReason?: string;
 };
 
-export function getSubtaskStorageKey(id: string, threadId?: string | null) {
+export type SubtaskStorageKeyInput = {
+  id: string;
+  threadId?: string | null;
+  runId?: string | null;
+  roundId?: string | null;
+};
+
+export function getLegacySubtaskStorageKey(
+  id: string,
+  threadId?: string | null,
+) {
   if (!threadId) {
     return id;
   }
   return JSON.stringify([threadId, id]);
+}
+
+function normalizeSubtaskStorageKeyInput(
+  input: SubtaskStorageKeyInput | string,
+  threadId?: string | null,
+): SubtaskStorageKeyInput {
+  return typeof input === "string" ? { id: input, threadId } : input;
+}
+
+export function getSubtaskStorageKey(input: SubtaskStorageKeyInput): string;
+export function getSubtaskStorageKey(
+  id: string,
+  threadId?: string | null,
+): string;
+export function getSubtaskStorageKey(
+  input: SubtaskStorageKeyInput | string,
+  threadId?: string | null,
+) {
+  const keyInput = normalizeSubtaskStorageKeyInput(input, threadId);
+  if (!keyInput.threadId || !keyInput.runId) {
+    return getLegacySubtaskStorageKey(keyInput.id, keyInput.threadId);
+  }
+  return JSON.stringify([
+    "subtask",
+    keyInput.threadId,
+    keyInput.runId,
+    keyInput.id,
+  ]);
+}
+
+function getSubtaskLookupKeys(input: SubtaskStorageKeyInput): string[] {
+  const storageKey = getSubtaskStorageKey(input);
+  const legacyKey = getLegacySubtaskStorageKey(input.id, input.threadId);
+  return storageKey === legacyKey ? [storageKey] : [storageKey, legacyKey];
+}
+
+function subtaskStorageKeyThreadId(storageKey: string) {
+  try {
+    const parts = JSON.parse(storageKey) as unknown;
+    if (!Array.isArray(parts)) {
+      return undefined;
+    }
+    if (parts[0] === "subtask") {
+      return typeof parts[1] === "string" ? parts[1] : undefined;
+    }
+    return typeof parts[0] === "string" ? parts[0] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
@@ -61,9 +120,24 @@ export function useSubtaskContext() {
   return context;
 }
 
-export function useSubtask(id: string, threadId?: string | null) {
+export function useSubtask(input: SubtaskStorageKeyInput): Subtask | undefined;
+export function useSubtask(
+  id: string,
+  threadId?: string | null,
+): Subtask | undefined;
+export function useSubtask(
+  input: SubtaskStorageKeyInput | string,
+  threadId?: string | null,
+) {
   const { tasks } = useSubtaskContext();
-  return tasks[getSubtaskStorageKey(id, threadId)];
+  const keyInput = normalizeSubtaskStorageKeyInput(input, threadId);
+  for (const storageKey of getSubtaskLookupKeys(keyInput)) {
+    const task = tasks[storageKey];
+    if (task) {
+      return task;
+    }
+  }
+  return undefined;
 }
 
 export function mergeSubtaskUpdate(
@@ -72,9 +146,11 @@ export function mergeSubtaskUpdate(
   now?: number,
 ) {
   const previousStatus = previous?.status;
-  const { threadId } = task;
+  const { roundId, runId, threadId } = task;
   const taskPatch = { ...task };
   delete taskPatch.threadId;
+  delete taskPatch.runId;
+  delete taskPatch.roundId;
   delete taskPatch.notify;
   // Completed and task-event terminal failures are definitive. Older UI code
   // also inferred failed from the parent turn ending; allow later running
@@ -87,6 +163,8 @@ export function mergeSubtaskUpdate(
     ...previous,
     ...taskPatch,
     ...(threadId ? { threadId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(roundId ? { roundId } : {}),
     ...(task.status === "in_progress" && previousStatus !== "completed"
       ? { error: undefined, result: undefined }
       : {}),
@@ -175,7 +253,10 @@ export function clearSubtasksForThreadInState(
   let changed = false;
   const nextTasks: Record<string, Subtask> = {};
   for (const [storageKey, task] of Object.entries(tasks)) {
-    if (task.threadId === threadId) {
+    if (
+      task.threadId === threadId ||
+      subtaskStorageKeyThreadId(storageKey) === threadId
+    ) {
       changed = true;
       continue;
     }
@@ -218,7 +299,12 @@ export function useUpdateSubtask() {
     (task: SubtaskUpdate) => {
       if (task.notify || task.latestMessage) {
         setTasks((currentTasks) => {
-          const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+          const storageKey = getSubtaskStorageKey({
+            id: task.id,
+            threadId: task.threadId,
+            runId: task.runId,
+            roundId: task.roundId,
+          });
           const previous = currentTasks[storageKey];
           const next = mergeSubtaskUpdate(previous, task);
 
@@ -231,7 +317,12 @@ export function useUpdateSubtask() {
         return;
       }
 
-      const storageKey = getSubtaskStorageKey(task.id, task.threadId);
+      const storageKey = getSubtaskStorageKey({
+        id: task.id,
+        threadId: task.threadId,
+        runId: task.runId,
+        roundId: task.roundId,
+      });
       const previous = tasks[storageKey];
       const next = mergeSubtaskUpdate(previous, task);
 

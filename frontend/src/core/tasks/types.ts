@@ -4,6 +4,7 @@ export interface Subtask {
   id: string;
   threadId?: string;
   runId?: string;
+  roundId?: string;
   status: "in_progress" | "completed" | "failed";
   startedAt?: number;
   subagent_type: string;

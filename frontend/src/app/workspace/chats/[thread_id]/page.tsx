@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -28,13 +28,15 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import type { AgentThreadState } from "@/core/threads";
 import {
   getThreadHistoryLoadErrorKind,
+  type ThreadStreamFinishMeta,
   useThreadContextUsage,
   useThreadMetadata,
-  useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
+import { useThreadRuntime } from "@/core/threads/runtime";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -95,6 +97,71 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
 
+  const threadRuntime = useMemo(
+    () => ({
+      runtimeKey: threadId,
+      threadId: isNewThread ? undefined : threadId,
+      displayThreadId: threadId,
+      context: settings.context,
+      isMock,
+      // onSend only animates the UI; do NOT flip `isNewThread` here — the
+      // LangGraph SDK eagerly fetches /history the moment it receives a
+      // thread id and assumes the thread exists on the backend (issue #2746).
+      onSend: (sentThreadId: string) => {
+        pendingStartThreadIdRef.current = sentThreadId;
+        setIsWelcomeMode(false);
+      },
+      onStart: (createdThreadId: string) => {
+        const pendingThreadId = pendingStartThreadIdRef.current;
+        const visibleThreadId = visibleThreadIdRef.current;
+        const currentPathname = window.location.pathname;
+        const streamStillOwnsVisibleChat =
+          visibleThreadId === createdThreadId ||
+          (pendingThreadId !== null &&
+            visibleThreadId === pendingThreadId &&
+            currentPathname.endsWith("/new"));
+        if (!streamStillOwnsVisibleChat) {
+          return;
+        }
+        pendingStartThreadIdRef.current = null;
+        // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
+        history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
+        setThreadId(createdThreadId);
+        setIsNewThread(false);
+      },
+      onFinish: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => {
+        // Finish side effects are scoped to the visible chat; background thread
+        // completion should not rewrite the current chat UI or notification text.
+        if (meta.threadId !== visibleThreadIdRef.current) {
+          return;
+        }
+        if (document.hidden || !document.hasFocus()) {
+          let body = "Conversation finished";
+          const lastMessage = state.messages.at(-1);
+          if (lastMessage) {
+            const textContent = textOfMessage(lastMessage);
+            if (textContent) {
+              body =
+                textContent.length > 200
+                  ? textContent.substring(0, 200) + "..."
+                  : textContent;
+            }
+          }
+          showNotification(state.title, { body });
+        }
+      },
+    }),
+    [
+      isMock,
+      isNewThread,
+      setIsNewThread,
+      setThreadId,
+      settings.context,
+      showNotification,
+      threadId,
+    ],
+  );
+
   const {
     thread,
     pendingUsageMessages,
@@ -108,58 +175,7 @@ export default function ChatPage() {
     retryRecovery,
     hasMoreHistory,
     loadMoreHistory,
-  } = useThreadStream({
-    threadId: isNewThread ? undefined : threadId,
-    displayThreadId: threadId,
-    context: settings.context,
-    isMock,
-    // onSend only animates the UI; do NOT flip `isNewThread` here — the
-    // LangGraph SDK eagerly fetches /history the moment it receives a
-    // thread id and assumes the thread exists on the backend (issue #2746).
-    onSend: (sentThreadId) => {
-      pendingStartThreadIdRef.current = sentThreadId;
-      setIsWelcomeMode(false);
-    },
-    onStart: (createdThreadId) => {
-      const pendingThreadId = pendingStartThreadIdRef.current;
-      const visibleThreadId = visibleThreadIdRef.current;
-      const currentPathname = window.location.pathname;
-      const streamStillOwnsVisibleChat =
-        visibleThreadId === createdThreadId ||
-        (pendingThreadId !== null &&
-          visibleThreadId === pendingThreadId &&
-          currentPathname.endsWith("/new"));
-      if (!streamStillOwnsVisibleChat) {
-        return;
-      }
-      pendingStartThreadIdRef.current = null;
-      // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
-      setThreadId(createdThreadId);
-      setIsNewThread(false);
-    },
-    onFinish: (state, meta) => {
-      // Finish side effects are scoped to the visible chat; background thread
-      // completion should not rewrite the current chat UI or notification text.
-      if (meta.threadId !== visibleThreadIdRef.current) {
-        return;
-      }
-      if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
-        const lastMessage = state.messages.at(-1);
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
-      }
-    },
-  });
+  } = useThreadRuntime(threadRuntime);
 
   useEffect(() => {
     setIsWelcomeMode(

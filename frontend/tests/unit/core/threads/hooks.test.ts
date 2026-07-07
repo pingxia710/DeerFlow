@@ -132,6 +132,84 @@ test("resolveAssistantId falls back to the default lead agent", async () => {
   expect(resolveAssistantId(undefined)).toBe("lead_agent");
 });
 
+test("createOptimisticMessageId uses randomUUID when available", async () => {
+  const randomUUID = rs.fn(() => "uuid-1");
+  rs.stubGlobal("crypto", { randomUUID });
+  const { createOptimisticMessageId } = await import("@/core/threads/hooks");
+
+  expect(createOptimisticMessageId("opt-human")).toBe("opt-human-uuid-1");
+  expect(randomUUID).toHaveBeenCalledTimes(1);
+});
+
+test("isSameSendRequest requires matching request and thread ownership", async () => {
+  const { isSameSendRequest } = await import("@/core/threads/hooks");
+  const request = { requestId: "send-1", threadId: "thread-a" };
+
+  expect(isSameSendRequest(request, request)).toBe(true);
+  expect(
+    isSameSendRequest({ requestId: "send-2", threadId: "thread-a" }, request),
+  ).toBe(false);
+  expect(
+    isSameSendRequest({ requestId: "send-1", threadId: "thread-b" }, request),
+  ).toBe(false);
+  expect(isSameSendRequest(null, request)).toBe(false);
+});
+
+test("async send ownership rejects stale upload and regenerate continuations after a thread switch", async () => {
+  const { isSameSendRequest } = await import("@/core/threads/hooks");
+  const uploadRequest = { requestId: "send-upload", threadId: "thread-a" };
+  const regenerateRequest = { requestId: "regen-1", threadId: "thread-a" };
+
+  expect(isSameSendRequest(null, uploadRequest)).toBe(false);
+  expect(
+    isSameSendRequest(
+      { requestId: "send-upload", threadId: "thread-b" },
+      uploadRequest,
+    ),
+  ).toBe(false);
+  expect(
+    isSameSendRequest(
+      { requestId: "regen-1", threadId: "thread-b" },
+      regenerateRequest,
+    ),
+  ).toBe(false);
+});
+
+test("getScopedToolEndEvent attaches stream thread and run ownership", async () => {
+  const { getScopedToolEndEvent } = await import("@/core/threads/hooks");
+
+  expect(
+    getScopedToolEndEvent(
+      { name: "setup_agent", data: { ok: true } },
+      "thread-a",
+      "run-a",
+    ),
+  ).toEqual({
+    name: "setup_agent",
+    data: { ok: true },
+    threadId: "thread-a",
+    runId: "run-a",
+  });
+  expect(
+    getScopedToolEndEvent({ name: "setup_agent" }, "thread-a", null),
+  ).toBeNull();
+});
+
+test("isSameStreamErrorRecoveryRun requires matching thread and run ownership", async () => {
+  const { isSameStreamErrorRecoveryRun } = await import("@/core/threads/hooks");
+  const recovery = { threadId: "thread-a", runId: "run-a" };
+
+  expect(isSameStreamErrorRecoveryRun(recovery, "thread-a", "run-a")).toBe(
+    true,
+  );
+  expect(isSameStreamErrorRecoveryRun(recovery, "thread-b", "run-a")).toBe(
+    false,
+  );
+  expect(isSameStreamErrorRecoveryRun(recovery, "thread-a", "run-b")).toBe(
+    false,
+  );
+});
+
 test("buildThreadRunContext forces command-room into ultra subagent mode", async () => {
   const { buildThreadRunContext } = await import("@/core/threads/hooks");
 
@@ -232,6 +310,84 @@ test("shouldShowThreadHistory hides history from another visible thread", async 
 
   expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
   expect(shouldShowThreadHistory("thread-b", "thread-b")).toBe(true);
+});
+
+test("getThreadMessagesWithLiveSnapshot keeps completed live messages over stale history", async () => {
+  const { getThreadMessagesWithLiveSnapshot } =
+    await import("@/core/threads/hooks");
+  const staleHistory = [
+    {
+      id: "old-human",
+      type: "human",
+      content: [{ type: "text", text: "previous prompt" }],
+    },
+    {
+      id: "old-ai",
+      type: "ai",
+      content: "previous answer",
+    },
+  ] as Message[];
+  const liveTurn = [
+    {
+      id: "new-human",
+      type: "human",
+      content: [{ type: "text", text: "fresh prompt" }],
+    },
+    {
+      id: "new-ai",
+      type: "ai",
+      content: "fresh answer",
+    },
+  ] as Message[];
+
+  expect(
+    getThreadMessagesWithLiveSnapshot({
+      viewThreadId: "thread-a",
+      threadMessages: staleHistory,
+      liveSnapshot: {
+        threadId: "thread-a",
+        runId: "run-a",
+        messages: liveTurn,
+      },
+      pendingSupersededMessageIds: new Set(),
+    }).map((message) => message.content),
+  ).toEqual([
+    [{ type: "text", text: "previous prompt" }],
+    "previous answer",
+    [{ type: "text", text: "fresh prompt" }],
+    "fresh answer",
+  ]);
+});
+
+test("getThreadMessagesWithLiveSnapshot ignores snapshots from another thread", async () => {
+  const { getThreadMessagesWithLiveSnapshot } =
+    await import("@/core/threads/hooks");
+  const currentMessages = [
+    {
+      id: "current-ai",
+      type: "ai",
+      content: "current thread answer",
+    },
+  ] as Message[];
+
+  expect(
+    getThreadMessagesWithLiveSnapshot({
+      viewThreadId: "thread-b",
+      threadMessages: currentMessages,
+      liveSnapshot: {
+        threadId: "thread-a",
+        runId: "run-a",
+        messages: [
+          {
+            id: "other-ai",
+            type: "ai",
+            content: "other thread answer",
+          },
+        ] as Message[],
+      },
+      pendingSupersededMessageIds: new Set(),
+    }),
+  ).toEqual(currentMessages);
 });
 
 test("run status helpers classify terminal and inflight statuses", async () => {
@@ -492,8 +648,8 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
     await import("@/core/threads/hooks");
 
   const base = {
-    isLoading: false,
     sendInFlight: false,
+    recovering: false,
     queuedThreadId: "thread-a",
     currentViewThreadId: "thread-a",
   };
@@ -501,12 +657,22 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
   expect(
     shouldReleaseQueuedThreadMessage({ ...base, streamFinished: false }),
   ).toBe(false);
+  // Timeout streams can settle through run.terminal/onFinish before the SDK's
+  // loading snapshot catches up. Owned terminal settlement is enough to release
+  // the queued follow-up for the same thread.
   expect(
-    shouldReleaseQueuedThreadMessage({ ...base, streamFinished: true }),
+    shouldReleaseQueuedThreadMessage({
+      ...base,
+      streamFinished: true,
+    }),
   ).toBe(true);
-  // Timeout streams arrive as run.terminal -> error -> end. Once end makes
-  // loading false, the queued follow-up may release only for the same visible
-  // thread.
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      ...base,
+      recovering: true,
+      streamFinished: true,
+    }),
+  ).toBe(false);
   expect(
     shouldReleaseQueuedThreadMessage({
       ...base,
@@ -514,6 +680,98 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
       currentViewThreadId: "thread-b",
     }),
   ).toBe(false);
+});
+
+test("shouldQueueThreadMessage queues during the pre-loading send window", async () => {
+  const { shouldQueueThreadMessage } = await import("@/core/threads/hooks");
+
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: false,
+      streamFinished: false,
+      recovering: false,
+      sendInFlight: true,
+    }),
+  ).toBe(true);
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: true,
+      streamFinished: false,
+      recovering: false,
+      sendInFlight: false,
+    }),
+  ).toBe(true);
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: false,
+      streamFinished: false,
+      recovering: true,
+      sendInFlight: false,
+    }),
+  ).toBe(true);
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: false,
+      streamFinished: false,
+      recovering: false,
+      sendInFlight: false,
+    }),
+  ).toBe(false);
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: true,
+      streamFinished: true,
+      recovering: false,
+      sendInFlight: false,
+    }),
+  ).toBe(false);
+});
+
+test("queued follow-up release ignores stream recovery owned by another thread", async () => {
+  const {
+    isThreadRecoveringFromStreamError,
+    shouldReleaseQueuedThreadMessage,
+  } = await import("@/core/threads/hooks");
+  const recovery = { threadId: "thread-a", runId: "run-a" };
+
+  expect(isThreadRecoveringFromStreamError(recovery, "thread-b")).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: isThreadRecoveringFromStreamError(recovery, "thread-b"),
+      queuedThreadId: "thread-b",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(true);
+});
+
+test("queued follow-up release requires the owning runtime when owner ids are present", async () => {
+  const { shouldReleaseQueuedThreadMessage } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "slot-a",
+      currentOwnerId: "slot-b",
+      queuedThreadId: "thread-b",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "slot-a",
+      currentOwnerId: "slot-a",
+      queuedThreadId: "old-display-id",
+      currentViewThreadId: "created-thread-id",
+    }),
+  ).toBe(true);
 });
 
 test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned stream run", async () => {
@@ -550,7 +808,6 @@ test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned 
 
   expect(
     shouldReleaseQueuedThreadMessage({
-      isLoading: false,
       streamFinished: shouldTreatTerminalEventAsCurrentStream(
         terminalEvent.thread_id,
         terminalEvent.run_id,
@@ -558,13 +815,13 @@ test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned 
         "run-a",
       ),
       sendInFlight: false,
+      recovering: false,
       queuedThreadId: "thread-a",
       currentViewThreadId: "thread-a",
     }),
   ).toBe(true);
   expect(
     shouldReleaseQueuedThreadMessage({
-      isLoading: false,
       streamFinished: shouldTreatTerminalEventAsCurrentStream(
         terminalEvent.thread_id,
         terminalEvent.run_id,
@@ -572,9 +829,48 @@ test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned 
         "run-a",
       ),
       sendInFlight: false,
+      recovering: false,
       queuedThreadId: "thread-a",
       currentViewThreadId: "thread-a",
     }),
+  ).toBe(false);
+});
+
+test("shouldTreatStreamFinishAsCurrentStream accepts same-thread finish without run metadata", async () => {
+  const { shouldTreatStreamFinishAsCurrentStream } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    shouldTreatStreamFinishAsCurrentStream(
+      "thread-a",
+      null,
+      "thread-a",
+      "run-a",
+    ),
+  ).toBe(true);
+  expect(
+    shouldTreatStreamFinishAsCurrentStream(
+      "thread-a",
+      "run-a",
+      "thread-a",
+      "run-a",
+    ),
+  ).toBe(true);
+  expect(
+    shouldTreatStreamFinishAsCurrentStream(
+      "thread-a",
+      null,
+      "thread-b",
+      "run-a",
+    ),
+  ).toBe(false);
+  expect(
+    shouldTreatStreamFinishAsCurrentStream(
+      "thread-a",
+      "run-a",
+      "thread-a",
+      "run-b",
+    ),
   ).toBe(false);
 });
 
@@ -598,48 +894,6 @@ test("shouldShowStreamErrorToast keeps ordinary stream error toast when recovery
   const { shouldShowStreamErrorToast } = await import("@/core/threads/hooks");
 
   expect(shouldShowStreamErrorToast(null)).toBe(true);
-});
-
-test("keepQueuedMessagesForThread intentionally drops queued sends from other chats on view switch", async () => {
-  const { keepQueuedMessagesForThread } = await import("@/core/threads/hooks");
-
-  expect(
-    keepQueuedMessagesForThread(
-      [
-        { threadId: "thread-a", text: "from a" },
-        { threadId: "thread-b", text: "from b" },
-      ],
-      "thread-b",
-    ),
-  ).toEqual([{ threadId: "thread-b", text: "from b" }]);
-  expect(keepQueuedMessagesForThread([{ threadId: "thread-a" }], null)).toEqual(
-    [],
-  );
-});
-
-test("getQueuedMessagesForVisibleThreadWithDropCount reports hidden-thread queue drops", async () => {
-  const { getQueuedMessagesForVisibleThreadWithDropCount } =
-    await import("@/core/threads/hooks");
-
-  expect(
-    getQueuedMessagesForVisibleThreadWithDropCount(
-      [
-        { threadId: "thread-a", text: "from a" },
-        { threadId: "thread-b", text: "from b" },
-        { threadId: "thread-c", text: "from c" },
-      ],
-      "thread-b",
-    ),
-  ).toEqual({
-    messages: [{ threadId: "thread-b", text: "from b" }],
-    dropCount: 2,
-  });
-  expect(
-    getQueuedMessagesForVisibleThreadWithDropCount(
-      [{ threadId: "thread-a", text: "from a" }],
-      null,
-    ),
-  ).toEqual({ messages: [], dropCount: 1 });
 });
 
 test("readRunMessagesPageResponse preserves HTTP status on history load errors", async () => {
@@ -710,8 +964,9 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   client.setQueryData(["artifact", "report.md", otherThreadId, false], {
     content: "other",
   });
+  const clearSubtasksForThread = rs.fn();
 
-  clearDeletedThreadClientState(client, threadId);
+  clearDeletedThreadClientState(client, threadId, { clearSubtasksForThread });
 
   expect(client.getQueryData(["threads", "search"])).toEqual(["global-search"]);
   expect(client.getQueryData(threadRunsQueryKey(threadId))).toBeUndefined();
@@ -754,6 +1009,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   expect(getManualThreadTitleLock(threadId)).toBeUndefined();
   expect(storage.getItem(`${THREAD_MODEL_KEY_PREFIX}${threadId}`)).toBeNull();
   expect(getThreadModelSnapshot(threadId)).toBeUndefined();
+  expect(clearSubtasksForThread).toHaveBeenCalledWith(threadId);
 });
 
 test("stopBackgroundRunProbesForThread clears same-thread probes only", async () => {

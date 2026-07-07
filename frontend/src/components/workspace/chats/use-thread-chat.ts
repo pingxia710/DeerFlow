@@ -8,7 +8,7 @@ import { uuid } from "@/core/utils/uuid";
 export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
 
 type ThreadChatResetDetail = {
-  deletedThreadId: string;
+  deletedThreadId?: string;
   nextPath: string;
   force?: boolean;
 };
@@ -76,6 +76,10 @@ export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
       detail,
     }),
   );
+}
+
+export function resetThreadChatToNew(nextPath: string) {
+  resetThreadChatAfterDelete({ nextPath, force: true });
 }
 
 export function useThreadChat() {
@@ -173,6 +177,7 @@ export function useThreadChat() {
     setThreadId,
     isNewThread: isNewPath ? true : isNewThreadState,
     setIsNewThread,
+    resetToNewThread,
     isMock,
   };
 }

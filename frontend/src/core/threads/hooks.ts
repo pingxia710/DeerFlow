@@ -42,6 +42,7 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadContextUsage, fetchThreadTokenUsage } from "./api";
+import { notifyThreadRuntimeDeleted } from "./runtime-events";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -63,6 +64,8 @@ import type {
 export type ToolEndEvent = {
   name: string;
   data: unknown;
+  threadId: string;
+  runId: string;
 };
 
 export type ThreadStreamFinishMeta = {
@@ -73,6 +76,7 @@ export type ThreadStreamFinishMeta = {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  runtimeOwnerId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
@@ -86,10 +90,16 @@ type SendMessageOptions = {
 };
 
 type QueuedThreadMessage = {
+  ownerId: string;
   threadId: string;
   message: PromptInputMessage;
   extraContext?: Record<string, unknown>;
   options?: SendMessageOptions;
+};
+
+type SendRequestOwnership = {
+  requestId: string;
+  threadId: string;
 };
 
 type ThreadActivitySnapshot = {
@@ -137,11 +147,19 @@ const backgroundRunProbeTimers = new Map<string, number>();
 const backgroundRunProbeAttempts = new Map<string, number>();
 
 type QueuedMessageReleaseState = {
-  isLoading: boolean;
   streamFinished: boolean;
   sendInFlight: boolean;
+  recovering: boolean;
+  queuedOwnerId?: string | null;
+  currentOwnerId?: string | null;
   queuedThreadId?: string | null;
   currentViewThreadId?: string | null;
+};
+type QueuedMessageAdmissionState = {
+  isLoading: boolean;
+  streamFinished: boolean;
+  recovering: boolean;
+  sendInFlight: boolean;
 };
 
 const threadActivityListeners = new Set<() => void>();
@@ -223,39 +241,63 @@ export function shouldShowThreadRunningStatus(
 }
 
 export function shouldReleaseQueuedThreadMessage({
-  isLoading,
   streamFinished,
   sendInFlight,
+  recovering,
+  queuedOwnerId,
+  currentOwnerId,
   queuedThreadId,
   currentViewThreadId,
 }: QueuedMessageReleaseState) {
+  const hasOwner = Boolean(queuedOwnerId && currentOwnerId);
+  const ownedByCurrentRuntime = hasOwner
+    ? queuedOwnerId === currentOwnerId
+    : Boolean(
+        queuedThreadId &&
+        currentViewThreadId &&
+        queuedThreadId === currentViewThreadId,
+      );
   return (
-    !isLoading &&
-    streamFinished &&
-    !sendInFlight &&
-    Boolean(queuedThreadId) &&
-    Boolean(currentViewThreadId) &&
-    queuedThreadId === currentViewThreadId
+    streamFinished && !sendInFlight && !recovering && ownedByCurrentRuntime
   );
 }
 
-export function keepQueuedMessagesForThread<T extends { threadId: string }>(
-  messages: T[],
-  threadId: string | null | undefined,
-): T[] {
-  if (!threadId) {
-    return [];
-  }
-  return messages.filter((message) => message.threadId === threadId);
+export function shouldQueueThreadMessage({
+  isLoading,
+  streamFinished,
+  recovering,
+  sendInFlight,
+}: QueuedMessageAdmissionState) {
+  return (isLoading && !streamFinished) || recovering || sendInFlight;
 }
 
-export function getQueuedMessagesForVisibleThreadWithDropCount<
-  T extends { threadId: string },
->(messages: T[], threadId: string | null | undefined) {
-  const next = keepQueuedMessagesForThread(messages, threadId);
+export function createOptimisticMessageId(prefix: string) {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+export function isSameSendRequest(
+  current: SendRequestOwnership | null,
+  request: SendRequestOwnership,
+) {
+  return (
+    current?.threadId === request.threadId &&
+    current.requestId === request.requestId
+  );
+}
+
+export function getScopedToolEndEvent(
+  event: { name?: unknown; data?: unknown },
+  threadId: string | null | undefined,
+  runId: string | null | undefined,
+): ToolEndEvent | null {
+  if (typeof event.name !== "string" || !threadId || !runId) {
+    return null;
+  }
   return {
-    messages: next,
-    dropCount: messages.length - next.length,
+    name: event.name,
+    data: event.data,
+    threadId,
+    runId,
   };
 }
 
@@ -374,6 +416,18 @@ function runScopedBaseMessageIdentity(message: Message): string | undefined {
   const identity = baseMessageIdentity(message);
   const runId = messageRunId(message);
   return identity && runId ? `${runId}:${identity}` : undefined;
+}
+
+function liveOverlapMessageIdentities(
+  message: Message,
+  includeBaseIdentity: boolean,
+): string[] {
+  const runScopedIdentity = runScopedBaseMessageIdentity(message);
+  const baseIdentity = baseMessageIdentity(message);
+  return [
+    runScopedIdentity,
+    includeBaseIdentity ? baseIdentity : undefined,
+  ].filter(isNonEmptyString);
 }
 
 function messageIdentity(message: Message): string | undefined {
@@ -647,6 +701,71 @@ export function shouldShowThreadHistory(
   return Boolean(viewThreadId) && historyThreadId === viewThreadId;
 }
 
+type LiveMessagesSnapshot = {
+  threadId: string;
+  runId: string | null;
+  messages: Message[];
+};
+
+export function getThreadMessagesWithLiveSnapshot({
+  viewThreadId,
+  threadMessages,
+  liveSnapshot,
+  pendingSupersededMessageIds,
+}: {
+  viewThreadId: string | null;
+  threadMessages: Message[];
+  liveSnapshot: LiveMessagesSnapshot | null;
+  pendingSupersededMessageIds: ReadonlySet<string>;
+}): Message[] {
+  if (
+    !viewThreadId ||
+    liveSnapshot?.threadId !== viewThreadId ||
+    liveSnapshot.messages.length === 0
+  ) {
+    return threadMessages;
+  }
+
+  const snapshotMessages = liveSnapshot.messages.filter(
+    (message) => !message.id || !pendingSupersededMessageIds.has(message.id),
+  );
+  if (snapshotMessages.length === 0) {
+    return threadMessages;
+  }
+
+  const snapshotByIdentity = new Map<string, Message>();
+  for (const message of snapshotMessages) {
+    const identity = messageIdentity(message);
+    if (identity) {
+      snapshotByIdentity.set(identity, message);
+    }
+  }
+
+  const seen = new Set<string>();
+  const replacedThreadMessages = threadMessages.map((message) => {
+    const identity = messageIdentity(message);
+    if (!identity) {
+      return message;
+    }
+    seen.add(identity);
+    return snapshotByIdentity.get(identity) ?? message;
+  });
+
+  const missingSnapshotMessages = snapshotMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    return !identity || !seen.has(identity);
+  });
+
+  if (missingSnapshotMessages.length === 0) {
+    return replacedThreadMessages;
+  }
+
+  return dedupeMessagesByIdentity([
+    ...replacedThreadMessages,
+    ...missingSnapshotMessages,
+  ]);
+}
+
 export function resolveVisibleTaskRunningThreadId({
   eventThreadId,
   streamThreadId,
@@ -720,6 +839,10 @@ type SettleRunSubtasks = (terminal: {
   status: string;
   terminalReason?: string;
 }) => void;
+type TerminalRunSettlementOptions = {
+  terminalReason?: string;
+  settleRunSubtasks?: SettleRunSubtasks;
+};
 
 export function asTaskEvent(value: unknown): PersistedTaskEvent | null {
   if (typeof value !== "object" || value === null) {
@@ -1177,6 +1300,24 @@ export function getLatestRunTerminalNotice(
   };
 }
 
+function settleTerminalRunSubtasksForThread(
+  settleRunSubtasks: SettleRunSubtasks,
+  threadId: string,
+  run: Run,
+) {
+  const runWithTerminal = run as RunWithTerminalFields;
+  const status = stringValue(runWithTerminal.status);
+  if (!status || !isTerminalRunStatus(status)) {
+    return;
+  }
+  settleRunSubtasks({
+    threadId,
+    runId: run.run_id,
+    status,
+    terminalReason: stringValue(runWithTerminal.terminal_reason) ?? status,
+  });
+}
+
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
 
 export function shouldAutoContinueOnEmptyRun(
@@ -1447,19 +1588,23 @@ export function mergeMessages(
     }
   }
 
+  const visibleThreadMessages = threadMessages.filter(
+    (message) => !isHiddenFromUIMessage(message),
+  );
+  const allowUnscopedLiveOverlap = visibleThreadMessages[0]?.type === "human";
   const liveRunScopedMessageIds = new Set(
-    threadMessages
-      .filter((message) => !isHiddenFromUIMessage(message))
-      .map(runScopedBaseMessageIdentity)
+    visibleThreadMessages
+      .flatMap((message) =>
+        liveOverlapMessageIdentities(message, allowUnscopedLiveOverlap),
+      )
       .filter(isNonEmptyString),
   );
   const liveMessageByRunScopedIdentity = new Map<string, Message>();
-  for (const message of threadMessages) {
-    if (isHiddenFromUIMessage(message)) {
-      continue;
-    }
-    const identity = runScopedBaseMessageIdentity(message);
-    if (identity) {
+  for (const message of visibleThreadMessages) {
+    for (const identity of liveOverlapMessageIdentities(
+      message,
+      allowUnscopedLiveOverlap,
+    )) {
       liveMessageByRunScopedIdentity.set(identity, message);
     }
   }
@@ -1473,8 +1618,11 @@ export function mergeMessages(
     if (!msg) {
       continue;
     }
-    const identity = runScopedBaseMessageIdentity(msg);
-    if (identity && liveRunScopedMessageIds.has(identity)) {
+    const identities = liveOverlapMessageIdentities(
+      msg,
+      allowUnscopedLiveOverlap,
+    );
+    if (identities.some((identity) => liveRunScopedMessageIds.has(identity))) {
       cutoff = i;
     } else {
       break;
@@ -1485,10 +1633,12 @@ export function mergeMessages(
   const historyWithRunScopedLiveReplacements = historyMessages
     .slice(0, cutoff)
     .map((message) => {
-      const runScopedIdentity = runScopedBaseMessageIdentity(message);
-      const liveMessage = runScopedIdentity
-        ? liveMessageByRunScopedIdentity.get(runScopedIdentity)
-        : undefined;
+      const liveMessage = liveOverlapMessageIdentities(
+        message,
+        allowUnscopedLiveOverlap,
+      )
+        .map((identity) => liveMessageByRunScopedIdentity.get(identity))
+        .find(Boolean);
       if (!liveMessage) {
         return message;
       }
@@ -1786,11 +1936,19 @@ export function applyBackgroundRunProbeResult(
   threadId: string,
   runId: string,
   status: unknown,
+  options: TerminalRunSettlementOptions = {},
 ) {
   if (!isTerminalRunStatus(status)) {
     return false;
   }
-  const threadStatus = status === "success" ? "idle" : String(status);
+  const terminalStatus = String(status);
+  const threadStatus = status === "success" ? "idle" : terminalStatus;
+  options.settleRunSubtasks?.({
+    threadId,
+    runId,
+    status: terminalStatus,
+    terminalReason: options.terminalReason ?? terminalStatus,
+  });
   clearReconnectRun(threadId, runId);
   if (status === "success") {
     markThreadFinished(threadId);
@@ -1807,11 +1965,13 @@ export function applyStreamErrorRecovery({
   threadId,
   runId,
   isMock,
+  settleRunSubtasks,
 }: {
   queryClient: QueryClient;
   threadId: string | null | undefined;
   runId: string | null | undefined;
   isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
 }): StreamErrorRecoveryRun | null {
   if (!threadId || !runId) {
     if (threadId) {
@@ -1820,7 +1980,13 @@ export function applyStreamErrorRecovery({
     return null;
   }
   markThreadBusyInCaches(queryClient, threadId);
-  startBackgroundRunProbe({ queryClient, threadId, runId, isMock });
+  startBackgroundRunProbe({
+    queryClient,
+    threadId,
+    runId,
+    isMock,
+    settleRunSubtasks,
+  });
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
   });
@@ -1847,6 +2013,20 @@ export function isThreadRecoveringFromStreamError(
   threadId: string | null | undefined,
 ) {
   return Boolean(threadId && recoveryRun?.threadId === threadId);
+}
+
+export function isSameStreamErrorRecoveryRun(
+  recoveryRun: StreamErrorRecoveryRun | null,
+  threadId: string | null | undefined,
+  runId: string | null | undefined,
+) {
+  return Boolean(
+    recoveryRun &&
+    threadId &&
+    runId &&
+    recoveryRun.threadId === threadId &&
+    recoveryRun.runId === runId,
+  );
 }
 
 export function hasTerminalStreamErrorRecoveryRun(
@@ -1913,6 +2093,20 @@ export function shouldTreatTerminalEventAsCurrentStream(
   );
 }
 
+export function shouldTreatStreamFinishAsCurrentStream(
+  finishThreadId: string | null | undefined,
+  finishRunId: string | null | undefined,
+  streamThreadId: string | null | undefined,
+  streamRunId: string | null | undefined,
+) {
+  return Boolean(
+    finishThreadId &&
+    streamThreadId &&
+    finishThreadId === streamThreadId &&
+    (!finishRunId || !streamRunId || finishRunId === streamRunId),
+  );
+}
+
 export type RefreshRunsParams = {
   threadId?: string | null;
   runIds?: Iterable<string>;
@@ -1971,12 +2165,6 @@ export function reconcileTerminalRunHistory(
   if (!runTerminalEvent) {
     return false;
   }
-  settleRunSubtasks?.({
-    threadId: runTerminalEvent.thread_id,
-    runId: runTerminalEvent.run_id,
-    status: runTerminalEvent.status,
-    terminalReason: runTerminalEvent.terminal_reason,
-  });
   stopBackgroundRunProbe(runTerminalEvent.thread_id, runTerminalEvent.run_id);
   if (
     !applyBackgroundRunProbeResult(
@@ -1984,6 +2172,10 @@ export function reconcileTerminalRunHistory(
       runTerminalEvent.thread_id,
       runTerminalEvent.run_id,
       runTerminalEvent.status,
+      {
+        settleRunSubtasks,
+        terminalReason: runTerminalEvent.terminal_reason,
+      },
     )
   ) {
     invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
@@ -2111,11 +2303,13 @@ export function startBackgroundRunProbe({
   threadId,
   runId,
   isMock,
+  settleRunSubtasks,
 }: {
   queryClient: QueryClient;
   threadId: string;
   runId: string;
   isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
 }) {
   if (typeof window === "undefined" || isMock) {
     return;
@@ -2146,6 +2340,12 @@ export function startBackgroundRunProbe({
             threadId,
             runId,
             run.status,
+            {
+              terminalReason: stringValue(
+                (run as { terminal_reason?: unknown }).terminal_reason,
+              ),
+              settleRunSubtasks,
+            },
           )
         ) {
           backgroundRunProbeAttempts.delete(key);
@@ -2162,7 +2362,13 @@ export function startBackgroundRunProbe({
           return;
         }
       }
-      startBackgroundRunProbe({ queryClient, threadId, runId });
+      startBackgroundRunProbe({
+        queryClient,
+        threadId,
+        runId,
+        isMock,
+        settleRunSubtasks,
+      });
     })();
   }, getBackgroundRunProbeDelay(attempt));
 
@@ -2264,6 +2470,7 @@ function isThreadMissingError(error: unknown): boolean {
 export function useThreadStream({
   threadId,
   displayThreadId,
+  runtimeOwnerId,
   context,
   isMock,
   onSend,
@@ -2274,8 +2481,12 @@ export function useThreadStream({
   const { t } = useI18n();
   const threadActivity = useThreadActivity();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
+  const currentRuntimeOwnerId =
+    runtimeOwnerId ?? currentViewThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
+  const currentRuntimeOwnerIdRef = useRef(currentRuntimeOwnerId);
   currentViewThreadIdRef.current = currentViewThreadId;
+  currentRuntimeOwnerIdRef.current = currentRuntimeOwnerId;
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
@@ -2296,15 +2507,22 @@ export function useThreadStream({
   const [streamErrorRecoveryRun, setStreamErrorRecoveryRunState] =
     useState<StreamErrorRecoveryRun | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [queueReleaseVersion, setQueueReleaseVersion] = useState(0);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  const [streamClientThreadId, setStreamClientThreadId] = useState<
+    string | null
+  >(() => threadId ?? null);
   // Ref to track the stream target across async callbacks without causing re-renders.
   // Do not use the visible route id here; users can switch away while a run
   // continues in the background.
   const streamThreadIdRef = useRef<string | null>(threadId ?? null);
   const streamRunIdRef = useRef<string | null>(null);
+  const streamClientThreadIdLockedRef = useRef(false);
+  const liveMessagesSnapshotRef = useRef<LiveMessagesSnapshot | null>(null);
   const streamErrorRecoveryRunRef = useRef<StreamErrorRecoveryRun | null>(null);
   const startedRef = useRef(false);
+  const activeSendRequestRef = useRef<SendRequestOwnership | null>(null);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
     onSend,
@@ -2357,6 +2575,14 @@ export function useThreadStream({
     [],
   );
 
+  const releaseStreamClientThreadId = useCallback(
+    (nextThreadId?: string | null) => {
+      streamClientThreadIdLockedRef.current = false;
+      setStreamClientThreadId(nextThreadId ?? threadId ?? null);
+    },
+    [threadId],
+  );
+
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
@@ -2365,6 +2591,9 @@ export function useThreadStream({
       setOnStreamThreadId(normalizedThreadId);
     } else {
       setOnStreamThreadId(normalizedThreadId);
+    }
+    if (!streamClientThreadIdLockedRef.current) {
+      setStreamClientThreadId(normalizedThreadId);
     }
     streamThreadIdRef.current = normalizedThreadId;
   }, [threadId]);
@@ -2418,13 +2647,36 @@ export function useThreadStream({
   const assistantId = resolveAssistantId(context.agent_name);
   const reconnectOnMount =
     !onStreamThreadId || !threadActivitySnapshot.finished.has(onStreamThreadId);
+  const controlledStreamThreadId = streamClientThreadId
+    ? { threadId: streamClientThreadId }
+    : {};
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId,
-    threadId: onStreamThreadId,
+    ...controlledStreamThreadId,
     reconnectOnMount,
     fetchStateHistory: { limit: 1 },
+    onThreadId(createdThreadId) {
+      const previousIds = new Set(
+        [
+          streamThreadIdRef.current,
+          optimisticThreadIdRef.current,
+          liveMessagesThreadIdRef.current,
+        ].filter((id): id is string => Boolean(id && id !== createdThreadId)),
+      );
+      queuedMessagesRef.current = queuedMessagesRef.current.map((queued) =>
+        previousIds.has(queued.threadId)
+          ? { ...queued, threadId: createdThreadId }
+          : queued,
+      );
+      streamThreadIdRef.current = createdThreadId;
+      setOnStreamThreadId(createdThreadId);
+      for (const previousId of previousIds) {
+        clearThreadActivity(previousId);
+      }
+      markThreadBusyInCaches(queryClient, createdThreadId);
+    },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       markThreadBusyInCaches(queryClient, meta.thread_id);
@@ -2433,6 +2685,7 @@ export function useThreadStream({
         threadId: meta.thread_id,
         runId: meta.run_id,
         isMock,
+        settleRunSubtasks,
       });
       void queryClient.invalidateQueries({
         queryKey: threadRunsQueryKey(meta.thread_id),
@@ -2474,10 +2727,14 @@ export function useThreadStream({
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
-        listeners.current.onToolEnd?.({
-          name: event.name,
-          data: event.data,
-        });
+        const toolEndEvent = getScopedToolEndEvent(
+          event,
+          streamThreadIdRef.current,
+          streamRunIdRef.current,
+        );
+        if (toolEndEvent) {
+          listeners.current.onToolEnd?.(toolEndEvent);
+        }
       }
     },
     onUpdateEvent(data) {
@@ -2603,8 +2860,15 @@ export function useThreadStream({
           )
         ) {
           streamFinishedRef.current = true;
+          setQueueReleaseVersion((version) => version + 1);
         }
-        if (streamErrorRecoveryRunRef.current?.runId === terminalEvent.run_id) {
+        if (
+          isSameStreamErrorRecoveryRun(
+            streamErrorRecoveryRunRef.current,
+            terminalEvent.thread_id,
+            terminalEvent.run_id,
+          )
+        ) {
           setStreamErrorRecoveryRun(null);
         }
         return;
@@ -2626,6 +2890,7 @@ export function useThreadStream({
     onError(error, run) {
       const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
       const streamRunId = run?.run_id ?? streamRunIdRef.current;
+      releaseStreamClientThreadId(streamThreadId);
       if (
         shouldCommitStreamStartFromError({
           started: startedRef.current,
@@ -2640,17 +2905,44 @@ export function useThreadStream({
         threadId: streamThreadId,
         runId: streamRunId,
         isMock,
+        settleRunSubtasks,
       });
-      setStreamErrorRecoveryRun(recoveryRun);
-      streamFinishedRef.current = recoveryRun === null;
-      if (recoveryRun === null) {
+      const errorOwnsCurrentStream = shouldTreatTerminalEventAsCurrentStream(
+        streamThreadId,
+        streamRunId,
+        streamThreadIdRef.current,
+        streamRunIdRef.current,
+      );
+      const errorOwnsCurrentThread = Boolean(
+        streamThreadId && streamThreadId === streamThreadIdRef.current,
+      );
+      const errorOwnsCurrentUi =
+        errorOwnsCurrentStream || (errorOwnsCurrentThread && !streamRunId);
+      if (
+        !streamErrorRecoveryRunRef.current ||
+        errorOwnsCurrentUi ||
+        isSameStreamErrorRecoveryRun(
+          streamErrorRecoveryRunRef.current,
+          streamThreadId,
+          streamRunId,
+        )
+      ) {
+        setStreamErrorRecoveryRun(recoveryRun);
+      }
+      if (errorOwnsCurrentUi) {
+        streamFinishedRef.current = recoveryRun === null;
+        if (recoveryRun === null) {
+          setQueueReleaseVersion((version) => version + 1);
+        }
+      }
+      if (recoveryRun === null && errorOwnsCurrentUi) {
         setOptimisticMessages([]);
         setOptimisticThreadTarget(null);
         setLiveMessagesThreadTarget(null);
         setPendingSupersededRunIds(new Set());
         setPendingSupersededMessageIds(new Set());
       }
-      if (shouldShowStreamErrorToast(recoveryRun)) {
+      if (errorOwnsCurrentUi && shouldShowStreamErrorToast(recoveryRun)) {
         toast.error(getStreamErrorMessage(error));
       }
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -2675,15 +2967,36 @@ export function useThreadStream({
       });
       const streamThreadId = finishMeta.threadId;
       const streamRunId = finishMeta.runId;
+      releaseStreamClientThreadId(streamThreadId);
       if (streamRunId) {
         clearReconnectRun(streamThreadId, streamRunId);
         stopBackgroundRunProbe(streamThreadId, streamRunId);
       }
-      setStreamErrorRecoveryRun(null);
+      if (
+        !streamErrorRecoveryRunRef.current ||
+        isSameStreamErrorRecoveryRun(
+          streamErrorRecoveryRunRef.current,
+          streamThreadId,
+          streamRunId,
+        )
+      ) {
+        setStreamErrorRecoveryRun(null);
+      }
       if (streamThreadId) {
         markThreadFinished(streamThreadId);
+        setThreadStatusInCaches(queryClient, streamThreadId, "idle");
       }
-      streamFinishedRef.current = true;
+      if (
+        shouldTreatStreamFinishAsCurrentStream(
+          streamThreadId,
+          streamRunId,
+          streamThreadIdRef.current,
+          streamRunIdRef.current,
+        )
+      ) {
+        streamFinishedRef.current = true;
+        setQueueReleaseVersion((version) => version + 1);
+      }
       listeners.current.onFinish?.(state.values, finishMeta);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -2709,7 +3022,7 @@ export function useThreadStream({
     onStreamThreadId ?? null,
     liveMessagesThreadId,
   );
-  const persistedMessages = useMemo(
+  const currentThreadMessages = useMemo(
     () =>
       hasVisibleStreamState
         ? thread.messages.filter(
@@ -2718,6 +3031,30 @@ export function useThreadStream({
           )
         : [],
     [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
+  );
+  const liveSnapshotThreadId =
+    streamThreadIdRef.current ?? onStreamThreadId ?? null;
+  if (
+    hasVisibleStreamState &&
+    thread.isLoading &&
+    liveSnapshotThreadId &&
+    currentThreadMessages.length > 0
+  ) {
+    liveMessagesSnapshotRef.current = {
+      threadId: liveSnapshotThreadId,
+      runId: streamRunIdRef.current,
+      messages: currentThreadMessages,
+    };
+  }
+  const persistedMessages = useMemo(
+    () =>
+      getThreadMessagesWithLiveSnapshot({
+        viewThreadId: currentViewThreadId,
+        threadMessages: currentThreadMessages,
+        liveSnapshot: liveMessagesSnapshotRef.current,
+        pendingSupersededMessageIds,
+      }),
+    [currentThreadMessages, currentViewThreadId, pendingSupersededMessageIds],
   );
   const visibleHistory = useMemo(
     () =>
@@ -2749,6 +3086,7 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     streamRunIdRef.current = null;
+    activeSendRequestRef.current = null;
     sendInFlightRef.current = false;
     streamFinishedRef.current = true;
     messagesRef.current = [];
@@ -2757,6 +3095,7 @@ export function useThreadStream({
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     setStreamErrorRecoveryRun(null);
+    setIsUploading(false);
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [setStreamErrorRecoveryRun, threadId]);
@@ -2768,6 +3107,7 @@ export function useThreadStream({
       return;
     }
     streamFinishedRef.current = true;
+    setQueueReleaseVersion((version) => version + 1);
     setStreamErrorRecoveryRun(null);
   }, [historyRuns, setStreamErrorRecoveryRun, streamErrorRecoveryRun]);
 
@@ -2779,23 +3119,11 @@ export function useThreadStream({
       return;
     }
     streamFinishedRef.current = true;
+    setQueueReleaseVersion((version) => version + 1);
     setStreamErrorRecoveryRun(null);
   }, [setStreamErrorRecoveryRun, streamErrorRecoveryRun, threadActivity]);
 
   useEffect(() => {
-    // Intentional: queued follow-ups are tied to the visible chat. On route
-    // changes we drop hidden-thread queued sends so a stale stream end cannot
-    // submit them into the current window.
-    const { messages, dropCount } =
-      getQueuedMessagesForVisibleThreadWithDropCount(
-        queuedMessagesRef.current,
-        currentViewThreadId,
-      );
-    queuedMessagesRef.current = messages;
-    if (dropCount > 0) {
-      // TODO(i18n): move this short-term queue-cancel copy into translations.
-      toast("Queued message for the previous chat was cancelled.");
-    }
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
       setOptimisticMessages([]);
       setOptimisticThreadTarget(null);
@@ -2857,14 +3185,8 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
-      if (sendInFlightRef.current) {
-        return;
-      }
-      sendInFlightRef.current = true;
-
       const text = message.text.trim();
       if (threadId === "new" && message.files.length > 0) {
-        sendInFlightRef.current = false;
         toast.error("Please start the chat before adding attachments.");
         return Promise.reject(
           new Error("Attachments require a saved thread before upload."),
@@ -2874,9 +3196,15 @@ export function useThreadStream({
         streamErrorRecoveryRunRef.current,
         threadId,
       );
-      if (thread.isLoading || targetThreadRecovering) {
+      if (
+        shouldQueueThreadMessage({
+          isLoading: thread.isLoading,
+          streamFinished: streamFinishedRef.current,
+          recovering: targetThreadRecovering,
+          sendInFlight: sendInFlightRef.current,
+        })
+      ) {
         if (message.files.length > 0) {
-          sendInFlightRef.current = false;
           toast(t.inputBox.waitForCurrentResponse);
           return Promise.reject(
             new Error("Current response is still streaming."),
@@ -2886,6 +3214,7 @@ export function useThreadStream({
         queuedMessagesRef.current = [
           ...queuedMessagesRef.current,
           {
+            ownerId: currentRuntimeOwnerIdRef.current ?? threadId,
             threadId,
             message: { ...message, text, files: [] },
             extraContext,
@@ -2902,7 +3231,7 @@ export function useThreadStream({
             ...messages,
             {
               type: "human",
-              id: `opt-queued-human-${Date.now()}-${queuedMessagesRef.current.length}`,
+              id: createOptimisticMessageId("opt-queued-human"),
               content: text ? [{ type: "text", text }] : "",
               additional_kwargs: optimisticAdditionalKwargs,
             },
@@ -2912,9 +3241,21 @@ export function useThreadStream({
         setLiveMessagesThreadTarget(threadId);
         markThreadBusyInCaches(queryClient, threadId);
         listeners.current.onSend?.(threadId);
-        sendInFlightRef.current = false;
         return;
       }
+
+      if (sendInFlightRef.current) {
+        return;
+      }
+      sendInFlightRef.current = true;
+      streamClientThreadIdLockedRef.current = true;
+      const sendRequest = {
+        requestId: createOptimisticMessageId("send"),
+        threadId,
+      };
+      activeSendRequestRef.current = sendRequest;
+      const ownsSendRequest = () =>
+        isSameSendRequest(activeSendRequestRef.current, sendRequest);
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -2944,7 +3285,7 @@ export function useThreadStream({
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: createOptimisticMessageId("opt-human"),
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
@@ -2954,7 +3295,7 @@ export function useThreadStream({
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
-          id: `opt-ai-${Date.now()}`,
+          id: createOptimisticMessageId("opt-ai"),
           content: t.uploads.uploadingFiles,
           additional_kwargs: {
             element: "task",
@@ -2999,6 +3340,9 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
+              if (!ownsSendRequest()) {
+                return;
+              }
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
@@ -3018,6 +3362,9 @@ export function useThreadStream({
               });
             }
           } catch (error) {
+            if (!ownsSendRequest()) {
+              return;
+            }
             const errorMessage =
               error instanceof Error
                 ? error.message
@@ -3028,8 +3375,14 @@ export function useThreadStream({
             setLiveMessagesThreadTarget(null);
             throw error;
           } finally {
-            setIsUploading(false);
+            if (ownsSendRequest()) {
+              setIsUploading(false);
+            }
           }
+        }
+
+        if (!ownsSendRequest()) {
+          return;
         }
 
         // Build files metadata for submission (included in additional_kwargs)
@@ -3078,6 +3431,10 @@ export function useThreadStream({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
+        if (!ownsSendRequest()) {
+          return;
+        }
+        releaseStreamClientThreadId(streamThreadIdRef.current);
         setOptimisticMessages([]);
         setOptimisticThreadTarget(null);
         setLiveMessagesThreadTarget(null);
@@ -3085,7 +3442,11 @@ export function useThreadStream({
         clearThreadActivity(threadId);
         throw error;
       } finally {
-        sendInFlightRef.current = false;
+        if (ownsSendRequest()) {
+          activeSendRequestRef.current = null;
+          sendInFlightRef.current = false;
+          setQueueReleaseVersion((version) => version + 1);
+        }
       }
     },
     [
@@ -3096,6 +3457,7 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      releaseStreamClientThreadId,
       setLiveMessagesThreadTarget,
       setOptimisticThreadTarget,
     ],
@@ -3103,11 +3465,17 @@ export function useThreadStream({
 
   useEffect(() => {
     const next = queuedMessagesRef.current[0];
+    const currentThreadRecovering = isThreadRecoveringFromStreamError(
+      streamErrorRecoveryRun,
+      currentViewThreadId,
+    );
     if (
       !shouldReleaseQueuedThreadMessage({
-        isLoading: thread.isLoading || streamErrorRecoveryRun !== null,
         streamFinished: streamFinishedRef.current,
         sendInFlight: sendInFlightRef.current,
+        recovering: currentThreadRecovering,
+        queuedOwnerId: next?.ownerId,
+        currentOwnerId: currentRuntimeOwnerId,
         queuedThreadId: next?.threadId,
         currentViewThreadId,
       })
@@ -3126,8 +3494,10 @@ export function useThreadStream({
     );
   }, [
     currentViewThreadId,
+    currentRuntimeOwnerId,
     sendMessage,
     streamErrorRecoveryRun,
+    queueReleaseVersion,
     thread.isLoading,
   ]);
 
@@ -3141,6 +3511,13 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      const sendRequest = {
+        requestId: createOptimisticMessageId("regen"),
+        threadId,
+      };
+      activeSendRequestRef.current = sendRequest;
+      const ownsSendRequest = () =>
+        isSameSendRequest(activeSendRequestRef.current, sendRequest);
       prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         persistedMessages
@@ -3170,7 +3547,13 @@ export function useThreadStream({
         if (!response.ok) {
           throw new Error(await readResponseErrorMessage(response));
         }
+        if (!ownsSendRequest()) {
+          return;
+        }
         const prepared = (await response.json()) as RegeneratePrepareResponse;
+        if (!ownsSendRequest()) {
+          return;
+        }
         preparedSupersededRunId = prepared.target_run_id;
         preparedSupersededMessageIds = supersededMessageIds;
         setPendingSupersededRunIds((current) => {
@@ -3186,6 +3569,7 @@ export function useThreadStream({
           return next;
         });
 
+        streamClientThreadIdLockedRef.current = true;
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
@@ -3198,6 +3582,9 @@ export function useThreadStream({
           },
           context: buildThreadRunContext(context, threadId),
         });
+        if (!ownsSendRequest()) {
+          return;
+        }
         void queryClient.invalidateQueries({
           queryKey: threadRunsQueryKey(threadId),
         });
@@ -3212,6 +3599,10 @@ export function useThreadStream({
           queryKey: threadContextUsageQueryKey(threadId),
         });
       } catch (error) {
+        if (!ownsSendRequest()) {
+          return;
+        }
+        releaseStreamClientThreadId(streamThreadIdRef.current);
         setLiveMessagesThreadTarget(null);
         clearThreadActivity(threadId);
         if (preparedSupersededRunId) {
@@ -3225,7 +3616,11 @@ export function useThreadStream({
         }
         toast.error(getStreamErrorMessage(error));
       } finally {
-        sendInFlightRef.current = false;
+        if (ownsSendRequest()) {
+          activeSendRequestRef.current = null;
+          sendInFlightRef.current = false;
+          setQueueReleaseVersion((version) => version + 1);
+        }
       }
     },
     [
@@ -3233,6 +3628,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       queryClient,
+      releaseStreamClientThreadId,
       setLiveMessagesThreadTarget,
       thread,
     ],
@@ -3575,6 +3971,7 @@ export function useThreadHistory(
   const appliedTaskEventKeysRef = useRef<Set<string>>(new Set());
   const latestRoundIdRef = useRef<string | null>(null);
   const updateSubtask = useUpdateSubtask();
+  const settleRunSubtasks = useSettleRunningSubtasksForRun();
   const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -3787,6 +4184,9 @@ export function useThreadHistory(
     appliedTaskEventKeysRef.current = new Set();
 
     const rows = data.run_messages.flatMap((page) => page.data);
+    for (const run of snapshotRuns) {
+      settleTerminalRunSubtasksForThread(settleRunSubtasks, threadId, run);
+    }
     applyTaskEventRunMessages(
       rows,
       updateSubtaskRef.current,
@@ -3817,7 +4217,7 @@ export function useThreadHistory(
     setError(null);
     setLoading(false);
     setMessageRows(rows);
-  }, [enabled, snapshot.data, threadId]);
+  }, [enabled, settleRunSubtasks, snapshot.data, threadId]);
 
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
@@ -3966,6 +4366,16 @@ export function useThreadHistory(
       activeRunIdsRef.current,
       runsData,
     );
+    for (const runId of terminalTransitionRunIds) {
+      const terminalRun = runsData.find((run) => run.run_id === runId);
+      if (terminalRun) {
+        settleTerminalRunSubtasksForThread(
+          settleRunSubtasks,
+          threadId,
+          terminalRun,
+        );
+      }
+    }
     const { known: pendingRefreshRunIds } = partitionKnownRunIds(
       pendingRefreshRunIdsRef.current,
       runsData,
@@ -3985,7 +4395,7 @@ export function useThreadHistory(
     if (refreshRunIds.length > 0) {
       refreshRuns({ threadId, runIds: refreshRunIds });
     }
-  }, [enabled, refreshRuns, runsData, threadId]);
+  }, [enabled, refreshRuns, runsData, settleRunSubtasks, threadId]);
 
   const hasThreadId = Boolean(threadId);
   const hasUnloadedRuns = Boolean(
@@ -4133,13 +4543,18 @@ function isDeletedThreadClientQueryKey(
 export function clearDeletedThreadClientState(
   queryClient: QueryClient,
   threadId: string,
+  {
+    clearSubtasksForThread,
+  }: { clearSubtasksForThread?: (threadId: string) => void } = {},
 ) {
   clearThreadSingletonState(threadId);
+  notifyThreadRuntimeDeleted(threadId);
   clearThreadModelName(threadId);
   queryClient.removeQueries({
     predicate: (query) =>
       isDeletedThreadClientQueryKey(query.queryKey, threadId),
   });
+  clearSubtasksForThread?.(threadId);
 }
 
 export function useInfiniteThreads(
@@ -4306,8 +4721,9 @@ export function useDeleteThread() {
       }
     },
     onSuccess(_, { threadId }) {
-      clearDeletedThreadClientState(queryClient, threadId);
-      clearSubtasksForThread(threadId);
+      clearDeletedThreadClientState(queryClient, threadId, {
+        clearSubtasksForThread,
+      });
       queryClient.setQueriesData(
         {
           queryKey: ["threads", "search"],

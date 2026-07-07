@@ -208,9 +208,9 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
         timeout: 60_000,
       },
     );
-    await expect(page.getByTestId("run-terminal-notice")).toBeVisible();
+    await expect(page.getByTestId("run-recovery-notice")).toBeVisible();
     await expect(
-      page.getByText("Run ended without a visible reply"),
+      page.getByText(/运行已终止|Run ended without a visible reply/),
     ).toBeVisible();
     await expect(page.getByText("worker_lost", { exact: false })).toBeVisible();
   });

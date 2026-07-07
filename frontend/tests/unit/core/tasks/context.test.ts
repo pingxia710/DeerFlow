@@ -99,6 +99,44 @@ test("run-scoped subtask updates do not overwrite the same task id in another ru
   });
 });
 
+test("applySubtaskUpdateInState creates a new state object for changed subtask updates", async () => {
+  const { applySubtaskUpdateInState, getSubtaskStorageKey } =
+    await import("@/core/tasks/context");
+  const storageKey = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-a",
+    runId: "run-a",
+  });
+  const tasks = {};
+
+  const updated = applySubtaskUpdateInState(tasks, {
+    id: "task-1",
+    threadId: "thread-a",
+    runId: "run-a",
+    status: "in_progress",
+    subagent_type: "executor",
+    description: "run A",
+    prompt: "work A",
+  });
+
+  expect(updated).not.toBe(tasks);
+  expect(tasks).not.toHaveProperty(storageKey);
+  expect(updated[storageKey]).toMatchObject({
+    id: "task-1",
+    threadId: "thread-a",
+    runId: "run-a",
+    status: "in_progress",
+  });
+  expect(
+    applySubtaskUpdateInState(updated, {
+      id: "task-1",
+      threadId: "thread-a",
+      runId: "run-a",
+      status: "in_progress",
+    }),
+  ).toBe(updated);
+});
+
 test("legacy subtask updates do not overwrite existing run-scoped tasks", async () => {
   const { getSubtaskStorageKey, mergeSubtaskUpdate } =
     await import("@/core/tasks/context");

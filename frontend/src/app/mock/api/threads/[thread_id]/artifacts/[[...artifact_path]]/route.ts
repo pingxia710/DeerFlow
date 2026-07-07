@@ -1,5 +1,5 @@
-import fs from "fs";
-import path from "path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, join, normalize, sep } from "node:path";
 
 import type { NextRequest } from "next/server";
 
@@ -14,35 +14,38 @@ export async function GET(
     }>;
   },
 ) {
-  const threadId = (await params).thread_id;
-  let artifactPath = (await params).artifact_path?.join("/") ?? "";
+  const { artifact_path, thread_id: threadId } = await params;
+  const artifactPath = artifact_path?.join("/") ?? "";
   if (artifactPath.startsWith("mnt/")) {
-    artifactPath = path.resolve(
-      process.cwd(),
-      artifactPath.replace("mnt/", `public/demo/threads/${threadId}/`),
+    const baseDir = join(process.cwd(), "public", "demo", "threads", threadId);
+    const filePath = normalize(
+      join(baseDir, artifactPath.slice("mnt/".length)),
     );
-    if (fs.existsSync(artifactPath)) {
+    if (
+      (filePath === baseDir || filePath.startsWith(`${baseDir}${sep}`)) &&
+      existsSync(filePath)
+    ) {
       if (request.nextUrl.searchParams.get("download") === "true") {
         // Attach the file to the response
         const headers = new Headers();
         headers.set(
           "Content-Disposition",
-          `attachment; filename="${artifactPath}"`,
+          `attachment; filename="${basename(filePath)}"`,
         );
-        return new Response(fs.readFileSync(artifactPath), {
+        return new Response(readFileSync(filePath), {
           status: 200,
           headers,
         });
       }
-      if (artifactPath.endsWith(".mp4")) {
-        return new Response(fs.readFileSync(artifactPath), {
+      if (filePath.endsWith(".mp4")) {
+        return new Response(readFileSync(filePath), {
           status: 200,
           headers: {
             "Content-Type": "video/mp4",
           },
         });
       }
-      return new Response(fs.readFileSync(artifactPath), { status: 200 });
+      return new Response(readFileSync(filePath), { status: 200 });
     }
   }
   return new Response("File not found", { status: 404 });

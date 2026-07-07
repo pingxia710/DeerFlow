@@ -22,7 +22,6 @@ import {
   isTaskEventRunMessage,
   isTaskEventRunMessageForRequest,
   isVisibleHistoryRunMessage,
-  keepQueuedMessagesForThread,
   latestRoundIdFromSnapshot,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeFetchedRunMessages,
@@ -253,25 +252,16 @@ test("runtime snapshot recovery telemetry is additive", async () => {
   expect(restored?.[0]?.status).toBe("running");
 });
 
-test("thread switching gates live state, history, and queued messages by visible thread", () => {
+test("thread switching gates live state, history, and queued release by visible thread", () => {
   expect(shouldShowLiveThreadState("thread-b", "thread-a", "thread-a")).toBe(
     false,
   );
   expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
   expect(
-    keepQueuedMessagesForThread(
-      [
-        { threadId: "thread-a", text: "old" },
-        { threadId: "thread-b", text: "current" },
-      ],
-      "thread-b",
-    ),
-  ).toEqual([{ threadId: "thread-b", text: "current" }]);
-  expect(
     shouldReleaseQueuedThreadMessage({
-      isLoading: false,
       streamFinished: true,
       sendInFlight: false,
+      recovering: false,
       queuedThreadId: "thread-a",
       currentViewThreadId: "thread-b",
     }),

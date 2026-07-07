@@ -46,7 +46,7 @@ import {
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
-import { useUpdateSubtask } from "@/core/tasks/context";
+import { type SubtaskUpdate, useUpdateSubtask } from "@/core/tasks/context";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -313,7 +313,7 @@ export function MessageList({
     prevIsLoading.current = thread.isLoading;
   }, [thread.isLoading]);
   const messages = thread.messages;
-  const groupedMessages = getMessageGroups(messages);
+  const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<
     string | null
   >(null);
@@ -336,6 +336,65 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  const subtaskUpdates = useMemo<SubtaskUpdate[]>(() => {
+    const updates: SubtaskUpdate[] = [];
+    for (const [groupIndex, group] of groupedMessages.entries()) {
+      if (group.type !== "assistant:subagent") {
+        continue;
+      }
+      const groupIsLoading = thread.isLoading && groupIndex === lastGroupIndex;
+      for (const message of group.messages) {
+        if (message.type === "ai") {
+          for (const toolCall of message.tool_calls ?? []) {
+            if (toolCall.name !== "task" || !toolCall.id) {
+              continue;
+            }
+            const status = derivePendingSubtaskStatus(
+              toolCall.id,
+              group.messages,
+              groupIsLoading,
+            );
+            const runId = getMessageRunId(message);
+            const startedAt = getMessageHistoryTime(message);
+            updates.push({
+              id: toolCall.id,
+              threadId,
+              ...(runId ? { runId } : {}),
+              subagent_type: toolCall.args.subagent_type,
+              description: toolCall.args.description,
+              prompt: toolCall.args.prompt,
+              status,
+              ...(startedAt !== undefined ? { startedAt } : {}),
+              ...(status === "failed" ? { error: t.subtasks.failed } : {}),
+            });
+          }
+        } else if (message.type === "tool" && message.tool_call_id) {
+          const runId = getMessageRunId(message);
+          updates.push({
+            id: message.tool_call_id,
+            threadId,
+            ...(runId ? { runId } : {}),
+            ...parseSubtaskResult(
+              extractTextFromMessage(message),
+              message.additional_kwargs,
+            ),
+          });
+        }
+      }
+    }
+    return updates;
+  }, [
+    groupedMessages,
+    lastGroupIndex,
+    t.subtasks.failed,
+    thread.isLoading,
+    threadId,
+  ]);
+  useEffect(() => {
+    for (const update of subtaskUpdates) {
+      updateSubtask(update);
+    }
+  }, [subtaskUpdates, updateSubtask]);
   const activeTurnStartTime = useMemo(() => {
     return (
       getMessagesHistoryStartTime(
@@ -688,24 +747,8 @@ export function MessageList({
                         ? { error: t.subtasks.failed }
                         : {}),
                     };
-                    updateSubtask(task);
                     tasks.add(task);
                   }
-                }
-              } else if (message.type === "tool") {
-                const taskId = message.tool_call_id;
-                if (taskId) {
-                  const runId = getMessageRunId(message);
-                  const parsed = parseSubtaskResult(
-                    extractTextFromMessage(message),
-                    message.additional_kwargs,
-                  );
-                  updateSubtask({
-                    id: taskId,
-                    threadId,
-                    ...(runId ? { runId } : {}),
-                    ...parsed,
-                  });
                 }
               }
             }

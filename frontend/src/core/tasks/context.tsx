@@ -194,6 +194,26 @@ export function didSubtaskChange(previous: Subtask | undefined, next: Subtask) {
   return false;
 }
 
+export function applySubtaskUpdateInState(
+  tasks: Record<string, Subtask>,
+  task: SubtaskUpdate,
+) {
+  const storageKey = getSubtaskStorageKey({
+    id: task.id,
+    threadId: task.threadId,
+    runId: task.runId,
+    roundId: task.roundId,
+  });
+  const previous = tasks[storageKey];
+  const next = mergeSubtaskUpdate(previous, task);
+
+  if (!didSubtaskChange(previous, next)) {
+    return tasks;
+  }
+
+  return { ...tasks, [storageKey]: next };
+}
+
 function runTerminalSubtaskError(status: string, terminalReason?: string) {
   if (status === "timeout") {
     return "Parent run timed out before this subtask completed.";
@@ -293,46 +313,13 @@ export function useClearSubtasksForThread() {
 }
 
 export function useUpdateSubtask() {
-  const { tasks, setTasks } = useSubtaskContext();
+  const { setTasks } = useSubtaskContext();
 
   const updateSubtask = useCallback(
     (task: SubtaskUpdate) => {
-      if (task.notify || task.latestMessage) {
-        setTasks((currentTasks) => {
-          const storageKey = getSubtaskStorageKey({
-            id: task.id,
-            threadId: task.threadId,
-            runId: task.runId,
-            roundId: task.roundId,
-          });
-          const previous = currentTasks[storageKey];
-          const next = mergeSubtaskUpdate(previous, task);
-
-          if (!didSubtaskChange(previous, next)) {
-            return currentTasks;
-          }
-
-          return { ...currentTasks, [storageKey]: next };
-        });
-        return;
-      }
-
-      const storageKey = getSubtaskStorageKey({
-        id: task.id,
-        threadId: task.threadId,
-        runId: task.runId,
-        roundId: task.roundId,
-      });
-      const previous = tasks[storageKey];
-      const next = mergeSubtaskUpdate(previous, task);
-
-      if (!didSubtaskChange(previous, next)) {
-        return;
-      }
-
-      tasks[storageKey] = next;
+      setTasks((currentTasks) => applySubtaskUpdateInState(currentTasks, task));
     },
-    [tasks, setTasks],
+    [setTasks],
   );
 
   return updateSubtask;

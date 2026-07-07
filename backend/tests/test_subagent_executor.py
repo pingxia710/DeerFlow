@@ -1945,6 +1945,88 @@ class TestCooperativeCancellation:
         for task_id in task_ids:
             executor_module._background_tasks.pop(task_id, None)
 
+    def test_execute_async_queues_above_process_wide_limit(self, executor_module, classes, base_config):
+        """Process-wide limiter keeps excess background executions pending."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        pending_futures = []
+
+        def submit_never_finishes(_context, _coro_factory):
+            future = concurrent.futures.Future()
+            pending_futures.append(future)
+            return future
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with (
+            patch.object(executor_module, "_get_process_wide_subagent_limit", return_value=1),
+            patch.object(executor_module, "_get_process_wide_subagent_queue_limit", return_value=10),
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submit_never_finishes),
+        ):
+            first_id = executor.execute_async("Task 1", task_id="limited-task-1")
+            second_id = executor.execute_async("Task 2", task_id="limited-task-2")
+
+            assert len(pending_futures) == 1
+            assert executor_module._background_tasks[first_id].status.value == SubagentStatus.RUNNING.value
+            assert executor_module._background_tasks[second_id].status.value == SubagentStatus.PENDING.value
+
+            pending_futures[0].set_result(None)
+
+            assert len(pending_futures) == 2
+            assert executor_module._background_tasks[second_id].status.value == SubagentStatus.RUNNING.value
+
+        for future in pending_futures:
+            if not future.done():
+                future.set_result(None)
+        for task_id in [first_id, second_id]:
+            executor_module._background_tasks.pop(task_id, None)
+
+    def test_execute_async_fails_when_process_wide_queue_is_full(self, executor_module, classes, base_config):
+        """A full limiter queue publishes a terminal failure instead of dropping the task."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        pending_futures = []
+
+        def submit_never_finishes(_context, _coro_factory):
+            future = concurrent.futures.Future()
+            pending_futures.append(future)
+            return future
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with (
+            patch.object(executor_module, "_get_process_wide_subagent_limit", return_value=1),
+            patch.object(executor_module, "_get_process_wide_subagent_queue_limit", return_value=0),
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submit_never_finishes),
+        ):
+            first_id = executor.execute_async("Task 1", task_id="queue-full-task-1")
+            second_id = executor.execute_async("Task 2", task_id="queue-full-task-2")
+
+            assert len(pending_futures) == 1
+            assert executor_module._background_tasks[first_id].status.value == SubagentStatus.RUNNING.value
+            assert executor_module._background_tasks[second_id].status.value == SubagentStatus.FAILED.value
+            assert "queue is full" in (executor_module._background_tasks[second_id].error or "")
+
+        for future in pending_futures:
+            if not future.done():
+                future.set_result(None)
+        for task_id in [first_id, second_id]:
+            executor_module._background_tasks.pop(task_id, None)
+
     def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
         """Regression: background subagent execution must keep request user context."""
         from deerflow.runtime.user_context import (

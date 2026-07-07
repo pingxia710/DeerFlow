@@ -24,6 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { resetThreadChatToNew } from "@/components/workspace/chats/use-thread-chat";
 import { useI18n } from "@/core/i18n/hooks";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
@@ -38,6 +39,7 @@ export function CommandPalette() {
   const [isMac, setIsMac] = useState(false);
 
   const handleNewChat = useCallback(() => {
+    resetThreadChatToNew("/workspace/chats/new");
     router.push("/workspace/chats/new");
     setOpen(false);
   }, [router]);

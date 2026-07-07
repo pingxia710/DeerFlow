@@ -191,6 +191,8 @@ export const zhCN: Translations = {
     channels: "渠道",
     recentChats: "最近的对话",
     demoChats: "演示对话",
+    chatRunning: "运行中",
+    chatFinished: "已完成",
     agents: "智能体",
   },
 

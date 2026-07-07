@@ -104,6 +104,7 @@ type VisibleReasoningEffort = Extract<
 const MAX_SKILL_SUGGESTIONS = 6;
 const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
   /\[(?:主题|来源|topic|source)\]/i;
+let lastPromptInputThreadId: string | null = null;
 
 function getCompactModelLabel(
   displayName: string | undefined,
@@ -247,7 +248,7 @@ export function InputBox({
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const previousThreadIdRef = useRef(threadId);
+  const previousThreadIdRef = useRef(lastPromptInputThreadId ?? threadId);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -362,6 +363,7 @@ export function InputBox({
       clearPromptInput();
       clearAttachments();
     }
+    lastPromptInputThreadId = threadId;
   }, [clearAttachments, clearPromptInput, threadId]);
 
   useEffect(() => {

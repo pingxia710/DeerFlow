@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import uuid
+from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -183,6 +184,22 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
+DEFAULT_PROCESS_WIDE_SUBAGENT_LIMIT = 8
+DEFAULT_PROCESS_WIDE_SUBAGENT_QUEUE_LIMIT = 64
+
+
+@dataclass
+class _QueuedSubagentExecution:
+    executor: "SubagentExecutor"
+    task: str
+    result: SubagentResult
+    context: Context
+
+
+_subagent_scheduler_lock = threading.RLock()
+_subagent_pending_queue: deque[_QueuedSubagentExecution] = deque()
+_subagent_running_count = 0
+
 # Per lead-agent response dispatch cap. This is not a process-wide worker cap:
 # each command-room run may dispatch up to this many subagents in a round.
 MAX_CONCURRENT_SUBAGENTS = 6
@@ -288,6 +305,120 @@ def _submit_to_isolated_loop_in_context(
             _get_isolated_subagent_loop(),
         )
     )
+
+
+def _get_process_wide_subagent_limit(app_config: AppConfig | None = None) -> int:
+    """Return process-wide admitted subagent limit, clamped to at least 1."""
+    try:
+        config = app_config or get_app_config()
+        subagents_config = getattr(config, "subagents", None)
+        value = getattr(subagents_config, "process_wide_max_concurrent", DEFAULT_PROCESS_WIDE_SUBAGENT_LIMIT)
+        return max(1, int(value))
+    except Exception:
+        logger.exception("Failed to read process-wide subagent limit; using default")
+        return DEFAULT_PROCESS_WIDE_SUBAGENT_LIMIT
+
+
+def _get_process_wide_subagent_queue_limit(app_config: AppConfig | None = None) -> int:
+    """Return process-wide pending queue limit, clamped to at least 0."""
+    try:
+        config = app_config or get_app_config()
+        subagents_config = getattr(config, "subagents", None)
+        value = getattr(subagents_config, "process_wide_queue_size", DEFAULT_PROCESS_WIDE_SUBAGENT_QUEUE_LIMIT)
+        return max(0, int(value))
+    except Exception:
+        logger.exception("Failed to read process-wide subagent queue limit; using default")
+        return DEFAULT_PROCESS_WIDE_SUBAGENT_QUEUE_LIMIT
+
+
+def _schedule_subagent_execution(item: _QueuedSubagentExecution) -> bool:
+    """Admit a subagent execution immediately or enqueue it for later."""
+    global _subagent_running_count
+    with _subagent_scheduler_lock:
+        limit = _get_process_wide_subagent_limit()
+        if _subagent_running_count < limit:
+            _start_subagent_execution_unlocked(item)
+            return True
+
+        queue_limit = _get_process_wide_subagent_queue_limit()
+        if len(_subagent_pending_queue) >= queue_limit:
+            return False
+        _subagent_pending_queue.append(item)
+        return True
+
+
+def _start_subagent_execution_unlocked(item: _QueuedSubagentExecution) -> None:
+    """Start an admitted execution. Caller must hold _subagent_scheduler_lock."""
+    global _subagent_running_count
+    result = item.result
+    if result.status.is_terminal or result.cancel_event.is_set():
+        if not result.status.is_terminal:
+            result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+        return
+
+    _subagent_running_count += 1
+    with result._state_lock:
+        if not result.status.is_terminal:
+            result.status = SubagentStatus.RUNNING
+            result.started_at = datetime.now()
+
+    execution_future: Future[SubagentResult] | None = None
+
+    def handle_timeout() -> None:
+        if result.status.is_terminal:
+            result.cancel_event.set()
+            if execution_future is not None:
+                execution_future.cancel()
+            return
+        logger.error(f"[trace={item.executor.trace_id}] Subagent {item.executor.config.name} execution timed out after {item.executor.config.timeout_seconds}s")
+        result.cancel_event.set()
+        result.try_set_terminal(SubagentStatus.TIMED_OUT, error=f"Execution timed out after {item.executor.config.timeout_seconds} seconds")
+        if execution_future is not None:
+            execution_future.cancel()
+
+    timeout_timer = threading.Timer(item.executor.config.timeout_seconds, handle_timeout)
+    timeout_timer.daemon = True
+
+    def handle_done(future: Future[SubagentResult]) -> None:
+        timeout_timer.cancel()
+        try:
+            future.result()
+        except Exception as e:
+            if not result.status.is_terminal:
+                logger.exception(f"[trace={item.executor.trace_id}] Subagent {item.executor.config.name} async execution failed")
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+        finally:
+            _release_subagent_slot_and_drain()
+
+    try:
+        execution_future = _submit_to_isolated_loop_in_context(item.context, lambda: item.executor._aexecute(item.task, result))
+    except Exception as e:
+        logger.exception(f"[trace={item.executor.trace_id}] Subagent {item.executor.config.name} async execution failed")
+        result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+        _release_subagent_slot_and_drain()
+        return
+
+    timeout_timer.start()
+    execution_future.add_done_callback(handle_done)
+
+
+def _release_subagent_slot_and_drain() -> None:
+    """Release one running slot and start queued executions if capacity allows."""
+    global _subagent_running_count
+    with _subagent_scheduler_lock:
+        _subagent_running_count = max(0, _subagent_running_count - 1)
+        _drain_subagent_queue_unlocked()
+
+
+def _drain_subagent_queue_unlocked() -> None:
+    """Drain queued executions while capacity is available. Caller holds lock."""
+    while _subagent_pending_queue and _subagent_running_count < _get_process_wide_subagent_limit():
+        item = _subagent_pending_queue.popleft()
+        if item.result.status.is_terminal or item.result.cancel_event.is_set():
+            if not item.result.status.is_terminal:
+                item.result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+            continue
+        _start_subagent_execution_unlocked(item)
 
 
 def _filter_tools(
@@ -887,69 +1018,20 @@ class SubagentExecutor:
         Returns:
             Task ID that can be used to check status later.
         """
-        # Use provided task_id or generate a new one
         if task_id is None:
             task_id = str(uuid.uuid4())[:8]
 
-        # Create initial pending result
-        result = SubagentResult(
-            task_id=task_id,
-            trace_id=self.trace_id,
-            status=SubagentStatus.PENDING,
-        )
+        result = SubagentResult(task_id=task_id, trace_id=self.trace_id, status=SubagentStatus.PENDING)
 
-        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
+        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} scheduling async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
 
         with _background_tasks_lock:
             _background_tasks[task_id] = result
 
-        parent_context = copy_context()
+        item = _QueuedSubagentExecution(executor=self, task=task, result=result, context=copy_context())
+        if not _schedule_subagent_execution(item):
+            result.try_set_terminal(SubagentStatus.FAILED, error="Subagent queue is full; try again later")
 
-        with _background_tasks_lock:
-            result.status = SubagentStatus.RUNNING
-            result.started_at = datetime.now()
-
-        try:
-            # Submit execution directly to the persistent isolated loop. A fixed
-            # global scheduler pool would make "6" a process-wide cap instead
-            # of a per-command-room dispatch cap.
-            execution_future = _submit_to_isolated_loop_in_context(
-                parent_context,
-                lambda: self._aexecute(task, result),
-            )
-        except Exception as e:
-            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-            result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
-            return task_id
-
-        def handle_timeout() -> None:
-            if result.status.is_terminal:
-                result.cancel_event.set()
-                execution_future.cancel()
-                return
-            logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
-            result.cancel_event.set()
-            result.try_set_terminal(
-                SubagentStatus.TIMED_OUT,
-                error=f"Execution timed out after {self.config.timeout_seconds} seconds",
-            )
-            execution_future.cancel()
-
-        timeout_timer = threading.Timer(self.config.timeout_seconds, handle_timeout)
-        timeout_timer.daemon = True
-
-        def handle_done(future: Future[SubagentResult]) -> None:
-            timeout_timer.cancel()
-            try:
-                future.result()
-            except Exception as e:
-                if result.status.is_terminal:
-                    return
-                logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-                result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
-
-        timeout_timer.start()
-        execution_future.add_done_callback(handle_done)
         return task_id
 
 
@@ -968,6 +1050,8 @@ def request_cancel_background_task(task_id: str) -> None:
         result = _background_tasks.get(task_id)
         if result is not None:
             result.cancel_event.set()
+            if result.status == SubagentStatus.PENDING:
+                result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
             logger.info("Requested cancellation for background task %s", task_id)
 
 

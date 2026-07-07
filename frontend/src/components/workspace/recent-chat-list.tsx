@@ -253,6 +253,12 @@ export function RecentChatList() {
                 );
                 const isFinished =
                   !isRunning && threadActivity.finished.has(thread.thread_id);
+                const threadTitle = titleOfThread(thread);
+                const activityLabel = isRunning
+                  ? t.sidebar.chatRunning
+                  : isFinished
+                    ? t.sidebar.chatFinished
+                    : null;
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -260,15 +266,26 @@ export function RecentChatList() {
                   >
                     <SidebarMenuButton isActive={isActive} asChild>
                       <Link
+                        aria-label={
+                          activityLabel
+                            ? `${threadTitle}, ${activityLabel}`
+                            : threadTitle
+                        }
                         className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                         href={pathOfThread(thread)}
+                        title={
+                          activityLabel
+                            ? `${threadTitle} - ${activityLabel}`
+                            : threadTitle
+                        }
                       >
                         <ThreadChannelIcon source={channelSource} />
-                        <span className="min-w-0 truncate">
-                          {titleOfThread(thread)}
-                        </span>
+                        <span className="min-w-0 truncate">{threadTitle}</span>
                         {(isRunning || isFinished || channelSource) && (
                           <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+                            {activityLabel && (
+                              <span className="sr-only">{activityLabel}</span>
+                            )}
                             {isRunning && (
                               <LoaderCircleIcon
                                 aria-hidden="true"

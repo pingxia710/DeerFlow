@@ -94,6 +94,47 @@ test.describe("Agent chat", () => {
     await expect(page.getByLabel("Regenerate")).toHaveCount(1);
   });
 
+  test("agent new chat button resets while already on the new chat route", async ({
+    page,
+  }) => {
+    const marker = "AGENT-NEW-CHAT-SHOULD-CLEAR-THIS";
+    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+    let releaseStream: () => void = () => undefined;
+    const pendingStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const markerStream = async (route: Route) => {
+      await pendingStream;
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: end\ndata: {}\n\n",
+      });
+    };
+    await page.route("**/api/langgraph/runs/stream", markerStream);
+    await page.route("**/api/langgraph/threads/*/runs/stream", markerStream);
+
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    try {
+      await textarea.fill(marker);
+      await textarea.press("Enter");
+
+      await expect(page).toHaveURL(
+        /\/workspace\/agents\/test-agent\/chats\/new$/,
+      );
+      await expect(page.getByText(marker).first()).toBeVisible();
+      await page.getByRole("button", { name: /new chat/i }).click();
+      await expect(page).toHaveURL(
+        /\/workspace\/agents\/test-agent\/chats\/new$/,
+      );
+      await expect(page.getByText(marker)).toHaveCount(0);
+    } finally {
+      releaseStream();
+    }
+  });
+
   test("switching agent chats ignores a delayed stream from the previous chat", async ({
     page,
   }) => {

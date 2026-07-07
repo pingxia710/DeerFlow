@@ -5,6 +5,7 @@ const FRONTEND_PORT =
   process.env.PLAYWRIGHT_REAL_BACKEND_FRONTEND_PORT ?? "3100";
 const GATEWAY_URL = `http://127.0.0.1:${GATEWAY_PORT}`;
 const APP_URL = `http://localhost:${FRONTEND_PORT}`;
+const FRONTEND_WEB_SERVER_TIMEOUT_MS = 360_000;
 
 /**
  * Layer 2 of the record/replay e2e: the REAL Next.js frontend rendering data
@@ -54,7 +55,7 @@ export default defineConfig({
       command: "pnpm build && pnpm start",
       url: APP_URL,
       reuseExistingServer: process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === "1",
-      timeout: 240_000,
+      timeout: FRONTEND_WEB_SERVER_TIMEOUT_MS,
       env: {
         SKIP_ENV_VALIDATION: "1",
         DEER_FLOW_AUTH_DISABLED: "1",

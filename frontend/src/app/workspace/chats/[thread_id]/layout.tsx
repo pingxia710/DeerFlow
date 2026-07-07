@@ -1,8 +1,6 @@
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
 
-import { ChatProviders } from "./providers";
-
 export function generateStaticParams() {
   if (!isStaticWebsiteOnly()) {
     return [];
@@ -15,5 +13,5 @@ export default function ChatLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <ChatProviders>{children}</ChatProviders>;
+  return children;
 }

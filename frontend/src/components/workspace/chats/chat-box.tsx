@@ -20,6 +20,8 @@ import {
 } from "../artifacts";
 import { useThread } from "../messages/context";
 
+import { shouldDeselectArtifactForThreadChange } from "./chat-box-state";
+
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
 const OPEN_MODE = { chat: 60, artifacts: 40 };
 
@@ -44,7 +46,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
-    if (threadIdRef.current !== threadId) {
+    if (shouldDeselectArtifactForThreadChange(threadIdRef.current, threadId)) {
       threadIdRef.current = threadId;
       deselect();
     }

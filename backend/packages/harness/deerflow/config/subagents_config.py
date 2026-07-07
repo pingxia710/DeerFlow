@@ -89,6 +89,16 @@ class SubagentsAppConfig(BaseModel):
         default_factory=dict,
         description="User-defined subagent types keyed by agent name",
     )
+    process_wide_max_concurrent: int = Field(
+        default=8,
+        ge=1,
+        description="Process-wide maximum number of admitted background subagent executions",
+    )
+    process_wide_queue_size: int = Field(
+        default=64,
+        ge=0,
+        description="Process-wide queue size for background subagent executions waiting for capacity",
+    )
 
     def get_timeout_for(self, agent_name: str) -> int:
         """Get the effective timeout for a specific agent.
@@ -173,9 +183,11 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
 
     if overrides_summary or custom_agents_names:
         logger.info(
-            "Subagents config loaded: default timeout=%ss, default max_turns=%s, per-agent overrides=%s, custom_agents=%s",
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, process_wide_max_concurrent=%s, process_wide_queue_size=%s, per-agent overrides=%s, custom_agents=%s",
             _subagents_config.timeout_seconds,
             _subagents_config.max_turns,
+            _subagents_config.process_wide_max_concurrent,
+            _subagents_config.process_wide_queue_size,
             overrides_summary or "none",
             custom_agents_names or "none",
         )

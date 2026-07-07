@@ -30,12 +30,14 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import type { AgentThreadState } from "@/core/threads";
 import {
+  type ThreadStreamFinishMeta,
   useThreadContextUsage,
   useThreadMetadata,
-  useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
+import { useThreadRuntime } from "@/core/threads/runtime";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -55,8 +57,14 @@ export default function AgentChatPage() {
   const { agent } = useAgent(agent_name);
   const isCommandRoom = agent_name === COMMAND_ROOM_AGENT;
 
-  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
-    useThreadChat();
+  const {
+    threadId,
+    setThreadId,
+    isNewThread,
+    setIsNewThread,
+    resetToNewThread,
+    isMock,
+  } = useThreadChat();
   // `isNewThread` gates history/token-usage fetches until the backend creates
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.
@@ -100,6 +108,73 @@ export default function AgentChatPage() {
     [agent_name, isCommandRoom, settings.context],
   );
 
+  const runtimeRegistration = useMemo(
+    () => ({
+      runtimeKey: threadId,
+      threadId: isNewThread ? undefined : threadId,
+      displayThreadId: threadId,
+      context: threadContext,
+      isMock,
+      onSend: (sentThreadId: string) => {
+        pendingStartThreadIdRef.current = sentThreadId;
+        setIsWelcomeMode(false);
+      },
+      onStart: (createdThreadId: string) => {
+        const pendingThreadId = pendingStartThreadIdRef.current;
+        const visibleThreadId = visibleThreadIdRef.current;
+        const currentPathname = window.location.pathname;
+        const streamStillOwnsVisibleChat =
+          visibleThreadId === createdThreadId ||
+          (pendingThreadId !== null &&
+            visibleThreadId === pendingThreadId &&
+            currentPathname.endsWith("/new"));
+        if (!streamStillOwnsVisibleChat) {
+          return;
+        }
+        pendingStartThreadIdRef.current = null;
+        // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
+        history.replaceState(
+          null,
+          "",
+          `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
+        );
+        setThreadId(createdThreadId);
+        setIsNewThread(false);
+      },
+      onFinish: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => {
+        // Finish side effects are scoped to the visible chat; background thread
+        // completion should not rewrite the current chat UI or notification text.
+        if (meta.threadId !== visibleThreadIdRef.current) {
+          return;
+        }
+        if (document.hidden || !document.hasFocus()) {
+          let body = "Conversation finished";
+          const lastMessage = state.messages[state.messages.length - 1];
+          if (lastMessage) {
+            const textContent = textOfMessage(lastMessage);
+            if (textContent) {
+              body =
+                textContent.length > 200
+                  ? textContent.substring(0, 200) + "..."
+                  : textContent;
+            }
+          }
+          showNotification(state.title, { body });
+        }
+      },
+    }),
+    [
+      agent_name,
+      isMock,
+      isNewThread,
+      setIsNewThread,
+      setThreadId,
+      showNotification,
+      threadContext,
+      threadId,
+    ],
+  );
+
   const {
     thread,
     pendingUsageMessages,
@@ -112,59 +187,7 @@ export default function AgentChatPage() {
     retryRecovery,
     hasMoreHistory,
     loadMoreHistory,
-  } = useThreadStream({
-    threadId: isNewThread ? undefined : threadId,
-    displayThreadId: threadId,
-    context: threadContext,
-    isMock,
-    onSend: (sentThreadId) => {
-      pendingStartThreadIdRef.current = sentThreadId;
-      setIsWelcomeMode(false);
-    },
-    onStart: (createdThreadId) => {
-      const pendingThreadId = pendingStartThreadIdRef.current;
-      const visibleThreadId = visibleThreadIdRef.current;
-      const currentPathname = window.location.pathname;
-      const streamStillOwnsVisibleChat =
-        visibleThreadId === createdThreadId ||
-        (pendingThreadId !== null &&
-          visibleThreadId === pendingThreadId &&
-          currentPathname.endsWith("/new"));
-      if (!streamStillOwnsVisibleChat) {
-        return;
-      }
-      pendingStartThreadIdRef.current = null;
-      // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(
-        null,
-        "",
-        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
-      );
-      setThreadId(createdThreadId);
-      setIsNewThread(false);
-    },
-    onFinish: (state, meta) => {
-      // Finish side effects are scoped to the visible chat; background thread
-      // completion should not rewrite the current chat UI or notification text.
-      if (meta.threadId !== visibleThreadIdRef.current) {
-        return;
-      }
-      if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
-      }
-    },
-  });
+  } = useThreadRuntime(runtimeRegistration);
 
   useEffect(() => {
     setIsWelcomeMode(
@@ -261,7 +284,9 @@ export default function AgentChatPage() {
                   size="sm"
                   variant="secondary"
                   onClick={() => {
-                    router.push(`/workspace/agents/${agent_name}/chats/new`);
+                    const nextPath = `/workspace/agents/${agent_name}/chats/new`;
+                    resetToNewThread();
+                    router.push(nextPath);
                   }}
                 >
                   <PlusSquare />

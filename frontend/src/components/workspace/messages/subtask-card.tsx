@@ -23,6 +23,7 @@ import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
 import { formatElapsedMinutesSeconds } from "@/core/tasks/elapsed";
+import type { Subtask } from "@/core/tasks/types";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -78,7 +79,17 @@ export function SubtaskCard({
 }) {
   const { t } = useI18n();
   const { scrollRef, stopScroll } = useStickToBottomContext();
-  const task = useSubtask({ id: taskId, threadId, runId })!;
+  const task =
+    useSubtask({ id: taskId, threadId, runId }) ??
+    ({
+      id: taskId,
+      threadId,
+      ...(runId ? { runId } : {}),
+      status: "in_progress",
+      subagent_type: "",
+      description: t.subtasks.in_progress,
+      prompt: "",
+    } satisfies Subtask);
   const resultPreview = useMemo(
     () => task.result?.replace(/\s+/g, " ").trim() ?? "",
     [task.result],

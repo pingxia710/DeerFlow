@@ -35,6 +35,7 @@ export type MockThread = {
   metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
+  runtimeSnapshot?: Record<string, unknown>;
 };
 
 export type MockAgent = {
@@ -345,6 +346,29 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           latest_lead: null,
           by_caller: {},
           recent: [],
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/([^/]+)\/runtime-snapshot$/, (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      const matchingThread = threads.find((t) => t.thread_id === threadId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          runs: [],
+          rounds: [],
+          run_messages: [],
+          task_lanes: [],
+          recovery: null,
+          ...(matchingThread?.runtimeSnapshot ?? {}),
         }),
       });
     }

@@ -311,17 +311,35 @@ describe("applyBackgroundRunProbeResult", () => {
   test("clears failed background runs and records terminal cache status", () => {
     const client = new QueryClient();
     const threadId = "probe-timeout-thread";
+    const settled: unknown[] = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
     markThreadBusyInCaches(client, threadId);
 
     expect(
-      applyBackgroundRunProbeResult(client, threadId, "run-timeout", "timeout"),
+      applyBackgroundRunProbeResult(
+        client,
+        threadId,
+        "run-timeout",
+        "timeout",
+        {
+          settleRunSubtasks: (terminal) => settled.push(terminal),
+          terminalReason: "timeout",
+        },
+      ),
     ).toBe(true);
 
     const search = client.getQueryData<AgentThread[]>(["threads", "search"]);
     expect(search?.[0]?.status).toBe("timeout");
     expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
     expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+    expect(settled).toEqual([
+      {
+        threadId,
+        runId: "run-timeout",
+        status: "timeout",
+        terminalReason: "timeout",
+      },
+    ]);
   });
 
   test("clears lost background runs and records terminal cache status", () => {
@@ -447,9 +465,9 @@ describe("stream error recovery", () => {
     ).toBe(false);
     expect(
       shouldReleaseQueuedThreadMessage({
-        isLoading: false,
         streamFinished: true,
         sendInFlight: false,
+        recovering: false,
         queuedThreadId: threadId,
         currentViewThreadId: threadId,
       }),

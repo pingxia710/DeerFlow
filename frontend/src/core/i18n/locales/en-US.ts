@@ -200,6 +200,8 @@ export const enUS: Translations = {
     channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
+    chatRunning: "Running",
+    chatFinished: "Finished",
     agents: "Agents",
   },
 

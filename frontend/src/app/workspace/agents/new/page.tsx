@@ -27,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
@@ -88,6 +87,7 @@ export default function NewAgentPage() {
 
   const { thread, sendMessage } = useThreadStream({
     threadId: undefined,
+    displayThreadId: threadId,
     context: {
       mode: "flash",
       is_bootstrap: true,
@@ -100,7 +100,8 @@ export default function NewAgentPage() {
         setSetupAgentStatus("idle");
       }
     },
-    onToolEnd({ name }) {
+    onToolEnd({ name, threadId: eventThreadId }) {
+      if (eventThreadId !== threadId) return;
       if (name !== "setup_agent" || !agentName) return;
       setSetupAgentStatus("completed");
       void getAgentWithRetry(agentName).then((fetched) => {
@@ -347,73 +348,69 @@ export default function NewAgentPage() {
 
   return (
     <ThreadContext.Provider value={{ thread }}>
-      <ArtifactsProvider>
-        <div className="flex size-full flex-col">
-          {header}
+      <div className="flex size-full flex-col">
+        {header}
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            {showSaveHint ? (
-              <div className="px-4 pt-4">
-                <div className="mx-auto w-full max-w-(--container-width-md)">
-                  <Alert>
-                    <InfoIcon className="h-4 w-4" />
-                    <AlertDescription>{t.agents.saveHint}</AlertDescription>
-                  </Alert>
-                </div>
+        <main className="flex min-h-0 flex-1 flex-col">
+          {showSaveHint ? (
+            <div className="px-4 pt-4">
+              <div className="mx-auto w-full max-w-(--container-width-md)">
+                <Alert>
+                  <InfoIcon className="h-4 w-4" />
+                  <AlertDescription>{t.agents.saveHint}</AlertDescription>
+                </Alert>
               </div>
-            ) : null}
-
-            <div className="flex min-h-0 flex-1 justify-center">
-              <MessageList
-                className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
-                threadId={threadId}
-                thread={thread}
-              />
             </div>
+          ) : null}
 
-            <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
-              <div className="w-full max-w-(--container-width-md)">
-                {agent ? (
-                  <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
-                    <CheckCircleIcon className="text-primary h-10 w-10" />
-                    <p className="font-semibold">{t.agents.agentCreated}</p>
-                    <div className="flex gap-2">
-                      <Button
-                        onClick={() =>
-                          router.push(
-                            `/workspace/agents/${agentName}/chats/new`,
-                          )
-                        }
-                      >
-                        {t.agents.startChatting}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => router.push("/workspace/agents")}
-                      >
-                        {t.agents.backToGallery}
-                      </Button>
-                    </div>
+          <div className="flex min-h-0 flex-1 justify-center">
+            <MessageList
+              className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
+              threadId={threadId}
+              thread={thread}
+            />
+          </div>
+
+          <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
+            <div className="w-full max-w-(--container-width-md)">
+              {agent ? (
+                <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
+                  <CheckCircleIcon className="text-primary h-10 w-10" />
+                  <p className="font-semibold">{t.agents.agentCreated}</p>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() =>
+                        router.push(`/workspace/agents/${agentName}/chats/new`)
+                      }
+                    >
+                      {t.agents.startChatting}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => router.push("/workspace/agents")}
+                    >
+                      {t.agents.backToGallery}
+                    </Button>
                   </div>
-                ) : (
-                  <PromptInput
-                    onSubmit={({ text }) => void handleChatSubmit(text)}
-                  >
-                    <PromptInputTextarea
-                      autoFocus
-                      placeholder={t.agents.createPageSubtitle}
-                      disabled={thread.isLoading}
-                    />
-                    <PromptInputFooter className="justify-end">
-                      <PromptInputSubmit disabled={thread.isLoading} />
-                    </PromptInputFooter>
-                  </PromptInput>
-                )}
-              </div>
+                </div>
+              ) : (
+                <PromptInput
+                  onSubmit={({ text }) => void handleChatSubmit(text)}
+                >
+                  <PromptInputTextarea
+                    autoFocus
+                    placeholder={t.agents.createPageSubtitle}
+                    disabled={thread.isLoading}
+                  />
+                  <PromptInputFooter className="justify-end">
+                    <PromptInputSubmit disabled={thread.isLoading} />
+                  </PromptInputFooter>
+                </PromptInput>
+              )}
             </div>
-          </main>
-        </div>
-      </ArtifactsProvider>
+          </div>
+        </main>
+      </div>
     </ThreadContext.Provider>
   );
 }

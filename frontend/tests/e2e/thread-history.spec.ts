@@ -497,13 +497,496 @@ test.describe("Thread history", () => {
     ).toBeVisible();
   });
 
-  // TODO(e2e): cover A streaming -> switch B -> B streaming -> A terminal late
-  // once the stream mock can hold multiple runs open and emit custom terminal
-  // events without brittle timing.
-  // TODO(e2e): cover terminal runtime snapshot vs stale active runs once
-  // mockLangGraphAPI owns /api/threads/:id/runtime-snapshot ordering.
-  // TODO(e2e): cover queued follow-up cancellation after switching chats once
-  // the stream mock can hold a run open without brittle timing.
+  test("switching chats keeps simultaneous streams scoped to their threads", async ({
+    page,
+  }) => {
+    const markerA = "THREAD-A-LATE-STREAM-MUST-STAY-IN-A";
+    const markerB = "THREAD-B-OWN-STREAM-MUST-STAY-IN-B";
+    let releaseThreadA!: () => void;
+    const threadAReleased = new Promise<void>((resolve) => {
+      releaseThreadA = resolve;
+    });
+    let resolveThreadAFulfilled!: () => void;
+    const threadAFulfilled = new Promise<void>((resolve) => {
+      resolveThreadAFulfilled = resolve;
+    });
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Destination conversation",
+          updated_at: "2025-06-04T12:00:00Z",
+        },
+      ],
+    });
+
+    const fulfillStream = (
+      route: Route,
+      {
+        threadId,
+        runId,
+        marker,
+      }: { threadId: string; runId: string; marker: string },
+    ) => {
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: runId,
+            thread_id: threadId,
+          },
+        },
+        {
+          event: "values",
+          data: {
+            messages: [
+              {
+                type: "human",
+                id: `msg-human-${runId}`,
+                content: [{ type: "text", text: marker }],
+              },
+              {
+                type: "ai",
+                id: `msg-ai-${runId}`,
+                content: `Answer for ${marker}`,
+              },
+            ],
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+    };
+
+    await page.route("**/api/langgraph/runs/stream", async (route) => {
+      await threadAReleased;
+      await fulfillStream(route, {
+        threadId: MOCK_THREAD_ID,
+        runId: "run-thread-a-late",
+        marker: markerA,
+      });
+      resolveThreadAFulfilled();
+    });
+    await page.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      async (route) => {
+        const url = route.request().url();
+        if (url.includes(MOCK_THREAD_ID_2)) {
+          await fulfillStream(route, {
+            threadId: MOCK_THREAD_ID_2,
+            runId: "run-thread-b",
+            marker: markerB,
+          });
+          return;
+        }
+        await threadAReleased;
+        await fulfillStream(route, {
+          threadId: MOCK_THREAD_ID,
+          runId: "run-thread-a-late",
+          marker: markerA,
+        });
+        resolveThreadAFulfilled();
+      },
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(markerA);
+    await textarea.press("Enter");
+    await expect(page.getByText(markerA)).toBeVisible();
+
+    await page.getByText("Destination conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText(markerA)).toHaveCount(0);
+
+    await textarea.fill(markerB);
+    await textarea.press("Enter");
+    await expect(page.getByText(`Answer for ${markerB}`)).toBeVisible({
+      timeout: 15_000,
+    });
+
+    releaseThreadA();
+    await threadAFulfilled;
+
+    await expect(page.getByText(`Answer for ${markerA}`)).toHaveCount(0);
+    await expect(
+      page.locator(
+        `[data-sidebar='sidebar'] a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
+      ),
+    ).toHaveAttribute("aria-label", /Finished/, { timeout: 15_000 });
+    await expect(page.getByText(markerB, { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID_2));
+  });
+
+  test("separate browser tabs keep simultaneous streams scoped", async ({
+    page,
+    context,
+  }) => {
+    const pageA = page;
+    const pageB = await context.newPage();
+    const markerA = "TAB-A-LATE-STREAM-MUST-STAY-IN-A";
+    const markerB = "TAB-B-OWN-STREAM-MUST-STAY-IN-B";
+    let releaseThreadA!: () => void;
+    const threadAReleased = new Promise<void>((resolve) => {
+      releaseThreadA = resolve;
+    });
+
+    mockLangGraphAPI(pageA, { threads: THREADS });
+    mockLangGraphAPI(pageB, { threads: THREADS });
+
+    const fulfillStream = (
+      route: Route,
+      {
+        threadId,
+        runId,
+        marker,
+      }: { threadId: string; runId: string; marker: string },
+    ) => {
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: runId,
+            thread_id: threadId,
+          },
+        },
+        {
+          event: "values",
+          data: {
+            messages: [
+              {
+                type: "human",
+                id: `msg-human-${runId}`,
+                content: [{ type: "text", text: marker }],
+              },
+              {
+                type: "ai",
+                id: `msg-ai-${runId}`,
+                content: `Answer for ${marker}`,
+              },
+            ],
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+    };
+
+    await pageA.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      async (route) => {
+        await threadAReleased;
+        await fulfillStream(route, {
+          threadId: MOCK_THREAD_ID,
+          runId: "run-tab-a",
+          marker: markerA,
+        });
+      },
+    );
+    await pageB.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      async (route) => {
+        await fulfillStream(route, {
+          threadId: MOCK_THREAD_ID_2,
+          runId: "run-tab-b",
+          marker: markerB,
+        });
+      },
+    );
+
+    await pageA.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await pageB.goto(`/workspace/chats/${MOCK_THREAD_ID_2}`);
+    const textareaA = pageA.getByPlaceholder(/how can i assist you/i);
+    const textareaB = pageB.getByPlaceholder(/how can i assist you/i);
+    await expect(textareaA).toBeVisible({ timeout: 15_000 });
+    await expect(textareaB).toBeVisible({ timeout: 15_000 });
+
+    await textareaA.fill(markerA);
+    await textareaA.press("Enter");
+    await expect(pageA.getByText(markerA)).toBeVisible();
+
+    await textareaB.fill(markerB);
+    await textareaB.press("Enter");
+    await expect(pageB.getByText(`Answer for ${markerB}`)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(pageB.getByText(markerA)).toHaveCount(0);
+
+    releaseThreadA();
+
+    await expect(pageA.getByText(`Answer for ${markerA}`)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(pageA.getByText(markerB)).toHaveCount(0);
+    await expect(pageB.getByText(markerA)).toHaveCount(0);
+    await pageB.close();
+  });
+
+  test("queued follow-up stays on its original thread after switching chats", async ({
+    page,
+  }) => {
+    const firstMarker = "THREAD-A-FIRST-HELD-STREAM";
+    const queuedMarker = "THREAD-A-QUEUED-FOLLOW-UP";
+    let releaseFirstStream!: () => void;
+    const firstStreamReleased = new Promise<void>((resolve) => {
+      releaseFirstStream = resolve;
+    });
+    let resolveQueuedSubmit!: () => void;
+    const queuedSubmitSeen = new Promise<void>((resolve) => {
+      resolveQueuedSubmit = resolve;
+    });
+    let threadAStreamCount = 0;
+    let threadBStreamCount = 0;
+    const streamRequests: string[] = [];
+
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    const fulfillStream = (
+      route: Route,
+      {
+        threadId,
+        runId,
+        marker,
+      }: { threadId: string; runId: string; marker: string },
+    ) => {
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: runId,
+            thread_id: threadId,
+          },
+        },
+        {
+          event: "values",
+          data: {
+            messages: [
+              {
+                type: "human",
+                id: `msg-human-${runId}`,
+                content: [{ type: "text", text: marker }],
+              },
+              {
+                type: "ai",
+                id: `msg-ai-${runId}`,
+                content: `Answer for ${marker}`,
+              },
+            ],
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+    };
+
+    const handleStreamRoute = async (route: Route) => {
+      const url = route.request().url();
+      streamRequests.push(url);
+      if (url.includes(MOCK_THREAD_ID_2)) {
+        threadBStreamCount += 1;
+        await fulfillStream(route, {
+          threadId: MOCK_THREAD_ID_2,
+          runId: "run-thread-b-unexpected",
+          marker: "THREAD-B-UNEXPECTED-STREAM",
+        });
+        return;
+      }
+
+      threadAStreamCount += 1;
+      if (threadAStreamCount === 1) {
+        await firstStreamReleased;
+        await fulfillStream(route, {
+          threadId: MOCK_THREAD_ID,
+          runId: "run-thread-a-first",
+          marker: firstMarker,
+        });
+        return;
+      }
+
+      await fulfillStream(route, {
+        threadId: MOCK_THREAD_ID,
+        runId: "run-thread-a-queued",
+        marker: queuedMarker,
+      });
+      resolveQueuedSubmit();
+    };
+
+    await page.route("**/api/langgraph/runs/stream", handleStreamRoute);
+    await page.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      handleStreamRoute,
+    );
+
+    const waitForQueuedSubmit = () =>
+      Promise.race([
+        queuedSubmitSeen,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `queued submit was not released: A=${threadAStreamCount}, B=${threadBStreamCount}, urls=${streamRequests.join(",")}`,
+                ),
+              ),
+            10_000,
+          ),
+        ),
+      ]);
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(firstMarker);
+    await textarea.press("Enter");
+    await expect(page.getByText(firstMarker)).toBeVisible();
+
+    await textarea.fill(queuedMarker);
+    await textarea.press("Enter");
+    await expect(textarea).toHaveValue("");
+    await expect(page.getByText(queuedMarker)).toBeVisible();
+
+    await page.getByText("Second conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText(firstMarker)).toHaveCount(0);
+    await expect(page.getByText(queuedMarker)).toHaveCount(0);
+
+    releaseFirstStream();
+    await waitForQueuedSubmit();
+
+    expect(threadAStreamCount).toBe(2);
+    expect(threadBStreamCount).toBe(0);
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID_2));
+    await expect(page.getByText(firstMarker)).toHaveCount(0);
+    await expect(page.getByText(queuedMarker)).toHaveCount(0);
+    await expect(
+      page.getByText("Response in thread Second conversation"),
+    ).toBeVisible();
+  });
+
+  test("runtime snapshot terminal wins over stale active runs", async ({
+    page,
+  }) => {
+    const runId = "snapshot-terminal-run";
+    const marker = "SNAPSHOT-TERMINAL-HUMAN";
+    let staleRunQueries = 0;
+    let activeRunMessageLoads = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Snapshot terminal conversation",
+          updated_at: "2025-06-05T12:00:00Z",
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: runId,
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "lead_agent",
+                status: "success",
+                terminal_reason: "success",
+                metadata: {},
+                kwargs: {},
+                created_at: "2025-06-05T12:00:00Z",
+                updated_at: "2025-06-05T12:00:01Z",
+              },
+            ],
+            run_messages: [
+              {
+                run_id: runId,
+                data: [
+                  {
+                    run_id: runId,
+                    content: {
+                      type: "human",
+                      id: "snapshot-terminal-human",
+                      content: [{ type: "text", text: marker }],
+                    },
+                    metadata: { caller: "lead_agent" },
+                    created_at: "2025-06-05T12:00:00Z",
+                  },
+                ],
+                hasMore: false,
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await page.route(
+      /\/api\/langgraph\/threads\/[^/]+\/runs(\?|$)/,
+      (route) => {
+        if (
+          route.request().method() === "GET" &&
+          route.request().url().includes(MOCK_THREAD_ID)
+        ) {
+          staleRunQueries += 1;
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([
+              {
+                run_id: runId,
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "lead_agent",
+                status: "running",
+                metadata: {},
+                kwargs: {},
+                created_at: "2025-06-05T12:00:00Z",
+                updated_at: "2025-06-05T12:00:02Z",
+              },
+            ]),
+          });
+        }
+        return route.fallback();
+      },
+    );
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runs/${runId}/messages`),
+      (route) => {
+        activeRunMessageLoads += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ data: [], hasMore: false }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(marker)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText("运行已终止")).toBeVisible();
+    await expect(page.getByText("终止原因：success")).toBeVisible();
+    await expect
+      .poll(() => staleRunQueries, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+    expect(activeRunMessageLoads).toBe(0);
+  });
+
   test("new chat resets immediately after a history-only thread URL update", async ({
     page,
   }) => {

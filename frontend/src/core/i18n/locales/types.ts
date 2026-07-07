@@ -140,6 +140,8 @@ export interface Translations {
     newChat: string;
     chats: string;
     demoChats: string;
+    chatRunning: string;
+    chatFinished: string;
     agents: string;
     channels: string;
   };

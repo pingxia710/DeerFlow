@@ -72,7 +72,7 @@ export function SubtaskCard({
   isLoading,
 }: {
   className?: string;
-  runId?: string | null;
+  runId: string;
   taskId: string;
   threadId: string;
   isLoading: boolean;
@@ -84,7 +84,7 @@ export function SubtaskCard({
     ({
       id: taskId,
       threadId,
-      ...(runId ? { runId } : {}),
+      runId,
       status: "in_progress",
       subagent_type: "",
       description: t.subtasks.in_progress,

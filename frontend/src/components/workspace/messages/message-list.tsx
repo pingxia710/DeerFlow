@@ -368,11 +368,14 @@ export function MessageList({
               groupIsLoading,
             );
             const runId = getMessageRunId(message);
+            if (!runId) {
+              continue;
+            }
             const startedAt = getMessageHistoryTime(message);
             updates.push({
               id: toolCall.id,
               threadId,
-              ...(runId ? { runId } : {}),
+              runId,
               subagent_type: toolCall.args.subagent_type,
               description: toolCall.args.description,
               prompt: toolCall.args.prompt,
@@ -383,10 +386,13 @@ export function MessageList({
           }
         } else if (message.type === "tool" && message.tool_call_id) {
           const runId = getMessageRunId(message);
+          if (!runId) {
+            continue;
+          }
           updates.push({
             id: message.tool_call_id,
             threadId,
-            ...(runId ? { runId } : {}),
+            runId,
             ...parseSubtaskResult(
               extractTextFromMessage(message),
               message.additional_kwargs,
@@ -740,17 +746,20 @@ export function MessageList({
                     if (!taskId) {
                       continue;
                     }
+                    const runId = getMessageRunId(message);
+                    if (!runId) {
+                      continue;
+                    }
                     const status = derivePendingSubtaskStatus(
                       taskId,
                       group.messages,
                       groupIsLoading,
                     );
-                    const runId = getMessageRunId(message);
                     const startedAt = getMessageHistoryTime(message);
                     const task: Subtask = {
                       id: taskId,
                       threadId,
-                      ...(runId ? { runId } : {}),
+                      runId,
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
@@ -802,16 +811,18 @@ export function MessageList({
                 toolCall.name === "task" && toolCall.id ? [toolCall.id] : [],
               );
               const runId = getMessageRunId(message);
-              for (const taskId of taskIds ?? []) {
-                results.push(
-                  <SubtaskCard
-                    key={getSubtaskCardKey(taskId, runId)}
-                    runId={runId}
-                    taskId={taskId}
-                    threadId={threadId}
-                    isLoading={groupIsLoading}
-                  />,
-                );
+              if (runId) {
+                for (const taskId of taskIds ?? []) {
+                  results.push(
+                    <SubtaskCard
+                      key={getSubtaskCardKey(taskId, runId)}
+                      runId={runId}
+                      taskId={taskId}
+                      threadId={threadId}
+                      isLoading={groupIsLoading}
+                    />,
+                  );
+                }
               }
               if (hasContent(message)) {
                 results.push(

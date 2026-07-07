@@ -708,7 +708,7 @@ test("resolveThreadStreamFinishMeta returns onFinish thread and run metadata", a
   ).toEqual({ threadId: "thread-from-owner", runId: "run-from-owner" });
 });
 
-test("resolveVisibleTaskRunningThreadId only accepts the current live thread", async () => {
+test("resolveVisibleTaskRunningThreadId uses event or stream owner, not current route fallback", async () => {
   const { resolveVisibleTaskRunningThreadId } =
     await import("@/core/threads/hooks");
 
@@ -720,10 +720,11 @@ test("resolveVisibleTaskRunningThreadId only accepts the current live thread", a
   ).toBeNull();
   expect(
     resolveVisibleTaskRunningThreadId({
+      streamThreadId: "thread-a",
       viewThreadId: "thread-b",
       liveMessagesThreadId: "thread-b",
     }),
-  ).toBe("thread-b");
+  ).toBe("thread-a");
 });
 
 test("shouldReleaseQueuedThreadMessage releases visible queued thread after terminal/error/end", async () => {
@@ -1046,7 +1047,7 @@ test("metadata-less current finish is accepted when owner snapshot matches", asy
   ).toBe(true);
 });
 
-test("stream title updates require current thread/run or visible owner fallback", async () => {
+test("stream title updates use event or stream owner, not current route fallback", async () => {
   const { shouldApplyStreamTitleUpdate } = await import("@/core/threads/hooks");
 
   expect(
@@ -1080,12 +1081,14 @@ test("stream title updates require current thread/run or visible owner fallback"
   ).toBe(true);
   expect(
     shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
       streamThreadId: "thread-a",
       streamRunId: "run-a",
       viewThreadId: "thread-b",
-      liveMessagesThreadId: "thread-a",
+      liveMessagesThreadId: "thread-b",
     }),
-  ).toBe(false);
+  ).toBe(true);
   expect(
     shouldApplyStreamTitleUpdate({
       streamThreadId: "thread-b",
@@ -1129,6 +1132,130 @@ test("stale A stream finish/title cannot release B queue or update B title", asy
       liveMessagesThreadId: "thread-b",
     }),
   ).toBe(false);
+});
+
+test("local stop settlement releases same-run follow-up and refreshes snapshot fallback", async () => {
+  const {
+    beginLocalRunCancellation,
+    finishLocalRunCancellation,
+    getThreadActivitySnapshot,
+    shouldQueueThreadMessage,
+    shouldReleaseQueuedThreadMessage,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "stop-thread";
+  const runId = "stop-run";
+  const settled: unknown[] = [];
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(
+    beginLocalRunCancellation({ queryClient: client, threadId, runId }),
+  ).toEqual({ threadId, runId });
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+
+  expect(
+    finishLocalRunCancellation({
+      queryClient: client,
+      threadId,
+      runId,
+      settleRunSubtasks: (terminal) => settled.push(terminal),
+    }),
+  ).toEqual({ threadId, runId });
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  expect(settled).toEqual([
+    {
+      threadId,
+      runId,
+      status: "interrupted",
+      terminalReason: "user_cancelled",
+    },
+  ]);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: false,
+      queuedThreadId: threadId,
+      currentViewThreadId: threadId,
+    }),
+  ).toBe(true);
+  expect(
+    shouldQueueThreadMessage({
+      isLoading: false,
+      streamFinished: true,
+      recovering: false,
+      sendInFlight: false,
+    }),
+  ).toBe(false);
+});
+
+test("double local stop settlement is idempotent and keeps snapshot fallback invalidated", async () => {
+  const {
+    finishLocalRunCancellation,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "double-stop-thread";
+  const runId = "double-stop-run";
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(() =>
+    finishLocalRunCancellation({ queryClient: client, threadId, runId }),
+  ).not.toThrow();
+  expect(() =>
+    finishLocalRunCancellation({ queryClient: client, threadId, runId }),
+  ).not.toThrow();
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("stream_recovery_required uses error thread/run owner for snapshot backfill", async () => {
+  const {
+    applyStreamErrorRecovery,
+    resolveRunStreamRecoveryErrorOwner,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const { RunStreamRecoveryRequiredError } = await import("@/core/api");
+  const client = new QueryClient();
+  const threadId = "recovery-required-thread";
+  const runId = "recovery-required-run";
+  const error = new RunStreamRecoveryRequiredError({
+    threadId,
+    runId,
+    reason: "stream_recovery_required",
+  });
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  const owner = resolveRunStreamRecoveryErrorOwner(
+    error,
+    "current-route-thread",
+    "current-route-run",
+  );
+  expect(owner).toEqual({ threadId, runId });
+  expect(
+    applyStreamErrorRecovery({
+      queryClient: client,
+      threadId: owner?.threadId,
+      runId: owner?.runId,
+      isMock: true,
+    }),
+  ).toEqual({ threadId, runId });
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
 });
 
 test("getVisibleThreadError hides transient stream errors while recovery owns the run", async () => {

@@ -94,6 +94,47 @@ test("subtask updates with runId are stored under strong run-scoped key", () => 
   ]);
 });
 
+test("same thread and task id stay isolated across different runs", () => {
+  const run1Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+  });
+  const run2Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-2",
+  });
+  const tasks = applySubtaskUpdateInState(
+    applySubtaskUpdateInState(
+      {},
+      subtaskFixture({
+        id: "task-1",
+        threadId: "thread-1",
+        runId: "run-1",
+        status: "completed",
+        result: "run 1 result",
+      }),
+    ),
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-2",
+      status: "in_progress",
+    }),
+  );
+
+  expect(tasks[run1Key]).toMatchObject({
+    runId: "run-1",
+    status: "completed",
+    result: "run 1 result",
+  });
+  expect(tasks[run2Key]).toMatchObject({
+    runId: "run-2",
+    status: "in_progress",
+  });
+});
+
 test("legacy update without runId updates unique existing run-scoped task without creating legacy duplicate", () => {
   const strongKey = getSubtaskStorageKey({
     id: "task-1",

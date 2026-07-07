@@ -21,7 +21,11 @@ import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
-import { clearReconnectRun, getAPIClient } from "../api";
+import {
+  clearReconnectRun,
+  getAPIClient,
+  isRunStreamRecoveryRequiredError,
+} from "../api";
 import {
   DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
   fetch,
@@ -792,8 +796,6 @@ export function getThreadMessagesWithLiveSnapshot({
 export function resolveVisibleTaskRunningThreadId({
   eventThreadId,
   streamThreadId,
-  viewThreadId,
-  liveMessagesThreadId,
 }: {
   eventThreadId?: string | null;
   streamThreadId?: string | null;
@@ -803,13 +805,7 @@ export function resolveVisibleTaskRunningThreadId({
   if (eventThreadId) {
     return eventThreadId;
   }
-  if (streamThreadId) {
-    return streamThreadId;
-  }
-  if (!viewThreadId || !liveMessagesThreadId) {
-    return null;
-  }
-  return liveMessagesThreadId === viewThreadId ? viewThreadId : null;
+  return streamThreadId ?? null;
 }
 
 const TASK_EVENT_CALLER = "task_event";
@@ -2065,6 +2061,78 @@ export function applyBackgroundRunProbeResult(
   return true;
 }
 
+export function markThreadCancellingInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+) {
+  markThreadBusyInCaches(queryClient, threadId);
+  setThreadStatusInCaches(queryClient, threadId, "cancelling");
+  void queryClient.invalidateQueries({
+    queryKey: threadRunsQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadRuntimeSnapshotQueryKey(threadId),
+  });
+}
+
+export function beginLocalRunCancellation({
+  queryClient,
+  threadId,
+  runId,
+}: {
+  queryClient: QueryClient;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+}): StreamErrorRecoveryRun | null {
+  if (!threadId || !runId) {
+    if (threadId) {
+      clearThreadActivity(threadId);
+    }
+    return null;
+  }
+  markThreadCancellingInCaches(queryClient, threadId);
+  return { threadId, runId };
+}
+
+export function finishLocalRunCancellation({
+  queryClient,
+  threadId,
+  runId,
+  settleRunSubtasks,
+}: {
+  queryClient: QueryClient;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+  settleRunSubtasks?: SettleRunSubtasks;
+}): StreamErrorRecoveryRun | null {
+  if (!threadId || !runId) {
+    if (threadId) {
+      clearThreadActivity(threadId);
+    }
+    return null;
+  }
+  stopBackgroundRunProbe(threadId, runId);
+  applyBackgroundRunProbeResult(queryClient, threadId, runId, "interrupted", {
+    settleRunSubtasks,
+    terminalReason: "user_cancelled",
+  });
+  return { threadId, runId };
+}
+
+export function resolveRunStreamRecoveryErrorOwner(
+  error: unknown,
+  fallbackThreadId: string | null | undefined,
+  fallbackRunId: string | null | undefined,
+): StreamErrorRecoveryRun | null {
+  const threadId = isRunStreamRecoveryRequiredError(error)
+    ? (error.threadId ?? fallbackThreadId)
+    : fallbackThreadId;
+  const runId = isRunStreamRecoveryRequiredError(error)
+    ? error.runId
+    : fallbackRunId;
+  return threadId && runId ? { threadId, runId } : null;
+}
+
 export function applyStreamErrorRecovery({
   queryClient,
   threadId,
@@ -2234,9 +2302,6 @@ export function shouldApplyStreamTitleUpdate({
   eventRunId,
   streamThreadId,
   streamRunId,
-  viewThreadId,
-  liveMessagesThreadId,
-  optimisticThreadId,
 }: StreamOwnershipState) {
   if (!streamThreadId) {
     return false;
@@ -2244,18 +2309,13 @@ export function shouldApplyStreamTitleUpdate({
   if (eventThreadId && eventThreadId !== streamThreadId) {
     return false;
   }
-  if (eventRunId && streamRunId && eventRunId !== streamRunId) {
+  if (eventRunId && eventRunId !== streamRunId) {
     return false;
   }
   if (eventThreadId || eventRunId) {
     return Boolean(eventThreadId && eventThreadId === streamThreadId);
   }
-  return Boolean(
-    viewThreadId &&
-    (viewThreadId === streamThreadId ||
-      liveMessagesThreadId === viewThreadId ||
-      optimisticThreadId === viewThreadId),
-  );
+  return true;
 }
 
 export type RefreshRunsParams = {
@@ -2669,6 +2729,8 @@ export function useThreadStream({
     useState<ReadonlySet<string>>(() => new Set());
   const [streamErrorRecoveryRun, setStreamErrorRecoveryRunState] =
     useState<StreamErrorRecoveryRun | null>(null);
+  const [locallySettledRun, setLocallySettledRunState] =
+    useState<StreamErrorRecoveryRun | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [queueReleaseVersion, setQueueReleaseVersion] = useState(0);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
@@ -2687,6 +2749,7 @@ export function useThreadStream({
   const streamClientThreadIdLockedRef = useRef(false);
   const liveMessagesSnapshotRef = useRef<LiveMessagesSnapshot | null>(null);
   const streamErrorRecoveryRunRef = useRef<StreamErrorRecoveryRun | null>(null);
+  const locallySettledRunRef = useRef<StreamErrorRecoveryRun | null>(null);
   const startedRef = useRef(false);
   const activeSendRequestRef = useRef<SendRequestOwnership | null>(null);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
@@ -2716,6 +2779,13 @@ export function useThreadStream({
     (next: StreamErrorRecoveryRun | null) => {
       streamErrorRecoveryRunRef.current = next;
       setStreamErrorRecoveryRunState(next);
+    },
+    [],
+  );
+  const setLocallySettledRun = useCallback(
+    (next: StreamErrorRecoveryRun | null) => {
+      locallySettledRunRef.current = next;
+      setLocallySettledRunState(next);
     },
     [],
   );
@@ -2773,6 +2843,7 @@ export function useThreadStream({
       streamRunIdRef.current = _runId;
       streamOwnerSnapshotRef.current = { threadId: _threadId, runId: _runId };
       setStreamErrorRecoveryRun(null);
+      setLocallySettledRun(null);
       const currentView = currentViewThreadIdRef.current;
       const streamStillOwnsVisibleChat =
         currentView === _threadId ||
@@ -2808,7 +2879,7 @@ export function useThreadStream({
       }
       setOnStreamThreadId(_threadId);
     },
-    [setStreamErrorRecoveryRun],
+    [setLocallySettledRun, setStreamErrorRecoveryRun],
   );
 
   const queryClient = useQueryClient();
@@ -3075,6 +3146,15 @@ export function useThreadStream({
         ) {
           setStreamErrorRecoveryRun(null);
         }
+        if (
+          isSameStreamErrorRecoveryRun(
+            locallySettledRunRef.current,
+            terminalEvent.thread_id,
+            terminalEvent.run_id,
+          )
+        ) {
+          setLocallySettledRun(null);
+        }
         return;
       }
 
@@ -3092,8 +3172,15 @@ export function useThreadStream({
       }
     },
     onError(error, run) {
-      const streamThreadId = run?.thread_id ?? streamThreadIdRef.current;
-      const streamRunId = run?.run_id ?? streamRunIdRef.current;
+      const recoveryOwner = resolveRunStreamRecoveryErrorOwner(
+        error,
+        run?.thread_id ?? streamThreadIdRef.current,
+        run?.run_id ?? streamRunIdRef.current,
+      );
+      const streamThreadId =
+        recoveryOwner?.threadId ?? run?.thread_id ?? streamThreadIdRef.current;
+      const streamRunId =
+        recoveryOwner?.runId ?? run?.run_id ?? streamRunIdRef.current;
       releaseStreamClientThreadId(streamThreadId);
       if (
         shouldCommitStreamStartFromError({
@@ -3140,6 +3227,7 @@ export function useThreadStream({
         }
       }
       if (recoveryRun === null && errorOwnsCurrentUi) {
+        setLocallySettledRun(null);
         setOptimisticMessages([]);
         setOptimisticThreadTarget(null);
         setLiveMessagesThreadTarget(null);
@@ -3184,6 +3272,15 @@ export function useThreadStream({
         )
       ) {
         setStreamErrorRecoveryRun(null);
+      }
+      if (
+        isSameStreamErrorRecoveryRun(
+          locallySettledRunRef.current,
+          streamThreadId,
+          streamRunId,
+        )
+      ) {
+        setLocallySettledRun(null);
       }
       if (streamThreadId) {
         markThreadFinished(streamThreadId);
@@ -3291,6 +3388,7 @@ export function useThreadStream({
     activeSendRequestRef.current = null;
     sendInFlightRef.current = false;
     streamFinishedRef.current = true;
+    setLocallySettledRun(null);
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
@@ -3300,7 +3398,7 @@ export function useThreadStream({
     setIsUploading(false);
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-  }, [setStreamErrorRecoveryRun, threadId]);
+  }, [setLocallySettledRun, setStreamErrorRecoveryRun, threadId]);
 
   useEffect(() => {
     if (
@@ -3380,6 +3478,16 @@ export function useThreadStream({
     setOptimisticThreadTarget,
   ]);
 
+  const isCurrentStreamLocallySettled = useCallback(
+    () =>
+      isSameStreamErrorRecoveryRun(
+        locallySettledRunRef.current,
+        streamThreadIdRef.current,
+        streamRunIdRef.current,
+      ),
+    [],
+  );
+
   const sendMessage = useCallback(
     async (
       threadId: string,
@@ -3400,7 +3508,7 @@ export function useThreadStream({
       );
       if (
         shouldQueueThreadMessage({
-          isLoading: thread.isLoading,
+          isLoading: thread.isLoading && !isCurrentStreamLocallySettled(),
           streamFinished: streamFinishedRef.current,
           recovering: targetThreadRecovering,
           sendInFlight: sendInFlightRef.current,
@@ -3509,6 +3617,7 @@ export function useThreadStream({
       setOptimisticThreadTarget(threadId);
       setLiveMessagesThreadTarget(threadId);
       setOptimisticMessages(newOptimistic);
+      setLocallySettledRun(null);
       streamFinishedRef.current = false;
       markThreadBusyInCaches(queryClient, threadId);
 
@@ -3659,8 +3768,10 @@ export function useThreadStream({
       context,
       queryClient,
       humanMessageCount,
+      isCurrentStreamLocallySettled,
       persistedMessages,
       releaseStreamClientThreadId,
+      setLocallySettledRun,
       setLiveMessagesThreadTarget,
       setOptimisticThreadTarget,
     ],
@@ -3733,6 +3844,7 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       setLiveMessagesThreadTarget(threadId);
+      setLocallySettledRun(null);
       markThreadBusyInCaches(queryClient, threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
@@ -3837,6 +3949,7 @@ export function useThreadStream({
       persistedMessages,
       queryClient,
       releaseStreamClientThreadId,
+      setLocallySettledRun,
       setLiveMessagesThreadTarget,
       thread,
     ],
@@ -3857,24 +3970,88 @@ export function useThreadStream({
     streamErrorRecoveryRun,
     currentViewThreadId,
   );
+  const hasLocallySettledCurrentStream = isSameStreamErrorRecoveryRun(
+    locallySettledRun,
+    streamThreadIdRef.current,
+    streamRunIdRef.current,
+  );
+  const effectiveThreadIsLoading =
+    thread.isLoading && !hasLocallySettledCurrentStream;
 
   const mergedMessages = mergeMessages(
     visibleHistory,
     persistedMessages,
     visibleOptimisticMessages,
   );
-  const pendingUsageMessages = thread.isLoading
+  const pendingUsageMessages = effectiveThreadIsLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
 
+  const stopCurrentStream = useCallback(async () => {
+    const owner = streamOwnerSnapshotRef.current;
+    const stopThreadId = owner?.threadId ?? streamThreadIdRef.current;
+    const stopRunId = owner?.runId ?? streamRunIdRef.current;
+    const cancellation = beginLocalRunCancellation({
+      queryClient,
+      threadId: stopThreadId,
+      runId: stopRunId,
+    });
+    const ownsCurrentStream = shouldTreatTerminalEventAsCurrentStream(
+      stopThreadId,
+      stopRunId,
+      streamThreadIdRef.current,
+      streamRunIdRef.current,
+    );
+
+    if (cancellation && ownsCurrentStream) {
+      streamFinishedRef.current = true;
+      activeSendRequestRef.current = null;
+      sendInFlightRef.current = false;
+      setStreamErrorRecoveryRun(null);
+      setLocallySettledRun(cancellation);
+      releaseStreamClientThreadId(cancellation.threadId);
+      setQueueReleaseVersion((version) => version + 1);
+    }
+
+    try {
+      await thread.stop();
+    } catch (error) {
+      if (!cancellation) {
+        throw error;
+      }
+    } finally {
+      if (cancellation) {
+        finishLocalRunCancellation({
+          queryClient,
+          threadId: cancellation.threadId,
+          runId: cancellation.runId,
+          settleRunSubtasks,
+        });
+        refreshHistoryRuns({
+          threadId: cancellation.threadId,
+          runIds: [cancellation.runId],
+        });
+      }
+    }
+  }, [
+    queryClient,
+    refreshHistoryRuns,
+    releaseStreamClientThreadId,
+    setLocallySettledRun,
+    setStreamErrorRecoveryRun,
+    settleRunSubtasks,
+    thread,
+  ]);
+
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
-    isLoading: thread.isLoading || hasVisibleStreamErrorRecovery,
+    stop: stopCurrentStream,
+    isLoading: effectiveThreadIsLoading || hasVisibleStreamErrorRecovery,
     error: getVisibleThreadError(thread.error, hasVisibleStreamErrorRecovery),
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
@@ -3899,7 +4076,7 @@ export function useThreadStream({
               terminalNotice.status,
           } as const)
         : streamErrorRecoveryRun === null &&
-            !thread.isLoading &&
+            !effectiveThreadIsLoading &&
             thread.error === undefined
           ? null
           : null;

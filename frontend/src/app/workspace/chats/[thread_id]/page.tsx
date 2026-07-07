@@ -42,6 +42,10 @@ import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+export function getChatRuntimeKey(threadId: string, isNewThread: boolean) {
+  return isNewThread ? `new-chat:${threadId}` : threadId;
+}
+
 export default function ChatPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -97,9 +101,11 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
 
+  const runtimeKey = getChatRuntimeKey(threadId, isNewThread);
+
   const threadRuntime = useMemo(
     () => ({
-      runtimeKey: threadId,
+      runtimeKey,
       threadId: isNewThread ? undefined : threadId,
       displayThreadId: threadId,
       context: settings.context,
@@ -156,6 +162,7 @@ export default function ChatPage() {
       isNewThread,
       setIsNewThread,
       setThreadId,
+      runtimeKey,
       settings.context,
       showNotification,
       threadId,

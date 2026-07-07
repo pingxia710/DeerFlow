@@ -97,12 +97,22 @@ export function SubtaskCard({
   const hasCompletedResult =
     task.status === "completed" && resultPreview.length > 0;
   const [collapsed, setCollapsed] = useState(true);
-  const startedAtRef = useRef<number | null>(
-    task.status === "in_progress" ? (task.startedAt ?? Date.now()) : null,
-  );
-  const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(
-    task.status === "in_progress" ? 0 : null,
-  );
+  const startedAtRef = useRef<number | null>(task.startedAt ?? null);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(() => {
+    if (task.durationMs !== undefined) {
+      return Math.floor(task.durationMs / MS_IN_SECOND);
+    }
+    if (task.status === "in_progress") {
+      const startedAt = task.startedAt ?? startedAtRef.current;
+      return startedAt === null
+        ? null
+        : Math.floor((Date.now() - startedAt) / MS_IN_SECOND);
+    }
+    if (task.startedAt !== undefined && task.finishedAt !== undefined) {
+      return Math.floor((task.finishedAt - task.startedAt) / MS_IN_SECOND);
+    }
+    return null;
+  });
   const isOpen = !collapsed;
   const elapsedText =
     elapsedSeconds === null
@@ -120,13 +130,27 @@ export function SubtaskCard({
   }, [task.status]);
 
   useEffect(() => {
-    if (task.status !== "in_progress") {
-      if (startedAtRef.current !== null) {
-        setElapsedSeconds(
-          Math.floor((Date.now() - startedAtRef.current) / MS_IN_SECOND),
-        );
+    if (task.durationMs !== undefined) {
+      setElapsedSeconds(Math.floor(task.durationMs / MS_IN_SECOND));
+      if (task.status !== "in_progress") {
         startedAtRef.current = null;
       }
+      return;
+    }
+
+    if (task.status !== "in_progress") {
+      const startedAt = task.startedAt ?? startedAtRef.current;
+      const finishedAt = task.finishedAt;
+      if (
+        startedAt !== null &&
+        startedAt !== undefined &&
+        finishedAt !== undefined
+      ) {
+        setElapsedSeconds(Math.floor((finishedAt - startedAt) / MS_IN_SECOND));
+      } else {
+        setElapsedSeconds(null);
+      }
+      startedAtRef.current = null;
       return;
     }
 
@@ -136,9 +160,12 @@ export function SubtaskCard({
     ) {
       startedAtRef.current = task.startedAt;
     }
-    startedAtRef.current ??= Date.now();
 
     const startedAt = startedAtRef.current;
+    if (startedAt === null) {
+      setElapsedSeconds(null);
+      return;
+    }
     const updateElapsed = () => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / MS_IN_SECOND));
     };
@@ -147,7 +174,7 @@ export function SubtaskCard({
     const interval = window.setInterval(updateElapsed, MS_IN_SECOND);
 
     return () => window.clearInterval(interval);
-  }, [task.startedAt, task.status]);
+  }, [task.durationMs, task.finishedAt, task.startedAt, task.status]);
 
   const handleHeaderToggle = (event: MouseEvent<HTMLButtonElement>) => {
     const anchor = event.currentTarget;

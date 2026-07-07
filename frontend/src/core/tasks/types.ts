@@ -7,6 +7,8 @@ export interface Subtask {
   roundId?: string;
   status: "in_progress" | "completed" | "failed";
   startedAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
   subagent_type: string;
   description: string;
   latestMessage?: AIMessage;

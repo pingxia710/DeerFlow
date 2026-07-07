@@ -91,7 +91,9 @@ test.describe("Agent chat", () => {
       page.getByText("Agent response eligible for regeneration"),
     ).toBeVisible({ timeout: 15_000 });
 
-    await expect(page.getByLabel("Regenerate")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Regenerate" })).toHaveCount(
+      1,
+    );
   });
 
   test("agent new chat button resets while already on the new chat route", async ({
@@ -220,6 +222,51 @@ test.describe("Agent chat", () => {
     await expect(page.getByText(delayedMarker)).toHaveCount(0);
     await expect(
       page.getByText("Response in thread Destination agent conversation"),
+    ).toBeVisible();
+  });
+
+  test("agent chat history failure shows retry UI instead of a blank message list", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+    await page.route(
+      /\/api\/threads\/nonexistent\/runtime-snapshot$/,
+      (route) => {
+        if (route.request().method() === "GET") {
+          return route.fulfill({
+            status: 404,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "Thread not found" }),
+          });
+        }
+        return route.fallback();
+      },
+    );
+    await page.route("**/api/langgraph/threads/nonexistent/history", (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Thread not found" }),
+      }),
+    );
+    await page.route(
+      /\/api\/langgraph\/threads\/nonexistent\/runs(\?|$)/,
+      (route) =>
+        route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Thread not found" }),
+        }),
+    );
+
+    await page.goto("/workspace/agents/test-agent/chats/nonexistent");
+
+    const notice = page.getByTestId("run-recovery-notice");
+    await expect(notice).toBeVisible({ timeout: 15_000 });
+    await expect(notice.getByText("恢复失败")).toBeVisible();
+    await expect(notice.getByText("Thread not found")).toBeVisible();
+    await expect(
+      notice.getByRole("button", { name: "重试恢复" }),
     ).toBeVisible();
   });
 });

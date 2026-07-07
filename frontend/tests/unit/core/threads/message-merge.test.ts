@@ -1,13 +1,20 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
+import { QueryClient } from "@tanstack/react-query";
 
-import { applySubtaskUpdateInState } from "@/core/tasks/context";
+import {
+  applySubtaskUpdateInState,
+  settleRunningSubtasksForRun,
+} from "@/core/tasks/context";
+import type { Subtask } from "@/core/tasks/types";
 import {
   applyNativeRoundsToSnapshotRuns,
   applySnapshotRunMessagePageState,
   applyTaskEventRunMessages,
+  applyBackgroundRunProbeResult,
   buildRunMessagesUrl,
   buildThreadRuntimeSnapshotUrl,
+  clearDeletedThreadClientState,
   buildVisibleHistoryMessages,
   completeOptimisticUploadMessages,
   findLatestUnloadedRunIndex,
@@ -15,6 +22,7 @@ import {
   getOldestRunMessageSeq,
   getLatestRunTerminalNotice,
   getTerminalTransitionRunIds,
+  getThreadActivitySnapshot,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
@@ -25,11 +33,14 @@ import {
   isVisibleHistoryRunMessage,
   latestRoundIdFromSnapshot,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+  markThreadBusyInCaches,
   mergeFetchedRunMessages,
   mergeMessages,
+  mergeRunsWithTerminalPrecedence,
   partitionKnownRunIds,
   readThreadRuntimeSnapshotResponse,
   readRunMessagesPageResponse,
+  reconcileTerminalRunHistory,
   resetLoadedRunStateForRefresh,
   removeSetItems,
   resolveThreadHistoryReset,
@@ -38,7 +49,10 @@ import {
   shouldAutoContinueOnEmptyRun,
   shouldAutoContinueRunHistory,
   shouldAutoLoadLatestRun,
+  shouldApplyStreamTitleUpdate,
   shouldReleaseQueuedThreadMessage,
+  shouldRefreshRunHistoryForThread,
+  shouldRunCurrentStreamFinishSideEffects,
   shouldShowLiveThreadState,
   shouldShowThreadHistory,
   taskLanesForLatestRound,
@@ -46,6 +60,7 @@ import {
   taskEventRunMessageKey,
   threadRuntimeSnapshotQueryKey,
   threadRunsQueryKey,
+  upsertThreadInSearchCache,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
@@ -267,6 +282,101 @@ test("thread switching gates live state, history, and queued release by visible 
       currentViewThreadId: "thread-b",
     }),
   ).toBe(false);
+});
+
+test("late terminal event from thread A settles A without mutating visible thread B", () => {
+  const client = new QueryClient();
+  const refreshed: Array<{
+    threadId: string | null | undefined;
+    runIds: string[];
+  }> = [];
+  const settled: unknown[] = [];
+  client.setQueryData(
+    ["threads", "search"],
+    [
+      { thread_id: "thread-a", status: "busy", values: {}, metadata: {} },
+      { thread_id: "thread-b", status: "busy", values: {}, metadata: {} },
+    ],
+  );
+  client.setQueryData(threadRunsQueryKey("thread-a"), ["old-a-runs"]);
+  client.setQueryData(threadRuntimeSnapshotQueryKey("thread-a"), {
+    thread_id: "thread-a",
+  });
+
+  expect(
+    shouldRunCurrentStreamFinishSideEffects({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+      optimisticThreadId: "thread-b",
+    }),
+  ).toBe(false);
+  expect(shouldShowLiveThreadState("thread-b", "thread-a", "thread-a")).toBe(
+    false,
+  );
+  expect(shouldShowThreadHistory("thread-b", "thread-a")).toBe(false);
+  expect(shouldRefreshRunHistoryForThread("thread-a", "thread-b")).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "owner-a",
+      currentOwnerId: "owner-b",
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(false);
+
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: "thread-a",
+        run_id: "run-a",
+        status: "success",
+        terminal_reason: "success",
+      },
+      (params) =>
+        refreshed.push({
+          threadId: params?.threadId,
+          runIds: [...(params?.runIds ?? [])],
+        }),
+      (terminal) => settled.push(terminal),
+    ),
+  ).toBe(true);
+
+  expect(refreshed).toEqual([{ threadId: "thread-a", runIds: ["run-a"] }]);
+  expect(settled).toEqual([
+    {
+      threadId: "thread-a",
+      runId: "run-a",
+      status: "success",
+      terminalReason: "success",
+    },
+  ]);
+  expect(
+    client.getQueryData<Array<{ thread_id: string; status: string }>>([
+      "threads",
+      "search",
+    ]),
+  ).toEqual([
+    { thread_id: "thread-a", status: "idle", values: {}, metadata: {} },
+    { thread_id: "thread-b", status: "busy", values: {}, metadata: {} },
+  ]);
 });
 
 test("round id changes revalidate thread history without clearing visible rows", () => {
@@ -755,6 +865,102 @@ test("buildThreadRuntimeSnapshotUrl encodes the thread id", () => {
   );
 });
 
+test("clearDeletedThreadClientState removes deleted thread caches before late async completion", () => {
+  const client = new QueryClient();
+  const deletedThreadId = "deleted-thread";
+  const visibleThreadId = "visible-thread";
+  const refreshed: Array<{
+    threadId: string | null | undefined;
+    runIds: string[];
+  }> = [];
+
+  client.setQueryData(threadRunsQueryKey(deletedThreadId), ["deleted-runs"]);
+  client.setQueryData(threadRuntimeSnapshotQueryKey(deletedThreadId), {
+    thread_id: deletedThreadId,
+  });
+  client.setQueryData(["thread", "metadata", deletedThreadId, false], {
+    thread_id: deletedThreadId,
+  });
+  client.setQueryData(["uploads", "list", deletedThreadId], ["stale-upload"]);
+  client.setQueryData(["thread", deletedThreadId, "run", "run-1"], {
+    run_id: "run-1",
+  });
+  client.setQueryData(threadRunsQueryKey(visibleThreadId), ["visible-runs"]);
+  client.setQueryData(["thread", "metadata", visibleThreadId, false], {
+    thread_id: visibleThreadId,
+  });
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: visibleThreadId, status: "idle", values: {}, metadata: {} }],
+  );
+
+  clearDeletedThreadClientState(client, deletedThreadId);
+
+  expect(
+    client.getQueryData(threadRunsQueryKey(deletedThreadId)),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(threadRuntimeSnapshotQueryKey(deletedThreadId)),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(["thread", "metadata", deletedThreadId, false]),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(["uploads", "list", deletedThreadId]),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData(["thread", deletedThreadId, "run", "run-1"]),
+  ).toBeUndefined();
+  expect(client.getQueryData(threadRunsQueryKey(visibleThreadId))).toEqual([
+    "visible-runs",
+  ]);
+  expect(
+    client.getQueryData(["thread", "metadata", visibleThreadId, false]),
+  ).toEqual({ thread_id: visibleThreadId });
+
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: deletedThreadId,
+        run_id: "run-1",
+        status: "success",
+        terminal_reason: "success",
+      },
+      (params) =>
+        refreshed.push({
+          threadId: params?.threadId,
+          runIds: [...(params?.runIds ?? [])],
+        }),
+    ),
+  ).toBe(true);
+
+  markThreadBusyInCaches(client, deletedThreadId);
+  upsertThreadInSearchCache(client, {
+    thread_id: deletedThreadId,
+    created_at: "2026-07-07T00:00:00Z",
+    updated_at: "2026-07-07T00:00:00Z",
+    metadata: {},
+    status: "busy",
+    values: { title: "Deleted", messages: [], artifacts: [] },
+    interrupts: {},
+  });
+
+  expect(refreshed).toEqual([]);
+  expect(
+    applyBackgroundRunProbeResult(client, deletedThreadId, "run-1", "success"),
+  ).toBe(true);
+  expect(getThreadActivitySnapshot().finished.has(deletedThreadId)).toBe(false);
+  expect(client.getQueryData(["threads", "search"])).toEqual([
+    { thread_id: visibleThreadId, status: "idle", values: {}, metadata: {} },
+  ]);
+  expect(client.getQueryData(threadRunsQueryKey(visibleThreadId))).toEqual([
+    "visible-runs",
+  ]);
+});
+
 test("taskLaneSubtaskUpdate restores completed task lane state", () => {
   expect(
     taskLaneSubtaskUpdate({
@@ -795,6 +1001,73 @@ test("taskLaneSubtaskUpdate maps non-active terminal lanes to failed", () => {
     error: "Boundary stopped task.",
     terminalReason: "blocked",
   });
+});
+
+test("task cancelled and timed out events replay as visible terminal failed subtasks", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        event_type: "task_cancelled",
+        task_id: "task-cancelled",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        action_result: {
+          status: "cancelled",
+          terminal_reason: "user_cancelled",
+          error: "User cancelled task.",
+        },
+      },
+      metadata: { caller: "task_event" },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        event_type: "task_timed_out",
+        task_id: "task-timeout",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        action_result: {
+          status: "timed_out",
+          terminal_reason: "timed_out",
+          error: "Task timed out.",
+        },
+      },
+      metadata: { caller: "task_event" },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+  ] as unknown as RunMessage[];
+  const updates: unknown[] = [];
+
+  applyTaskEventRunMessages(rows, (update) => updates.push(update), "thread-1");
+
+  expect(updates).toEqual([
+    {
+      id: "task-cancelled",
+      threadId: "thread-1",
+      runId: "run-1",
+      notify: true,
+      status: "failed",
+      actionResultStatus: "cancelled",
+      terminalReason: "user_cancelled",
+      error: "User cancelled task.",
+      finishedAt: 1779408000000,
+    },
+    {
+      id: "task-timeout",
+      threadId: "thread-1",
+      runId: "run-1",
+      notify: true,
+      status: "failed",
+      actionResultStatus: "timed_out",
+      terminalReason: "timed_out",
+      error: "Task timed out.",
+      finishedAt: 1779408001000,
+    },
+  ]);
 });
 
 test("task event run messages update subtask state without entering visible history", () => {
@@ -840,6 +1113,7 @@ test("task event run messages update subtask state without entering visible hist
       notify: true,
       status: "completed",
       result: "done",
+      finishedAt: 1779408000000,
     },
   ]);
   expect(
@@ -888,6 +1162,7 @@ test("mixed task event replay preserves each event identity", () => {
       runId: "run-1",
       notify: true,
       status: "in_progress",
+      startedAt: 1779408000000,
     },
     {
       id: "task-b",
@@ -896,6 +1171,7 @@ test("mixed task event replay preserves each event identity", () => {
       notify: true,
       status: "completed",
       result: "done b",
+      finishedAt: 1779408001000,
     },
   ]);
 });
@@ -926,6 +1202,7 @@ test("legacy task event run messages without metadata still restore subtask stat
       notify: true,
       status: "completed",
       result: "legacy done",
+      finishedAt: 1779408000000,
     },
   ]);
   expect(buildVisibleHistoryMessages([taskEventRow], new Set(), [])).toEqual(
@@ -1225,6 +1502,7 @@ test("task event run messages are idempotent and scoped to the requested thread 
       runId: "run-1",
       notify: true,
       status: "in_progress",
+      startedAt: 1779408000000,
     },
     {
       id: "call-legacy",
@@ -1233,6 +1511,7 @@ test("task event run messages are idempotent and scoped to the requested thread 
       notify: true,
       status: "completed",
       result: "legacy done",
+      finishedAt: 1779408001000,
     },
     {
       id: "call-legacy",
@@ -1241,6 +1520,7 @@ test("task event run messages are idempotent and scoped to the requested thread 
       notify: true,
       status: "completed",
       result: "legacy done",
+      finishedAt: 1779408001000,
     },
   ]);
 });
@@ -1374,6 +1654,84 @@ test("getLatestRunTerminalNotice reports terminal runs without visible AI replie
     runId: "run-ok",
     status: "success",
     terminalReason: undefined,
+    error: undefined,
+  });
+});
+
+test("snapshot merge keeps terminal queried runs stronger than stale active snapshots", () => {
+  expect(
+    mergeRunsWithTerminalPrecedence({
+      snapshotRuns: [{ run_id: "run-1", status: "running" } as unknown as Run],
+      queriedRuns: [{ run_id: "run-1", status: "success" } as unknown as Run],
+      rounds: [
+        {
+          thread_id: "thread-1",
+          round_id: "round-1",
+          current_run_id: "run-1",
+          state: "executing",
+        },
+      ],
+    })?.[0]?.status,
+  ).toBe("success");
+
+  expect(
+    mergeRunsWithTerminalPrecedence({
+      snapshotRuns: [{ run_id: "run-2", status: "error" } as unknown as Run],
+      queriedRuns: [{ run_id: "run-2", status: "running" } as unknown as Run],
+    })?.[0]?.status,
+  ).toBe("error");
+});
+
+test("duplicate run scoped message ids keep chronological order and terminal notice", () => {
+  const rows = [
+    {
+      run_id: "run-old",
+      seq: 1,
+      content: {
+        id: "shared-human",
+        type: "human",
+        content: "old prompt",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-old",
+      seq: 2,
+      content: {
+        id: "old-ai",
+        type: "ai",
+        content: "old answer",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+    {
+      run_id: "run-new",
+      seq: 1,
+      content: {
+        id: "shared-human",
+        type: "human",
+        content: "new prompt",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:01:01Z",
+    },
+  ] satisfies RunMessage[];
+  const runs = [
+    { run_id: "run-new", status: "error", terminal_reason: "worker_lost" },
+    { run_id: "run-old", status: "success" },
+  ] as unknown as Run[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), [], runs).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["old prompt", "old answer", "new prompt"]);
+  expect(getLatestRunTerminalNotice(runs, rows)).toEqual({
+    runId: "run-new",
+    status: "error",
+    terminalReason: "worker_lost",
     error: undefined,
   });
 });
@@ -2211,7 +2569,7 @@ test("P2-b offline replay keeps command-room task state run-scoped across interl
     return aSeq - bSeq || a.run_id.localeCompare(b.run_id);
   });
   const targetThread = "command-room-3-owner-2-thread";
-  let tasks = {};
+  let tasks: Record<string, Subtask> = {};
   const updates: unknown[] = [];
   applyTaskEventRunMessages(
     interleaved,
@@ -2256,9 +2614,10 @@ test("P2-b offline replay keeps command-room task state run-scoped across interl
     `${targetThread}-round-2-run visible answer`,
   ]);
   expect(
-    visible.every((message) =>
-      message.additional_kwargs?.deerflow_run_id?.startsWith(targetThread),
-    ),
+    visible.every((message) => {
+      const runId = message.additional_kwargs?.deerflow_run_id;
+      return typeof runId === "string" && runId.startsWith(targetThread);
+    }),
   ).toBe(true);
 
   const wrongThreadUpdates: unknown[] = [];
@@ -2268,4 +2627,235 @@ test("P2-b offline replay keeps command-room task state run-scoped across interl
     "command-room-wrong-owner-thread",
   );
   expect(wrongThreadUpdates).toEqual([]);
+});
+
+test("terminal task event is not downgraded by later weak running refresh", () => {
+  const completed = applySubtaskUpdateInState(
+    {},
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+      result: "done",
+      finishedAt: 200,
+    },
+  );
+
+  const refreshed = applySubtaskUpdateInState(completed, {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "in_progress",
+    startedAt: 100,
+  });
+
+  const task = Object.values(refreshed)[0]!;
+  expect(task.status).toBe("completed");
+  expect(task.result).toBe("done");
+  expect(task.finishedAt).toBe(200);
+});
+
+test("terminal failed task event is not visually cleared by later running replay", () => {
+  const failed = applySubtaskUpdateInState(
+    {},
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "failed",
+      error: "boom",
+      actionResultStatus: "error",
+      terminalReason: "error",
+      finishedAt: 200,
+    },
+  );
+
+  const replayed = applySubtaskUpdateInState(failed, {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "in_progress",
+    startedAt: 100,
+  });
+
+  const task = Object.values(replayed)[0]!;
+  expect(task.status).toBe("failed");
+  expect(task.error).toBe("boom");
+  expect(task.finishedAt).toBe(200);
+});
+
+test("old run task replay cannot overwrite current run task owner", () => {
+  const current = applySubtaskUpdateInState(
+    {},
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-current",
+      status: "completed",
+      result: "current",
+    },
+  );
+
+  const replayed = applySubtaskUpdateInState(current, {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-old",
+    status: "in_progress",
+  });
+
+  const tasks = Object.values(replayed);
+  expect(tasks).toHaveLength(2);
+  expect(tasks.find((task) => task.runId === "run-current")?.status).toBe(
+    "completed",
+  );
+  expect(tasks.find((task) => task.runId === "run-old")?.status).toBe(
+    "in_progress",
+  );
+});
+
+test("old thread task replay cannot overwrite current thread task owner", () => {
+  const current = applySubtaskUpdateInState(
+    {},
+    {
+      id: "task-1",
+      threadId: "thread-current",
+      runId: "run-1",
+      status: "completed",
+    },
+  );
+
+  const replayed = applySubtaskUpdateInState(current, {
+    id: "task-1",
+    threadId: "thread-old",
+    runId: "run-1",
+    status: "in_progress",
+  });
+
+  const tasks = Object.values(replayed);
+  expect(tasks).toHaveLength(2);
+  expect(tasks.find((task) => task.threadId === "thread-current")?.status).toBe(
+    "completed",
+  );
+  expect(tasks.find((task) => task.threadId === "thread-old")?.status).toBe(
+    "in_progress",
+  );
+});
+
+test("run terminal settling does not downgrade already completed task rows", () => {
+  const tasks = applySubtaskUpdateInState(
+    {},
+    {
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+      result: "done",
+      finishedAt: 200,
+    },
+  );
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "error",
+    terminalReason: "worker_lost",
+  });
+
+  expect(Object.values(settled)[0]?.status).toBe("completed");
+});
+
+test("pressure: terminal subtasks across two rounds are not downgraded by stale running replay", () => {
+  let tasks: Record<string, Subtask> = {};
+  const apply = (update: Parameters<typeof applySubtaskUpdateInState>[1]) => {
+    tasks = applySubtaskUpdateInState(tasks, update);
+  };
+
+  for (const [runId, count] of [
+    ["run-1", 5],
+    ["run-2", 6],
+  ] as const) {
+    for (let i = 1; i <= count; i++) {
+      apply({
+        id: `task-${i}`,
+        threadId: "thread-1",
+        runId,
+        status: "in_progress",
+      });
+      apply({
+        id: `task-${i}`,
+        threadId: "thread-1",
+        runId,
+        status: i % 4 === 0 ? "failed" : "completed",
+        result: i % 4 === 0 ? undefined : `${runId}-task-${i}-done`,
+        error: i % 4 === 0 ? `${runId}-task-${i}-failed` : undefined,
+        actionResultStatus: i % 4 === 0 ? "error" : undefined,
+        terminalReason: i % 4 === 0 ? "error" : undefined,
+        finishedAt: 1000 + i,
+      });
+    }
+  }
+
+  for (const [runId, count] of [
+    ["run-1", 5],
+    ["run-2", 6],
+  ] as const) {
+    for (let i = 1; i <= count; i++) {
+      apply({
+        id: `task-${i}`,
+        threadId: "thread-1",
+        runId,
+        status: "in_progress",
+        startedAt: 1,
+      });
+    }
+  }
+
+  const rows = Object.values(tasks);
+  expect(rows).toHaveLength(11);
+  expect(rows.filter((task) => task.status === "in_progress")).toHaveLength(0);
+  expect(rows.filter((task) => task.status === "failed")).toHaveLength(2);
+  expect(rows.filter((task) => task.status === "completed")).toHaveLength(9);
+});
+
+test("pressure: reused task ids from old thread and run replays do not overwrite current owner", () => {
+  let tasks: Record<string, Subtask> = {};
+  const apply = (update: Parameters<typeof applySubtaskUpdateInState>[1]) => {
+    tasks = applySubtaskUpdateInState(tasks, update);
+  };
+
+  for (let i = 1; i <= 10; i++) {
+    apply({
+      id: `shared-${i}`,
+      threadId: "thread-current",
+      runId: "run-current",
+      status: "completed",
+      result: `current-${i}`,
+    });
+  }
+  for (let i = 1; i <= 10; i++) {
+    apply({
+      id: `shared-${i}`,
+      threadId: "thread-current",
+      runId: "run-old",
+      status: "in_progress",
+    });
+    apply({
+      id: `shared-${i}`,
+      threadId: "thread-old",
+      runId: "run-current",
+      status: "in_progress",
+    });
+  }
+
+  const currentRows = Object.values(tasks).filter(
+    (task) =>
+      task.threadId === "thread-current" && task.runId === "run-current",
+  );
+  expect(currentRows).toHaveLength(10);
+  expect(currentRows.every((task) => task.status === "completed")).toBe(true);
+  expect(currentRows.map((task) => task.result).sort()).toEqual(
+    Array.from({ length: 10 }, (_, i) => `current-${i + 1}`).sort(),
+  );
+  expect(Object.values(tasks)).toHaveLength(30);
 });

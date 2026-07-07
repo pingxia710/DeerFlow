@@ -5,6 +5,7 @@ import {
   normalizeThreadRuntimeKey,
   resolveThreadRuntimeSlotId,
   shouldCollectThreadRuntimeSlot,
+  shouldResetThreadRuntimeSlot,
 } from "@/core/threads/runtime";
 
 test("normalizeThreadRuntimeKey trims blank runtime keys", () => {
@@ -50,6 +51,33 @@ test("resolveThreadRuntimeSlotId reuses pending slot after backend thread id arr
   expect(resolveThreadRuntimeSlotId(aliases, "thread:thread-a")).toBe("slot-1");
 });
 
+test("resolveThreadRuntimeSlotId migrates /new display owner to the created thread slot", () => {
+  const aliases = new Map<string, string>();
+  const slotId = "slot-created";
+
+  for (const key of getThreadRuntimeSlotKeys({
+    runtimeKey: "chat:new:pending-1",
+    displayThreadId: "pending-1",
+  })) {
+    aliases.set(key, slotId);
+  }
+
+  expect(
+    resolveThreadRuntimeSlotId(
+      aliases,
+      "thread:created-thread",
+      "display:pending-1",
+    ),
+  ).toBe(slotId);
+
+  aliases.set("thread:created-thread", slotId);
+
+  expect(resolveThreadRuntimeSlotId(aliases, "thread:created-thread")).toBe(
+    slotId,
+  );
+  expect(new Set(aliases.values())).toEqual(new Set([slotId]));
+});
+
 test("shouldCollectThreadRuntimeSlot collects only idle unsubscribed slots", () => {
   expect(
     shouldCollectThreadRuntimeSlot({
@@ -91,4 +119,60 @@ test("shouldCollectThreadRuntimeSlot collects only idle unsubscribed slots", () 
       recoveryState: "repairing",
     }),
   ).toBe(false);
+});
+
+test("shouldResetThreadRuntimeSlot resets only idle fixed slots", () => {
+  expect(
+    shouldResetThreadRuntimeSlot({
+      subscribers: 0,
+      pendingInvocationCount: 0,
+    }),
+  ).toBe(true);
+
+  expect(
+    shouldResetThreadRuntimeSlot({
+      subscribers: 0,
+      pendingInvocationCount: 0,
+      isLoading: true,
+    }),
+  ).toBe(false);
+  expect(
+    shouldResetThreadRuntimeSlot({
+      subscribers: 0,
+      pendingInvocationCount: 0,
+      isUploading: true,
+    }),
+  ).toBe(false);
+  expect(
+    shouldResetThreadRuntimeSlot({
+      subscribers: 0,
+      pendingInvocationCount: 1,
+    }),
+  ).toBe(false);
+});
+
+test("command-room-like runtime slot aliases stay isolated across pending and backend ids", () => {
+  const aliases = new Map<string, string>();
+  const slotA = "slot-a";
+  const slotB = "slot-b";
+  for (const key of getThreadRuntimeSlotKeys({
+    runtimeKey: "command-room:pending:1",
+    threadId: undefined,
+    displayThreadId: "command-room:pending:1",
+  })) {
+    aliases.set(key, slotA);
+  }
+  for (const key of getThreadRuntimeSlotKeys({
+    runtimeKey: "command-room:pending:2",
+    threadId: "thread-b",
+    displayThreadId: "command-room:pending:2",
+  })) {
+    aliases.set(key, slotB);
+  }
+
+  expect(slotA).not.toBe(slotB);
+  expect(resolveThreadRuntimeSlotId(aliases, "thread:thread-b")).toBe(slotB);
+  expect(
+    resolveThreadRuntimeSlotId(aliases, "display:command-room:pending:1"),
+  ).toBe(slotA);
 });

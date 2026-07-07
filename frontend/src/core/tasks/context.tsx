@@ -149,8 +149,26 @@ export function mergeSubtaskUpdate(
   now?: number,
 ) {
   const previousStatus = previous?.status;
+  const isTerminalStatus =
+    task.status === "completed" || task.status === "failed";
   const { roundId, runId, threadId } = task;
+  const hasStrongerTiming =
+    task.startedAt !== undefined ||
+    task.finishedAt !== undefined ||
+    task.durationMs !== undefined;
   const taskPatch = { ...task };
+  if (previous?.startedAt !== undefined && task.startedAt === undefined) {
+    delete taskPatch.startedAt;
+  }
+  if (
+    previous?.finishedAt !== undefined &&
+    (task.finishedAt === undefined || task.finishedAt < previous.finishedAt)
+  ) {
+    delete taskPatch.finishedAt;
+  }
+  if (previous?.durationMs !== undefined && task.durationMs === undefined) {
+    delete taskPatch.durationMs;
+  }
   delete taskPatch.threadId;
   delete taskPatch.runId;
   delete taskPatch.roundId;
@@ -162,6 +180,9 @@ export function mergeSubtaskUpdate(
     previousStatus === "failed" &&
     (previous?.actionResultStatus !== undefined ||
       previous?.terminalReason !== undefined);
+  const isTerminalCompleted = previousStatus === "completed";
+  const shouldKeepTerminalStatus =
+    task.status === "in_progress" && (isTerminalCompleted || isTerminalFailure);
   return {
     ...previous,
     ...taskPatch,
@@ -171,14 +192,36 @@ export function mergeSubtaskUpdate(
     ...(task.status === "in_progress" && previousStatus !== "completed"
       ? { error: undefined, result: undefined }
       : {}),
+    ...(task.startedAt !== undefined &&
+    (previous?.startedAt === undefined || task.startedAt < previous.startedAt)
+      ? { startedAt: task.startedAt }
+      : {}),
     ...(task.status === "in_progress" &&
     previous?.startedAt === undefined &&
     (task.startedAt !== undefined || now !== undefined)
       ? { startedAt: task.startedAt ?? now }
       : {}),
-    ...(task.status === "in_progress" &&
-    (previousStatus === "completed" || isTerminalFailure)
-      ? { status: previousStatus }
+    ...(isTerminalStatus &&
+    previous?.finishedAt === undefined &&
+    hasStrongerTiming
+      ? { finishedAt: task.finishedAt ?? now ?? Date.now() }
+      : {}),
+    ...(task.finishedAt !== undefined &&
+    (previous?.finishedAt === undefined ||
+      task.finishedAt > previous.finishedAt)
+      ? { finishedAt: task.finishedAt }
+      : {}),
+    ...(task.durationMs !== undefined &&
+    (previous?.durationMs === undefined ||
+      task.durationMs > previous.durationMs)
+      ? { durationMs: task.durationMs }
+      : {}),
+    ...(shouldKeepTerminalStatus
+      ? {
+          status: previousStatus,
+          ...(isTerminalCompleted ? { result: previous?.result } : {}),
+          ...(isTerminalFailure ? { error: previous?.error } : {}),
+        }
       : {}),
   } as Subtask;
 }
@@ -266,6 +309,7 @@ export function settleRunningSubtasksForRun(
   }
 
   let changed = false;
+  const now = Date.now();
   const nextTasks: Record<string, Subtask> = { ...tasks };
   for (const [storageKey, task] of Object.entries(tasks)) {
     if (
@@ -284,6 +328,7 @@ export function settleRunningSubtasksForRun(
       error: runTerminalSubtaskError(terminal.status, terminal.terminalReason),
       actionResultStatus: terminal.status,
       terminalReason: terminal.terminalReason ?? terminal.status,
+      finishedAt: now,
       notify: true,
     });
     if (!didSubtaskChange(task, next)) {

@@ -530,7 +530,7 @@ test("shouldRefreshRunHistoryForThread rejects explicit refreshes for another th
   expect(shouldRefreshRunHistoryForThread(undefined, "thread-b")).toBe(true);
 });
 
-test("reconcileTaskEventRunHistory passes event thread id to refreshRuns", async () => {
+test("reconcileTaskEventRunHistory refreshes run messages and invalidates run list per terminal task event", async () => {
   const {
     reconcileTaskEventRunHistory,
     threadRunsQueryKey,
@@ -573,8 +573,60 @@ test("reconcileTaskEventRunHistory passes event thread id to refreshRuns", async
   ).toBe(true);
 });
 
-test("reconcileTerminalRunHistory passes event thread id to refreshRuns", async () => {
-  const { reconcileTerminalRunHistory } = await import("@/core/threads/hooks");
+test("reconcileTaskEventRunHistory refreshes each terminal task event and invalidates runs plus snapshot", async () => {
+  const {
+    reconcileTaskEventRunHistory,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "multi-task-event-thread";
+  const runId = "multi-task-event-run";
+  const refreshed: Array<{
+    threadId: string | null | undefined;
+    runIds: string[];
+  }> = [];
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  for (const [index, type] of ["task_completed", "task_failed"].entries()) {
+    expect(
+      reconcileTaskEventRunHistory(
+        client,
+        {
+          type,
+          task_id: `task-${index}`,
+          thread_id: threadId,
+          run_id: runId,
+        },
+        (params) =>
+          refreshed.push({
+            threadId: params?.threadId,
+            runIds: [...(params?.runIds ?? [])],
+          }),
+      ),
+    ).toBe(true);
+  }
+
+  expect(refreshed).toEqual([
+    { threadId, runIds: [runId] },
+    { threadId, runIds: [runId] },
+  ]);
+  expect(
+    client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("reconcileTerminalRunHistory refreshes run messages and invalidates runs plus snapshot", async () => {
+  const {
+    reconcileTerminalRunHistory,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
   const client = new QueryClient();
   const threadId = "terminal-event-thread";
   const runId = "terminal-event-run";
@@ -582,6 +634,8 @@ test("reconcileTerminalRunHistory passes event thread id to refreshRuns", async 
     threadId: string | null | undefined;
     runIds: string[];
   }> = [];
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
 
   expect(
     reconcileTerminalRunHistory(
@@ -603,6 +657,37 @@ test("reconcileTerminalRunHistory passes event thread id to refreshRuns", async 
   ).toBe(true);
 
   expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
+  expect(
+    client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("applyBackgroundRunProbeResult invalidates runs and snapshot for final stream settlement", async () => {
+  const {
+    applyBackgroundRunProbeResult,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "finish-thread";
+  const runId = "finish-run";
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(
+    applyBackgroundRunProbeResult(client, threadId, runId, "success"),
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
 });
 
 test("resolveThreadStreamFinishMeta returns onFinish thread and run metadata", async () => {
@@ -678,6 +763,23 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
       currentViewThreadId: "thread-b",
     }),
   ).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      ...base,
+      streamFinished: true,
+      queuedOwnerId: "owner-a",
+      currentOwnerId: "owner-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      ...base,
+      streamFinished: true,
+      queuedOwnerId: "owner-a",
+      currentOwnerId: "owner-a",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(true);
 });
 
 test("shouldQueueThreadMessage queues during the pre-loading send window", async () => {

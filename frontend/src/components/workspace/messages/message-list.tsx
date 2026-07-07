@@ -78,6 +78,19 @@ export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
+export function getMessageGroupKey(
+  group: { type: string; id?: string | null },
+  index: number,
+) {
+  return group.id
+    ? `${group.type}-${group.id}`
+    : `fallback-${index}-${group.type}`;
+}
+
+export function getSubtaskCardKey(taskId: string, runId?: string | null) {
+  return runId ? `task-group-${runId}-${taskId}` : `task-group-${taskId}`;
+}
+
 type ThreadRecoveryStatus = ReturnType<
   typeof useThreadStream
 >["recoveryStatus"];
@@ -622,7 +635,7 @@ export function MessageList({
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           const groupIsLoading =
             thread.isLoading && groupIndex === lastGroupIndex;
-          const groupKey = `${groupIndex}-${group.type}-${group.id ?? "unknown"}`;
+          const groupKey = getMessageGroupKey(group, groupIndex);
 
           if (group.type === "human" || group.type === "assistant") {
             return (
@@ -792,7 +805,7 @@ export function MessageList({
               for (const taskId of taskIds ?? []) {
                 results.push(
                   <SubtaskCard
-                    key={"task-group-" + taskId}
+                    key={getSubtaskCardKey(taskId, runId)}
                     runId={runId}
                     taskId={taskId}
                     threadId={threadId}

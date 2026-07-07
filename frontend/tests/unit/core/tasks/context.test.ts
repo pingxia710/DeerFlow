@@ -6,6 +6,7 @@ import {
   getSubtaskLookupKeys,
   getSubtaskStorageKey,
   mergeSubtaskUpdate,
+  settleRunningSubtasksForRun,
   type SubtaskUpdate,
 } from "@/core/tasks/context";
 import type { Subtask } from "@/core/tasks/types";
@@ -222,4 +223,109 @@ test("later running update does not overwrite completed or terminal failed subta
       }),
     ).status,
   ).toBe("failed");
+});
+
+test("mergeSubtaskUpdate preserves strong timing fields from weaker later updates", () => {
+  const previous = mergeSubtaskUpdate(
+    undefined,
+    subtaskUpdateFixture({
+      id: "task-timing",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+      startedAt: 1_000,
+      finishedAt: 4_000,
+      durationMs: 3_000,
+    }),
+  );
+
+  const next = mergeSubtaskUpdate(
+    previous,
+    subtaskUpdateFixture({
+      id: "task-timing",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+    }),
+    10_000,
+  );
+
+  expect(next.startedAt).toBe(1_000);
+  expect(next.finishedAt).toBe(4_000);
+  expect(next.durationMs).toBe(3_000);
+});
+
+test("running subtask with historical startedAt keeps elapsed anchored after refresh", () => {
+  const refreshed = mergeSubtaskUpdate(
+    undefined,
+    subtaskUpdateFixture({
+      id: "task-running",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+      startedAt: 1_000,
+    }),
+    61_000,
+  );
+
+  expect(refreshed.startedAt).toBe(1_000);
+  expect(Math.floor((61_000 - refreshed.startedAt!) / 1_000)).toBe(60);
+});
+
+test("settleRunningSubtasksForRun only fails matching thread and run tasks", () => {
+  let tasks: Record<string, Subtask> = {};
+  for (const task of [
+    subtaskUpdateFixture({
+      id: "target",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-thread-other-run",
+      threadId: "thread-1",
+      runId: "run-2",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-run-other-thread",
+      threadId: "thread-2",
+      runId: "run-1",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "already-done",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+    }),
+  ]) {
+    tasks = applySubtaskUpdateInState(tasks, task);
+  }
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "timeout",
+    terminalReason: "timed_out",
+  });
+
+  expect(
+    Object.values(settled).find((task) => task.id === "target"),
+  ).toMatchObject({
+    status: "failed",
+    actionResultStatus: "timeout",
+    terminalReason: "timed_out",
+  });
+  expect(
+    Object.values(settled).find((task) => task.id === "same-thread-other-run")
+      ?.status,
+  ).toBe("in_progress");
+  expect(
+    Object.values(settled).find((task) => task.id === "same-run-other-thread")
+      ?.status,
+  ).toBe("in_progress");
+  expect(
+    Object.values(settled).find((task) => task.id === "already-done")?.status,
+  ).toBe("completed");
 });

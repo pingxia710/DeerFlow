@@ -59,7 +59,9 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             <Link
               className="text-muted-foreground"
               href="/workspace/chats/new"
-              onClick={() => resetThreadChatToNew("/workspace/chats/new")}
+              onClick={() => {
+                resetThreadChatToNew("/workspace/chats/new");
+              }}
             >
               <MessageSquarePlus size={16} />
               <span>{t.sidebar.newChat}</span>

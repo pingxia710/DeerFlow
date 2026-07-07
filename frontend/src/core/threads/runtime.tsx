@@ -105,6 +105,10 @@ export function shouldCollectThreadRuntimeSlot({
   );
 }
 
+export function shouldResetThreadRuntimeSlot(state: ThreadRuntimeSlotGcState) {
+  return shouldCollectThreadRuntimeSlot(state);
+}
+
 export function normalizeThreadRuntimeKey(key: string | null | undefined) {
   const normalized = key?.trim();
   if (!normalized) {
@@ -521,6 +525,18 @@ function getEntryForRuntimeKey(runtimeKey: string) {
 export function clearThreadRuntime(threadId: string) {
   const slotId = resolveSlotId(scopedThreadRuntimeKey("thread", threadId));
   if (!slotId) {
+    return;
+  }
+  deleteRuntimeEntry(slotId);
+}
+
+export function resetThreadRuntimeSlot(runtimeKey: string) {
+  const slotId = resolveSlotId(scopedThreadRuntimeKey("runtime", runtimeKey));
+  if (!slotId) {
+    return;
+  }
+  const entry = entriesBySlotId.get(slotId);
+  if (!entry || !shouldResetThreadRuntimeSlot(runtimeSlotGcState(entry))) {
     return;
   }
   deleteRuntimeEntry(slotId);

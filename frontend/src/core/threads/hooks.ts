@@ -183,6 +183,11 @@ let threadActivitySnapshot: ThreadActivitySnapshot = {
   finished: new Set(),
 };
 const manualThreadTitleLocks = new Map<string, string>();
+const deletedThreadTombstones = new Set<string>();
+
+export function isDeletedThreadTombstoned(threadId: string | null | undefined) {
+  return Boolean(threadId && deletedThreadTombstones.has(threadId));
+}
 
 function emitThreadActivity() {
   for (const listener of threadActivityListeners) {
@@ -206,6 +211,9 @@ export function useThreadActivity() {
 }
 
 export function markThreadFinished(threadId: string) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
   threadActivitySnapshot = {
     running: new Set(
       [...threadActivitySnapshot.running].filter((id) => id !== threadId),
@@ -829,6 +837,11 @@ type PersistedTaskEvent = {
   error_preview?: unknown;
   redacted?: unknown;
   artifact_refs?: unknown;
+  created_at?: unknown;
+  started_at?: unknown;
+  updated_at?: unknown;
+  completed_at?: unknown;
+  finished_at?: unknown;
   description?: unknown;
   subagent_type?: unknown;
   prompt?: unknown;
@@ -973,8 +986,13 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     ...(lane.details ?? {}),
     ...(Object.keys(refs).length > 0 ? { refs } : {}),
   };
-  if (lane.created_at) {
-    update.startedAt = taskEventStartedAt(lane.created_at);
+  update.startedAt =
+    taskEventStartedAt(lane.started_at) ?? taskEventStartedAt(lane.created_at);
+  if (status !== "in_progress") {
+    update.finishedAt =
+      taskEventTimestamp(lane.finished_at) ??
+      taskEventTimestamp(lane.completed_at) ??
+      taskEventTimestamp(lane.updated_at);
   }
   if (status === "completed" && result) {
     update.result = result;
@@ -1015,12 +1033,25 @@ function applyActionResultMetadata(
   }
 }
 
-function taskEventStartedAt(value?: string) {
-  if (!value) {
+function taskEventTimestamp(value?: unknown) {
+  const stringTimestamp = stringValue(value);
+  if (!stringTimestamp) {
     return undefined;
   }
-  const time = Date.parse(value);
+  const time = Date.parse(stringTimestamp);
   return Number.isFinite(time) ? time : undefined;
+}
+
+function taskEventStartedAt(value?: unknown) {
+  return taskEventTimestamp(value);
+}
+
+function taskEventFinishedAt(event: PersistedTaskEvent) {
+  return (
+    taskEventTimestamp(event.finished_at) ??
+    taskEventTimestamp(event.completed_at) ??
+    taskEventTimestamp(event.updated_at)
+  );
 }
 
 export function isTaskEventRunMessage(message: RunMessage) {
@@ -1085,8 +1116,12 @@ export function applyTaskEventToSubtask(
 
   if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
-    if (startedAt !== undefined) {
-      update.startedAt = startedAt;
+    const eventStartedAt =
+      taskEventStartedAt(taskEvent.started_at) ??
+      taskEventStartedAt(taskEvent.created_at) ??
+      startedAt;
+    if (eventStartedAt !== undefined) {
+      update.startedAt = eventStartedAt;
     }
     const description =
       stringValue(taskEvent.description) ?? stringValue(taskEvent.summary);
@@ -1106,12 +1141,28 @@ export function applyTaskEventToSubtask(
   }
 
   if (eventType === "task_running" || eventStatus === "in_progress") {
-    updateSubtask({ ...base, status: "in_progress" });
+    const eventStartedAt =
+      taskEventStartedAt(taskEvent.started_at) ??
+      taskEventStartedAt(taskEvent.created_at) ??
+      startedAt;
+    updateSubtask({
+      ...base,
+      status: "in_progress",
+      ...(eventStartedAt !== undefined ? { startedAt: eventStartedAt } : {}),
+    });
     return true;
   }
 
   if (eventType === "task_completed" || eventStatus === "completed") {
     const update: SubtaskUpdate = { ...base, status: "completed" };
+    const eventStartedAt = taskEventStartedAt(taskEvent.started_at);
+    const eventFinishedAt = taskEventFinishedAt(taskEvent) ?? startedAt;
+    if (eventStartedAt !== undefined) {
+      update.startedAt = eventStartedAt;
+    }
+    if (eventFinishedAt !== undefined) {
+      update.finishedAt = eventFinishedAt;
+    }
     applyActionResultMetadata(taskEvent, update);
     const result = isRedactedTaskEvent(taskEvent)
       ? stringValue(taskEvent.result_preview)
@@ -1126,6 +1177,14 @@ export function applyTaskEventToSubtask(
   }
 
   const update: SubtaskUpdate = { ...base, status: "failed" };
+  const eventStartedAt = taskEventStartedAt(taskEvent.started_at);
+  const eventFinishedAt = taskEventFinishedAt(taskEvent) ?? startedAt;
+  if (eventStartedAt !== undefined) {
+    update.startedAt = eventStartedAt;
+  }
+  if (eventFinishedAt !== undefined) {
+    update.finishedAt = eventFinishedAt;
+  }
   applyActionResultMetadata(taskEvent, update);
   const error = isRedactedTaskEvent(taskEvent)
     ? stringValue(taskEvent.error_preview)
@@ -1397,6 +1456,10 @@ export type TaskLaneSnapshot = {
   details?: Record<string, unknown> | null;
   error?: string | null;
   created_at?: string;
+  started_at?: string;
+  updated_at?: string;
+  completed_at?: string;
+  finished_at?: string;
 };
 
 export type RuntimeRoundSnapshot = {
@@ -1808,6 +1871,9 @@ export function upsertThreadInSearchCache(
   queryClient: QueryClient,
   thread: AgentThread,
 ) {
+  if (isDeletedThreadTombstoned(thread.thread_id)) {
+    return;
+  }
   queryClient.setQueriesData(
     {
       queryKey: ["threads", "search"],
@@ -1850,6 +1916,9 @@ export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
 ) {
+  if (isDeletedThreadTombstoned(thread.thread_id)) {
+    return;
+  }
   queryClient.setQueriesData(
     {
       queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -1900,6 +1969,9 @@ export function markThreadBusyInCaches(
   queryClient: QueryClient,
   threadId: string,
 ) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
   threadActivitySnapshot = {
     running: new Set([...threadActivitySnapshot.running, threadId]),
     finished: new Set(
@@ -1934,6 +2006,9 @@ function setThreadStatusInCaches(
   threadId: string,
   status: string,
 ) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
   const nextStatus = status as AgentThread["status"];
   queryClient.setQueriesData(
     {
@@ -1964,6 +2039,10 @@ export function applyBackgroundRunProbeResult(
   status: unknown,
   options: TerminalRunSettlementOptions = {},
 ) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    stopBackgroundRunProbe(threadId, runId);
+    return true;
+  }
   if (!isTerminalRunStatus(status)) {
     return false;
   }
@@ -2223,6 +2302,12 @@ export function reconcileTaskEventRunHistory(
   void queryClient.invalidateQueries({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
+  void queryClient.invalidateQueries({
+    queryKey: threadTokenUsageQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadContextUsageQueryKey(threadId),
+  });
   refreshRuns({ threadId, runIds: [runId] });
   return true;
 }
@@ -2238,6 +2323,9 @@ export function reconcileTerminalRunHistory(
     return false;
   }
   stopBackgroundRunProbe(runTerminalEvent.thread_id, runTerminalEvent.run_id);
+  if (isDeletedThreadTombstoned(runTerminalEvent.thread_id)) {
+    return true;
+  }
   if (
     !applyBackgroundRunProbeResult(
       queryClient,
@@ -2263,6 +2351,9 @@ export function invalidateTerminalRunQueries(
   queryClient: QueryClient,
   threadId: string,
 ) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
   void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
     queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -2737,6 +2828,9 @@ export function useThreadStream({
     reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     onThreadId(createdThreadId) {
+      if (isDeletedThreadTombstoned(createdThreadId)) {
+        return;
+      }
       const previousIds = new Set(
         [
           streamThreadIdRef.current,
@@ -2761,6 +2855,9 @@ export function useThreadStream({
       markThreadBusyInCaches(queryClient, createdThreadId);
     },
     onCreated(meta) {
+      if (isDeletedThreadTombstoned(meta.thread_id)) {
+        return;
+      }
       handleStreamStart(meta.thread_id, meta.run_id);
       markThreadBusyInCaches(queryClient, meta.thread_id);
       startBackgroundRunProbe({
@@ -3360,7 +3457,8 @@ export function useThreadStream({
       };
       activeSendRequestRef.current = sendRequest;
       const ownsSendRequest = () =>
-        isSameSendRequest(activeSendRequestRef.current, sendRequest);
+        isSameSendRequest(activeSendRequestRef.current, sendRequest) &&
+        !isDeletedThreadTombstoned(sendRequest.threadId);
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -3590,6 +3688,10 @@ export function useThreadStream({
     if (!next) {
       return;
     }
+    if (isDeletedThreadTombstoned(next.threadId)) {
+      queuedMessagesRef.current = queuedMessagesRef.current.slice(1);
+      return;
+    }
     queuedMessagesRef.current = queuedMessagesRef.current.slice(1);
     void sendMessage(
       next.threadId,
@@ -3622,7 +3724,8 @@ export function useThreadStream({
       };
       activeSendRequestRef.current = sendRequest;
       const ownsSendRequest = () =>
-        isSameSendRequest(activeSendRequestRef.current, sendRequest);
+        isSameSendRequest(activeSendRequestRef.current, sendRequest) &&
+        !isDeletedThreadTombstoned(sendRequest.threadId);
       prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         persistedMessages
@@ -4594,6 +4697,7 @@ export function filterInfiniteThreadsCache(
 }
 
 export function clearThreadSingletonState(threadId: string) {
+  deletedThreadTombstones.add(threadId);
   clearThreadActivity(threadId);
   manualThreadTitleLocks.delete(threadId);
   stopBackgroundRunProbesForThread(threadId);

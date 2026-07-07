@@ -37,7 +37,10 @@ import {
   useThreadMetadata,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
-import { useThreadRuntime } from "@/core/threads/runtime";
+import {
+  resetThreadRuntimeSlot,
+  useThreadRuntime,
+} from "@/core/threads/runtime";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -45,6 +48,14 @@ import { cn } from "@/lib/utils";
 
 const COMMAND_ROOM_AGENT = "command-room";
 const COMMAND_ROOM_DEFAULT_MODEL = "deepseek-command-room";
+
+export function getAgentChatRuntimeKey(
+  agentName: string,
+  threadId: string,
+  isNewThread: boolean,
+) {
+  return isNewThread ? `agent-new-chat:${agentName}:${threadId}` : threadId;
+}
 
 export default function AgentChatPage() {
   const { t } = useI18n();
@@ -108,9 +119,11 @@ export default function AgentChatPage() {
     [agent_name, isCommandRoom, settings.context],
   );
 
+  const runtimeKey = getAgentChatRuntimeKey(agent_name, threadId, isNewThread);
+
   const runtimeRegistration = useMemo(
     () => ({
-      runtimeKey: threadId,
+      runtimeKey,
       threadId: isNewThread ? undefined : threadId,
       displayThreadId: threadId,
       context: threadContext,
@@ -168,6 +181,7 @@ export default function AgentChatPage() {
       isMock,
       isNewThread,
       setIsNewThread,
+      runtimeKey,
       setThreadId,
       showNotification,
       threadContext,
@@ -285,6 +299,7 @@ export default function AgentChatPage() {
                   variant="secondary"
                   onClick={() => {
                     const nextPath = `/workspace/agents/${agent_name}/chats/new`;
+                    resetThreadRuntimeSlot(runtimeKey);
                     resetToNewThread();
                     router.push(nextPath);
                   }}

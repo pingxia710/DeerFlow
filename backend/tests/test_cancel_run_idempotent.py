@@ -14,7 +14,8 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import END_SENTINEL, DisconnectMode, RunManager, RunRecord, RunStatus
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 THREAD_ID = "thread-cancel-test"
 
@@ -140,3 +141,43 @@ class TestStreamExistingRunIdempotentCancel:
             params={"action": "interrupt"},
         )
         assert resp.status_code != 409, f"Should not 409 on idempotent cancel, got {resp.status_code}"
+
+    def test_stream_interrupt_emits_cancelled_terminal_before_end(self):
+        """Stop-button stream must give the frontend a terminal custom event."""
+        run_id = "run-stream-interrupt"
+        record = RunRecord(
+            run_id=run_id,
+            thread_id=THREAD_ID,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+
+        class _RunManager:
+            async def get(self, _run_id: str, *, user_id=None):
+                return record
+
+            async def cancel(self, _run_id: str, *, action: str = "interrupt") -> bool:
+                record.status = RunStatus.interrupted
+                record.terminal_reason = "cancelled"
+                return True
+
+        class _EndedBridge:
+            async def subscribe(self, *_args, **_kwargs):
+                yield END_SENTINEL
+
+        client = _make_app(_RunManager())
+        client.app.state.stream_bridge = _EndedBridge()
+        client.app.state.run_event_store = MemoryRunEventStore()
+
+        resp = client.post(
+            f"/api/threads/{THREAD_ID}/runs/{run_id}/stream",
+            params={"action": "interrupt"},
+        )
+
+        assert resp.status_code == 200
+        frames = [frame for frame in resp.text.split("\n\n") if frame]
+        assert [frame.splitlines()[0] for frame in frames] == ["event: custom", "event: end"]
+        assert '"event_type": "run.terminal"' in frames[0]
+        assert '"status": "interrupted"' in frames[0]
+        assert '"terminal_reason": "cancelled"' in frames[0]

@@ -8,7 +8,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import RunManager, RunRecord
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.user_context import get_effective_user_id
@@ -392,3 +392,82 @@ async def test_projection_repair_terminal_event_updates_active_lane_without_run_
     assert record.status == RunStatus.pending
     assert "PASS" not in str(lane)
     assert len(await event_store.list_events(record.thread_id, record.run_id, limit=10)) == event_count
+
+
+@pytest.mark.anyio
+async def test_projection_repair_does_not_downgrade_terminal_lane_from_stale_started_event():
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-projection-terminal-strong", kwargs={"input": {"messages": [{"role": "user", "content": "run"}]}})
+    await round_store.record_task_events(
+        [
+            {
+                "type": "task_completed",
+                "thread_id": record.thread_id,
+                "run_id": record.run_id,
+                "task_id": "task-1",
+                "status": "completed",
+            }
+        ]
+    )
+    await event_store.put(
+        thread_id=record.thread_id,
+        run_id=record.run_id,
+        event_type="task_started",
+        category="event",
+        content={"task_id": "task-1", "status": "in_progress"},
+    )
+
+    repaired = await thread_runs._repair_task_event_projection_from_store(
+        event_store=event_store,
+        round_store=round_store,
+        records=[record],
+        round_rows=await round_store.list_by_thread(record.thread_id),
+        task_lane_rows=await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id),
+        user_id=None,
+    )
+
+    [lane] = await round_store.list_task_lanes_by_round(thread_id=record.thread_id, round_id=record.round_id)
+    assert repaired is False
+    assert lane["status"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_projection_repair_scopes_same_task_id_to_run_id():
+    event_store = MemoryRunEventStore()
+    round_store = MemoryRoundStateStore()
+    thread_id = "thread-projection-run-scope"
+    first = await round_store.bind_run(thread_id=thread_id, run_id="run-1", current_intent="first")
+    await round_store.set_run_state("run-1", state="closed", event_type="run.completed")
+    second = await round_store.bind_run(thread_id=thread_id, run_id="run-2", current_intent="second")
+    records = [
+        RunRecord(run_id="run-1", thread_id=thread_id, assistant_id="lead_agent", status=RunStatus.success, on_disconnect="continue", round_id=first["round_id"]),
+        RunRecord(run_id="run-2", thread_id=thread_id, assistant_id="lead_agent", status=RunStatus.error, on_disconnect="continue", round_id=second["round_id"]),
+    ]
+    for run_id, event_type, status in [
+        ("run-1", "task_completed", "completed"),
+        ("run-2", "task_failed", "failed"),
+    ]:
+        await event_store.put(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type=event_type,
+            category="event",
+            content={"task_id": "task-shared", "status": status},
+        )
+
+    repaired = await thread_runs._repair_task_event_projection_from_store(
+        event_store=event_store,
+        round_store=round_store,
+        records=records,
+        round_rows=await round_store.list_by_thread(thread_id),
+        task_lane_rows=[],
+        user_id=None,
+    )
+
+    first_lanes = await round_store.list_task_lanes_by_round(thread_id=thread_id, round_id=first["round_id"])
+    second_lanes = await round_store.list_task_lanes_by_round(thread_id=thread_id, round_id=second["round_id"])
+    assert repaired is True
+    assert [(lane["run_id"], lane["task_id"], lane["status"]) for lane in first_lanes] == [("run-1", "task-shared", "completed")]
+    assert [(lane["run_id"], lane["task_id"], lane["status"]) for lane in second_lanes] == [("run-2", "task-shared", "failed")]

@@ -430,6 +430,90 @@ async def test_sse_consumer_replays_terminal_task_events_without_bridge_subscrip
 
 
 @pytest.mark.asyncio
+async def test_sse_consumer_prefers_stream_projection_over_duplicate_task_projection():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-stream-projection"
+    run_id = "run-stream-projection"
+    user_id = "user-stream-projection"
+    event_store = MemoryRunEventStore()
+    task_event = {
+        "schema_version": "deerflow.task-event/v1",
+        "type": "task_started",
+        "event_type": "task_started",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "task_id": "task-projected",
+        "status": "running",
+    }
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.custom",
+        category="event",
+        content={"event": "custom", "data": task_event},
+        metadata={"caller": "runtime"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_started",
+        category="message",
+        content=task_event,
+        metadata={"caller": "task_event"},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="run.terminal",
+        category="lifecycle",
+        content={"status": "success", "terminal_reason": "success"},
+        metadata={"caller": "runtime"},
+        user_id=user_id,
+    )
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal replay should use durable rows only")
+            yield
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        _CleanedBridge(),
+        record,
+        _NeverDisconnectedRequest(),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    custom_payloads = [json.loads(_parse_sse_frame(frame)["data"]) for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    assert custom_payloads == [
+        task_event,
+        {
+            "type": "run.terminal",
+            "event_type": "run.terminal",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "status": "success",
+            "terminal_reason": "success",
+        },
+    ]
+    assert _parse_sse_frame(frames[-1])["event"] == "end"
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_synthesizes_terminal_event_from_run_row_without_replay_event():
     from app.gateway.services import sse_consumer
 

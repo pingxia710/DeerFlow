@@ -15,6 +15,7 @@ the real implementation in isolation.
 
 import asyncio
 import importlib
+import re
 import sys
 import threading
 from datetime import datetime
@@ -533,6 +534,10 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert "trusted local host-access mode" in messages[0].content
         assert "Use direct host absolute paths such as `/Users/...`" in messages[0].content
+        assert "`/mnt/user-data/*`" in messages[0].content
+        assert "`/mnt/acp-workspace`" in messages[0].content
+        assert ".deer-flow/users" not in messages[0].content
+        assert not re.search(r"threads/[0-9a-fA-F-]{20,}", messages[0].content)
         assert "`/mnt/obsidian-vault` -> `/Users/pingxia/Documents/Obsidian Vault`" in messages[0].content
 
     @pytest.mark.anyio
@@ -1988,6 +1993,87 @@ class TestCooperativeCancellation:
         for task_id in [first_id, second_id]:
             executor_module._background_tasks.pop(task_id, None)
 
+    def test_pending_queue_drains_round_robin_across_threads(self, executor_module, classes, base_config):
+        """A single busy session must not monopolize a multi-slot drain."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        started_task_ids = []
+        pending_futures = []
+
+        def submit_never_finishes(_context, _coro_factory):
+            future = concurrent.futures.Future()
+            pending_futures.append(future)
+            return future
+
+        executors = {
+            f"thread-{i}": SubagentExecutor(
+                config=base_config,
+                tools=[],
+                thread_id=f"thread-{i}",
+                trace_id=f"trace-{i}",
+            )
+            for i in range(5)
+        }
+
+        original_start = executor_module._start_subagent_execution_unlocked
+
+        def record_start(item):
+            started_task_ids.append(item.result.task_id)
+            original_start(item)
+
+        with (
+            patch.object(executor_module, "_get_process_wide_subagent_limit", return_value=12),
+            patch.object(executor_module, "_get_process_wide_subagent_queue_limit", return_value=64),
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submit_never_finishes),
+            patch.object(executor_module, "_start_subagent_execution_unlocked", side_effect=record_start),
+        ):
+            # Fill all process-wide slots with thread-0 work, then enqueue a
+            # deterministic backlog: thread-0 has six older items, followed by
+            # four other sessions with six items each.
+            for i in range(12):
+                executors["thread-0"].execute_async("running", task_id=f"running-{i}")
+            for thread_index in range(5):
+                for task_index in range(6):
+                    executors[f"thread-{thread_index}"].execute_async(
+                        "queued",
+                        task_id=f"t{thread_index}-{task_index}",
+                    )
+
+            assert started_task_ids[:12] == [f"running-{i}" for i in range(12)]
+            assert len(executor_module._subagent_pending_queue) == 30
+
+            # Simulate all 12 running slots becoming available in a single drain.
+            executor_module._subagent_running_count = 0
+            executor_module._drain_subagent_queue_unlocked()
+
+            drained = started_task_ids[12:24]
+            assert drained[:5] == ["t0-0", "t1-0", "t2-0", "t3-0", "t4-0"]
+            assert drained[:12].count("t0-0") == 1
+            assert [task_id.split("-")[0] for task_id in drained[:10]] == [
+                "t0",
+                "t1",
+                "t2",
+                "t3",
+                "t4",
+                "t0",
+                "t1",
+                "t2",
+                "t3",
+                "t4",
+            ]
+            assert all(executor_module._background_tasks[f"t{thread_index}-0"].status.value == SubagentStatus.RUNNING.value for thread_index in range(5))
+
+        for future in pending_futures:
+            if not future.done():
+                future.set_result(None)
+        for task_id in list(executor_module._background_tasks):
+            if task_id.startswith(("running-", "t")):
+                executor_module._background_tasks.pop(task_id, None)
+        executor_module._subagent_pending_queue.clear()
+        executor_module._subagent_running_count = 0
+
     def test_execute_async_fails_when_process_wide_queue_is_full(self, executor_module, classes, base_config):
         """A full limiter queue publishes a terminal failure instead of dropping the task."""
         import concurrent.futures
@@ -2607,3 +2693,73 @@ class TestSubagentGuardrailAttribution:
         from langchain_core.messages import HumanMessage
 
         return ({"messages": [HumanMessage(content=task)]}, [], None)
+
+
+# -----------------------------------------------------------------------------
+# Background Task Run Scope Tests
+# -----------------------------------------------------------------------------
+
+
+class TestBackgroundTaskRunScoping:
+    """Registry keys are scoped by run_id while public task_id remains stable."""
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        executor = importlib.import_module("deerflow.subagents.executor")
+        module = _patch_default_get_app_config(importlib.reload(executor))
+        module._background_tasks.clear()
+        yield module
+        module._background_tasks.clear()
+
+    def _result(self, module, task_id: str, status=None):
+        status = status or module.SubagentStatus.RUNNING
+        return module.SubagentResult(task_id=task_id, trace_id=f"trace-{task_id}", status=status, started_at=datetime.now())
+
+    def test_run_scoped_results_with_same_task_id_do_not_overwrite(self, executor_module):
+        task_id = "same-tool-call"
+        run_a = self._result(executor_module, task_id)
+        run_b = self._result(executor_module, task_id)
+        executor_module._background_tasks["run-a:same-tool-call"] = run_a
+        executor_module._background_tasks["run-b:same-tool-call"] = run_b
+
+        assert executor_module.get_background_task_result(task_id, run_id="run-a") is run_a
+        assert executor_module.get_background_task_result(task_id, run_id="run-b") is run_b
+        assert executor_module.get_background_task_result(task_id) is None
+
+    def test_cancel_only_affects_matching_run_scope(self, executor_module):
+        task_id = "same-tool-call"
+        run_a = self._result(executor_module, task_id)
+        run_b = self._result(executor_module, task_id)
+        executor_module._background_tasks["run-a:same-tool-call"] = run_a
+        executor_module._background_tasks["run-b:same-tool-call"] = run_b
+
+        executor_module.request_cancel_background_task(task_id, run_id="run-a")
+
+        assert run_a.cancel_event.is_set()
+        assert not run_b.cancel_event.is_set()
+
+    def test_cleanup_only_removes_matching_run_scope(self, executor_module):
+        task_id = "same-tool-call"
+        run_a = self._result(executor_module, task_id, executor_module.SubagentStatus.COMPLETED)
+        run_a.completed_at = datetime.now()
+        run_b = self._result(executor_module, task_id, executor_module.SubagentStatus.COMPLETED)
+        run_b.completed_at = datetime.now()
+        executor_module._background_tasks["run-a:same-tool-call"] = run_a
+        executor_module._background_tasks["run-b:same-tool-call"] = run_b
+
+        executor_module.cleanup_background_task(task_id, run_id="run-a")
+
+        assert executor_module.get_background_task_result(task_id, run_id="run-a") is None
+        assert executor_module.get_background_task_result(task_id, run_id="run-b") is run_b
+
+    def test_legacy_unscoped_access_still_works(self, executor_module):
+        task_id = "legacy-task"
+        result = self._result(executor_module, task_id, executor_module.SubagentStatus.COMPLETED)
+        result.completed_at = datetime.now()
+        executor_module._background_tasks[task_id] = result
+
+        assert executor_module.get_background_task_result(task_id) is result
+        executor_module.request_cancel_background_task(task_id)
+        assert result.cancel_event.is_set()
+        executor_module.cleanup_background_task(task_id)
+        assert executor_module.get_background_task_result(task_id) is None

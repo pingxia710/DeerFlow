@@ -1925,3 +1925,47 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
         )
 
     assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+
+
+def test_scoped_background_task_wrappers_support_old_signature(monkeypatch):
+    calls = []
+    result = object()
+
+    def old_get(task_id):
+        calls.append(("get", task_id))
+        return result
+
+    def old_cleanup(task_id):
+        calls.append(("cleanup", task_id))
+
+    def old_cancel(task_id):
+        calls.append(("cancel", task_id))
+
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", old_get)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", old_cleanup)
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", old_cancel)
+
+    assert task_tool_module._scoped_get_background_task_result("task-1", run_id="run-1") is result
+    task_tool_module._scoped_cleanup_background_task("task-1", run_id="run-1")
+    task_tool_module._scoped_request_cancel_background_task("task-1", run_id="run-1")
+
+    assert calls == [("get", "task-1"), ("cleanup", "task-1"), ("cancel", "task-1")]
+
+
+def test_scoped_background_task_wrapper_does_not_swallow_internal_type_error(monkeypatch):
+    unscoped_called = False
+
+    def broken_get(task_id, *, run_id=None):
+        raise TypeError("internal bug")
+
+    def unscoped_cleanup(task_id):
+        nonlocal unscoped_called
+        unscoped_called = True
+
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", broken_get)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", unscoped_cleanup)
+
+    with pytest.raises(TypeError, match="internal bug"):
+        task_tool_module._scoped_get_background_task_result("task-1", run_id="run-1")
+
+    assert unscoped_called is False

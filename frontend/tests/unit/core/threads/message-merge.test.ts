@@ -1,6 +1,7 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
+import { applySubtaskUpdateInState } from "@/core/tasks/context";
 import {
   applyNativeRoundsToSnapshotRuns,
   applySnapshotRunMessagePageState,
@@ -528,6 +529,24 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   ]);
 });
 
+test("mergeMessages keeps optimistic user input before live assistant messages", () => {
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const liveAi = {
+    id: "live-ai-1",
+    type: "ai",
+    content: "working",
+  } as Message;
+
+  expect(mergeMessages([], [liveAi], [optimisticHuman])).toEqual([
+    optimisticHuman,
+    liveAi,
+  ]);
+});
+
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
@@ -832,6 +851,55 @@ test("task event run messages update subtask state without entering visible hist
   ).toEqual(["ai-1"]);
 });
 
+test("mixed task event replay preserves each event identity", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        type: "task_running",
+        task_id: "task-a",
+        thread_id: "thread-a",
+        run_id: "run-1",
+      },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+    {
+      run_id: "run-2",
+      seq: 1,
+      content: {
+        type: "task_completed",
+        task_id: "task-b",
+        thread_id: "thread-b",
+        run_id: "run-2",
+        result: "done b",
+      },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+  ] as unknown as RunMessage[];
+  const updates: unknown[] = [];
+
+  applyTaskEventRunMessages(rows, (update) => updates.push(update));
+
+  expect(updates).toEqual([
+    {
+      id: "task-a",
+      threadId: "thread-a",
+      runId: "run-1",
+      notify: true,
+      status: "in_progress",
+    },
+    {
+      id: "task-b",
+      threadId: "thread-b",
+      runId: "run-2",
+      notify: true,
+      status: "completed",
+      result: "done b",
+    },
+  ]);
+});
+
 test("legacy task event run messages without metadata still restore subtask state", () => {
   const taskEventRow = {
     run_id: "run-legacy",
@@ -1048,6 +1116,35 @@ test("visible history run messages honor backend display contract", () => {
 });
 
 test("task event run messages are idempotent and scoped to the requested thread and run", () => {
+  const legacyTaskEventRow = {
+    run_id: "run-1",
+    content: {
+      type: "task_completed",
+      task_id: "call-legacy",
+      thread_id: "thread-1",
+      run_id: "run-1",
+      result: "legacy done",
+    },
+    metadata: { caller: "task_event" },
+    created_at: "2026-05-22T00:00:01Z",
+  } as unknown as RunMessage;
+  const crossRunSameTaskRow = {
+    ...legacyTaskEventRow,
+    run_id: "run-2",
+    content: {
+      ...legacyTaskEventRow.content,
+      run_id: "run-2",
+    },
+  } as unknown as RunMessage;
+  const missingRunIdentityRow = {
+    ...legacyTaskEventRow,
+    run_id: "run-3",
+    content: {
+      ...legacyTaskEventRow.content,
+      run_id: undefined,
+    },
+    created_at: "2026-05-22T00:00:02Z",
+  } as unknown as RunMessage;
   const taskEventRow = {
     run_id: "run-1",
     seq: 1,
@@ -1080,6 +1177,12 @@ test("task event run messages are idempotent and scoped to the requested thread 
   const updates: unknown[] = [];
 
   expect(taskEventRunMessageKey(taskEventRow)).toBe("run-1:1");
+  expect(taskEventRunMessageKey(legacyTaskEventRow)).toBe(
+    "run-1:thread-1:call-legacy:task_completed:2026-05-22T00:00:01Z",
+  );
+  expect(taskEventRunMessageKey(crossRunSameTaskRow)).toBe(
+    "run-2:thread-1:call-legacy:task_completed:2026-05-22T00:00:01Z",
+  );
   expect(isTaskEventRunMessageForRequest(taskEventRow, "thread-1")).toBe(true);
   expect(isTaskEventRunMessageForRequest(wrongThreadRow, "thread-1")).toBe(
     false,
@@ -1087,7 +1190,16 @@ test("task event run messages are idempotent and scoped to the requested thread 
   expect(isTaskEventRunMessageForRequest(wrongRunRow, "thread-1")).toBe(false);
 
   applyTaskEventRunMessages(
-    [taskEventRow, taskEventRow, wrongThreadRow, wrongRunRow],
+    [
+      taskEventRow,
+      taskEventRow,
+      wrongThreadRow,
+      wrongRunRow,
+      legacyTaskEventRow,
+      legacyTaskEventRow,
+      crossRunSameTaskRow,
+      missingRunIdentityRow,
+    ],
     (update) => updates.push(update),
     "thread-1",
     appliedKeys,
@@ -1099,7 +1211,13 @@ test("task event run messages are idempotent and scoped to the requested thread 
     appliedKeys,
   );
 
-  expect(appliedKeys).toEqual(new Set(["run-1:1"]));
+  expect(appliedKeys).toEqual(
+    new Set([
+      "run-1:1",
+      "run-1:thread-1:call-legacy:task_completed:2026-05-22T00:00:01Z",
+      "run-2:thread-1:call-legacy:task_completed:2026-05-22T00:00:01Z",
+    ]),
+  );
   expect(updates).toEqual([
     {
       id: "call-1",
@@ -1107,6 +1225,22 @@ test("task event run messages are idempotent and scoped to the requested thread 
       runId: "run-1",
       notify: true,
       status: "in_progress",
+    },
+    {
+      id: "call-legacy",
+      threadId: "thread-1",
+      runId: "run-1",
+      notify: true,
+      status: "completed",
+      result: "legacy done",
+    },
+    {
+      id: "call-legacy",
+      threadId: "thread-1",
+      runId: "run-2",
+      notify: true,
+      status: "completed",
+      result: "legacy done",
     },
   ]);
 });
@@ -2006,4 +2140,132 @@ test("buildVisibleHistoryMessages preserves run origin without overwriting addit
     deerflow_caller: "research_agent",
     [HISTORY_CREATED_AT_KEY]: "2026-06-18T00:00:07Z",
   });
+});
+
+test("P2-b offline replay keeps command-room task state run-scoped across interleaved sessions", () => {
+  const rooms = Array.from(
+    { length: 5 },
+    (_, roomIndex) => `command-room-${roomIndex + 1}`,
+  );
+  const rows: RunMessage[] = [];
+  const runs: Run[] = [];
+  let tick = 0;
+
+  for (const room of rooms) {
+    for (let threadIndex = 1; threadIndex <= 2; threadIndex += 1) {
+      const threadId = `${room}-owner-${threadIndex}-thread`;
+      for (let round = 1; round <= 2; round += 1) {
+        const runId = `${threadId}-round-${round}-run`;
+        runs.unshift({ run_id: runId } as unknown as Run);
+        rows.push({
+          run_id: runId,
+          seq: 1,
+          content: {
+            id: `${runId}-human`,
+            type: "human",
+            content: `${room} owner ${threadIndex} round ${round}`,
+          } as Message,
+          metadata: { caller: "lead_agent" },
+          created_at: `2026-07-07T00:00:${String(tick++).padStart(2, "0")}Z`,
+        });
+        const subtaskCount = round === 1 ? 5 : 6;
+        for (let subtask = 1; subtask <= subtaskCount; subtask += 1) {
+          const sharedTaskId = `shared-task-${subtask}`;
+          rows.push({
+            run_id: runId,
+            seq: 10 + subtask,
+            content: {
+              type: "task_completed",
+              task_id: sharedTaskId,
+              thread_id: threadId,
+              run_id: runId,
+              result: `${runId}:${sharedTaskId}:done`,
+            },
+            metadata: { caller: "task_event" },
+            display: {
+              visible_in_chat: false,
+              surface: "control",
+              reason: "task_event",
+            },
+            created_at: `2026-07-07T00:00:${String(tick++).padStart(2, "0")}Z`,
+          } as unknown as RunMessage);
+        }
+        rows.push({
+          run_id: runId,
+          seq: 2,
+          content: {
+            id: `${runId}-ai`,
+            type: "ai",
+            content: `${runId} visible answer`,
+          } as Message,
+          metadata: { caller: "lead_agent" },
+          created_at: `2026-07-07T00:00:${String(tick++).padStart(2, "0")}Z`,
+        });
+      }
+    }
+  }
+
+  const interleaved = rows.sort((a, b) => {
+    const aSeq = typeof a.seq === "number" ? a.seq : 0;
+    const bSeq = typeof b.seq === "number" ? b.seq : 0;
+    return aSeq - bSeq || a.run_id.localeCompare(b.run_id);
+  });
+  const targetThread = "command-room-3-owner-2-thread";
+  let tasks = {};
+  const updates: unknown[] = [];
+  applyTaskEventRunMessages(
+    interleaved,
+    (update) => {
+      updates.push(update);
+      tasks = applySubtaskUpdateInState(tasks, update);
+    },
+    targetThread,
+  );
+
+  expect(updates).toHaveLength(11);
+  expect(
+    Object.values(tasks)
+      .map((task) => `${task.threadId}:${task.runId}:${task.id}:${task.result}`)
+      .sort(),
+  ).toEqual(
+    [
+      ...Array.from({ length: 5 }, (_, i) => {
+        const taskId = `shared-task-${i + 1}`;
+        const runId = `${targetThread}-round-1-run`;
+        return `${targetThread}:${runId}:${taskId}:${runId}:${taskId}:done`;
+      }),
+      ...Array.from({ length: 6 }, (_, i) => {
+        const taskId = `shared-task-${i + 1}`;
+        const runId = `${targetThread}-round-2-run`;
+        return `${targetThread}:${runId}:${taskId}:${runId}:${taskId}:done`;
+      }),
+    ].sort(),
+  );
+
+  const visible = buildVisibleHistoryMessages(
+    interleaved.filter((row) => row.run_id.startsWith(targetThread)),
+    new Set(),
+    [],
+    runs.filter((run) => run.run_id.startsWith(targetThread)),
+  );
+
+  expect(visible.map((message) => message.content)).toEqual([
+    "command-room-3 owner 2 round 1",
+    `${targetThread}-round-1-run visible answer`,
+    "command-room-3 owner 2 round 2",
+    `${targetThread}-round-2-run visible answer`,
+  ]);
+  expect(
+    visible.every((message) =>
+      message.additional_kwargs?.deerflow_run_id?.startsWith(targetThread),
+    ),
+  ).toBe(true);
+
+  const wrongThreadUpdates: unknown[] = [];
+  applyTaskEventRunMessages(
+    interleaved.filter((row) => row.run_id.startsWith(targetThread)),
+    (update) => wrongThreadUpdates.push(update),
+    "command-room-wrong-owner-thread",
+  );
+  expect(wrongThreadUpdates).toEqual([]);
 });

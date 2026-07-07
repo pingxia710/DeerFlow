@@ -73,8 +73,11 @@ export function getSubtaskStorageKey(
   ]);
 }
 
-function getSubtaskLookupKeys(input: SubtaskStorageKeyInput): string[] {
+export function getSubtaskLookupKeys(input: SubtaskStorageKeyInput): string[] {
   const storageKey = getSubtaskStorageKey(input);
+  if (input.threadId && input.runId) {
+    return [storageKey];
+  }
   const legacyKey = getLegacySubtaskStorageKey(input.id, input.threadId);
   return storageKey === legacyKey ? [storageKey] : [storageKey, legacyKey];
 }
@@ -194,16 +197,43 @@ export function didSubtaskChange(previous: Subtask | undefined, next: Subtask) {
   return false;
 }
 
-export function applySubtaskUpdateInState(
+function getSubtaskUpdateStorageKey(
   tasks: Record<string, Subtask>,
   task: SubtaskUpdate,
 ) {
-  const storageKey = getSubtaskStorageKey({
+  if (task.threadId && !task.runId) {
+    const matchingStrongKeys = Object.keys(tasks).filter((storageKey) => {
+      try {
+        const parts = JSON.parse(storageKey) as unknown;
+        return (
+          Array.isArray(parts) &&
+          parts[0] === "subtask" &&
+          parts[1] === task.threadId &&
+          parts[3] === task.id
+        );
+      } catch {
+        return false;
+      }
+    });
+
+    if (matchingStrongKeys.length === 1) {
+      return matchingStrongKeys[0]!;
+    }
+  }
+
+  return getSubtaskStorageKey({
     id: task.id,
     threadId: task.threadId,
     runId: task.runId,
     roundId: task.roundId,
   });
+}
+
+export function applySubtaskUpdateInState(
+  tasks: Record<string, Subtask>,
+  task: SubtaskUpdate,
+) {
+  const storageKey = getSubtaskUpdateStorageKey(tasks, task);
   const previous = tasks[storageKey];
   const next = mergeSubtaskUpdate(previous, task);
 

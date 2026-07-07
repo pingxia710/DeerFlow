@@ -73,6 +73,11 @@ export type ThreadStreamFinishMeta = {
   runId: string | null;
 };
 
+type ThreadStreamOwnerSnapshot = {
+  threadId: string | null;
+  runId: string | null;
+};
+
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
@@ -160,6 +165,16 @@ type QueuedMessageAdmissionState = {
   streamFinished: boolean;
   recovering: boolean;
   sendInFlight: boolean;
+};
+
+type StreamOwnershipState = {
+  eventThreadId?: string | null;
+  eventRunId?: string | null;
+  streamThreadId?: string | null;
+  streamRunId?: string | null;
+  viewThreadId?: string | null;
+  liveMessagesThreadId?: string | null;
+  optimisticThreadId?: string | null;
 };
 
 const threadActivityListeners = new Set<() => void>();
@@ -1591,6 +1606,16 @@ export function mergeMessages(
   const visibleThreadMessages = threadMessages.filter(
     (message) => !isHiddenFromUIMessage(message),
   );
+  const hasVisibleThreadHuman = visibleThreadMessages.some(
+    (message) => message.type === "human",
+  );
+  const optimisticMessagesBeforeThread =
+    !hasVisibleThreadHuman &&
+    optimisticMessages.some((message) => message.type === "human")
+      ? optimisticMessages
+      : [];
+  const optimisticMessagesAfterThread =
+    optimisticMessagesBeforeThread.length > 0 ? [] : optimisticMessages;
   const allowUnscopedLiveOverlap = visibleThreadMessages[0]?.type === "human";
   const liveRunScopedMessageIds = new Set(
     visibleThreadMessages
@@ -1665,8 +1690,9 @@ export function mergeMessages(
 
   const merged = dedupeMessagesByIdentity([
     ...historyWithRunScopedLiveReplacements,
+    ...optimisticMessagesBeforeThread,
     ...threadMessages.filter((message) => !consumedLiveMessages.has(message)),
-    ...optimisticMessages,
+    ...optimisticMessagesAfterThread,
   ]);
 
   return merged.map((message) => {
@@ -2064,16 +2090,19 @@ export function shouldRefreshRunHistoryForThread(
 
 export function resolveThreadStreamFinishMeta({
   run,
-  streamThreadId,
-  streamRunId,
+  streamOwner,
 }: {
   run?: { thread_id?: string | null; run_id?: string | null } | null;
-  streamThreadId?: string | null;
-  streamRunId?: string | null;
+  streamOwner?: ThreadStreamOwnerSnapshot | null;
 }): ThreadStreamFinishMeta {
+  const hasRunMetadata = Boolean(run?.thread_id ?? run?.run_id);
   return {
-    threadId: run?.thread_id ?? streamThreadId ?? null,
-    runId: run?.run_id ?? streamRunId ?? null,
+    threadId: hasRunMetadata
+      ? (run?.thread_id ?? null)
+      : (streamOwner?.threadId ?? null),
+    runId: hasRunMetadata
+      ? (run?.run_id ?? null)
+      : (streamOwner?.runId ?? null),
   };
 }
 
@@ -2104,6 +2133,49 @@ export function shouldTreatStreamFinishAsCurrentStream(
     streamThreadId &&
     finishThreadId === streamThreadId &&
     (!finishRunId || !streamRunId || finishRunId === streamRunId),
+  );
+}
+
+export function shouldRunCurrentStreamFinishSideEffects({
+  eventThreadId,
+  eventRunId,
+  streamThreadId,
+  streamRunId,
+}: StreamOwnershipState) {
+  return shouldTreatStreamFinishAsCurrentStream(
+    eventThreadId,
+    eventRunId,
+    streamThreadId,
+    streamRunId,
+  );
+}
+
+export function shouldApplyStreamTitleUpdate({
+  eventThreadId,
+  eventRunId,
+  streamThreadId,
+  streamRunId,
+  viewThreadId,
+  liveMessagesThreadId,
+  optimisticThreadId,
+}: StreamOwnershipState) {
+  if (!streamThreadId) {
+    return false;
+  }
+  if (eventThreadId && eventThreadId !== streamThreadId) {
+    return false;
+  }
+  if (eventRunId && streamRunId && eventRunId !== streamRunId) {
+    return false;
+  }
+  if (eventThreadId || eventRunId) {
+    return Boolean(eventThreadId && eventThreadId === streamThreadId);
+  }
+  return Boolean(
+    viewThreadId &&
+    (viewThreadId === streamThreadId ||
+      liveMessagesThreadId === viewThreadId ||
+      optimisticThreadId === viewThreadId),
   );
 }
 
@@ -2518,6 +2590,9 @@ export function useThreadStream({
   // continues in the background.
   const streamThreadIdRef = useRef<string | null>(threadId ?? null);
   const streamRunIdRef = useRef<string | null>(null);
+  const streamOwnerSnapshotRef = useRef<ThreadStreamOwnerSnapshot | null>(
+    threadId ? { threadId, runId: null } : null,
+  );
   const streamClientThreadIdLockedRef = useRef(false);
   const liveMessagesSnapshotRef = useRef<LiveMessagesSnapshot | null>(null);
   const streamErrorRecoveryRunRef = useRef<StreamErrorRecoveryRun | null>(null);
@@ -2596,12 +2671,16 @@ export function useThreadStream({
       setStreamClientThreadId(normalizedThreadId);
     }
     streamThreadIdRef.current = normalizedThreadId;
+    streamOwnerSnapshotRef.current = normalizedThreadId
+      ? { threadId: normalizedThreadId, runId: null }
+      : null;
   }, [threadId]);
 
   const handleStreamStart = useCallback(
     (_threadId: string, _runId: string) => {
       streamThreadIdRef.current = _threadId;
       streamRunIdRef.current = _runId;
+      streamOwnerSnapshotRef.current = { threadId: _threadId, runId: _runId };
       setStreamErrorRecoveryRun(null);
       const currentView = currentViewThreadIdRef.current;
       const streamStillOwnsVisibleChat =
@@ -2671,6 +2750,10 @@ export function useThreadStream({
           : queued,
       );
       streamThreadIdRef.current = createdThreadId;
+      streamOwnerSnapshotRef.current = {
+        threadId: createdThreadId,
+        runId: streamRunIdRef.current,
+      };
       setOnStreamThreadId(createdThreadId);
       for (const previousId of previousIds) {
         clearThreadActivity(previousId);
@@ -2773,7 +2856,31 @@ export function useThreadStream({
       for (const update of updates) {
         if (update && "title" in update && update.title) {
           const streamThreadId = streamThreadIdRef.current;
-          if (!shouldAcceptStreamTitle(streamThreadId, update.title)) {
+          const updateRecord = update as Record<string, unknown>;
+          const eventThreadId =
+            typeof updateRecord.thread_id === "string"
+              ? updateRecord.thread_id
+              : typeof updateRecord.threadId === "string"
+                ? updateRecord.threadId
+                : null;
+          const eventRunId =
+            typeof updateRecord.run_id === "string"
+              ? updateRecord.run_id
+              : typeof updateRecord.runId === "string"
+                ? updateRecord.runId
+                : null;
+          if (
+            !shouldApplyStreamTitleUpdate({
+              eventThreadId,
+              eventRunId,
+              streamThreadId,
+              streamRunId: streamRunIdRef.current,
+              viewThreadId: currentViewThreadIdRef.current,
+              liveMessagesThreadId: liveMessagesThreadIdRef.current,
+              optimisticThreadId: optimisticThreadIdRef.current,
+            }) ||
+            !shouldAcceptStreamTitle(streamThreadId, update.title)
+          ) {
             continue;
           }
           void queryClient.setQueriesData(
@@ -2962,8 +3069,7 @@ export function useThreadStream({
     onFinish(state, run) {
       const finishMeta = resolveThreadStreamFinishMeta({
         run,
-        streamThreadId: streamThreadIdRef.current,
-        streamRunId: streamRunIdRef.current,
+        streamOwner: streamOwnerSnapshotRef.current,
       });
       const streamThreadId = finishMeta.threadId;
       const streamRunId = finishMeta.runId;
@@ -2986,18 +3092,17 @@ export function useThreadStream({
         markThreadFinished(streamThreadId);
         setThreadStatusInCaches(queryClient, streamThreadId, "idle");
       }
-      if (
-        shouldTreatStreamFinishAsCurrentStream(
-          streamThreadId,
-          streamRunId,
-          streamThreadIdRef.current,
-          streamRunIdRef.current,
-        )
-      ) {
+      const finishOwnsCurrentStream = shouldRunCurrentStreamFinishSideEffects({
+        eventThreadId: streamThreadId,
+        eventRunId: streamRunId,
+        streamThreadId: streamThreadIdRef.current,
+        streamRunId: streamRunIdRef.current,
+      });
+      if (finishOwnsCurrentStream) {
         streamFinishedRef.current = true;
         setQueueReleaseVersion((version) => version + 1);
+        listeners.current.onFinish?.(state.values, finishMeta);
       }
-      listeners.current.onFinish?.(state.values, finishMeta);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)

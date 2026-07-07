@@ -612,17 +612,15 @@ test("resolveThreadStreamFinishMeta returns onFinish thread and run metadata", a
   expect(
     resolveThreadStreamFinishMeta({
       run: { thread_id: "thread-from-run", run_id: "run-from-run" },
-      streamThreadId: "thread-from-ref",
-      streamRunId: "run-from-ref",
+      streamOwner: { threadId: "thread-from-owner", runId: "run-from-owner" },
     }),
   ).toEqual({ threadId: "thread-from-run", runId: "run-from-run" });
   expect(
     resolveThreadStreamFinishMeta({
       run: null,
-      streamThreadId: "thread-from-ref",
-      streamRunId: "run-from-ref",
+      streamOwner: { threadId: "thread-from-owner", runId: "run-from-owner" },
     }),
-  ).toEqual({ threadId: "thread-from-ref", runId: "run-from-ref" });
+  ).toEqual({ threadId: "thread-from-owner", runId: "run-from-owner" });
 });
 
 test("resolveVisibleTaskRunningThreadId only accepts the current live thread", async () => {
@@ -874,6 +872,163 @@ test("shouldTreatStreamFinishAsCurrentStream accepts same-thread finish without 
   ).toBe(false);
 });
 
+test("current stream finish side effects ignore stale thread/run ownership", async () => {
+  const { shouldRunCurrentStreamFinishSideEffects } =
+    await import("@/core/threads/hooks");
+
+  expect(
+    shouldRunCurrentStreamFinishSideEffects({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldRunCurrentStreamFinishSideEffects({
+      eventThreadId: "thread-b",
+      eventRunId: "run-b",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+    }),
+  ).toBe(true);
+});
+
+test("metadata-less stale finish uses owner snapshot and cannot release B queue", async () => {
+  const {
+    resolveThreadStreamFinishMeta,
+    shouldReleaseQueuedThreadMessage,
+    shouldRunCurrentStreamFinishSideEffects,
+  } = await import("@/core/threads/hooks");
+  const finishMeta = resolveThreadStreamFinishMeta({
+    run: null,
+    streamOwner: { threadId: "thread-a", runId: "run-a" },
+  });
+  const staleFinishOwnsCurrent = shouldRunCurrentStreamFinishSideEffects({
+    eventThreadId: finishMeta.threadId,
+    eventRunId: finishMeta.runId,
+    streamThreadId: "thread-b",
+    streamRunId: "run-b",
+  });
+
+  expect(finishMeta).toEqual({ threadId: "thread-a", runId: "run-a" });
+  expect(staleFinishOwnsCurrent).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: staleFinishOwnsCurrent,
+      sendInFlight: false,
+      recovering: false,
+      queuedThreadId: "thread-b",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(false);
+});
+
+test("metadata-less current finish is accepted when owner snapshot matches", async () => {
+  const {
+    resolveThreadStreamFinishMeta,
+    shouldRunCurrentStreamFinishSideEffects,
+  } = await import("@/core/threads/hooks");
+  const finishMeta = resolveThreadStreamFinishMeta({
+    run: null,
+    streamOwner: { threadId: "thread-b", runId: "run-b" },
+  });
+
+  expect(
+    shouldRunCurrentStreamFinishSideEffects({
+      eventThreadId: finishMeta.threadId,
+      eventRunId: finishMeta.runId,
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+    }),
+  ).toBe(true);
+});
+
+test("stream title updates require current thread/run or visible owner fallback", async () => {
+  const { shouldApplyStreamTitleUpdate } = await import("@/core/threads/hooks");
+
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-b",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-b",
+      eventRunId: "run-b",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+    }),
+  ).toBe(true);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      streamThreadId: "thread-a",
+      streamRunId: "run-a",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-a",
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe(true);
+});
+
+test("stale A stream finish/title cannot release B queue or update B title", async () => {
+  const {
+    shouldApplyStreamTitleUpdate,
+    shouldReleaseQueuedThreadMessage,
+    shouldRunCurrentStreamFinishSideEffects,
+  } = await import("@/core/threads/hooks");
+  const staleFinishOwnsCurrent = shouldRunCurrentStreamFinishSideEffects({
+    eventThreadId: "thread-a",
+    eventRunId: "run-a",
+    streamThreadId: "thread-b",
+    streamRunId: "run-b",
+  });
+
+  expect(staleFinishOwnsCurrent).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: staleFinishOwnsCurrent,
+      sendInFlight: false,
+      recovering: false,
+      queuedThreadId: "thread-b",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamThreadId: "thread-b",
+      streamRunId: "run-b",
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe(false);
+});
+
 test("getVisibleThreadError hides transient stream errors while recovery owns the run", async () => {
   const { getVisibleThreadError } = await import("@/core/threads/hooks");
   const error = new Error("network stream dropped");
@@ -1111,6 +1266,34 @@ test("resolveVisibleTaskRunningThreadId prefers task event identity across threa
       liveMessagesThreadId: "thread-b",
     }),
   ).toBe("thread-a");
+});
+
+test("applyTaskEventToSubtask preserves event identity across conversation switches", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: SubtaskUpdate[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        type: "task_running",
+        task_id: "task-1",
+        thread_id: "event-thread",
+        run_id: "event-run",
+      },
+      (task) => updates.push(task),
+      "current-view-or-stream-thread",
+    ),
+  ).toBe(true);
+
+  expect(updates).toEqual([
+    {
+      id: "task-1",
+      threadId: "event-thread",
+      runId: "event-run",
+      notify: true,
+      status: "in_progress",
+    },
+  ]);
 });
 
 test("applyTaskEventToSubtask accepts shared known task event fixtures", async () => {
@@ -1736,6 +1919,56 @@ test("applyTaskEventRunMessages dedupes legacy task events without seq", async (
   expect([...applied]).toEqual([
     "run-legacy:thread-1:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
   ]);
+});
+
+test("applyTaskEventRunMessages deterministically replays five runs of six task updates", async () => {
+  const { applyTaskEventRunMessages } = await import("@/core/threads/hooks");
+  const updates: SubtaskUpdate[] = [];
+  const applied = new Set<string>();
+  const messages = Array.from({ length: 5 }, (_, runIndex) =>
+    Array.from({ length: 6 }, (_, taskIndex) => ({
+      run_id: `run-${runIndex}`,
+      seq: taskIndex + 1,
+      created_at: `2024-01-01T00:${String(runIndex).padStart(2, "0")}:${String(taskIndex).padStart(2, "0")}.000Z`,
+      metadata: { caller: "task_event" },
+      content: {
+        event_type: "task_running",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: `task-${taskIndex}`,
+        thread_id: `thread-${runIndex}`,
+        run_id: `run-${runIndex}`,
+        description: `run ${runIndex} task ${taskIndex}`,
+      },
+    })),
+  ).flat();
+
+  for (let runIndex = 0; runIndex < 5; runIndex += 1) {
+    applyTaskEventRunMessages(
+      messages as never,
+      (task) => updates.push(task),
+      `thread-${runIndex}`,
+      applied,
+    );
+  }
+
+  const identities = updates.map(
+    (update) => `${update.threadId}:${update.runId}:${update.id}`,
+  );
+
+  expect(updates).toHaveLength(30);
+  expect(new Set(identities).size).toBe(30);
+  expect(new Set(identities)).toEqual(
+    new Set(
+      Array.from({ length: 5 }, (_, runIndex) =>
+        Array.from(
+          { length: 6 },
+          (_, taskIndex) =>
+            `thread-${runIndex}:run-${runIndex}:task-${taskIndex}`,
+        ),
+      ).flat(),
+    ),
+  );
+  expect(applied.size).toBe(30);
 });
 
 test("buildVisibleHistoryMessages excludes task_event run messages", async () => {

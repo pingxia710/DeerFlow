@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import re
 import time
@@ -57,6 +58,46 @@ _SECRET_LIKE_RE = re.compile(
 # Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
 # write it back to the triggering AIMessage's usage_metadata.
 _subagent_usage_cache: dict[str, dict[str, int]] = {}
+
+
+def _call_supports_run_id(func: Any) -> bool:
+    """Return whether *func* can be called with a ``run_id=`` keyword."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        # If the signature cannot be inspected, prefer the modern scoped call so
+        # real TypeError exceptions from inside the callable are not masked.
+        return True
+
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "run_id" and parameter.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }:
+            return True
+    return False
+
+
+def _scoped_get_background_task_result(task_id: str, run_id: str | None = None) -> Any | None:
+    if _call_supports_run_id(get_background_task_result):
+        return get_background_task_result(task_id, run_id=run_id)
+    return get_background_task_result(task_id)
+
+
+def _scoped_cleanup_background_task(task_id: str, run_id: str | None = None) -> None:
+    if _call_supports_run_id(cleanup_background_task):
+        cleanup_background_task(task_id, run_id=run_id)
+        return
+    cleanup_background_task(task_id)
+
+
+def _scoped_request_cancel_background_task(task_id: str, run_id: str | None = None) -> None:
+    if _call_supports_run_id(request_cancel_background_task):
+        request_cancel_background_task(task_id, run_id=run_id)
+        return
+    request_cancel_background_task(task_id)
 
 
 def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
@@ -217,10 +258,10 @@ def _is_subagent_terminal(result: Any) -> bool:
     return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
 
 
-async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
+async def _await_subagent_terminal(task_id: str, max_polls: int, run_id: str | None = None) -> Any | None:
     """Poll until the background subagent reaches a terminal status or we run out of polls."""
     for _ in range(max_polls):
-        result = get_background_task_result(task_id)
+        result = _scoped_get_background_task_result(task_id, run_id=run_id)
         if result is None:
             return None
         if _is_subagent_terminal(result):
@@ -229,15 +270,15 @@ async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
     return None
 
 
-async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls: int) -> None:
+async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls: int, run_id: str | None = None) -> None:
     """Keep polling a cancelled subagent until it can be safely removed."""
     cleanup_poll_count = 0
     while True:
-        result = get_background_task_result(task_id)
+        result = _scoped_get_background_task_result(task_id, run_id=run_id)
         if result is None:
             return
         if _is_subagent_terminal(result):
-            cleanup_background_task(task_id)
+            _scoped_cleanup_background_task(task_id, run_id=run_id)
             return
         if cleanup_poll_count >= max_polls:
             logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
@@ -255,9 +296,9 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, tas
         logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
 
 
-def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
+def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int, run_id: str | None = None) -> None:
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
-    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls))
+    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls, run_id=run_id))
     cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id))
 
 
@@ -641,7 +682,7 @@ async def task_tool(
 
     try:
         while True:
-            result = get_background_task_result(task_id)
+            result = _scoped_get_background_task_result(task_id, run_id=run_id)
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
@@ -673,7 +714,7 @@ async def task_tool(
                         "handoff_envelope": handoff_envelope,
                     },
                 )
-                cleanup_background_task(task_id)
+                _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return f"Error: Task {task_id} disappeared from background tasks"
 
             # Log status changes for debugging
@@ -743,7 +784,7 @@ async def task_tool(
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
-                cleanup_background_task(task_id)
+                _scoped_cleanup_background_task(task_id, run_id=run_id)
                 result_text = _redacted_tool_text(result.result)
                 suggested_receiver = _suggested_handoff_receiver(result.result)
                 if suggested_receiver:
@@ -800,7 +841,7 @@ async def task_tool(
                 )
                 error_text = _redacted_tool_text(result.error)
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {error_text}")
-                cleanup_background_task(task_id)
+                _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return f"Task failed. Error: {error_text}"
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -848,7 +889,7 @@ async def task_tool(
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {_redacted_tool_text(result.error)}")
-                cleanup_background_task(task_id)
+                _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -897,7 +938,7 @@ async def task_tool(
                 )
                 error_text = _redacted_tool_text(result.error)
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {error_text}")
-                cleanup_background_task(task_id)
+                _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return f"Task timed out. Error: {error_text}"
 
             # Still running, wait before next poll
@@ -959,24 +1000,24 @@ async def task_tool(
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.
-                request_cancel_background_task(task_id)
-                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
+                _scoped_request_cancel_background_task(task_id, run_id=run_id)
+                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count, run_id=run_id)
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.
-        request_cancel_background_task(task_id)
+        _scoped_request_cancel_background_task(task_id, run_id=run_id)
 
         # Wait (shielded) for the subagent to reach a terminal state so the
         # final token usage snapshot is reported to the parent RunJournal
         # before the parent worker persists get_completion_data().
         terminal_result = None
         try:
-            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count))
+            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count, run_id=run_id))
         except asyncio.CancelledError:
             pass
 
         # Report whatever the subagent collected (even if we timed out).
-        final_result = terminal_result or get_background_task_result(task_id)
+        final_result = terminal_result or _scoped_get_background_task_result(task_id, run_id=run_id)
         usage = _summarize_usage(getattr(final_result, "token_usage_records", None)) if final_result is not None else None
         if final_result is not None:
             _report_subagent_usage(runtime, final_result)
@@ -1023,9 +1064,9 @@ async def task_tool(
             },
         )
         if final_result is not None and _is_subagent_terminal(final_result):
-            cleanup_background_task(task_id)
+            _scoped_cleanup_background_task(task_id, run_id=run_id)
         else:
-            _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
+            _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count, run_id=run_id)
         _subagent_usage_cache.pop(tool_call_id, None)
         raise
     except Exception:

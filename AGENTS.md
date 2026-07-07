@@ -141,7 +141,14 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Command Room round principle** — users provide intent, pain, preferences,
   real-world constraints, and irreversible authorization or refusal. Command Room turns
   that into proposed direction, current-round boundaries, evidence standard, execution,
-  validation, and the next step.
+  validation, and the next step. After the user confirms the plan and boundary,
+  Command Room should autonomously proceed with local low-risk code, tests, docs,
+  reversible validation, and evidence gathering; do not repeatedly ask about ordinary
+  technical details that AI-first discovery and minimal evidence actions can resolve.
+  Pause with `STOP_CONFIRM` only before major risk, redlines, or permission expansion:
+  production/customer-visible effects, secrets or customer/payment data, destructive
+  cleanup or history/evidence deletion, real provider cost or external side effects,
+  deploy/public exposure, changed architecture commitments, or bottom-boundary changes.
   For serious rounds, keep standing planning, boundary, evidence, and opposition
   roles separate from the Chair decision so Command Room does not approve its own
   first draft. These are long-running AI governance roles with persistent
@@ -261,7 +268,7 @@ These apply repo-wide; module guides own the module-specific detail.
   isolation or host-access policy without user confirmation.
 - **Feishu/Lark private-link handling** — treat Feishu/Lark Doc/Wiki/Base links as
   private resources by default. First follow `.agent/skills/feishu-cli-boundary/SKILL.md`;
-  use the local user-mode CLI path `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules//cli/scripts/run.js ... --as user`
+  use the local user-mode CLI path `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules/cli/scripts/run.js ... --as user`
   before anonymous web access or asking for exports. Command Room hands Feishu CLI operations
   to the sub-AI rooted at `/path/to/feishu-cli-worktree`, and returns only desensitized
   evidence.

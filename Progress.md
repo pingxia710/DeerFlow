@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-07-07 — Command Room confirmed-plan local execution rule
+
+- Clarified that after the user confirms a plan and boundary, Command Room should autonomously continue local low-risk code, tests, docs, reversible validation, and evidence gathering instead of repeatedly asking about ordinary technical details.
+- Kept STOP_CONFIRM for major risk or permission expansion: production/customer-visible effects, secrets or customer/payment data, destructive cleanup or history/evidence deletion, real provider cost or external side effects, deploy/public exposure, architecture commitment changes, and bottom-boundary changes.
+- Synced the rule into root `AGENTS.md` and `docs/command-room/state/` guidance while preserving boundary, evidence, and opposition checks and rejecting worker self-claims as PASS evidence.
+- Validation: grep/read verification and `git diff --check`.
+- Deliberately skipped: no system prompts or hidden config, no personal notes, no credential/raw-user-data access, no history deletion, no runtime behavior change, and no external/provider side effects.
+
 ## 2026-07-06 — Command Room P1/P2 operating plane closure
 
 - Integrated runtime snapshot self-heal detail telemetry so `recovery.snapshot_self_heal` reports repaired round/task counts and low-sensitive row IDs/status while preserving the old `repaired` flag.

@@ -1040,7 +1040,7 @@ sandbox:
 #
 #   # Process-wide admitted background subagent executions. Extra tasks stay
 #   # pending until capacity frees up.
-#   # process_wide_max_concurrent: 8
+#   # process_wide_max_concurrent: 12
 #
 #   # Process-wide pending queue size for subagent executions waiting for capacity.
 #   # process_wide_queue_size: 64

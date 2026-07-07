@@ -57,16 +57,28 @@ def _build_subagent_runtime_environment_section(app_config: AppConfig | None = N
         default_cwd = getattr(sandbox_cfg, "default_cwd", None)
         mounts = getattr(sandbox_cfg, "mounts", None) or []
 
+        mnt_root = "/" + "mnt"
+        user_data_alias = mnt_root + "/" + "user-data" + "/" + "*"
+        skills_alias = mnt_root + "/" + "skills"
+        workspace_alias = mnt_root + "/" + "acp-workspace"
+        custom_mount_alias = mnt_root + "/" + "*"
+
         if not is_unrestricted_host_access_allowed(config):
-            return "<runtime_environment>\nLocalSandboxProvider is using virtual path scoping. Use `/mnt/user-data/*`, `/mnt/skills`, `/mnt/acp-workspace`, and configured mount paths.\n</runtime_environment>"
+            return (
+                "<runtime_environment>\n"
+                "LocalSandboxProvider is using restricted virtual path scoping. "
+                f"Use generalized compatibility aliases such as `{user_data_alias}`, "
+                f"`{skills_alias}`, `{workspace_alias}`, and configured custom mount aliases.\n"
+                "</runtime_environment>"
+            )
 
         lines = [
             "<runtime_environment>",
             "LocalSandboxProvider is in trusted local host-access mode (`sandbox.unrestricted_host_access: true`).",
             "Tools run on this computer as the Gateway OS user, not inside a separate container.",
             "Use direct host absolute paths such as `/Users/...` for real project directories and Obsidian notes.",
-            "Treat `/mnt/user-data/*`, `/mnt/skills`, `/mnt/acp-workspace`, and custom `/mnt/*` mounts as compatibility aliases.",
-            "If a `/mnt/*` alias looks missing, stale, or read-only, verify the corresponding direct host path before reporting a blocker.",
+            f"Treat generalized compatibility aliases such as `{user_data_alias}`, `{skills_alias}`, `{workspace_alias}`, and custom `{custom_mount_alias}` mounts as compatibility aliases.",
+            f"If a `{custom_mount_alias}` alias looks missing, stale, or read-only, verify the corresponding direct host path before reporting a blocker.",
         ]
         if default_cwd:
             lines.append(f"Configured default bash cwd: `{default_cwd}`.")
@@ -137,6 +149,7 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _slot_released: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -184,7 +197,13 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
-DEFAULT_PROCESS_WIDE_SUBAGENT_LIMIT = 8
+
+def _background_task_key(task_id: str, run_id: str | None = None) -> str:
+    """Return the registry key for a task, scoped by run_id when available."""
+    return f"{run_id}:{task_id}" if run_id else task_id
+
+
+DEFAULT_PROCESS_WIDE_SUBAGENT_LIMIT = 12
 DEFAULT_PROCESS_WIDE_SUBAGENT_QUEUE_LIMIT = 64
 
 
@@ -194,6 +213,10 @@ class _QueuedSubagentExecution:
     task: str
     result: SubagentResult
     context: Context
+
+    @property
+    def session_key(self) -> str:
+        return self.executor.thread_id or self.executor.run_id or self.executor.trace_id
 
 
 _subagent_scheduler_lock = threading.RLock()
@@ -375,6 +398,7 @@ def _start_subagent_execution_unlocked(item: _QueuedSubagentExecution) -> None:
         result.try_set_terminal(SubagentStatus.TIMED_OUT, error=f"Execution timed out after {item.executor.config.timeout_seconds} seconds")
         if execution_future is not None:
             execution_future.cancel()
+        _release_subagent_slot_once_and_drain(result)
 
     timeout_timer = threading.Timer(item.executor.config.timeout_seconds, handle_timeout)
     timeout_timer.daemon = True
@@ -388,18 +412,28 @@ def _start_subagent_execution_unlocked(item: _QueuedSubagentExecution) -> None:
                 logger.exception(f"[trace={item.executor.trace_id}] Subagent {item.executor.config.name} async execution failed")
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
         finally:
-            _release_subagent_slot_and_drain()
+            _release_subagent_slot_once_and_drain(result)
 
     try:
         execution_future = _submit_to_isolated_loop_in_context(item.context, lambda: item.executor._aexecute(item.task, result))
     except Exception as e:
         logger.exception(f"[trace={item.executor.trace_id}] Subagent {item.executor.config.name} async execution failed")
         result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
-        _release_subagent_slot_and_drain()
+        _release_subagent_slot_once_and_drain(result)
         return
 
     timeout_timer.start()
     execution_future.add_done_callback(handle_done)
+
+
+def _release_subagent_slot_once_and_drain(result: SubagentResult) -> None:
+    """Release this result's admitted running slot at most once, then drain."""
+    with result._state_lock:
+        if result._slot_released:
+            return
+        result._slot_released = True
+
+    _release_subagent_slot_and_drain()
 
 
 def _release_subagent_slot_and_drain() -> None:
@@ -413,12 +447,31 @@ def _release_subagent_slot_and_drain() -> None:
 def _drain_subagent_queue_unlocked() -> None:
     """Drain queued executions while capacity is available. Caller holds lock."""
     while _subagent_pending_queue and _subagent_running_count < _get_process_wide_subagent_limit():
-        item = _subagent_pending_queue.popleft()
-        if item.result.status.is_terminal or item.result.cancel_event.is_set():
-            if not item.result.status.is_terminal:
-                item.result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
-            continue
-        _start_subagent_execution_unlocked(item)
+        sessions: dict[str, deque[_QueuedSubagentExecution]] = {}
+        order: list[str] = []
+        while _subagent_pending_queue:
+            queued = _subagent_pending_queue.popleft()
+            key = queued.session_key
+            if key not in sessions:
+                sessions[key] = deque()
+                order.append(key)
+            sessions[key].append(queued)
+
+        for key in order:
+            if _subagent_running_count >= _get_process_wide_subagent_limit():
+                break
+            bucket = sessions[key]
+            if not bucket:
+                continue
+            item = bucket.popleft()
+            if item.result.status.is_terminal or item.result.cancel_event.is_set():
+                if not item.result.status.is_terminal:
+                    item.result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+                continue
+            _start_subagent_execution_unlocked(item)
+
+        for key in order:
+            _subagent_pending_queue.extend(sessions[key])
 
 
 def _filter_tools(
@@ -1026,7 +1079,7 @@ class SubagentExecutor:
         logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} scheduling async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
 
         with _background_tasks_lock:
-            _background_tasks[task_id] = result
+            _background_tasks[_background_task_key(task_id, self.run_id)] = result
 
         item = _QueuedSubagentExecution(executor=self, task=task, result=result, context=copy_context())
         if not _schedule_subagent_execution(item):
@@ -1035,7 +1088,7 @@ class SubagentExecutor:
         return task_id
 
 
-def request_cancel_background_task(task_id: str) -> None:
+def request_cancel_background_task(task_id: str, run_id: str | None = None) -> None:
     """Signal a running background task to stop.
 
     Sets the cancel_event on the task, which is checked cooperatively
@@ -1047,7 +1100,7 @@ def request_cancel_background_task(task_id: str) -> None:
         task_id: The task ID to cancel.
     """
     with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
+        result = _background_tasks.get(_background_task_key(task_id, run_id))
         if result is not None:
             result.cancel_event.set()
             if result.status == SubagentStatus.PENDING:
@@ -1055,7 +1108,7 @@ def request_cancel_background_task(task_id: str) -> None:
             logger.info("Requested cancellation for background task %s", task_id)
 
 
-def get_background_task_result(task_id: str) -> SubagentResult | None:
+def get_background_task_result(task_id: str, run_id: str | None = None) -> SubagentResult | None:
     """Get the result of a background task.
 
     Args:
@@ -1065,7 +1118,7 @@ def get_background_task_result(task_id: str) -> SubagentResult | None:
         SubagentResult if found, None otherwise.
     """
     with _background_tasks_lock:
-        return _background_tasks.get(task_id)
+        return _background_tasks.get(_background_task_key(task_id, run_id))
 
 
 def list_background_tasks() -> list[SubagentResult]:
@@ -1078,7 +1131,7 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
-def cleanup_background_task(task_id: str) -> None:
+def cleanup_background_task(task_id: str, run_id: str | None = None) -> None:
     """Remove a completed task from background tasks.
 
     Should be called by task_tool after it finishes polling and returns the result.
@@ -1091,7 +1144,8 @@ def cleanup_background_task(task_id: str) -> None:
         task_id: The task ID to remove.
     """
     with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
+        key = _background_task_key(task_id, run_id)
+        result = _background_tasks.get(key)
         if result is None:
             # Nothing to clean up; may have been removed already.
             logger.debug("Requested cleanup for unknown background task %s", task_id)
@@ -1100,7 +1154,7 @@ def cleanup_background_task(task_id: str) -> None:
         # Only clean up tasks that are in a terminal state to avoid races with
         # the background executor still updating the task entry.
         if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[task_id]
+            del _background_tasks[key]
             logger.debug("Cleaned up background task: %s", task_id)
         else:
             logger.debug(

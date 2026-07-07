@@ -90,7 +90,7 @@ class SubagentsAppConfig(BaseModel):
         description="User-defined subagent types keyed by agent name",
     )
     process_wide_max_concurrent: int = Field(
-        default=8,
+        default=12,
         ge=1,
         description="Process-wide maximum number of admitted background subagent executions",
     )

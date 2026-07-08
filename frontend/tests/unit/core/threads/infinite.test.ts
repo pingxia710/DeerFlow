@@ -573,6 +573,121 @@ describe("stream error recovery", () => {
     ).toBe(true);
   });
 
+  test("does not keep old same-thread recovery from newer run activity", () => {
+    const client = new QueryClient();
+    const threadId = "same-thread-recovery-thread";
+    const oldRunId = "same-thread-recovery-old";
+    const newRunId = "same-thread-recovery-new";
+    const oldRecovery = { threadId, runId: oldRunId };
+
+    markThreadBusyInCaches(client, threadId, { runId: newRunId });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(
+        oldRecovery,
+        getThreadActivitySnapshot(),
+      ),
+    ).toBe(false);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(
+        { threadId },
+        getThreadActivitySnapshot(),
+      ),
+    ).toBe(true);
+
+    clearThreadActivity(threadId);
+  });
+
+  test("old recovery settle does not clear newer same-thread recovery", () => {
+    const client = new QueryClient();
+    const threadId = "same-thread-recovery-settle-thread";
+    const oldRunId = "same-thread-recovery-settle-old";
+    const newRunId = "same-thread-recovery-settle-new";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+
+    const oldRecovery = applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId: oldRunId,
+      isMock: true,
+    });
+    const newRecovery = applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId: newRunId,
+      isMock: true,
+    });
+
+    expect(oldRecovery).toEqual({ threadId, runId: oldRunId });
+    expect(newRecovery).toEqual({ threadId, runId: newRunId });
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, oldRunId, "success"),
+    ).toBe(true);
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(
+        newRecovery,
+        getThreadActivitySnapshot(),
+      ),
+    ).toBe(true);
+    expect(
+      client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
+    ).toBe("busy");
+
+    clearThreadActivity(threadId);
+  });
+
+  test("keeps runtime-owner recovery only while that owner is active", () => {
+    const client = new QueryClient();
+    const threadId = "runtime-owner-recovery-thread";
+    const runId = "runtime-owner-recovery-run";
+    const runtimeOwnerId = "runtime-owner-recovery-slot";
+
+    const recovery = applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId,
+      runtimeOwnerId,
+      isMock: true,
+    });
+
+    expect(recovery).toEqual({ threadId, runId, runtimeOwnerId });
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, getThreadActivitySnapshot()),
+    ).toBe(true);
+
+    markThreadFinished(threadId, { runId, runtimeOwnerId });
+
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, getThreadActivitySnapshot()),
+    ).toBe(false);
+    clearThreadActivity(threadId);
+  });
+
+  test("run-owned recovery ignores newer runtime-owner activity from the same slot", () => {
+    const client = new QueryClient();
+    const threadId = "same-slot-recovery-thread";
+    const oldRunId = "same-slot-recovery-old";
+    const runtimeOwnerId = "same-slot-runtime-owner";
+    const recovery = { threadId, runId: oldRunId, runtimeOwnerId };
+
+    markThreadBusyInCaches(client, threadId, {
+      runId: oldRunId,
+      runtimeOwnerId,
+    });
+    markThreadFinished(threadId, { runId: oldRunId, runtimeOwnerId });
+    markThreadBusyInCaches(client, threadId, { runtimeOwnerId });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(recovery, getThreadActivitySnapshot()),
+    ).toBe(false);
+
+    clearThreadActivity(threadId);
+  });
+
   test("clears local activity when a stream error has no known run id", () => {
     const client = new QueryClient();
     const threadId = "stream-error-missing-run-thread";
@@ -604,7 +719,7 @@ describe("stream error recovery", () => {
     ).toBe(true);
   });
 
-  test("releases recovery ownership when local running activity is gone", () => {
+  test("releases legacy recovery ownership when local running activity is gone", () => {
     const recovery = { threadId: "thread-1", runId: "run-1" };
 
     expect(
@@ -612,6 +727,15 @@ describe("stream error recovery", () => {
         running: new Set(["thread-1"]),
         finished: new Set(),
       }),
+    ).toBe(false);
+    expect(
+      shouldKeepStreamErrorRecoveryRun(
+        { threadId: "thread-1" },
+        {
+          running: new Set(["thread-1"]),
+          finished: new Set(),
+        },
+      ),
     ).toBe(true);
     expect(
       shouldKeepStreamErrorRecoveryRun(recovery, {

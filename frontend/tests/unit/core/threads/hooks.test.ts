@@ -1275,6 +1275,28 @@ test("old run finish after new run started does not release new queue or mark th
       currentViewThreadId: "thread-a",
     }),
   ).toBe(false);
+
+  const newFinishOwnsCurrent = shouldRunCurrentStreamFinishSideEffects({
+    eventThreadId: "thread-a",
+    eventRunId: "run-new",
+    streamThreadId: "thread-a",
+    streamRunId: "run-new",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+
+  expect(newFinishOwnsCurrent).toBe(true);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: newFinishOwnsCurrent,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "slot-a",
+      currentOwnerId: "slot-a",
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-a",
+    }),
+  ).toBe(true);
 });
 
 test("same-thread new run claim requires clearing the previous run owner first", async () => {

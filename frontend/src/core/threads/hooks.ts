@@ -155,6 +155,13 @@ const PROVIDER_TRANSIENT_ERROR_MARKERS = [
 export type StreamErrorRecoveryRun = {
   threadId: string;
   runId: string;
+  runtimeOwnerId?: string | null;
+};
+
+type StreamErrorRecoveryOwner = {
+  threadId: string;
+  runId?: string | null;
+  runtimeOwnerId?: string | null;
 };
 
 const ACTIVE_THREAD_STATUSES = new Set([
@@ -271,6 +278,28 @@ function setThreadActivityOwners(threadId: string, owners: Set<string>) {
 
 function hasActiveThreadActivity(threadId: string) {
   return Boolean(threadActivityOwnersByThread.get(threadId)?.size);
+}
+
+function hasActiveThreadActivityOwner(
+  threadId: string,
+  scope?: ThreadActivityOwnerScope,
+) {
+  if (!isScopedThreadActivityOwner(scope)) {
+    return hasActiveThreadActivity(threadId);
+  }
+  const owners = threadActivityOwnersByThread.get(threadId);
+  if (!owners) {
+    return false;
+  }
+  if (scope?.runId) {
+    return owners.has(threadActivityOwnerKey({ runId: scope.runId }));
+  }
+  return Boolean(
+    scope?.runtimeOwnerId &&
+    owners.has(
+      threadActivityOwnerKey({ runtimeOwnerId: scope.runtimeOwnerId }),
+    ),
+  );
 }
 
 function updateThreadActivitySnapshot(
@@ -2569,12 +2598,14 @@ export function applyStreamErrorRecovery({
   queryClient,
   threadId,
   runId,
+  runtimeOwnerId,
   isMock,
   settleRunSubtasks,
 }: {
   queryClient: QueryClient;
   threadId: string | null | undefined;
   runId: string | null | undefined;
+  runtimeOwnerId?: string | null | undefined;
   isMock?: boolean;
   settleRunSubtasks?: SettleRunSubtasks;
 }): StreamErrorRecoveryRun | null {
@@ -2584,7 +2615,7 @@ export function applyStreamErrorRecovery({
     }
     return null;
   }
-  markThreadBusyInCaches(queryClient, threadId, { runId });
+  markThreadBusyInCaches(queryClient, threadId, { runId, runtimeOwnerId });
   startBackgroundRunProbe({
     queryClient,
     threadId,
@@ -2598,7 +2629,7 @@ export function applyStreamErrorRecovery({
   void queryClient.invalidateQueries({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
-  return { threadId, runId };
+  return { threadId, runId, ...(runtimeOwnerId ? { runtimeOwnerId } : {}) };
 }
 
 export function shouldCommitStreamStartFromError({
@@ -2952,10 +2983,16 @@ export function stopBackgroundRunProbeRecovery(
 }
 
 export function shouldKeepStreamErrorRecoveryRun(
-  recoveryRun: StreamErrorRecoveryRun | null,
+  recoveryRun: StreamErrorRecoveryOwner | null,
   activity: ThreadActivitySnapshot,
 ) {
-  return Boolean(recoveryRun && activity.running.has(recoveryRun.threadId));
+  if (!recoveryRun) {
+    return false;
+  }
+  if (recoveryRun.runId || recoveryRun.runtimeOwnerId) {
+    return hasActiveThreadActivityOwner(recoveryRun.threadId, recoveryRun);
+  }
+  return activity.running.has(recoveryRun.threadId);
 }
 
 export function stopBackgroundRunProbe(
@@ -3805,6 +3842,7 @@ export function useThreadStream({
         queryClient,
         threadId: streamThreadId,
         runId: streamRunId,
+        runtimeOwnerId: currentOwner.runtimeOwnerId,
         isMock,
         settleRunSubtasks,
       });

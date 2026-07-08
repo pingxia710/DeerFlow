@@ -2948,7 +2948,7 @@ test("applyTaskEventRunMessages dedupes legacy task events without seq", async (
     }),
   ]);
   expect([...applied]).toEqual([
-    "run-legacy:thread-1::task-legacy:task_completed:2024-01-01T00:00:00.000Z",
+    "run-legacy:thread-1:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
   ]);
 });
 

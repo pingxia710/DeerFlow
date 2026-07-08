@@ -1289,11 +1289,12 @@ export function taskEventRunMessageKey(message: RunMessage) {
   const eventType = taskEventType(taskEvent);
   const eventRunId = stringValue(taskEvent?.run_id) ?? message.run_id;
   const eventThreadId = stringValue(taskEvent?.thread_id) ?? "";
-  const eventRoundId = taskEventRoundId(taskEvent) ?? "";
+  const eventRoundId = taskEventRoundId(taskEvent);
   if (!taskId || !eventType || !eventRunId || !message.created_at) {
     return null;
   }
-  return `${eventRunId}:${eventThreadId}:${eventRoundId}:${taskId}:${eventType}:${message.created_at}`;
+  const roundKeySegment = eventRoundId ? `${eventRoundId}:` : "";
+  return `${eventRunId}:${eventThreadId}:${roundKeySegment}${taskId}:${eventType}:${message.created_at}`;
 }
 
 export function isTaskEventRunMessageForRequest(

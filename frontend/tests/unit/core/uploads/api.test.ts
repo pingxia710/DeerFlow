@@ -11,6 +11,7 @@ rs.mock("@/core/config", () => ({
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   deleteUploadedFile,
+  isStaleThreadUploadError,
   listUploadedFiles,
   uploadFiles,
 } from "@/core/uploads/api";
@@ -56,5 +57,28 @@ describe("uploads api", () => {
       "/backend/api/threads/thread%2Fwith%20space/uploads/%E6%8A%A5%E5%91%8A%20final%2Fnotes.md",
       { method: "DELETE" },
     );
+  });
+
+  test("classifies stale thread upload 404 responses", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(404, {
+        detail: "Thread 0412bd22-c98f-4ffb-a3bb-8471433f3d94 not found",
+      }),
+    );
+
+    let thrown: unknown;
+    try {
+      await uploadFiles("0412bd22-c98f-4ffb-a3bb-8471433f3d94", [
+        new File(["demo"], "note.txt", { type: "text/plain" }),
+      ]);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isStaleThreadUploadError(thrown)).toBe(true);
+    expect(thrown).toMatchObject({
+      status: 404,
+      threadId: "0412bd22-c98f-4ffb-a3bb-8471433f3d94",
+    });
   });
 });

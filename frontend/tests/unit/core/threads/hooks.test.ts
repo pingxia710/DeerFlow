@@ -231,6 +231,168 @@ test("async send ownership rejects stale upload and regenerate continuations aft
   ).toBe(false);
 });
 
+test("/new attachment upload resolves a backend thread before upload", async () => {
+  const { uploadPromptFilesForThreadSend } =
+    await import("@/core/threads/hooks");
+  const createThread = rs.fn(async (requestedThreadId: string) => ({
+    thread_id:
+      requestedThreadId === "pending-display-thread"
+        ? "backend-thread"
+        : requestedThreadId,
+  }));
+  const upload = rs.fn(async (_uploadThreadId: string) => ({
+    success: true,
+    message: "ok",
+    skipped_files: [],
+    files: [
+      {
+        filename: "note.txt",
+        size: 4,
+        path: "/tmp/note.txt",
+        virtual_path: "/mnt/user-data/uploads/note.txt",
+        artifact_url: "/api/artifacts/note.txt",
+      },
+    ],
+  }));
+
+  const result = await uploadPromptFilesForThreadSend({
+    threadId: "pending-display-thread",
+    backendThreadId: null,
+    fileParts: [
+      {
+        type: "file",
+        filename: "note.txt",
+        mediaType: "text/plain",
+        url: "",
+        file: new File(["demo"], "note.txt", { type: "text/plain" }),
+      },
+    ],
+    createThread,
+    upload,
+  });
+
+  expect(createThread).toHaveBeenCalledWith("pending-display-thread");
+  expect(upload).toHaveBeenCalledWith("backend-thread", [expect.any(File)]);
+  expect(upload).not.toHaveBeenCalledWith("pending-display-thread", [
+    expect.any(File),
+  ]);
+  expect(result?.threadId).toBe("backend-thread");
+});
+
+test("stale upload continuation is ignored after request ownership changes", async () => {
+  const { uploadPromptFilesForThreadSend } =
+    await import("@/core/threads/hooks");
+  let ownsRequest = true;
+  const upload = rs.fn(async () => {
+    ownsRequest = false;
+    return {
+      success: true,
+      message: "ok",
+      skipped_files: [],
+      files: [
+        {
+          filename: "note.txt",
+          size: 4,
+          path: "/tmp/note.txt",
+          virtual_path: "/mnt/user-data/uploads/note.txt",
+          artifact_url: "/api/artifacts/note.txt",
+        },
+      ],
+    };
+  });
+
+  const result = await uploadPromptFilesForThreadSend({
+    threadId: "thread-a",
+    backendThreadId: "thread-a",
+    fileParts: [
+      {
+        type: "file",
+        filename: "note.txt",
+        mediaType: "text/plain",
+        url: "",
+        file: new File(["demo"], "note.txt", { type: "text/plain" }),
+      },
+    ],
+    createThread: rs.fn(async () => "unexpected-thread"),
+    upload,
+    shouldContinue: () => ownsRequest,
+  });
+
+  expect(result).toBeNull();
+  expect(upload).toHaveBeenCalledWith("thread-a", [expect.any(File)]);
+});
+
+test("stale thread-not-found upload error stops before stream submit", async () => {
+  const { uploadPromptFilesForThreadSend } =
+    await import("@/core/threads/hooks");
+  const { UploadRequestError, isStaleThreadUploadError } =
+    await import("@/core/uploads/api");
+  const streamSubmit = rs.fn();
+  let thrown: unknown;
+
+  try {
+    await uploadPromptFilesForThreadSend({
+      threadId: "stale-thread",
+      backendThreadId: "stale-thread",
+      fileParts: [
+        {
+          type: "file",
+          filename: "note.txt",
+          mediaType: "text/plain",
+          url: "",
+          file: new File(["demo"], "note.txt", { type: "text/plain" }),
+        },
+      ],
+      createThread: rs.fn(async () => "unexpected-thread"),
+      upload: rs.fn(async () => {
+        throw new UploadRequestError(
+          "Thread stale-thread not found",
+          404,
+          "stale-thread",
+        );
+      }),
+    });
+    streamSubmit();
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(isStaleThreadUploadError(thrown)).toBe(true);
+  expect(streamSubmit).not.toHaveBeenCalled();
+});
+
+test("existing-thread attachment upload uses the saved backend thread", async () => {
+  const { uploadPromptFilesForThreadSend } =
+    await import("@/core/threads/hooks");
+  const createThread = rs.fn(async () => "unexpected-thread");
+  const upload = rs.fn(async () => ({
+    success: true,
+    message: "ok",
+    skipped_files: [],
+    files: [],
+  }));
+
+  const result = await uploadPromptFilesForThreadSend({
+    threadId: "thread-a",
+    backendThreadId: "thread-a",
+    fileParts: [
+      {
+        type: "file",
+        filename: "note.txt",
+        mediaType: "text/plain",
+        url: "",
+        file: new File(["demo"], "note.txt", { type: "text/plain" }),
+      },
+    ],
+    createThread,
+    upload,
+  });
+
+  expect(createThread).not.toHaveBeenCalled();
+  expect(upload).toHaveBeenCalledWith("thread-a", [expect.any(File)]);
+  expect(result).toEqual({ threadId: "thread-a", files: [] });
+});
+
 test("getScopedToolEndEvent attaches stream thread and run ownership", async () => {
   const { getScopedToolEndEvent } = await import("@/core/threads/hooks");
 

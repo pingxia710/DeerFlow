@@ -35,12 +35,33 @@ export interface ListFilesResponse {
   count: number;
 }
 
+export class UploadRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly threadId: string,
+  ) {
+    super(message);
+    this.name = "UploadRequestError";
+  }
+}
+
+export function isStaleThreadUploadError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const status = Reflect.get(error, "status");
+  return (
+    status === 404 && /^Thread\s+\S+\s+not found$/.test(error.message.trim())
+  );
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
 ): Promise<string> {
   const error = await response.json().catch(() => ({ detail: fallback }));
-  return error.detail ?? fallback;
+  return typeof error.detail === "string" ? error.detail : fallback;
 }
 
 function uploadsURL(threadId: string, suffix = ""): string {
@@ -66,7 +87,11 @@ export async function uploadFiles(
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
+    throw new UploadRequestError(
+      await readErrorDetail(response, "Upload failed"),
+      response.status,
+      threadId,
+    );
   }
 
   return response.json();

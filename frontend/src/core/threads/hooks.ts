@@ -42,8 +42,9 @@ import {
   useSettleRunningSubtasksForRun,
   useUpdateSubtask,
 } from "../tasks/context";
-import type { UploadedFileInfo } from "../uploads";
+import type { UploadedFileInfo, UploadResponse } from "../uploads";
 import {
+  isStaleThreadUploadError,
   promptInputFilePartToFile,
   uploadFiles,
   uploadListQueryKey,
@@ -490,6 +491,80 @@ export function shouldApplyUploadContinuation({
     (currentViewThreadId === request.threadId ||
       currentViewThreadId === request.displayThreadId),
   );
+}
+
+type CreateThreadForUpload = (
+  requestedThreadId: string,
+) => Promise<string | { thread_id?: unknown } | null | undefined>;
+
+function createdThreadId(
+  result: Awaited<ReturnType<CreateThreadForUpload>>,
+  fallbackThreadId: string,
+) {
+  if (typeof result === "string" && result.length > 0) {
+    return result;
+  }
+  if (
+    result &&
+    typeof result === "object" &&
+    typeof result.thread_id === "string" &&
+    result.thread_id.length > 0
+  ) {
+    return result.thread_id;
+  }
+  return fallbackThreadId;
+}
+
+export async function uploadPromptFilesForThreadSend({
+  threadId,
+  backendThreadId,
+  fileParts,
+  createThread,
+  upload,
+  shouldContinue = () => true,
+}: {
+  threadId: string | null | undefined;
+  backendThreadId?: string | null;
+  fileParts: PromptInputMessage["files"];
+  createThread: CreateThreadForUpload;
+  upload: (threadId: string, files: File[]) => Promise<UploadResponse>;
+  shouldContinue?: () => boolean;
+}): Promise<{ threadId: string; files: UploadedFileInfo[] } | null> {
+  if (!threadId || threadId === "new") {
+    throw new Error("Thread is not ready for file upload.");
+  }
+
+  const conversionResults = await Promise.all(
+    fileParts.map((fileUIPart) => promptInputFilePartToFile(fileUIPart)),
+  );
+  const files = conversionResults.filter((file): file is File => file !== null);
+  const failedConversions = conversionResults.length - files.length;
+
+  if (failedConversions > 0) {
+    throw new Error(
+      `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
+    );
+  }
+
+  if (!shouldContinue()) {
+    return null;
+  }
+
+  const uploadThreadId =
+    backendThreadId === threadId
+      ? threadId
+      : createdThreadId(await createThread(threadId), threadId);
+
+  if (!shouldContinue()) {
+    return null;
+  }
+
+  const uploadResponse = await upload(uploadThreadId, files);
+  if (!shouldContinue()) {
+    return null;
+  }
+
+  return { threadId: uploadThreadId, files: uploadResponse.files };
 }
 
 export function getScopedToolEndEvent(
@@ -4175,13 +4250,13 @@ export function useThreadStream({
 
   const sendMessage = useCallback(
     async (
-      threadId: string,
+      targetThreadId: string,
       message: PromptInputMessage,
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
       const text = message.text.trim();
-      if (threadId === "new" && message.files.length > 0) {
+      if (targetThreadId === "new" && message.files.length > 0) {
         toast.error("Please start the chat before adding attachments.");
         return Promise.reject(
           new Error("Attachments require a saved thread before upload."),
@@ -4190,8 +4265,8 @@ export function useThreadStream({
       const currentOwner = getCurrentRuntimeOwner();
       const targetThreadRecovering = Boolean(
         streamErrorRecoveryRunRef.current &&
-        (streamErrorRecoveryRunRef.current.threadId === threadId ||
-          currentOwner.displayThreadId === threadId) &&
+        (streamErrorRecoveryRunRef.current.threadId === targetThreadId ||
+          currentOwner.displayThreadId === targetThreadId) &&
         isCurrentThreadRuntimeOwnerEvent({
           eventThreadId: streamErrorRecoveryRunRef.current.threadId,
           eventRunId: streamErrorRecoveryRunRef.current.runId,
@@ -4218,8 +4293,8 @@ export function useThreadStream({
         queuedMessagesRef.current = [
           ...queuedMessagesRef.current,
           {
-            ownerId: currentRuntimeOwnerIdRef.current ?? threadId,
-            threadId,
+            ownerId: currentRuntimeOwnerIdRef.current ?? targetThreadId,
+            threadId: targetThreadId,
             message: { ...message, text, files: [] },
             extraContext,
             options,
@@ -4241,13 +4316,13 @@ export function useThreadStream({
             },
           ]);
         }
-        setOptimisticThreadTarget(threadId);
-        setLiveMessagesThreadTarget(threadId);
-        markThreadBusyInCaches(queryClient, threadId, {
+        setOptimisticThreadTarget(targetThreadId);
+        setLiveMessagesThreadTarget(targetThreadId);
+        markThreadBusyInCaches(queryClient, targetThreadId, {
           runId: streamRunIdRef.current,
           runtimeOwnerId: currentRuntimeOwnerIdRef.current,
         });
-        listeners.current.onSend?.(threadId);
+        listeners.current.onSend?.(targetThreadId);
         return;
       }
 
@@ -4258,7 +4333,7 @@ export function useThreadStream({
       streamClientThreadIdLockedRef.current = true;
       const sendRequest = {
         requestId: createOptimisticMessageId("send"),
-        threadId,
+        threadId: targetThreadId,
         displayThreadId: currentViewThreadIdRef.current,
         runtimeOwnerId: currentRuntimeOwnerIdRef.current,
       };
@@ -4324,71 +4399,68 @@ export function useThreadStream({
           },
         });
       }
-      setOptimisticThreadTarget(threadId);
-      setLiveMessagesThreadTarget(threadId);
+      setOptimisticThreadTarget(targetThreadId);
+      setLiveMessagesThreadTarget(targetThreadId);
       setOptimisticMessages(newOptimistic);
       setLocallySettledRun(null);
-      prepareStreamOwnerForSend(threadId);
+      prepareStreamOwnerForSend(targetThreadId);
       streamFinishedRef.current = false;
-      markThreadBusyInCaches(queryClient, threadId, {
+      markThreadBusyInCaches(queryClient, targetThreadId, {
         runtimeOwnerId: currentRuntimeOwnerIdRef.current,
       });
 
-      listeners.current.onSend?.(threadId);
+      listeners.current.onSend?.(targetThreadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
+      let activeThreadId = targetThreadId;
+      let streamSubmitStarted = false;
 
       try {
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
-            );
-
-            const conversionResults = await Promise.all(filePromises);
-            const files = conversionResults.filter(
-              (file): file is File => file !== null,
-            );
-            const failedConversions = conversionResults.length - files.length;
-
-            if (failedConversions > 0) {
-              throw new Error(
-                `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
-              );
-            }
-
-            if (!threadId) {
-              throw new Error("Thread is not ready for file upload.");
-            }
-
-            if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
-              if (!ownsSendRequest()) {
-                return;
-              }
-              uploadedFileInfo = uploadResponse.files;
-              void queryClient.invalidateQueries({
-                queryKey: uploadListQueryKey(threadId),
-              });
-
-              // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
+            const uploadResult = await uploadPromptFilesForThreadSend({
+              threadId: activeThreadId,
+              backendThreadId: threadId ?? null,
+              fileParts: message.files,
+              createThread: async (requestedThreadId) =>
+                getAPIClient(isMock).threads.create({
+                  threadId: requestedThreadId,
+                  metadata: context.agent_name
+                    ? { agent_name: context.agent_name }
+                    : undefined,
                 }),
-              );
-              setOptimisticMessages((messages) => {
-                return completeOptimisticUploadMessages(
-                  messages,
-                  uploadedFiles,
-                );
+              upload: uploadFiles,
+              shouldContinue: ownsSendRequest,
+            });
+            if (!uploadResult) {
+              return;
+            }
+            activeThreadId = uploadResult.threadId;
+            sendRequest.threadId = activeThreadId;
+            uploadedFileInfo = uploadResult.files;
+            void queryClient.invalidateQueries({
+              queryKey: uploadListQueryKey(activeThreadId),
+            });
+            if (activeThreadId !== targetThreadId) {
+              markThreadBusyInCaches(queryClient, activeThreadId, {
+                runtimeOwnerId: currentRuntimeOwnerIdRef.current,
               });
             }
+
+            // Update optimistic human message with uploaded status + paths
+            const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
+              (info) => ({
+                filename: info.filename,
+                size: info.size,
+                path: info.virtual_path,
+                status: "uploaded" as const,
+              }),
+            );
+            setOptimisticMessages((messages) => {
+              return completeOptimisticUploadMessages(messages, uploadedFiles);
+            });
           } catch (error) {
             if (!ownsSendRequest()) {
               return;
@@ -4425,6 +4497,7 @@ export function useThreadStream({
           }),
         );
 
+        streamSubmitStarted = true;
         await thread.submit(
           {
             messages: [
@@ -4446,14 +4519,18 @@ export function useThreadStream({
             ],
           },
           {
-            threadId: threadId,
+            threadId: activeThreadId,
             streamSubgraphs: true,
             streamResumable: true,
             onDisconnect: "continue",
             config: {
               recursion_limit: 1000,
             },
-            context: buildThreadRunContext(context, threadId, extraContext),
+            context: buildThreadRunContext(
+              context,
+              activeThreadId,
+              extraContext,
+            ),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -4465,13 +4542,21 @@ export function useThreadStream({
           return;
         }
         releaseStreamClientThreadId(streamThreadIdRef.current);
+        if (!streamSubmitStarted || isStaleThreadUploadError(error)) {
+          streamFinishedRef.current = true;
+        }
         setOptimisticMessages([]);
         setOptimisticThreadTarget(null);
         setLiveMessagesThreadTarget(null);
         setIsUploading(false);
-        clearThreadActivity(threadId, {
+        clearThreadActivity(targetThreadId, {
           runtimeOwnerId: currentRuntimeOwnerIdRef.current,
         });
+        if (activeThreadId !== targetThreadId) {
+          clearThreadActivity(activeThreadId, {
+            runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+          });
+        }
         throw error;
       } finally {
         if (ownsSendRequest()) {
@@ -4483,9 +4568,11 @@ export function useThreadStream({
     },
     [
       thread,
+      threadId,
       t.inputBox.waitForCurrentResponse,
       t.uploads.uploadingFiles,
       context,
+      isMock,
       queryClient,
       humanMessageCount,
       getCurrentRuntimeOwner,

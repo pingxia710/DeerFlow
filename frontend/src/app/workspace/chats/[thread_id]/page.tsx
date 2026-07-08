@@ -43,7 +43,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export function getChatRuntimeKey(threadId: string, isNewThread: boolean) {
-  return isNewThread ? `new-chat:${threadId}` : threadId;
+  return isNewThread ? `new-chat:${threadId}` : `chat:${threadId}`;
 }
 
 export default function ChatPage() {
@@ -105,6 +105,7 @@ export default function ChatPage() {
 
   const threadRuntime = useMemo(
     () => ({
+      runtimeScope: "chat",
       runtimeKey,
       threadId: isNewThread ? undefined : threadId,
       displayThreadId: threadId,

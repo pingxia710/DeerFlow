@@ -54,7 +54,9 @@ export function getAgentChatRuntimeKey(
   threadId: string,
   isNewThread: boolean,
 ) {
-  return isNewThread ? `agent-new-chat:${agentName}:${threadId}` : threadId;
+  return isNewThread
+    ? `agent-new-chat:${agentName}:${threadId}`
+    : `agent-chat:${agentName}:${threadId}`;
 }
 
 export default function AgentChatPage() {
@@ -120,9 +122,11 @@ export default function AgentChatPage() {
   );
 
   const runtimeKey = getAgentChatRuntimeKey(agent_name, threadId, isNewThread);
+  const runtimeScope = `agent:${agent_name}`;
 
   const runtimeRegistration = useMemo(
     () => ({
+      runtimeScope,
       runtimeKey,
       threadId: isNewThread ? undefined : threadId,
       displayThreadId: threadId,
@@ -180,6 +184,7 @@ export default function AgentChatPage() {
       agent_name,
       isMock,
       isNewThread,
+      runtimeScope,
       setIsNewThread,
       runtimeKey,
       setThreadId,

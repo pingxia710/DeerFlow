@@ -10,6 +10,6 @@ test("new conversation runtime key is scoped by draft thread id", () => {
   );
 });
 
-test("existing conversation runtime key remains the backend thread id", () => {
-  expect(getChatRuntimeKey("thread-1", false)).toBe("thread-1");
+test("saved normal conversation runtime key is scoped by chat route", () => {
+  expect(getChatRuntimeKey("thread-1", false)).toBe("chat:thread-1");
 });

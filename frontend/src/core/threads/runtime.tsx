@@ -31,6 +31,7 @@ type ThreadRuntimeCallbacks = Pick<
 >;
 
 export type ThreadRuntimeRegistration = ThreadRuntimeCallbacks & {
+  runtimeScope: string;
   runtimeKey: string;
   threadId?: string | null;
   displayThreadId?: string | null;
@@ -40,6 +41,7 @@ export type ThreadRuntimeRegistration = ThreadRuntimeCallbacks & {
 
 type ThreadRuntimeSlotConfig = {
   slotId: string;
+  runtimeScope: string;
   threadId?: string | null;
   displayThreadId?: string | null;
   context: LocalSettings["context"];
@@ -75,6 +77,7 @@ const emptyHistory: BaseStream<AgentThreadState>["history"] = [];
 const noop = () => undefined;
 const asyncNoop = () => Promise.resolve(undefined);
 const THREAD_RUNTIME_IDLE_GC_DELAY_MS = 60_000;
+const DEFAULT_THREAD_RUNTIME_SCOPE = "chat";
 
 let nextSlotIndex = 1;
 let slotsSnapshot: ThreadRuntimeSlotConfig[] = emptySlots;
@@ -117,20 +120,25 @@ export function normalizeThreadRuntimeKey(key: string | null | undefined) {
   return normalized;
 }
 
+function normalizeThreadRuntimeScope(scope: string | null | undefined) {
+  return normalizeThreadRuntimeKey(scope) ?? DEFAULT_THREAD_RUNTIME_SCOPE;
+}
+
 export function getThreadRuntimeSlotKeys({
+  runtimeScope,
   runtimeKey,
   threadId,
   displayThreadId,
 }: Pick<
   ThreadRuntimeRegistration,
-  "runtimeKey" | "threadId" | "displayThreadId"
+  "runtimeScope" | "runtimeKey" | "threadId" | "displayThreadId"
 >) {
   return [
     ...new Set(
       [
         scopedThreadRuntimeKey("runtime", runtimeKey),
-        scopedThreadRuntimeKey("thread", threadId),
-        scopedThreadRuntimeKey("display", displayThreadId),
+        scopedThreadRuntimeOwnerKey("thread", runtimeScope, threadId),
+        scopedThreadRuntimeOwnerKey("display", runtimeScope, displayThreadId),
       ].filter((key): key is string => Boolean(key)),
     ),
   ];
@@ -142,6 +150,17 @@ function scopedThreadRuntimeKey(
 ) {
   const normalized = normalizeThreadRuntimeKey(key);
   return normalized ? `${scope}:${normalized}` : null;
+}
+
+function scopedThreadRuntimeOwnerKey(
+  scope: Exclude<ThreadRuntimeKeyScope, "runtime">,
+  runtimeScope: string | null | undefined,
+  key: string | null | undefined,
+) {
+  const normalized = normalizeThreadRuntimeKey(key);
+  return normalized
+    ? `${scope}:${normalizeThreadRuntimeScope(runtimeScope)}:${normalized}`
+    : null;
 }
 
 export function resolveThreadRuntimeSlotId(
@@ -168,12 +187,14 @@ function emitRuntimeChange() {
     .map(
       ({
         slotId,
+        runtimeScope,
         threadId,
         displayThreadId,
         context,
         isMock,
       }): ThreadRuntimeSlotConfig => ({
         slotId,
+        runtimeScope,
         threadId,
         displayThreadId,
         context,
@@ -241,10 +262,11 @@ function ensureRuntimeEntry(
   registration: Omit<ThreadRuntimeRegistration, keyof ThreadRuntimeCallbacks> &
     Partial<ThreadRuntimeCallbacks>,
 ) {
+  const runtimeScope = normalizeThreadRuntimeScope(registration.runtimeScope);
   const slotId =
     resolveThreadRuntimeSlotId(
       slotIdByKey,
-      ...getThreadRuntimeSlotKeys(registration),
+      ...getThreadRuntimeSlotKeys({ ...registration, runtimeScope }),
     ) ?? `thread-runtime-${nextSlotIndex++}`;
   const now = Date.now();
   let entry = entriesBySlotId.get(slotId);
@@ -252,6 +274,7 @@ function ensureRuntimeEntry(
   if (!entry) {
     entry = {
       slotId,
+      runtimeScope,
       threadId: registration.threadId,
       displayThreadId: registration.displayThreadId,
       context: registration.context,
@@ -269,6 +292,10 @@ function ensureRuntimeEntry(
     changed = true;
   }
 
+  if (entry.runtimeScope !== runtimeScope) {
+    entry.runtimeScope = runtimeScope;
+    changed = true;
+  }
   if (entry.threadId !== registration.threadId) {
     entry.threadId = registration.threadId;
     entry.idleSnapshot = null;
@@ -287,7 +314,10 @@ function ensureRuntimeEntry(
     changed = true;
   }
   entry.lastUsedAt = now;
-  for (const key of getThreadRuntimeSlotKeys(registration)) {
+  for (const key of getThreadRuntimeSlotKeys({
+    ...registration,
+    runtimeScope,
+  })) {
     addRuntimeKey(entry, key);
   }
   if (changed) {
@@ -363,7 +393,11 @@ function claimRuntimeThreadId(slotId: string, threadId: string) {
   if (!entry) {
     return;
   }
-  const threadSlotKey = scopedThreadRuntimeKey("thread", threadId);
+  const threadSlotKey = scopedThreadRuntimeOwnerKey(
+    "thread",
+    entry.runtimeScope,
+    threadId,
+  );
   const existingSlotId = threadSlotKey
     ? slotIdByKey.get(threadSlotKey)
     : undefined;
@@ -523,11 +557,19 @@ function getEntryForRuntimeKey(runtimeKey: string) {
 }
 
 export function clearThreadRuntime(threadId: string) {
-  const slotId = resolveSlotId(scopedThreadRuntimeKey("thread", threadId));
-  if (!slotId) {
+  const normalizedThreadId = normalizeThreadRuntimeKey(threadId);
+  if (!normalizedThreadId) {
     return;
   }
-  deleteRuntimeEntry(slotId);
+  const slotIds = [...entriesBySlotId.values()]
+    .filter(
+      (entry) =>
+        normalizeThreadRuntimeKey(entry.threadId) === normalizedThreadId,
+    )
+    .map((entry) => entry.slotId);
+  for (const slotId of slotIds) {
+    deleteRuntimeEntry(slotId);
+  }
 }
 
 export function resetThreadRuntimeSlot(runtimeKey: string) {
@@ -640,6 +682,53 @@ function callRuntimeCallback<K extends keyof ThreadRuntimeCallbacks>(
     (callback as (...callbackArgs: typeof args) => void)(...args);
   }
 }
+
+export const __threadRuntimeTestUtils = {
+  reset() {
+    for (const timer of runtimeGcTimers.values()) {
+      clearTimeout(timer);
+    }
+    runtimeGcTimers.clear();
+    entriesBySlotId.clear();
+    slotIdByKey.clear();
+    slotsSnapshot = emptySlots;
+    runtimeChangeScheduled = false;
+    nextSlotIndex = 1;
+  },
+  register(registration: ThreadRuntimeRegistration) {
+    const cleanup = registerThreadRuntime(registration);
+    const slotId = getEntryForRuntimeKey(registration.runtimeKey)?.slotId;
+    if (!slotId) {
+      cleanup();
+      throw new Error("Thread runtime test registration failed.");
+    }
+    return { slotId, cleanup };
+  },
+  claim: claimRuntimeThreadId,
+  setSnapshot(slotId: string, snapshot: unknown) {
+    const entry = entriesBySlotId.get(slotId);
+    if (entry) {
+      entry.snapshot = snapshot as ThreadRuntimeSnapshot;
+    }
+  },
+  get(slotId: string) {
+    const entry = entriesBySlotId.get(slotId);
+    if (!entry) {
+      return null;
+    }
+    return {
+      slotId: entry.slotId,
+      runtimeScope: entry.runtimeScope,
+      threadId: entry.threadId,
+      displayThreadId: entry.displayThreadId,
+      context: entry.context,
+      callbacks: entry.callbacks,
+      snapshot: entry.snapshot,
+      keys: [...entry.keys].sort(),
+      subscribers: entry.subscribers,
+    };
+  },
+};
 
 function ThreadRuntimeSlot({ slot }: { slot: ThreadRuntimeSlotConfig }) {
   const { slotId } = slot;

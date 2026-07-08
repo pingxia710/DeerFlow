@@ -11,8 +11,8 @@ test("new agent chat runtime key is isolated by draft thread id", () => {
   expect(firstDraftKey).not.toBe(secondDraftKey);
 });
 
-test("existing agent chat runtime key equals backend thread id", () => {
+test("saved agent chat runtime key is scoped by agent route owner", () => {
   expect(
     getAgentChatRuntimeKey("researcher", "backend-thread-123", false),
-  ).toBe("backend-thread-123");
+  ).toBe("agent-chat:researcher:backend-thread-123");
 });

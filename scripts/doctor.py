@@ -12,7 +12,9 @@ Exit codes:
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import socket
 import subprocess
 import sys
 from importlib import import_module
@@ -67,6 +69,14 @@ def _run(cmd: list[str]) -> str | None:
         return (r.stdout or r.stderr).strip()
     except Exception:
         return None
+
+
+def _is_tcp_listening(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 
 def _parse_major(version_text: str) -> int | None:
@@ -575,6 +585,47 @@ def check_frontend_env(project_root: Path) -> CheckResult:
     )
 
 
+def check_local_nginx_frontend_proxy(project_root: Path) -> CheckResult:
+    config_path = project_root / "logs" / "nginx.local.generated.conf"
+    if not config_path.exists():
+        return CheckResult("local nginx frontend upstream", "skip", "generated config not found")
+
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return CheckResult("local nginx frontend upstream", "warn", str(exc))
+
+    listen_match = re.search(r"^\s*listen\s+(\d+)\s*;", text, re.MULTILINE)
+    frontend_match = re.search(
+        r"upstream\s+frontend\s*\{[^}]*server\s+127\.0\.0\.1:(\d+)\s*;",
+        text,
+        re.DOTALL,
+    )
+    if not listen_match or not frontend_match:
+        return CheckResult("local nginx frontend upstream", "skip", "upstream not found")
+
+    nginx_port = int(listen_match.group(1))
+    frontend_port = int(frontend_match.group(1))
+    if not _is_tcp_listening("127.0.0.1", nginx_port):
+        return CheckResult(
+            "local nginx frontend upstream",
+            "skip",
+            f"nginx not listening on {nginx_port}",
+        )
+    if _is_tcp_listening("127.0.0.1", frontend_port):
+        return CheckResult(
+            "local nginx frontend upstream",
+            "ok",
+            f"nginx:{nginx_port} -> frontend:{frontend_port}",
+        )
+    return CheckResult(
+        "local nginx frontend upstream",
+        "warn",
+        f"nginx:{nginx_port} -> frontend:{frontend_port}, but frontend port is closed",
+        fix="Run `make dev` or inspect logs/frontend.log; nginx will return 502 until the frontend is listening.",
+    )
+
+
 def check_sandbox(config_path: Path) -> list[CheckResult]:
     if not config_path.exists():
         return [CheckResult("sandbox configured", "skip")]
@@ -718,6 +769,10 @@ def main() -> int:
     # ── Sandbox ──────────────────────────────────────────────────────────────
     sandbox_checks = check_sandbox(config_path)
     sections.append(("Sandbox", sandbox_checks))
+
+    # ── Local Runtime ────────────────────────────────────────────────────────
+    runtime_checks = [check_local_nginx_frontend_proxy(project_root)]
+    sections.append(("Local Runtime", runtime_checks))
 
     # ── Render ────────────────────────────────────────────────────────────────
     total_fails = 0

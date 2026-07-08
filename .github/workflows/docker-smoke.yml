@@ -83,6 +83,14 @@ jobs:
   compose-runtime-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      BETTER_AUTH_SECRET: ci-smoke-better-auth-secret
+      DEER_FLOW_BIND_HOST: 127.0.0.1
+      DEER_FLOW_CONFIG_PATH: ${{ github.workspace }}/.ci/config.yaml
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${{ github.workspace }}/.ci/extensions_config.json
+      DEER_FLOW_HOME: ${{ github.workspace }}/.ci/deer-flow-home
+      DEER_FLOW_INTERNAL_AUTH_TOKEN: ci-smoke-internal-token
+      DEER_FLOW_REPO_ROOT: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v6
 
@@ -106,14 +114,6 @@ jobs:
           : > frontend/.env
 
       - name: Build and start Compose stack
-        env:
-          BETTER_AUTH_SECRET: ci-smoke-better-auth-secret
-          DEER_FLOW_BIND_HOST: 127.0.0.1
-          DEER_FLOW_CONFIG_PATH: ${{ github.workspace }}/.ci/config.yaml
-          DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${{ github.workspace }}/.ci/extensions_config.json
-          DEER_FLOW_HOME: ${{ github.workspace }}/.ci/deer-flow-home
-          DEER_FLOW_INTERNAL_AUTH_TOKEN: ci-smoke-internal-token
-          DEER_FLOW_REPO_ROOT: ${{ github.workspace }}
         run: docker compose -f docker/docker-compose.yaml -p deer-flow-smoke up -d --build --wait --wait-timeout 240 nginx
 
       - name: Check nginx health endpoint

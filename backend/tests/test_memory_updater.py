@@ -227,6 +227,190 @@ def test_apply_updates_preserves_source_error() -> None:
     assert result["facts"][0]["category"] == "correction"
 
 
+def test_apply_updates_quarantines_active_execution_state() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    active_text = "P2-A/P2-B execution trace: FORCED STOP repeated tool calls, Todo, git status, git diff, pnpm test, commit hash, checkpoint flow."
+    update_data = {
+        "user": {
+            "topOfMind": {"summary": active_text, "shouldUpdate": True},
+        },
+        "history": {
+            "recentMonths": {"summary": active_text, "shouldUpdate": True},
+        },
+        "newFacts": [
+            {"content": active_text, "category": "context", "confidence": 0.95},
+            {"content": "run-aware thread activity validation passed", "category": "context", "confidence": 0.95},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-active")
+
+    serialized = str(result)
+    assert result["user"]["topOfMind"]["summary"] == ""
+    assert result["history"]["recentMonths"]["summary"] == ""
+    assert result["facts"] == []
+    assert "P2-A" not in serialized
+    assert "FORCED STOP" not in serialized
+    assert "pnpm test" not in serialized
+
+
+def test_apply_updates_preserves_stable_preferences_and_corrections() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "user": {
+            "personalContext": {"summary": "用户偏好中文回答。", "shouldUpdate": True},
+        },
+        "newFacts": [
+            {"content": "用户喜欢 Codex-ready prompt。", "category": "preference", "confidence": 0.95},
+            {"content": "不要使用 git commit --no-verify。", "category": "correction", "confidence": 0.99},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-stable")
+
+    assert result["user"]["personalContext"]["summary"] == "用户偏好中文回答。"
+    assert [fact["content"] for fact in result["facts"]] == [
+        "用户喜欢 Codex-ready prompt。",
+        "不要使用 git commit --no-verify。",
+    ]
+
+
+def test_apply_updates_preserves_stable_project_facts() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "user": {
+            "workContext": {
+                "summary": "DeerFlow 前端 runtime hardening 是长期关注方向。",
+                "shouldUpdate": True,
+            },
+        },
+        "newFacts": [
+            {
+                "content": "项目路径是 /Users/pingxia/projects/deer-flow。",
+                "category": "context",
+                "confidence": 0.9,
+            },
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-project")
+
+    assert result["user"]["workContext"]["summary"] == "DeerFlow 前端 runtime hardening 是长期关注方向。"
+    assert [fact["content"] for fact in result["facts"]] == ["项目路径是 /Users/pingxia/projects/deer-flow。"]
+
+
+def test_apply_updates_preserves_stable_command_workflow_preferences() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {"content": "用户希望 Codex 在修改代码前先检查 git status。", "category": "preference", "confidence": 0.95},
+            {"content": "用户偏好每次修改后运行 pnpm test 的相关 targeted tests。", "category": "preference", "confidence": 0.95},
+            {"content": "用户要求不要重复工具调用。", "category": "correction", "confidence": 0.98},
+            {
+                "content": "修改代码前应检查工作区状态。",
+                "category": "correction",
+                "confidence": 0.98,
+                "sourceError": "The agent previously skipped git status before editing.",
+            },
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-workflow")
+
+    assert [fact["content"] for fact in result["facts"]] == [
+        "用户希望 Codex 在修改代码前先检查 git status。",
+        "用户偏好每次修改后运行 pnpm test 的相关 targeted tests。",
+        "用户要求不要重复工具调用。",
+        "修改代码前应检查工作区状态。",
+    ]
+    assert result["facts"][3]["sourceError"] == "The agent previously skipped git status before editing."
+
+
+def test_apply_updates_quarantines_active_execution_flow_without_phase_label() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    active_text = "已修改 4 个文件，git status clean，tag 创建成功，未 push，测试通过。"
+    update_data = {
+        "user": {
+            "topOfMind": {"summary": active_text, "shouldUpdate": True},
+        },
+        "history": {
+            "recentMonths": {"summary": active_text, "shouldUpdate": True},
+        },
+        "newFacts": [
+            {"content": active_text, "category": "context", "confidence": 0.95},
+            {"content": "用户偏好中文回答。", "category": "preference", "confidence": 0.95},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-flow")
+
+    assert result["user"]["topOfMind"]["summary"] == ""
+    assert result["history"]["recentMonths"]["summary"] == ""
+    assert [fact["content"] for fact in result["facts"]] == ["用户偏好中文回答。"]
+
+
+def test_apply_updates_does_not_clean_existing_polluted_memory() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_existing",
+                "content": "P2-B pnpm test execution trace.",
+                "category": "context",
+                "confidence": 0.95,
+                "createdAt": "2026-07-08T00:00:00Z",
+                "source": "thread-old",
+            }
+        ]
+    )
+    current_memory["user"]["topOfMind"] = {
+        "summary": "FORCED STOP repeated tool calls from an older run.",
+        "updatedAt": "2026-07-08T00:00:00Z",
+    }
+    update_data = {
+        "newFacts": [
+            {"content": "用户偏好中文回答。", "category": "preference", "confidence": 0.95},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-new")
+
+    assert result["user"]["topOfMind"]["summary"] == "FORCED STOP repeated tool calls from an older run."
+    assert [fact["content"] for fact in result["facts"]] == [
+        "P2-B pnpm test execution trace.",
+        "用户偏好中文回答。",
+    ]
+
+
 def test_apply_updates_ignores_empty_source_error() -> None:
     updater = MemoryUpdater()
     current_memory = _make_memory()
@@ -567,6 +751,20 @@ class TestFormatConversationForUpdate:
         assert "raw user text" in result
         assert "structured text" in result
 
+    def test_active_execution_ai_is_skipped_but_human_correction_remains(self):
+        human_msg = MagicMock()
+        human_msg.type = "human"
+        human_msg.content = "请记住：不要使用 git commit --no-verify。"
+
+        ai_msg = MagicMock()
+        ai_msg.type = "ai"
+        ai_msg.content = "Todo: run git status, git diff, pnpm test; P2-B checkpoint is not pushed."
+
+        result = format_conversation_for_update([human_msg, ai_msg])
+        assert "不要使用 git commit --no-verify" in result
+        assert "pnpm test" not in result
+        assert "P2-B" not in result
+
 
 # ---------------------------------------------------------------------------
 # update_memory - structured LLM response handling
@@ -697,6 +895,42 @@ class TestUpdateMemoryStructuredResponse:
         assert result is True
         saved_memory = mock_storage.save.call_args.args[0]
         assert [fact["content"] for fact in saved_memory["facts"]] == ["User works on DeerFlow"]
+
+    def test_mixed_stable_correction_and_active_execution_trace(self):
+        updater = MemoryUpdater()
+        response = (
+            '{"user": {"topOfMind": {"summary": "P2-B Todo pnpm test execution trace", "shouldUpdate": true}}, '
+            '"history": {}, '
+            '"newFacts": ['
+            '{"content": "不要使用 git commit --no-verify。", "category": "correction", "confidence": 0.99}, '
+            '{"content": "P2-B git status and pnpm test checkpoint flow passed", "category": "context", "confidence": 0.95}'
+            '], "factsToRemove": []}'
+        )
+        model = self._make_mock_model(response)
+        mock_storage = MagicMock(save=MagicMock(return_value=True))
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True, fact_confidence_threshold=0.7, max_facts=100)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "请记住：不要使用 git commit --no-verify。"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Todo: run git status, git diff, pnpm test; P2-B checkpoint is not pushed."
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg], thread_id="thread-mixed")
+
+        assert result is True
+        prompt = model.invoke.call_args.args[0]
+        assert "不要使用 git commit --no-verify" in prompt
+        assert "pnpm test" not in prompt
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert saved_memory["user"]["topOfMind"]["summary"] == ""
+        assert [fact["content"] for fact in saved_memory["facts"]] == ["不要使用 git commit --no-verify。"]
 
     def test_fact_schema_guard_coerces_and_filters_nested_fields(self):
         """Malformed fact entries should be normalized per fact, not fail the whole update."""

@@ -7,6 +7,46 @@ from copy import copy
 from typing import Any
 
 _UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
+_ACTIVE_EXECUTION_HARD_PATTERNS = (
+    re.compile(r"\bP\d+-[A-Z]\b"),
+    re.compile(r"\bFORCED STOP\b", re.IGNORECASE),
+    re.compile(r"\btool[-\s]?trace\b", re.IGNORECASE),
+    re.compile(r"\btask[-\s]?trace\b", re.IGNORECASE),
+    re.compile(r"\bsubagent\s+handoff\b", re.IGNORECASE),
+    re.compile(r"\btodos?\b|\bto-do\s+list\b", re.IGNORECASE),
+    re.compile(r"\brun-aware\s+thread\s+activity\b", re.IGNORECASE),
+    re.compile(r"(?:执行态|任务流水|临时审计|当前实现)"),
+)
+_ACTIVE_EXECUTION_FLOW_PATTERNS = (
+    re.compile(r"\brepeated\s+tool[-\s]?calls?\b", re.IGNORECASE),
+    re.compile(r"\btool[-\s]?calls?\b", re.IGNORECASE),
+    re.compile(r"\bgit\s+(?:status|diff|log|show)\b", re.IGNORECASE),
+    re.compile(r"\bgit\s+diff\s+--check\b", re.IGNORECASE),
+    re.compile(r"\bpnpm\s+(?:test|lint|typecheck|exec)\b", re.IGNORECASE),
+    re.compile(r"\b(?:pytest|ruff)\s+(?:tests?|check|format)\b", re.IGNORECASE),
+    re.compile(r"\b(?:lint|typecheck|e2e|unit tests?)\s+(?:passed|failed|通过|失败)\b", re.IGNORECASE),
+    re.compile(r"\b(?:commit|checkpoint)\s+(?:hash|message|flow|流水)\b", re.IGNORECASE),
+    re.compile(r"\b(?:worktree|workspace)\s+(?:is\s+)?clean\b", re.IGNORECASE),
+    re.compile(r"\b(?:not|never)\s+pushed\b", re.IGNORECASE),
+    re.compile(r"\btag\s+(?:created|creation|checkpoint)\b", re.IGNORECASE),
+    re.compile(r"(?:工具调用|重复调用|工作区干净|未推送|未\s*push|创建\s*tag|打\s*tag|测试通过|测试失败)"),
+)
+_DURABLE_MEMORY_INTENT_RE = re.compile(
+    r"(?:"
+    r"用户(?:偏好|希望|喜欢|要求|明确要求|习惯|规定)"
+    r"|(?:prefers?|likes?|wants?|requires?)\b"
+    r"|\b(?:preference|correction|remember|always|never|do not|don't)\b"
+    r"|不要使用|不要|修改代码前|修改后|每次|长期"
+    r")",
+    re.IGNORECASE,
+)
+_DURABLE_CORRECTION_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"\b(?:wrong|incorrect|misunderstood|skipped|omitted|suggested|previously|prior|instead)\b"
+    r"|应该|不应|之前|错误|误解|漏"
+    r")",
+    re.IGNORECASE,
+)
 _CORRECTION_PATTERNS = (
     re.compile(r"\bthat(?:'s| is) (?:wrong|incorrect)\b", re.IGNORECASE),
     re.compile(r"\byou misunderstood\b", re.IGNORECASE),
@@ -51,6 +91,22 @@ def extract_message_text(message: Any) -> str:
                     text_parts.append(text_val)
         return " ".join(text_parts)
     return str(content)
+
+
+def is_active_execution_memory_text(text: str, *, preserve_correction_context: bool = False) -> bool:
+    """Return True when text is execution trace, not durable memory."""
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(pattern.search(stripped) for pattern in _ACTIVE_EXECUTION_HARD_PATTERNS):
+        return True
+    if preserve_correction_context and _DURABLE_CORRECTION_CONTEXT_RE.search(stripped):
+        return False
+    if _DURABLE_MEMORY_INTENT_RE.search(stripped):
+        return False
+    return any(pattern.search(stripped) for pattern in _ACTIVE_EXECUTION_FLOW_PATTERNS)
 
 
 def filter_messages_for_memory(messages: list[Any]) -> list[Any]:

@@ -11,6 +11,7 @@ import re
 import uuid
 from typing import Any
 
+from deerflow.agents.memory.message_processing import is_active_execution_memory_text
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
@@ -615,9 +616,10 @@ class MemoryUpdater:
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind"]:
             section_data = user_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            summary = section_data.get("summary")
+            if section_data.get("shouldUpdate") and isinstance(summary, str) and summary.strip() and not is_active_execution_memory_text(summary):
                 current_memory["user"][section] = {
-                    "summary": section_data["summary"],
+                    "summary": summary,
                     "updatedAt": now,
                 }
 
@@ -625,9 +627,10 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            summary = section_data.get("summary")
+            if section_data.get("shouldUpdate") and isinstance(summary, str) and summary.strip() and not is_active_execution_memory_text(summary):
                 current_memory["history"][section] = {
-                    "summary": section_data["summary"],
+                    "summary": summary,
                     "updatedAt": now,
                 }
 
@@ -652,6 +655,8 @@ class MemoryUpdater:
                     # non-string guard above does, instead of appending a blank
                     # fact that violates the non-empty-content invariant.
                     continue
+                if is_active_execution_memory_text(normalized_content):
+                    continue
                 if fact_key in existing_fact_keys:
                     continue
 
@@ -666,7 +671,7 @@ class MemoryUpdater:
                 source_error = fact.get("sourceError")
                 if isinstance(source_error, str):
                     normalized_source_error = source_error.strip()
-                    if normalized_source_error:
+                    if normalized_source_error and not is_active_execution_memory_text(normalized_source_error, preserve_correction_context=True):
                         fact_entry["sourceError"] = normalized_source_error
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:

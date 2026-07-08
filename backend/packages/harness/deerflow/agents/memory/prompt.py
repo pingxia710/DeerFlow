@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any, cast
 
+from deerflow.agents.memory.message_processing import is_active_execution_memory_text
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -56,8 +58,8 @@ Memory Section Guidelines:
   Example: Bilingual capabilities, specific interest areas, expertise domains
 - topOfMind: Multiple ongoing focus areas and priorities (3-5 sentences, detailed paragraph)
   Example: Primary project work, parallel technical investigations, ongoing learning/tracking
-  Include: Active implementation work, troubleshooting issues, market/research interests
-  Note: This captures SEVERAL concurrent focus areas, not just one task
+  Include: durable interests, long-running project directions, market/research interests
+  Note: This captures SEVERAL concurrent stable themes, not the current task scratchpad
 
 **History** (Temporal context - rich paragraphs):
 - recentMonths: Detailed summary of recent activities (4-6 sentences or 1-2 paragraphs)
@@ -131,6 +133,13 @@ Important Rules:
 - For history sections, integrate new information chronologically into appropriate time period
 - Preserve technical accuracy - keep exact names of technologies, companies, projects
 - Focus on information useful for future interactions and personalization
+- Durable memory is for reusable stable facts, preferences, project context, and explicit corrections only.
+- Do NOT record active execution state: todos, tool traces, repeated tool-call / forced-stop details,
+  subagent handoff traces, run/task/checkpoint flow, commit/test/lint/typecheck command output,
+  current audit or implementation steps, temporary troubleshooting status, local git status,
+  unpushed/tag/checkpoint notes, or phase labels such as P2-A/P2-B/P2-C.
+- topOfMind is not a scratchpad for the current run. Store only stable themes the user would want
+  reused in unrelated future conversations.
 - IMPORTANT: Do NOT record file upload events in memory. Uploaded files are
   session-specific and ephemeral — they will not be accessible in future sessions.
   Recording upload events causes confusion in subsequent conversations.
@@ -717,6 +726,9 @@ def format_conversation_for_update(messages: list[Any]) -> str:
                 continue
 
         # Truncate very long messages
+        if role == "ai" and is_active_execution_memory_text(str(content)):
+            continue
+
         if len(str(content)) > 1000:
             content = str(content)[:1000] + "..."
 

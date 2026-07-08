@@ -11,6 +11,13 @@
       "expected_error_contains": null
     },
     {
+      "name": "succeeded_with_suggested_receiver",
+      "origin": "task_tool.py succeeded path with advisory next receiver",
+      "content": "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
+      "expected_status": "completed",
+      "expected_error_contains": "reviewed files"
+    },
+    {
       "name": "failed",
       "origin": "task_tool.py failed path",
       "content": "Task failed. Error: underlying tool raised RuntimeError",

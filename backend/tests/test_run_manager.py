@@ -554,8 +554,8 @@ async def test_recover_stale_inflight_runs_uses_expired_active_lease_api():
 
 
 @pytest.mark.anyio
-async def test_stale_recovery_skips_live_local_task():
-    """A long local task may be quiet; stale recovery must not kill it."""
+async def test_stale_recovery_skips_live_local_task_without_expired_lease():
+    """Ordinary stale updated_at recovery must not cancel a still-live local task."""
     store = MemoryRunStore()
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
@@ -568,14 +568,18 @@ async def test_stale_recovery_skips_live_local_task():
         recovered = await manager.recover_stale_inflight_runs(
             before="2026-01-01T00:30:00+00:00",
         )
+        stored = await store.get(record.run_id)
+        assert recovered == []
+        assert not task.cancelled()
+        assert not record.abort_event.is_set()
+        assert record.status == RunStatus.running
+        assert record.terminal_reason is None
+        assert stored["status"] == "running"
+        assert stored.get("terminal_reason") is None
     finally:
-        task.cancel()
+        if not task.done():
+            task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-    stored = await store.get(record.run_id)
-    assert recovered == []
-    assert record.status == RunStatus.running
-    assert stored["status"] == "running"
 
 
 @pytest.mark.anyio

@@ -514,6 +514,70 @@ async def test_sse_consumer_prefers_stream_projection_over_duplicate_task_projec
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("alias", "normalized"),
+    [
+        ("lease_expired_recovered", "worker_lost"),
+        ("rollback_failed_owner_lost", "rollback_failed"),
+        ("polling_timed_out", "timeout"),
+        ("user_cancelled", "cancelled"),
+    ],
+)
+async def test_sse_consumer_replays_durable_terminal_reason_aliases(alias, normalized):
+    from app.gateway.services import sse_consumer
+
+    thread_id = f"thread-terminal-alias-{alias}"
+    run_id = f"run-terminal-alias-{alias}"
+    user_id = f"user-terminal-alias-{alias}"
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="run.terminal",
+        category="lifecycle",
+        content={"status": "error", "terminal_reason": alias},
+        metadata={"caller": "runtime"},
+        user_id=user_id,
+    )
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal replay should not subscribe to a cleaned stream")
+            yield
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.error,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        _CleanedBridge(),
+        record,
+        _NeverDisconnectedRequest(),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    events = [_parse_sse_frame(frame)["event"] for frame in frames]
+    assert events == ["custom", "end"]
+    terminal_payload = json.loads(_parse_sse_frame(frames[0])["data"])
+    assert terminal_payload == {
+        "type": "run.terminal",
+        "event_type": "run.terminal",
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "error",
+        "terminal_reason": normalized,
+    }
+
+
+@pytest.mark.asyncio
 async def test_sse_consumer_synthesizes_terminal_event_from_run_row_without_replay_event():
     from app.gateway.services import sse_consumer
 

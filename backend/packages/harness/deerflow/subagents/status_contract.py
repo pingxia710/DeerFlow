@@ -53,6 +53,7 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 # catches both the 3 ``Error:`` pre-execution returns and the wrapper
 # produced by ``ToolErrorHandlingMiddleware`` for any task tool exception.
 _PREFIX_TO_STATUS: tuple[tuple[str, SubagentStatusValue], ...] = (
+    ("Task Succeeded. Suggested next receiver", "completed"),
     ("Task Succeeded. Result:", "completed"),
     ("Task polling timed out", "polling_timed_out"),
     ("Task timed out", "timed_out"),

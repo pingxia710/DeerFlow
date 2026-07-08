@@ -130,6 +130,10 @@ def _is_task_event_payload(payload: Any, *, thread_id: str, run_id: str) -> bool
     return event_type in _TASK_EVENT_REPLAY_TYPES and payload.get("thread_id") == thread_id and payload.get("run_id") == run_id and isinstance(payload.get("task_id"), str)
 
 
+def _normalize_run_terminal_reason(reason: str) -> str:
+    return _RUN_TERMINAL_REASON_ALIASES.get(reason, reason)
+
+
 def _terminal_replay_frame(row: Mapping, record: RunRecord, payload: Any) -> str | None:
     if (
         row.get("event_type") == _RUN_TERMINAL_EVENT_TYPE
@@ -147,7 +151,7 @@ def _terminal_replay_frame(row: Mapping, record: RunRecord, payload: Any) -> str
                 "thread_id": record.thread_id,
                 "run_id": record.run_id,
                 "status": payload["status"],
-                "terminal_reason": payload["terminal_reason"],
+                "terminal_reason": _normalize_run_terminal_reason(payload["terminal_reason"]),
             },
         )
     return None
@@ -167,7 +171,7 @@ def _is_record_terminal_payload(payload: Any, record: RunRecord) -> bool:
 def _record_terminal_reason(record: RunRecord) -> str | None:
     reason = getattr(record, "terminal_reason", None)
     if isinstance(reason, str) and reason:
-        return _RUN_TERMINAL_REASON_ALIASES.get(reason, reason)
+        return _normalize_run_terminal_reason(reason)
     status = run_status_value(record.status)
     if status == "success":
         return "success"

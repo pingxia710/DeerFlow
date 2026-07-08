@@ -1323,9 +1323,15 @@ class RunManager:
                 if live_record is not None:
                     if not _record_matches_user_id(live_record, user_id):
                         continue
-                    if live_record.task is not None and not live_record.task.done():
-                        continue
                     if not is_inflight_status(live_record.status):
+                        continue
+                    if live_record.task is not None and not live_record.task.done():
+                        # Ordinary stale updated_at recovery is a store-owner lost
+                        # heuristic. A live local task means this process still owns
+                        # active work, so do not synthesize worker_lost or cancel it
+                        # here. Expired active lease recovery above remains the CAS
+                        # path that may settle/cancel local live tasks after the store
+                        # confirms the lease has been lost.
                         continue
                     live_record.status = RunStatus.error
                     live_record.error = error

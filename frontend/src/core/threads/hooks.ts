@@ -139,6 +139,11 @@ type ThreadActivitySnapshot = {
   finished: ReadonlySet<string>;
 };
 
+type ThreadActivityOwnerScope = {
+  runId?: string | null;
+  runtimeOwnerId?: string | null;
+};
+
 const PUBLIC_PROVIDER_TRANSIENT_ERROR_MESSAGE =
   "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation.";
 const PROVIDER_TRANSIENT_ERROR_MARKERS = [
@@ -212,6 +217,8 @@ let threadActivitySnapshot: ThreadActivitySnapshot = {
   running: new Set(),
   finished: new Set(),
 };
+const LEGACY_THREAD_ACTIVITY_OWNER = "thread";
+const threadActivityOwnersByThread = new Map<string, Set<string>>();
 const manualThreadTitleLocks = new Map<string, string>();
 const deletedThreadTombstones = new Set<string>();
 
@@ -240,28 +247,114 @@ export function useThreadActivity() {
   );
 }
 
-export function markThreadFinished(threadId: string) {
-  if (isDeletedThreadTombstoned(threadId)) {
+function threadActivityOwnerKey(scope?: ThreadActivityOwnerScope) {
+  if (scope?.runId) {
+    return `run:${scope.runId}`;
+  }
+  if (scope?.runtimeOwnerId) {
+    return `owner:${scope.runtimeOwnerId}`;
+  }
+  return LEGACY_THREAD_ACTIVITY_OWNER;
+}
+
+function isScopedThreadActivityOwner(scope?: ThreadActivityOwnerScope) {
+  return Boolean(scope?.runId ?? scope?.runtimeOwnerId);
+}
+
+function setThreadActivityOwners(threadId: string, owners: Set<string>) {
+  if (owners.size === 0) {
+    threadActivityOwnersByThread.delete(threadId);
     return;
   }
+  threadActivityOwnersByThread.set(threadId, owners);
+}
+
+function hasActiveThreadActivity(threadId: string) {
+  return Boolean(threadActivityOwnersByThread.get(threadId)?.size);
+}
+
+function updateThreadActivitySnapshot(
+  threadId: string,
+  { finished }: { finished: boolean },
+) {
+  const running = new Set(threadActivitySnapshot.running);
+  const finishedThreads = new Set(threadActivitySnapshot.finished);
+  if (hasActiveThreadActivity(threadId)) {
+    running.add(threadId);
+    finishedThreads.delete(threadId);
+  } else {
+    running.delete(threadId);
+    if (finished) {
+      finishedThreads.add(threadId);
+    } else {
+      finishedThreads.delete(threadId);
+    }
+  }
   threadActivitySnapshot = {
-    running: new Set(
-      [...threadActivitySnapshot.running].filter((id) => id !== threadId),
-    ),
-    finished: new Set([...threadActivitySnapshot.finished, threadId]),
+    running,
+    finished: finishedThreads,
   };
+}
+
+function markThreadActivityRunning(
+  threadId: string,
+  scope?: ThreadActivityOwnerScope,
+) {
+  const owners = new Set(threadActivityOwnersByThread.get(threadId));
+  if (isScopedThreadActivityOwner(scope)) {
+    if (scope?.runtimeOwnerId) {
+      owners.delete(LEGACY_THREAD_ACTIVITY_OWNER);
+      owners.delete(
+        threadActivityOwnerKey({ runtimeOwnerId: scope.runtimeOwnerId }),
+      );
+    }
+  }
+  owners.add(threadActivityOwnerKey(scope));
+  setThreadActivityOwners(threadId, owners);
+  updateThreadActivitySnapshot(threadId, { finished: false });
   emitThreadActivity();
 }
 
-export function clearThreadActivity(threadId: string) {
-  threadActivitySnapshot = {
-    running: new Set(
-      [...threadActivitySnapshot.running].filter((id) => id !== threadId),
-    ),
-    finished: new Set(
-      [...threadActivitySnapshot.finished].filter((id) => id !== threadId),
-    ),
-  };
+export function markThreadFinished(
+  threadId: string,
+  scope?: ThreadActivityOwnerScope,
+) {
+  if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
+  if (isScopedThreadActivityOwner(scope)) {
+    const owners = new Set(threadActivityOwnersByThread.get(threadId));
+    owners.delete(threadActivityOwnerKey(scope));
+    if (scope?.runId && scope.runtimeOwnerId) {
+      owners.delete(
+        threadActivityOwnerKey({ runtimeOwnerId: scope.runtimeOwnerId }),
+      );
+    }
+    setThreadActivityOwners(threadId, owners);
+  } else {
+    threadActivityOwnersByThread.delete(threadId);
+  }
+  updateThreadActivitySnapshot(threadId, { finished: true });
+  emitThreadActivity();
+}
+
+export function clearThreadActivity(
+  threadId: string,
+  scope?: ThreadActivityOwnerScope,
+) {
+  if (isScopedThreadActivityOwner(scope)) {
+    const owners = new Set(threadActivityOwnersByThread.get(threadId));
+    owners.delete(threadActivityOwnerKey(scope));
+    if (scope?.runId && scope.runtimeOwnerId) {
+      owners.delete(
+        threadActivityOwnerKey({ runtimeOwnerId: scope.runtimeOwnerId }),
+      );
+    }
+    setThreadActivityOwners(threadId, owners);
+  } else {
+    threadActivityOwnersByThread.delete(threadId);
+  }
+  updateThreadActivitySnapshot(threadId, { finished: false });
   emitThreadActivity();
 }
 
@@ -2097,17 +2190,12 @@ export function upsertThreadInInfiniteCache(
 export function markThreadBusyInCaches(
   queryClient: QueryClient,
   threadId: string,
+  scope?: ThreadActivityOwnerScope,
 ) {
   if (isDeletedThreadTombstoned(threadId)) {
     return;
   }
-  threadActivitySnapshot = {
-    running: new Set([...threadActivitySnapshot.running, threadId]),
-    finished: new Set(
-      [...threadActivitySnapshot.finished].filter((id) => id !== threadId),
-    ),
-  };
-  emitThreadActivity();
+  markThreadActivityRunning(threadId, scope);
   queryClient.setQueriesData(
     {
       queryKey: ["threads", "search"],
@@ -2136,6 +2224,12 @@ function setThreadStatusInCaches(
   status: string,
 ) {
   if (isDeletedThreadTombstoned(threadId)) {
+    return;
+  }
+  if (
+    INACTIVE_THREAD_STATUSES.has(status) &&
+    hasActiveThreadActivity(threadId)
+  ) {
     return;
   }
   const nextStatus = status as AgentThread["status"];
@@ -2189,10 +2283,11 @@ export function applyBackgroundRunProbeResult(
     terminalReason: options.terminalReason ?? terminalStatus,
   });
   clearReconnectRun(threadId, runId);
+  const scope = { runId };
   if (status === "success") {
-    markThreadFinished(threadId);
+    markThreadFinished(threadId, scope);
   } else {
-    clearThreadActivity(threadId);
+    clearThreadActivity(threadId, scope);
   }
   setThreadStatusInCaches(queryClient, threadId, threadStatus);
   invalidateTerminalRunQueries(queryClient, threadId);
@@ -2202,8 +2297,9 @@ export function applyBackgroundRunProbeResult(
 export function markThreadCancellingInCaches(
   queryClient: QueryClient,
   threadId: string,
+  scope?: ThreadActivityOwnerScope,
 ) {
-  markThreadBusyInCaches(queryClient, threadId);
+  markThreadBusyInCaches(queryClient, threadId, scope);
   setThreadStatusInCaches(queryClient, threadId, "cancelling");
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
@@ -2228,7 +2324,7 @@ export function beginLocalRunCancellation({
     }
     return null;
   }
-  markThreadCancellingInCaches(queryClient, threadId);
+  markThreadCancellingInCaches(queryClient, threadId, { runId });
   return { threadId, runId };
 }
 
@@ -2354,7 +2450,7 @@ export function reconcileRunCancellationAuthority({
     return "terminal";
   }
   if (isActiveRunStatus(status)) {
-    markThreadCancellingInCaches(queryClient, threadId);
+    markThreadCancellingInCaches(queryClient, threadId, { runId });
     startBackgroundRunProbe({
       queryClient,
       threadId,
@@ -2488,7 +2584,7 @@ export function applyStreamErrorRecovery({
     }
     return null;
   }
-  markThreadBusyInCaches(queryClient, threadId);
+  markThreadBusyInCaches(queryClient, threadId, { runId });
   startBackgroundRunProbe({
     queryClient,
     threadId,
@@ -2840,8 +2936,9 @@ export function getBackgroundRunProbeDelay(attempt: number): number {
 export function stopBackgroundRunProbeRecovery(
   queryClient: QueryClient,
   threadId: string,
+  runId?: string | null,
 ) {
-  clearThreadActivity(threadId);
+  clearThreadActivity(threadId, { runId });
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
   });
@@ -2918,7 +3015,7 @@ export function startBackgroundRunProbe({
   const attempt = (backgroundRunProbeAttempts.get(key) ?? 0) + 1;
   if (shouldStopBackgroundRunProbe(attempt)) {
     backgroundRunProbeAttempts.delete(key);
-    stopBackgroundRunProbeRecovery(queryClient, threadId);
+    stopBackgroundRunProbeRecovery(queryClient, threadId, runId);
     return;
   }
   backgroundRunProbeAttempts.set(key, attempt);
@@ -2955,7 +3052,7 @@ export function startBackgroundRunProbe({
         backgroundRunProbeTimers.delete(key);
         if (shouldStopBackgroundRunProbe(attempt, error)) {
           backgroundRunProbeAttempts.delete(key);
-          stopBackgroundRunProbeRecovery(queryClient, threadId);
+          stopBackgroundRunProbeRecovery(queryClient, threadId, runId);
           return;
         }
       }
@@ -3383,7 +3480,10 @@ export function useThreadStream({
       for (const previousId of previousIds) {
         clearThreadActivity(previousId);
       }
-      markThreadBusyInCaches(queryClient, createdThreadId);
+      markThreadBusyInCaches(queryClient, createdThreadId, {
+        runId: streamRunIdRef.current,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      });
     },
     onCreated(meta) {
       if (
@@ -3397,7 +3497,10 @@ export function useThreadStream({
         return;
       }
       handleStreamStart(meta.thread_id, meta.run_id);
-      markThreadBusyInCaches(queryClient, meta.thread_id);
+      markThreadBusyInCaches(queryClient, meta.thread_id, {
+        runId: meta.run_id,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      });
       startBackgroundRunProbe({
         queryClient,
         threadId: meta.thread_id,
@@ -3800,7 +3903,10 @@ export function useThreadStream({
         setLocallySettledRun(null);
       }
       if (streamThreadId && finishOwnsCurrentStream) {
-        markThreadFinished(streamThreadId);
+        markThreadFinished(streamThreadId, {
+          runId: streamRunId,
+          runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        });
         setThreadStatusInCaches(queryClient, streamThreadId, "idle");
       }
       if (finishOwnsCurrentStream) {
@@ -3824,7 +3930,10 @@ export function useThreadStream({
     if (!thread.isLoading || !streamThreadId) {
       return;
     }
-    markThreadBusyInCaches(queryClient, streamThreadId);
+    markThreadBusyInCaches(queryClient, streamThreadId, {
+      runId: streamRunIdRef.current,
+      runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+    });
   }, [queryClient, thread.isLoading]);
 
   const hasVisibleStreamState = shouldShowLiveThreadState(
@@ -4095,7 +4204,10 @@ export function useThreadStream({
         }
         setOptimisticThreadTarget(threadId);
         setLiveMessagesThreadTarget(threadId);
-        markThreadBusyInCaches(queryClient, threadId);
+        markThreadBusyInCaches(queryClient, threadId, {
+          runId: streamRunIdRef.current,
+          runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        });
         listeners.current.onSend?.(threadId);
         return;
       }
@@ -4179,7 +4291,9 @@ export function useThreadStream({
       setLocallySettledRun(null);
       prepareStreamOwnerForSend(threadId);
       streamFinishedRef.current = false;
-      markThreadBusyInCaches(queryClient, threadId);
+      markThreadBusyInCaches(queryClient, threadId, {
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      });
 
       listeners.current.onSend?.(threadId);
 
@@ -4316,7 +4430,9 @@ export function useThreadStream({
         setOptimisticThreadTarget(null);
         setLiveMessagesThreadTarget(null);
         setIsUploading(false);
-        clearThreadActivity(threadId);
+        clearThreadActivity(threadId, {
+          runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        });
         throw error;
       } finally {
         if (ownsSendRequest()) {
@@ -4422,7 +4538,9 @@ export function useThreadStream({
       );
       setLiveMessagesThreadTarget(threadId);
       setLocallySettledRun(null);
-      markThreadBusyInCaches(queryClient, threadId);
+      markThreadBusyInCaches(queryClient, threadId, {
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      });
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
       let preparedSupersededMessageIds: string[] = [];
@@ -4502,7 +4620,9 @@ export function useThreadStream({
         }
         releaseStreamClientThreadId(streamThreadIdRef.current);
         setLiveMessagesThreadTarget(null);
-        clearThreadActivity(threadId);
+        clearThreadActivity(threadId, {
+          runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        });
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
           setPendingSupersededRunIds((current) =>

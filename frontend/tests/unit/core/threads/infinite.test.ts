@@ -261,6 +261,55 @@ describe("markThreadBusyInCaches", () => {
       false,
     );
   });
+
+  test("keeps newer same-thread run active when an older run finishes", () => {
+    const client = new QueryClient();
+    const threadId = "activity-owned-thread";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+
+    markThreadBusyInCaches(client, threadId, { runId: "run-old" });
+    markThreadBusyInCaches(client, threadId, { runId: "run-new" });
+    markThreadFinished(threadId, { runId: "run-old" });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+    expect(
+      client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.status,
+    ).toBe("busy");
+
+    markThreadFinished(threadId, { runId: "run-new" });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+    clearThreadActivity(threadId);
+  });
+
+  test("settles runtime-owner pre-run activity without leaking legacy busy state", () => {
+    const client = new QueryClient();
+    const threadId = "activity-runtime-owner-thread";
+    const runtimeOwnerId = "runtime-owner-a";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+
+    markThreadBusyInCaches(client, threadId, { runtimeOwnerId });
+    markThreadFinished(threadId, { runtimeOwnerId });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+
+    markThreadBusyInCaches(client, threadId, { runtimeOwnerId });
+    markThreadBusyInCaches(client, threadId, {
+      runId: "run-owned",
+      runtimeOwnerId,
+    });
+    markThreadFinished(threadId, {
+      runId: "run-owned",
+      runtimeOwnerId,
+    });
+
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+    clearThreadActivity(threadId);
+  });
 });
 
 describe("applyBackgroundRunProbeResult", () => {
@@ -268,7 +317,7 @@ describe("applyBackgroundRunProbeResult", () => {
     const client = new QueryClient();
     const threadId = "probe-active-thread";
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId: "run-active" });
 
     expect(
       applyBackgroundRunProbeResult(client, threadId, "run-active", "running"),
@@ -289,7 +338,7 @@ describe("applyBackgroundRunProbeResult", () => {
       [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
       makeInfiniteData([[makeThread(threadId)]]),
     );
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId: "run-success" });
 
     expect(
       applyBackgroundRunProbeResult(client, threadId, "run-success", "success"),
@@ -308,12 +357,62 @@ describe("applyBackgroundRunProbeResult", () => {
     clearThreadActivity(threadId);
   });
 
+  test("does not clear newer same-thread activity when an old probe settles", () => {
+    const client = new QueryClient();
+    const threadId = "probe-owned-thread";
+    const oldRunId = "probe-run-old";
+    const newRunId = "probe-run-new";
+    client.setQueryData(["threads", "search"], [makeThread(threadId)]);
+    client.setQueryData(
+      [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
+      makeInfiniteData([[makeThread(threadId)]]),
+    );
+    markThreadBusyInCaches(client, threadId, { runId: oldRunId });
+    markThreadBusyInCaches(client, threadId, { runId: newRunId });
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, oldRunId, "success"),
+    ).toBe(true);
+
+    const searchAfterOld = client.getQueryData<AgentThread[]>([
+      "threads",
+      "search",
+    ]);
+    const infiniteAfterOld = client.getQueryData<InfiniteData<AgentThread[]>>([
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      {},
+    ]);
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+    expect(searchAfterOld?.[0]?.status).toBe("busy");
+    expect(infiniteAfterOld?.pages[0]?.[0]?.status).toBe("busy");
+
+    expect(
+      applyBackgroundRunProbeResult(client, threadId, newRunId, "success"),
+    ).toBe(true);
+
+    const searchAfterNew = client.getQueryData<AgentThread[]>([
+      "threads",
+      "search",
+    ]);
+    const infiniteAfterNew = client.getQueryData<InfiniteData<AgentThread[]>>([
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      {},
+    ]);
+    expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+    expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(true);
+    expect(searchAfterNew?.[0]?.status).toBe("idle");
+    expect(infiniteAfterNew?.pages[0]?.[0]?.status).toBe("idle");
+
+    clearThreadActivity(threadId);
+  });
+
   test("clears failed background runs and records terminal cache status", () => {
     const client = new QueryClient();
     const threadId = "probe-timeout-thread";
     const settled: unknown[] = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId: "run-timeout" });
 
     expect(
       applyBackgroundRunProbeResult(
@@ -346,7 +445,7 @@ describe("applyBackgroundRunProbeResult", () => {
     const client = new QueryClient();
     const threadId = "probe-worker-lost-thread";
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId: "run-worker-lost" });
 
     expect(
       applyBackgroundRunProbeResult(
@@ -595,7 +694,7 @@ describe("run history reconciliation", () => {
       runIds: string[];
     }> = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId });
 
     expect(
       reconcileTerminalRunHistory(
@@ -636,7 +735,7 @@ describe("run history reconciliation", () => {
     }> = [];
     const settled: unknown[] = [];
     client.setQueryData(["threads", "search"], [makeThread(threadId)]);
-    markThreadBusyInCaches(client, threadId);
+    markThreadBusyInCaches(client, threadId, { runId });
 
     expect(
       reconcileTerminalRunHistory(

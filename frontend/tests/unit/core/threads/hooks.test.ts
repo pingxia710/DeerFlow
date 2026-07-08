@@ -3355,6 +3355,44 @@ test("late terminal event after local cancellation settle is idempotent and keep
   ).toBe(true);
 });
 
+test("local cancellation settle only clears the matching same-thread run", async () => {
+  const {
+    clearThreadActivity,
+    finishLocalRunCancellation,
+    getThreadActivitySnapshot,
+    markThreadBusyInCaches,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "same-thread-cancel-thread";
+  const oldRunId = "same-thread-cancel-old";
+  const newRunId = "same-thread-cancel-new";
+
+  markThreadBusyInCaches(client, threadId, { runId: oldRunId });
+  markThreadBusyInCaches(client, threadId, { runId: newRunId });
+
+  expect(
+    finishLocalRunCancellation({
+      queryClient: client,
+      threadId,
+      runId: oldRunId,
+    }),
+  ).toEqual({ threadId, runId: oldRunId });
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+  expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+
+  expect(
+    finishLocalRunCancellation({
+      queryClient: client,
+      threadId,
+      runId: newRunId,
+    }),
+  ).toEqual({ threadId, runId: newRunId });
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  clearThreadActivity(threadId);
+});
+
 test("taskLaneSubtaskUpdate maps completed lane result and duration_ms safely", async () => {
   const { taskLaneSubtaskUpdate } = await import("@/core/threads/hooks");
   const base = {

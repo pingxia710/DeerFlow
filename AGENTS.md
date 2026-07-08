@@ -48,6 +48,9 @@ In daemon mode, `serve.sh` must detach stdin and start spawned services in a new
 session so the Gateway, frontend, and nginx survive after the launcher exits.
 If a daemon-owned process invokes `serve.sh --restart --daemon`, it must hand
 the restart to a detached relauncher before `stop_all` kills the current Gateway.
+`make doctor` also checks the generated local nginx config when nginx is
+currently listening; if nginx points at a closed frontend upstream port, report
+that as a warning instead of treating Gateway health as sufficient.
 
 Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all

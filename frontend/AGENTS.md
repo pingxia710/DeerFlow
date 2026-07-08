@@ -166,6 +166,10 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.
+- Historical subagent `task` tool calls without terminal result evidence must
+  not render indefinite running cards unless their owning run is still active
+  or the card belongs to the current live turn; stale history should wait for
+  durable task lanes/events or a terminal run recovery state.
 - Prompt input draft and attachment state must be cleared on chat-thread
   switches unless a per-thread draft store is implemented.
 - Agent chat pages must pass `isMock` through `ThreadContext` and disable the

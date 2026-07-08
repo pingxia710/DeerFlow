@@ -443,8 +443,16 @@ advisory context, not the old user goal as the current intent.
   consume.
 - `RunStore.list_inflight()` is the startup recovery source and must use the same inflight status set; do not limit it to only `pending`/`running`. Startup recovery thread-status writes must use each recovered `RunRecord.user_id`, not the `user_id=None` migration escape hatch.
 - `RunManager.get()` and `list_by_thread()` also perform conservative stale
-  inflight recovery: a persisted inflight run older than the recovery timeout is
-  marked `error`/`worker_lost` only when this process has no live task for it.
+  inflight recovery as a store-owner-lost heuristic: a persisted inflight run
+  older than the recovery timeout may be marked terminal in the store so UI
+  lanes cannot spin forever. If this process still has a live local task/control
+  state for that run, ordinary stale `updated_at` recovery must not set its
+  abort event, cancel the asyncio task, or synthesize `worker_lost` for that
+  local task.
+- Expired active-lease recovery is a separate lease/CAS path. It may close the
+  run as terminal `error` with `terminal_reason=lease_expired_recovered`; REST
+  and SSE display/replay normalization may surface that reason as
+  `worker_lost`.
 - `/api/threads/search` must keep active-looking thread-meta rows in sync with
   latest-run recovery: if `RunManager.list_by_thread(..., limit=1)` returns the
   newest run as `error` with `worker_lost`/`lease_expired_recovered`, update the

@@ -46,7 +46,12 @@ import {
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
-import { type SubtaskUpdate, useUpdateSubtask } from "@/core/tasks/context";
+import {
+  normalizeSubtaskRoundId,
+  type SubtaskUpdate,
+  useSubtasksForThread,
+  useUpdateSubtask,
+} from "@/core/tasks/context";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -87,8 +92,19 @@ export function getMessageGroupKey(
     : `fallback-${index}-${group.type}`;
 }
 
-export function getSubtaskCardKey(taskId: string, runId?: string | null) {
-  return runId ? `task-group-${runId}-${taskId}` : `task-group-${taskId}`;
+export function getSubtaskCardKey(
+  taskId: string,
+  runId?: string | null,
+  roundId?: string | null,
+) {
+  if (!runId) {
+    return `task-group-${taskId}`;
+  }
+  return `task-group-${JSON.stringify([
+    runId,
+    normalizeSubtaskRoundId(roundId),
+    taskId,
+  ])}`;
 }
 
 type ThreadRecoveryStatus = ReturnType<
@@ -109,6 +125,43 @@ function getMessageRunId(message: Message) {
     message.additional_kwargs?.deerflow_run_id ??
     message.additional_kwargs?.run_id;
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function getMessageRoundId(message: Message) {
+  const value =
+    message.additional_kwargs?.deerflow_round_id ??
+    message.additional_kwargs?.round_id ??
+    message.additional_kwargs?.roundId;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isTerminalSubtask(task: Subtask) {
+  return task.status === "completed" || task.status === "failed";
+}
+
+export function hasTerminalSubtaskForTask(
+  subtasks: Subtask[],
+  {
+    threadId,
+    runId,
+    taskId,
+    roundId,
+  }: {
+    threadId: string;
+    runId?: string | null;
+    taskId: string;
+    roundId?: string | null;
+  },
+) {
+  const normalizedRoundId = normalizeSubtaskRoundId(roundId);
+  return subtasks.some(
+    (task) =>
+      task.threadId === threadId &&
+      task.id === taskId &&
+      task.runId !== runId &&
+      normalizeSubtaskRoundId(task.roundId) === normalizedRoundId &&
+      isTerminalSubtask(task),
+  );
 }
 
 function getMessagesHistoryStartTime(messages: Message[]) {
@@ -348,6 +401,7 @@ export function MessageList({
   );
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
+  const contextSubtasks = useSubtasksForThread(threadId);
   const lastGroupIndex = groupedMessages.length - 1;
   const subtaskUpdates = useMemo<SubtaskUpdate[]>(() => {
     const updates: SubtaskUpdate[] = [];
@@ -362,13 +416,26 @@ export function MessageList({
             if (toolCall.name !== "task" || !toolCall.id) {
               continue;
             }
+            const runId = getMessageRunId(message);
+            if (!runId) {
+              continue;
+            }
+            const roundId = getMessageRoundId(message);
             const status = derivePendingSubtaskStatus(
               toolCall.id,
               group.messages,
-              groupIsLoading,
+              groupIsLoading &&
+                messages.some((message) => getMessageRunId(message) === runId),
             );
-            const runId = getMessageRunId(message);
-            if (!runId) {
+            if (
+              status === "in_progress" &&
+              hasTerminalSubtaskForTask(contextSubtasks, {
+                threadId,
+                runId,
+                taskId: toolCall.id,
+                roundId,
+              })
+            ) {
               continue;
             }
             const startedAt = getMessageHistoryTime(message);
@@ -376,6 +443,7 @@ export function MessageList({
               id: toolCall.id,
               threadId,
               runId,
+              roundId,
               subagent_type: toolCall.args.subagent_type,
               description: toolCall.args.description,
               prompt: toolCall.args.prompt,
@@ -389,10 +457,12 @@ export function MessageList({
           if (!runId) {
             continue;
           }
+          const roundId = getMessageRoundId(message);
           updates.push({
             id: message.tool_call_id,
             threadId,
             runId,
+            roundId,
             ...parseSubtaskResult(
               extractTextFromMessage(message),
               message.additional_kwargs,
@@ -404,7 +474,9 @@ export function MessageList({
     return updates;
   }, [
     groupedMessages,
+    contextSubtasks,
     lastGroupIndex,
+    messages,
     t.subtasks.failed,
     thread.isLoading,
     threadId,
@@ -414,6 +486,43 @@ export function MessageList({
       updateSubtask(update);
     }
   }, [subtaskUpdates, updateSubtask]);
+  const anchoredSubtaskKeys = useMemo(() => {
+    return new Set(
+      subtaskUpdates
+        .filter((task) => task.runId)
+        .map((task) =>
+          JSON.stringify([
+            task.runId,
+            normalizeSubtaskRoundId(task.roundId),
+            task.id,
+          ]),
+        ),
+    );
+  }, [subtaskUpdates]);
+  const runtimeOnlySubtasks = useMemo(() => {
+    if (!thread.isLoading) {
+      return [];
+    }
+
+    return contextSubtasks.filter(
+      (task) =>
+        task.status === "in_progress" &&
+        Boolean(task.runId) &&
+        !hasTerminalSubtaskForTask(contextSubtasks, {
+          threadId,
+          runId: task.runId,
+          taskId: task.id,
+          roundId: task.roundId,
+        }) &&
+        !anchoredSubtaskKeys.has(
+          JSON.stringify([
+            task.runId,
+            normalizeSubtaskRoundId(task.roundId),
+            task.id,
+          ]),
+        ),
+    );
+  }, [anchoredSubtaskKeys, contextSubtasks, thread.isLoading, threadId]);
   const activeTurnStartTime = useMemo(() => {
     return (
       getMessagesHistoryStartTime(
@@ -750,16 +859,29 @@ export function MessageList({
                     if (!runId) {
                       continue;
                     }
+                    const roundId = getMessageRoundId(message);
                     const status = derivePendingSubtaskStatus(
                       taskId,
                       group.messages,
                       groupIsLoading,
                     );
+                    if (
+                      status === "in_progress" &&
+                      hasTerminalSubtaskForTask(contextSubtasks, {
+                        threadId,
+                        runId,
+                        taskId,
+                        roundId,
+                      })
+                    ) {
+                      continue;
+                    }
                     const startedAt = getMessageHistoryTime(message);
                     const task: Subtask = {
                       id: taskId,
                       threadId,
                       runId,
+                      roundId,
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
@@ -777,7 +899,7 @@ export function MessageList({
 
             const results: React.ReactNode[] = [];
             const subagentDebugMessageIds: string[] = [];
-            if (!hideProtocolUi && tasks.size > 0) {
+            if (!hideProtocolUi && groupIsLoading && tasks.size > 0) {
               results.push(
                 <div
                   key="subtask-count"
@@ -811,15 +933,32 @@ export function MessageList({
                 toolCall.name === "task" && toolCall.id ? [toolCall.id] : [],
               );
               const runId = getMessageRunId(message);
+              const roundId = getMessageRoundId(message);
               if (runId) {
                 for (const taskId of taskIds ?? []) {
+                  if (
+                    hasTerminalSubtaskForTask(contextSubtasks, {
+                      threadId,
+                      runId,
+                      taskId,
+                      roundId,
+                    })
+                  ) {
+                    continue;
+                  }
                   results.push(
                     <SubtaskCard
-                      key={getSubtaskCardKey(taskId, runId)}
+                      key={getSubtaskCardKey(taskId, runId, roundId)}
                       runId={runId}
+                      roundId={roundId}
                       taskId={taskId}
                       threadId={threadId}
-                      isLoading={groupIsLoading}
+                      isLoading={
+                        groupIsLoading &&
+                        messages.some(
+                          (message) => getMessageRunId(message) === runId,
+                        )
+                      }
                     />,
                   );
                 }
@@ -875,6 +1014,25 @@ export function MessageList({
             </div>
           );
         })}
+        {runtimeOnlySubtasks.length > 0 && (
+          <div className="relative z-1 flex flex-col gap-2">
+            {!hideProtocolUi && (
+              <div className="text-muted-foreground pt-2 text-sm font-normal">
+                {t.subtasks.executing(runtimeOnlySubtasks.length)}
+              </div>
+            )}
+            {runtimeOnlySubtasks.map((task) => (
+              <SubtaskCard
+                key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                runId={task.runId!}
+                roundId={task.roundId}
+                taskId={task.id}
+                threadId={threadId}
+                isLoading={true}
+              />
+            ))}
+          </div>
+        )}
         {thread.isLoading &&
           !hideProtocolUi &&
           !hideThinkingUi &&

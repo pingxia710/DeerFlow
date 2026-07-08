@@ -6,6 +6,9 @@ import {
   getSubtaskLookupKeys,
   getSubtaskStorageKey,
   mergeSubtaskUpdate,
+  normalizeSubtaskRoundId,
+  selectSubtasksForRun,
+  selectSubtasksForThread,
   settleRunningSubtasksForRun,
   type SubtaskUpdate,
 } from "@/core/tasks/context";
@@ -35,6 +38,12 @@ function subtaskUpdateFixture(
 
 test("strong subtask lookup with runId does not fall back to legacy state", () => {
   const legacyKey = getLegacySubtaskStorageKey("task-1", "thread-1");
+  const legacyRunKey = JSON.stringify([
+    "subtask",
+    "thread-1",
+    "run-2",
+    "task-1",
+  ]);
   const strongKey = getSubtaskStorageKey({
     id: "task-1",
     threadId: "thread-1",
@@ -54,8 +63,8 @@ test("strong subtask lookup with runId does not fall back to legacy state", () =
       id: "task-1",
       threadId: "thread-1",
       runId: "run-2",
-    }),
-  ).toEqual([strongKey]);
+    })[0],
+  ).toBe(strongKey);
   expect(
     tasks[
       getSubtaskLookupKeys({
@@ -65,12 +74,20 @@ test("strong subtask lookup with runId does not fall back to legacy state", () =
       })[0]!
     ],
   ).toBeUndefined();
+  expect(
+    getSubtaskLookupKeys({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-2",
+    }),
+  ).toEqual([strongKey, legacyRunKey, legacyKey, "task-1"]);
 });
 
 test("legacy subtask lookup without runId still uses legacy key", () => {
   const legacyKey = getLegacySubtaskStorageKey("task-1", "thread-1");
   expect(getSubtaskLookupKeys({ id: "task-1", threadId: "thread-1" })).toEqual([
     legacyKey,
+    "task-1",
   ]);
 });
 
@@ -92,6 +109,59 @@ test("subtask updates with runId are stored under strong run-scoped key", () => 
       runId: "run-2",
     }),
   ]);
+});
+
+test("subtask updates with roundId are stored under round-scoped key", () => {
+  const tasks = applySubtaskUpdateInState(
+    {},
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+  );
+
+  expect(Object.keys(tasks)).toEqual([
+    getSubtaskStorageKey({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+    }),
+  ]);
+});
+
+test("missing roundId uses stable no-round fallback and updates same fallback task", () => {
+  const first = applySubtaskUpdateInState(
+    {},
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+    }),
+  );
+  const key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+  });
+  const second = applySubtaskUpdateInState(
+    first,
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "completed",
+      result: "done",
+    }),
+  );
+
+  expect(key).toContain(normalizeSubtaskRoundId(undefined));
+  expect(Object.keys(second)).toEqual([key]);
+  expect(second[key]).toMatchObject({ status: "completed", result: "done" });
 });
 
 test("same thread and task id stay isolated across different runs", () => {
@@ -132,6 +202,135 @@ test("same thread and task id stay isolated across different runs", () => {
   expect(tasks[run2Key]).toMatchObject({
     runId: "run-2",
     status: "in_progress",
+  });
+});
+
+test("same run and task id stay isolated across different rounds", () => {
+  const round1Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+  });
+  const round2Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-2",
+  });
+  const tasks = applySubtaskUpdateInState(
+    applySubtaskUpdateInState(
+      {},
+      subtaskFixture({
+        id: "task-1",
+        threadId: "thread-1",
+        runId: "run-1",
+        roundId: "round-1",
+        status: "completed",
+        result: "round 1 result",
+      }),
+    ),
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-2",
+      status: "in_progress",
+    }),
+  );
+
+  expect(tasks[round1Key]).toMatchObject({
+    roundId: "round-1",
+    status: "completed",
+    result: "round 1 result",
+  });
+  expect(tasks[round2Key]).toMatchObject({
+    roundId: "round-2",
+    status: "in_progress",
+  });
+});
+
+test("same task id stays isolated across different threads", () => {
+  const thread1Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+  });
+  const thread2Key = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-2",
+    runId: "run-1",
+    roundId: "round-1",
+  });
+  const tasks = applySubtaskUpdateInState(
+    applySubtaskUpdateInState(
+      {},
+      subtaskFixture({
+        id: "task-1",
+        threadId: "thread-1",
+        runId: "run-1",
+        roundId: "round-1",
+        status: "completed",
+        result: "thread 1 result",
+      }),
+    ),
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-2",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+  );
+
+  expect(tasks[thread1Key]).toMatchObject({
+    threadId: "thread-1",
+    status: "completed",
+  });
+  expect(tasks[thread2Key]).toMatchObject({
+    threadId: "thread-2",
+    status: "in_progress",
+  });
+});
+
+test("round-scoped update migrates matching legacy run key", () => {
+  const legacyRunKey = JSON.stringify([
+    "subtask",
+    "thread-1",
+    "run-1",
+    "task-1",
+  ]);
+  const roundKey = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+  });
+  const tasks = applySubtaskUpdateInState(
+    {
+      [legacyRunKey]: subtaskFixture({
+        id: "task-1",
+        threadId: "thread-1",
+        runId: "run-1",
+        status: "in_progress",
+      }),
+    },
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "completed",
+      result: "migrated",
+    }),
+  );
+
+  expect(tasks[legacyRunKey]).toBeUndefined();
+  expect(tasks[roundKey]).toMatchObject({
+    roundId: "round-1",
+    status: "completed",
+    result: "migrated",
   });
 });
 
@@ -369,4 +568,140 @@ test("settleRunningSubtasksForRun only fails matching thread and run tasks", () 
   expect(
     Object.values(settled).find((task) => task.id === "already-done")?.status,
   ).toBe("completed");
+});
+
+test("settleRunningSubtasksForRun without roundId settles all active subtasks in matching run", () => {
+  let tasks: Record<string, Subtask> = {};
+  for (const task of [
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-2",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-1",
+      runId: "run-2",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+  ]) {
+    tasks = applySubtaskUpdateInState(tasks, task);
+  }
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "interrupted",
+  });
+
+  expect(
+    selectSubtasksForRun(settled, "thread-1", "run-1")
+      .map((task) => [task.roundId, task.status])
+      .sort(),
+  ).toEqual([
+    ["round-1", "failed"],
+    ["round-2", "failed"],
+  ]);
+  expect(selectSubtasksForRun(settled, "thread-1", "run-2")[0]?.status).toBe(
+    "in_progress",
+  );
+});
+
+test("settleRunningSubtasksForRun with roundId settles only matching round", () => {
+  let tasks: Record<string, Subtask> = {};
+  for (const task of [
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-2",
+      status: "in_progress",
+    }),
+    subtaskUpdateFixture({
+      id: "same-task",
+      threadId: "thread-2",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "in_progress",
+    }),
+  ]) {
+    tasks = applySubtaskUpdateInState(tasks, task);
+  }
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+    status: "error",
+  });
+
+  expect(
+    selectSubtasksForRun(settled, "thread-1", "run-1")
+      .map((task) => [task.roundId, task.status])
+      .sort(),
+  ).toEqual([
+    ["round-1", "failed"],
+    ["round-2", "in_progress"],
+  ]);
+  expect(
+    selectSubtasksForRun(settled, "thread-2", "run-1", "round-1")[0]?.status,
+  ).toBe("in_progress");
+});
+
+test("selectSubtasksForRun and selectSubtasksForThread keep round-scoped task identities", () => {
+  const makeTask = (
+    id: string,
+    threadId: string,
+    runId: string,
+    roundId?: string,
+  ) => ({
+    id,
+    threadId,
+    runId,
+    ...(roundId ? { roundId } : {}),
+    status: "in_progress" as const,
+    subagent_type: "researcher",
+    description: `${id} description`,
+    prompt: `${id} prompt`,
+  });
+  const tasks = {
+    a: makeTask("same-task", "thread-a", "run-a", "round-1"),
+    b: makeTask("same-task", "thread-a", "run-a", "round-2"),
+    c: makeTask("same-task", "thread-a", "run-b", "round-1"),
+    d: makeTask("same-task", "thread-b", "run-a", "round-1"),
+  };
+
+  expect(
+    selectSubtasksForRun(tasks, "thread-a", "run-a")
+      .map((task) => task.roundId)
+      .sort(),
+  ).toEqual(["round-1", "round-2"]);
+  expect(
+    selectSubtasksForRun(tasks, "thread-a", "run-a", "round-2").map(
+      (task) => task.roundId,
+    ),
+  ).toEqual(["round-2"]);
+  expect(
+    selectSubtasksForThread(tasks, "thread-a")
+      .map((task) => `${task.runId}:${task.roundId}`)
+      .sort(),
+  ).toEqual(["run-a:round-1", "run-a:round-2", "run-b:round-1"]);
+  expect(selectSubtasksForRun(tasks, "thread-a", undefined)).toEqual([]);
 });

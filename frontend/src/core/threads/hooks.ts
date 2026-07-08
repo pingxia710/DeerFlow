@@ -43,10 +43,22 @@ import {
   useUpdateSubtask,
 } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
-import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  promptInputFilePartToFile,
+  uploadFiles,
+  uploadListQueryKey,
+} from "../uploads";
 
 import { fetchThreadContextUsage, fetchThreadTokenUsage } from "./api";
 import { notifyThreadRuntimeDeleted } from "./runtime-events";
+import {
+  createThreadRuntimeOwnerSnapshot,
+  isCurrentThreadRuntimeOwnerEvent,
+  shouldClaimThreadRuntimeOwner,
+  shouldPreserveRuntimeOwnerOnRouteSwitch,
+  shouldReleaseQueuedRuntimeOwner,
+  type ThreadRuntimeOwnerSnapshot,
+} from "./runtime-owner";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -77,9 +89,18 @@ export type ThreadStreamFinishMeta = {
   runId: string | null;
 };
 
-type ThreadStreamOwnerSnapshot = {
+export type ThreadStreamOwnerSnapshot = {
   threadId: string | null;
   runId: string | null;
+  runtimeOwnerId?: string | null;
+  displayThreadId?: string | null;
+};
+
+export {
+  createThreadRuntimeOwnerSnapshot,
+  isCurrentThreadRuntimeOwnerEvent,
+  shouldClaimThreadRuntimeOwner,
+  shouldPreserveRuntimeOwnerOnRouteSwitch,
 };
 
 export type ThreadStreamOptions = {
@@ -106,9 +127,11 @@ type QueuedThreadMessage = {
   options?: SendMessageOptions;
 };
 
-type SendRequestOwnership = {
+export type SendRequestOwnership = {
   requestId: string;
   threadId: string;
+  displayThreadId?: string | null;
+  runtimeOwnerId?: string | null;
 };
 
 type ThreadActivitySnapshot = {
@@ -174,9 +197,12 @@ type QueuedMessageAdmissionState = {
 type StreamOwnershipState = {
   eventThreadId?: string | null;
   eventRunId?: string | null;
+  eventRuntimeOwnerId?: string | null;
   streamThreadId?: string | null;
   streamRunId?: string | null;
+  runtimeOwnerId?: string | null;
   viewThreadId?: string | null;
+  displayThreadId?: string | null;
   liveMessagesThreadId?: string | null;
   optimisticThreadId?: string | null;
 };
@@ -276,14 +302,17 @@ export function shouldReleaseQueuedThreadMessage({
   queuedThreadId,
   currentViewThreadId,
 }: QueuedMessageReleaseState) {
-  const hasOwner = Boolean(queuedOwnerId && currentOwnerId);
-  const ownedByCurrentRuntime = hasOwner
-    ? queuedOwnerId === currentOwnerId
-    : Boolean(
-        queuedThreadId &&
-        currentViewThreadId &&
-        queuedThreadId === currentViewThreadId,
-      );
+  const currentOwner = createThreadRuntimeOwnerSnapshot({
+    runtimeOwnerId: currentOwnerId,
+    threadId: currentViewThreadId,
+    displayThreadId: currentViewThreadId,
+  });
+  const ownedByCurrentRuntime = shouldReleaseQueuedRuntimeOwner({
+    queuedOwnerId,
+    currentOwner,
+    queuedThreadId,
+    currentViewThreadId,
+  });
   return (
     streamFinished && !sendInFlight && !recovering && ownedByCurrentRuntime
   );
@@ -308,7 +337,36 @@ export function isSameSendRequest(
 ) {
   return (
     current?.threadId === request.threadId &&
-    current.requestId === request.requestId
+    current.requestId === request.requestId &&
+    (!current.runtimeOwnerId ||
+      !request.runtimeOwnerId ||
+      current.runtimeOwnerId === request.runtimeOwnerId)
+  );
+}
+
+export function shouldApplyUploadContinuation({
+  activeRequest,
+  request,
+  currentViewThreadId,
+  isDeletedThread,
+  visibleOnly = false,
+}: {
+  activeRequest: SendRequestOwnership | null;
+  request: SendRequestOwnership;
+  currentViewThreadId?: string | null;
+  isDeletedThread?: boolean;
+  visibleOnly?: boolean;
+}) {
+  if (isDeletedThread || !isSameSendRequest(activeRequest, request)) {
+    return false;
+  }
+  if (!visibleOnly) {
+    return true;
+  }
+  return Boolean(
+    currentViewThreadId &&
+    (currentViewThreadId === request.threadId ||
+      currentViewThreadId === request.displayThreadId),
   );
 }
 
@@ -827,6 +885,8 @@ type PersistedTaskEvent = {
   task_id?: unknown;
   thread_id?: unknown;
   run_id?: unknown;
+  round_id?: unknown;
+  roundId?: unknown;
   status?: unknown;
   summary?: unknown;
   result_preview?: unknown;
@@ -838,6 +898,7 @@ type PersistedTaskEvent = {
   updated_at?: unknown;
   completed_at?: unknown;
   finished_at?: unknown;
+  duration_ms?: unknown;
   description?: unknown;
   subagent_type?: unknown;
   prompt?: unknown;
@@ -845,6 +906,8 @@ type PersistedTaskEvent = {
   result?: unknown;
   error?: unknown;
   action_result?: unknown;
+  metadata?: unknown;
+  content?: unknown;
 };
 
 type RunTerminalEvent = {
@@ -852,6 +915,7 @@ type RunTerminalEvent = {
   event_type: typeof RUN_TERMINAL_EVENT_TYPE;
   thread_id: string;
   run_id: string;
+  round_id?: string | null;
   status: string;
   terminal_reason: string;
 };
@@ -860,10 +924,12 @@ type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
 type SettleRunSubtasks = (terminal: {
   threadId: string;
   runId: string;
+  roundId?: string | null;
   status: string;
   terminalReason?: string;
 }) => void;
 type TerminalRunSettlementOptions = {
+  roundId?: string | null;
   terminalReason?: string;
   settleRunSubtasks?: SettleRunSubtasks;
 };
@@ -897,8 +963,27 @@ function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function objectStringValue(value: unknown, field: string) {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  return stringValue((value as Record<string, unknown>)[field]);
+}
+
 function taskEventType(event: PersistedTaskEvent | null | undefined) {
   return stringValue(event?.event_type) ?? stringValue(event?.type);
+}
+
+function taskEventRoundId(event: PersistedTaskEvent | null | undefined) {
+  if (!event) {
+    return undefined;
+  }
+  return (
+    objectStringValue(event.metadata, "round_id") ??
+    objectStringValue(event.content, "round_id") ??
+    stringValue(event.round_id) ??
+    stringValue(event.roundId)
+  );
 }
 
 export function asRunTerminalEvent(value: unknown): RunTerminalEvent | null {
@@ -909,6 +994,7 @@ export function asRunTerminalEvent(value: unknown): RunTerminalEvent | null {
   const eventType = stringValue(event.event_type) ?? stringValue(event.type);
   const threadId = stringValue(event.thread_id);
   const runId = stringValue(event.run_id);
+  const roundId = stringValue(event.round_id) ?? stringValue(event.roundId);
   const status = stringValue(event.status);
   const terminalReason = stringValue(event.terminal_reason);
   if (
@@ -925,6 +1011,7 @@ export function asRunTerminalEvent(value: unknown): RunTerminalEvent | null {
     event_type: RUN_TERMINAL_EVENT_TYPE,
     thread_id: threadId,
     run_id: runId,
+    ...(roundId ? { round_id: roundId } : {}),
     status,
     terminal_reason: terminalReason,
   };
@@ -947,7 +1034,8 @@ function taskLaneStatus(status: string): NonNullable<SubtaskUpdate["status"]> {
 export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
   const status = taskLaneStatus(lane.status);
   const description = lane.role ? `${lane.role} task` : lane.task_id;
-  const result = lane.result_ref ?? lane.evidence_ref ?? undefined;
+  const result =
+    lane.result ?? lane.result_ref ?? lane.evidence_ref ?? undefined;
   const update: SubtaskUpdate = {
     id: lane.task_id,
     threadId: lane.thread_id,
@@ -984,6 +1072,10 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
   };
   update.startedAt =
     taskEventStartedAt(lane.started_at) ?? taskEventStartedAt(lane.created_at);
+  const durationMs = taskEventDurationMs(lane.duration_ms);
+  if (durationMs !== undefined) {
+    update.durationMs = durationMs;
+  }
   if (status !== "in_progress") {
     update.finishedAt =
       taskEventTimestamp(lane.finished_at) ??
@@ -1042,6 +1134,12 @@ function taskEventStartedAt(value?: unknown) {
   return taskEventTimestamp(value);
 }
 
+function taskEventDurationMs(value?: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 function taskEventFinishedAt(event: PersistedTaskEvent) {
   return (
     taskEventTimestamp(event.finished_at) ??
@@ -1069,10 +1167,11 @@ export function taskEventRunMessageKey(message: RunMessage) {
   const eventType = taskEventType(taskEvent);
   const eventRunId = stringValue(taskEvent?.run_id) ?? message.run_id;
   const eventThreadId = stringValue(taskEvent?.thread_id) ?? "";
+  const eventRoundId = taskEventRoundId(taskEvent) ?? "";
   if (!taskId || !eventType || !eventRunId || !message.created_at) {
     return null;
   }
-  return `${eventRunId}:${eventThreadId}:${taskId}:${eventType}:${message.created_at}`;
+  return `${eventRunId}:${eventThreadId}:${eventRoundId}:${taskId}:${eventType}:${message.created_at}`;
 }
 
 export function isTaskEventRunMessageForRequest(
@@ -1108,7 +1207,16 @@ export function applyTaskEventToSubtask(
   const threadId =
     stringValue(taskEvent.thread_id) ?? fallbackThreadId ?? undefined;
   const runId = stringValue(taskEvent.run_id);
-  const base: SubtaskUpdate = { id: taskId, threadId, runId, notify: true };
+  const roundId = taskEventRoundId(taskEvent);
+  const durationMs = taskEventDurationMs(taskEvent.duration_ms);
+  const base: SubtaskUpdate = {
+    id: taskId,
+    threadId,
+    runId,
+    roundId,
+    notify: true,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
 
   if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };
@@ -1383,6 +1491,7 @@ function settleTerminalRunSubtasksForThread(
   settleRunSubtasks({
     threadId,
     runId: run.run_id,
+    roundId: roundIdOfRun(run),
     status,
     terminalReason: stringValue(runWithTerminal.terminal_reason) ?? status,
   });
@@ -1442,8 +1551,10 @@ export type TaskLaneSnapshot = {
   task_id: string;
   role?: string | null;
   status: string;
+  result?: string | null;
   result_ref?: string | null;
   evidence_ref?: string | null;
+  duration_ms?: unknown;
   evidence_refs?: unknown;
   artifact_refs?: unknown;
   output_refs?: unknown;
@@ -1524,6 +1635,28 @@ export function buildThreadRuntimeSnapshotUrl(
     typeof window !== "undefined" ? window.location.origin : "http://localhost",
   );
   return normalizedBaseUrl ? url.toString() : url.pathname;
+}
+
+export function buildThreadRunCancelUrl(
+  baseUrl: string,
+  threadId: string,
+  runId: string,
+  {
+    action = "interrupt",
+    wait = false,
+  }: { action?: "interrupt" | "rollback"; wait?: boolean } = {},
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(
+    runId,
+  )}/cancel`;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
+  url.searchParams.set("action", action);
+  url.searchParams.set("wait", wait ? "1" : "0");
+  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
 export async function readThreadRuntimeSnapshotResponse(
@@ -2044,9 +2177,14 @@ export function applyBackgroundRunProbeResult(
   }
   const terminalStatus = String(status);
   const threadStatus = status === "success" ? "idle" : terminalStatus;
+  const roundId =
+    typeof options.roundId === "string" && options.roundId.length > 0
+      ? options.roundId
+      : undefined;
   options.settleRunSubtasks?.({
     threadId,
     runId,
+    ...(roundId ? { roundId } : {}),
     status: terminalStatus,
     terminalReason: options.terminalReason ?? terminalStatus,
   });
@@ -2094,6 +2232,56 @@ export function beginLocalRunCancellation({
   return { threadId, runId };
 }
 
+export async function requestThreadRunCancel({
+  threadId,
+  runId,
+  action = "interrupt",
+  wait = false,
+}: {
+  threadId: string;
+  runId: string;
+  action?: "interrupt" | "rollback";
+  wait?: boolean;
+}): Promise<{ status: number; detail?: string }> {
+  const response = await fetch(
+    buildThreadRunCancelUrl(getBackendBaseURL(), threadId, runId, {
+      action,
+      wait,
+    }),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      credentials: "include",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    },
+  );
+  if (response.status === 202 || response.status === 204) {
+    return { status: response.status };
+  }
+  if (response.status === 409) {
+    return {
+      status: response.status,
+      detail: await readResponseErrorMessage(
+        response,
+        "Run cancellation requires recovery.",
+      ),
+    };
+  }
+  if (!response.ok) {
+    const error = new Error(
+      await readResponseErrorMessage(response, "Failed to cancel run."),
+    );
+    Object.defineProperty(error, "status", {
+      value: response.status,
+      enumerable: true,
+    });
+    throw error;
+  }
+  return { status: response.status };
+}
+
 export function finishLocalRunCancellation({
   queryClient,
   threadId,
@@ -2117,6 +2305,154 @@ export function finishLocalRunCancellation({
     terminalReason: "user_cancelled",
   });
   return { threadId, runId };
+}
+
+function runStatus(run: unknown) {
+  return typeof run === "object" && run !== null
+    ? Reflect.get(run, "status")
+    : undefined;
+}
+
+function runTerminalReason(run: unknown) {
+  if (typeof run !== "object" || run === null) {
+    return undefined;
+  }
+  const reason = Reflect.get(run, "terminal_reason");
+  return typeof reason === "string" ? reason : undefined;
+}
+
+export function reconcileRunCancellationAuthority({
+  queryClient,
+  threadId,
+  runId,
+  run,
+  isMock,
+  settleRunSubtasks,
+}: {
+  queryClient: QueryClient;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+  run: unknown;
+  isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
+}): "terminal" | "active" | "unknown" {
+  if (!threadId || !runId) {
+    return "unknown";
+  }
+  if (isDeletedThreadTombstoned(threadId)) {
+    stopBackgroundRunProbe(threadId, runId);
+    return "terminal";
+  }
+  const status = runStatus(run);
+  if (isTerminalRunStatus(status)) {
+    stopBackgroundRunProbe(threadId, runId);
+    applyBackgroundRunProbeResult(queryClient, threadId, runId, status, {
+      settleRunSubtasks,
+      roundId: roundIdOfRun(run as Run | undefined),
+      terminalReason: runTerminalReason(run),
+    });
+    return "terminal";
+  }
+  if (isActiveRunStatus(status)) {
+    markThreadCancellingInCaches(queryClient, threadId);
+    startBackgroundRunProbe({
+      queryClient,
+      threadId,
+      runId,
+      isMock,
+      settleRunSubtasks,
+    });
+    return "active";
+  }
+  return "unknown";
+}
+
+export function keepRunCancellationRecovering({
+  queryClient,
+  threadId,
+  runId,
+  isMock,
+  settleRunSubtasks,
+}: {
+  queryClient: QueryClient;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+  isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
+}): StreamErrorRecoveryRun | null {
+  const cancellation = beginLocalRunCancellation({
+    queryClient,
+    threadId,
+    runId,
+  });
+  if (!cancellation) {
+    return null;
+  }
+  startBackgroundRunProbe({
+    queryClient,
+    threadId: cancellation.threadId,
+    runId: cancellation.runId,
+    isMock,
+    settleRunSubtasks,
+  });
+  return cancellation;
+}
+
+export async function reconcileRunCancellationFromAuthority({
+  queryClient,
+  threadId,
+  runId,
+  isMock,
+  settleRunSubtasks,
+}: {
+  queryClient: QueryClient;
+  threadId: string;
+  runId: string;
+  isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
+}): Promise<"terminal" | "active" | "unknown"> {
+  try {
+    const run = await getAPIClient(isMock).runs.get(threadId, runId);
+    const result = reconcileRunCancellationAuthority({
+      queryClient,
+      threadId,
+      runId,
+      run,
+      isMock,
+      settleRunSubtasks,
+    });
+    if (result !== "unknown") {
+      return result;
+    }
+  } catch {
+    // Fall through to runtime snapshot; it is the canonical recovery source.
+  }
+
+  try {
+    const snapshot = await fetch(
+      buildThreadRuntimeSnapshotUrl(getBackendBaseURL(), threadId),
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+      },
+    ).then(readThreadRuntimeSnapshotResponse);
+    queryClient.setQueryData(threadRuntimeSnapshotQueryKey(threadId), snapshot);
+    const run = snapshot.runs?.find((item) => item.run_id === runId);
+    return reconcileRunCancellationAuthority({
+      queryClient,
+      threadId,
+      runId,
+      run,
+      isMock,
+      settleRunSubtasks,
+    });
+  } catch {
+    return "unknown";
+  }
 }
 
 export function resolveRunStreamRecoveryErrorOwner(
@@ -2259,14 +2595,17 @@ export function shouldTreatTerminalEventAsCurrentStream(
   streamThreadId: string | null | undefined,
   streamRunId: string | null | undefined,
 ) {
-  return Boolean(
-    eventThreadId &&
-    eventRunId &&
-    streamThreadId &&
-    streamRunId &&
-    eventThreadId === streamThreadId &&
-    eventRunId === streamRunId,
-  );
+  return isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId,
+    eventRunId,
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: streamThreadId,
+      runId: streamRunId,
+      displayThreadId: streamThreadId,
+    }),
+    requireEventThreadId: true,
+    requireEventRunId: true,
+  });
 }
 
 export function shouldTreatStreamFinishAsCurrentStream(
@@ -2275,47 +2614,73 @@ export function shouldTreatStreamFinishAsCurrentStream(
   streamThreadId: string | null | undefined,
   streamRunId: string | null | undefined,
 ) {
-  return Boolean(
-    finishThreadId &&
-    streamThreadId &&
-    finishThreadId === streamThreadId &&
-    (!finishRunId || !streamRunId || finishRunId === streamRunId),
-  );
+  const streamHasRunOwner = Boolean(streamRunId);
+  return isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId: finishThreadId,
+    eventRunId: finishRunId,
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: streamThreadId,
+      runId: streamRunId,
+      displayThreadId: streamThreadId,
+    }),
+    requireEventThreadId: true,
+    requireEventRunId: streamHasRunOwner,
+    allowMissingEventRunId: !streamHasRunOwner,
+    allowMissingCurrentRunId: true,
+  });
 }
 
 export function shouldRunCurrentStreamFinishSideEffects({
   eventThreadId,
   eventRunId,
+  eventRuntimeOwnerId,
   streamThreadId,
   streamRunId,
+  runtimeOwnerId,
+  displayThreadId,
 }: StreamOwnershipState) {
-  return shouldTreatStreamFinishAsCurrentStream(
+  const streamHasRunOwner = Boolean(streamRunId);
+  return isCurrentThreadRuntimeOwnerEvent({
     eventThreadId,
     eventRunId,
-    streamThreadId,
-    streamRunId,
-  );
+    eventRuntimeOwnerId,
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: streamThreadId,
+      runId: streamRunId,
+      runtimeOwnerId,
+      displayThreadId: displayThreadId ?? streamThreadId,
+    }),
+    requireEventThreadId: true,
+    requireEventRunId: streamHasRunOwner,
+    allowMissingEventRunId: !streamHasRunOwner,
+    allowMissingCurrentRunId: true,
+  });
 }
 
 export function shouldApplyStreamTitleUpdate({
   eventThreadId,
   eventRunId,
+  eventRuntimeOwnerId,
   streamThreadId,
   streamRunId,
+  runtimeOwnerId,
+  displayThreadId,
 }: StreamOwnershipState) {
-  if (!streamThreadId) {
-    return false;
-  }
-  if (eventThreadId && eventThreadId !== streamThreadId) {
-    return false;
-  }
-  if (eventRunId && eventRunId !== streamRunId) {
-    return false;
-  }
-  if (eventThreadId || eventRunId) {
-    return Boolean(eventThreadId && eventThreadId === streamThreadId);
-  }
-  return true;
+  const streamHasRunOwner = Boolean(streamRunId);
+  return isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId,
+    eventRunId,
+    eventRuntimeOwnerId,
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: streamThreadId,
+      runId: streamRunId,
+      runtimeOwnerId,
+      displayThreadId: displayThreadId ?? streamThreadId,
+    }),
+    requireEventThreadId: streamHasRunOwner,
+    requireEventRunId: streamHasRunOwner,
+    allowMissingEventRunId: !streamHasRunOwner,
+  });
 }
 
 export type RefreshRunsParams = {
@@ -2356,6 +2721,9 @@ export function reconcileTaskEventRunHistory(
   if (!threadId || !runId) {
     return false;
   }
+  if (isDeletedThreadTombstoned(threadId)) {
+    return true;
+  }
   void queryClient.invalidateQueries({
     queryKey: threadRunsQueryKey(threadId),
   });
@@ -2377,6 +2745,7 @@ export function reconcileTerminalRunHistory(
   event: unknown,
   refreshRuns: RefreshRuns,
   settleRunSubtasks?: SettleRunSubtasks,
+  { applyThreadSideEffects = true }: { applyThreadSideEffects?: boolean } = {},
 ) {
   const runTerminalEvent = asRunTerminalEvent(event);
   if (!runTerminalEvent) {
@@ -2387,6 +2756,7 @@ export function reconcileTerminalRunHistory(
     return true;
   }
   if (
+    applyThreadSideEffects &&
     !applyBackgroundRunProbeResult(
       queryClient,
       runTerminalEvent.thread_id,
@@ -2394,10 +2764,14 @@ export function reconcileTerminalRunHistory(
       runTerminalEvent.status,
       {
         settleRunSubtasks,
+        roundId: runTerminalEvent.round_id,
         terminalReason: runTerminalEvent.terminal_reason,
       },
     )
   ) {
+    invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
+  }
+  if (!applyThreadSideEffects) {
     invalidateTerminalRunQueries(queryClient, runTerminalEvent.thread_id);
   }
   refreshRuns({
@@ -2690,6 +3064,48 @@ function isThreadMissingError(error: unknown): boolean {
   return status === 403 || status === 404;
 }
 
+export function isThreadDeleteNotFound(error: unknown): boolean {
+  return getHttpStatus(error) === 404;
+}
+
+export async function deleteThreadRemote({
+  threadId,
+  apiClient,
+  onRemoteDeleted,
+}: {
+  threadId: string;
+  apiClient: ReturnType<typeof getAPIClient>;
+  onRemoteDeleted?: () => void;
+}) {
+  let sdkDeleteConfirmed = false;
+  try {
+    await apiClient.threads.delete(threadId);
+    sdkDeleteConfirmed = true;
+  } catch (error) {
+    if (!isThreadDeleteNotFound(error)) {
+      throw error;
+    }
+    sdkDeleteConfirmed = true;
+  }
+  onRemoteDeleted?.();
+
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  if (response.ok || (response.status === 404 && sdkDeleteConfirmed)) {
+    return;
+  }
+
+  const error = await response
+    .json()
+    .catch(() => ({ detail: "Failed to delete local thread data." }));
+  throw new Error(error.detail ?? "Failed to delete local thread data.");
+}
+
 export function useThreadStream({
   threadId,
   displayThreadId,
@@ -2743,8 +3159,13 @@ export function useThreadStream({
   // continues in the background.
   const streamThreadIdRef = useRef<string | null>(threadId ?? null);
   const streamRunIdRef = useRef<string | null>(null);
-  const streamOwnerSnapshotRef = useRef<ThreadStreamOwnerSnapshot | null>(
-    threadId ? { threadId, runId: null } : null,
+  const streamOwnerSnapshotRef = useRef<ThreadRuntimeOwnerSnapshot | null>(
+    createThreadRuntimeOwnerSnapshot({
+      threadId: threadId ?? null,
+      runId: null,
+      runtimeOwnerId: currentRuntimeOwnerId,
+      displayThreadId: currentViewThreadId,
+    }),
   );
   const streamClientThreadIdLockedRef = useRef(false);
   const liveMessagesSnapshotRef = useRef<LiveMessagesSnapshot | null>(null);
@@ -2759,6 +3180,18 @@ export function useThreadStream({
     onFinish,
     onToolEnd,
   });
+
+  const getCurrentRuntimeOwner = useCallback(
+    () =>
+      streamOwnerSnapshotRef.current ??
+      createThreadRuntimeOwnerSnapshot({
+        threadId: streamThreadIdRef.current,
+        runId: streamRunIdRef.current,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        displayThreadId: currentViewThreadIdRef.current,
+      }),
+    [],
+  );
 
   const {
     runs: historyRuns,
@@ -2821,9 +3254,17 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    const preserveRuntimeOwner = shouldPreserveRuntimeOwnerOnRouteSwitch({
+      currentOwner: getCurrentRuntimeOwner(),
+      nextDisplayThreadId: currentViewThreadIdRef.current,
+      streamFinished: streamFinishedRef.current,
+      sendInFlight: sendInFlightRef.current,
+    });
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
-      startedRef.current = false;
+      if (!preserveRuntimeOwner) {
+        startedRef.current = false;
+      }
       setOnStreamThreadId(normalizedThreadId);
     } else {
       setOnStreamThreadId(normalizedThreadId);
@@ -2831,17 +3272,27 @@ export function useThreadStream({
     if (!streamClientThreadIdLockedRef.current) {
       setStreamClientThreadId(normalizedThreadId);
     }
-    streamThreadIdRef.current = normalizedThreadId;
-    streamOwnerSnapshotRef.current = normalizedThreadId
-      ? { threadId: normalizedThreadId, runId: null }
-      : null;
-  }, [threadId]);
+    if (!preserveRuntimeOwner) {
+      streamThreadIdRef.current = normalizedThreadId;
+      streamOwnerSnapshotRef.current = createThreadRuntimeOwnerSnapshot({
+        threadId: normalizedThreadId,
+        runId: null,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        displayThreadId: currentViewThreadIdRef.current,
+      });
+    }
+  }, [getCurrentRuntimeOwner, threadId]);
 
   const handleStreamStart = useCallback(
     (_threadId: string, _runId: string) => {
       streamThreadIdRef.current = _threadId;
       streamRunIdRef.current = _runId;
-      streamOwnerSnapshotRef.current = { threadId: _threadId, runId: _runId };
+      streamOwnerSnapshotRef.current = createThreadRuntimeOwnerSnapshot({
+        threadId: _threadId,
+        runId: _runId,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        displayThreadId: currentViewThreadIdRef.current,
+      });
       setStreamErrorRecoveryRun(null);
       setLocallySettledRun(null);
       const currentView = currentViewThreadIdRef.current;
@@ -2899,7 +3350,15 @@ export function useThreadStream({
     reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     onThreadId(createdThreadId) {
-      if (isDeletedThreadTombstoned(createdThreadId)) {
+      const currentOwner = getCurrentRuntimeOwner();
+      if (
+        isDeletedThreadTombstoned(createdThreadId) ||
+        !shouldClaimThreadRuntimeOwner({
+          eventThreadId: createdThreadId,
+          eventRunId: streamRunIdRef.current,
+          currentOwner,
+        })
+      ) {
         return;
       }
       const previousIds = new Set(
@@ -2915,10 +3374,11 @@ export function useThreadStream({
           : queued,
       );
       streamThreadIdRef.current = createdThreadId;
-      streamOwnerSnapshotRef.current = {
+      streamOwnerSnapshotRef.current = createThreadRuntimeOwnerSnapshot({
+        ...currentOwner,
         threadId: createdThreadId,
         runId: streamRunIdRef.current,
-      };
+      });
       setOnStreamThreadId(createdThreadId);
       for (const previousId of previousIds) {
         clearThreadActivity(previousId);
@@ -2926,7 +3386,14 @@ export function useThreadStream({
       markThreadBusyInCaches(queryClient, createdThreadId);
     },
     onCreated(meta) {
-      if (isDeletedThreadTombstoned(meta.thread_id)) {
+      if (
+        isDeletedThreadTombstoned(meta.thread_id) ||
+        !shouldClaimThreadRuntimeOwner({
+          eventThreadId: meta.thread_id,
+          eventRunId: meta.run_id,
+          currentOwner: getCurrentRuntimeOwner(),
+        })
+      ) {
         return;
       }
       handleStreamStart(meta.thread_id, meta.run_id);
@@ -2978,6 +3445,9 @@ export function useThreadStream({
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
+        if (isDeletedThreadTombstoned(getCurrentRuntimeOwner().threadId)) {
+          return;
+        }
         const toolEndEvent = getScopedToolEndEvent(
           event,
           streamThreadIdRef.current,
@@ -3038,11 +3508,14 @@ export function useThreadStream({
                 ? updateRecord.runId
                 : null;
           if (
+            isDeletedThreadTombstoned(eventThreadId ?? streamThreadId) ||
             !shouldApplyStreamTitleUpdate({
               eventThreadId,
               eventRunId,
               streamThreadId,
               streamRunId: streamRunIdRef.current,
+              runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+              displayThreadId: currentViewThreadIdRef.current,
               viewThreadId: currentViewThreadIdRef.current,
               liveMessagesThreadId: liveMessagesThreadIdRef.current,
               optimisticThreadId: optimisticThreadIdRef.current,
@@ -3098,8 +3571,23 @@ export function useThreadStream({
     onCustomEvent(event: unknown) {
       const taskEvent = asTaskEvent(event);
       if (taskEvent) {
+        const eventThreadId = stringValue(taskEvent.thread_id) ?? null;
+        const eventRunId = stringValue(taskEvent.run_id) ?? null;
+        if (
+          isDeletedThreadTombstoned(eventThreadId) ||
+          !isCurrentThreadRuntimeOwnerEvent({
+            eventThreadId,
+            eventRunId,
+            currentOwner: getCurrentRuntimeOwner(),
+            requireEventThreadId: true,
+            requireEventRunId: true,
+            allowMissingCurrentRunId: true,
+          })
+        ) {
+          return;
+        }
         const taskThreadId = resolveVisibleTaskRunningThreadId({
-          eventThreadId: stringValue(taskEvent.thread_id) ?? null,
+          eventThreadId,
           streamThreadId: streamThreadIdRef.current,
           viewThreadId: currentViewThreadIdRef.current,
           liveMessagesThreadId: liveMessagesThreadIdRef.current,
@@ -3117,23 +3605,27 @@ export function useThreadStream({
       }
 
       const terminalEvent = asRunTerminalEvent(event);
+      const terminalOwnsCurrentStream = terminalEvent
+        ? isCurrentThreadRuntimeOwnerEvent({
+            eventThreadId: terminalEvent.thread_id,
+            eventRunId: terminalEvent.run_id,
+            currentOwner: getCurrentRuntimeOwner(),
+            requireEventThreadId: true,
+            requireEventRunId: true,
+          })
+        : false;
       if (
         terminalEvent &&
+        !isDeletedThreadTombstoned(terminalEvent.thread_id) &&
         reconcileTerminalRunHistory(
           queryClient,
           terminalEvent,
           refreshHistoryRuns,
-          settleRunSubtasks,
+          terminalOwnsCurrentStream ? settleRunSubtasks : undefined,
+          { applyThreadSideEffects: terminalOwnsCurrentStream },
         )
       ) {
-        if (
-          shouldTreatTerminalEventAsCurrentStream(
-            terminalEvent.thread_id,
-            terminalEvent.run_id,
-            streamThreadIdRef.current,
-            streamRunIdRef.current,
-          )
-        ) {
+        if (terminalOwnsCurrentStream) {
           streamFinishedRef.current = true;
           setQueueReleaseVersion((version) => version + 1);
         }
@@ -3181,8 +3673,23 @@ export function useThreadStream({
         recoveryOwner?.threadId ?? run?.thread_id ?? streamThreadIdRef.current;
       const streamRunId =
         recoveryOwner?.runId ?? run?.run_id ?? streamRunIdRef.current;
-      releaseStreamClientThreadId(streamThreadId);
+      if (isDeletedThreadTombstoned(streamThreadId)) {
+        return;
+      }
+      const currentOwner = getCurrentRuntimeOwner();
+      const errorOwnsCurrentUi = isCurrentThreadRuntimeOwnerEvent({
+        eventThreadId: streamThreadId,
+        eventRunId: streamRunId,
+        currentOwner,
+        requireEventThreadId: true,
+        allowMissingEventRunId: true,
+        allowMissingCurrentRunId: true,
+      });
+      if (errorOwnsCurrentUi) {
+        releaseStreamClientThreadId(streamThreadId);
+      }
       if (
+        errorOwnsCurrentUi &&
         shouldCommitStreamStartFromError({
           started: startedRef.current,
           threadId: streamThreadId,
@@ -3198,19 +3705,7 @@ export function useThreadStream({
         isMock,
         settleRunSubtasks,
       });
-      const errorOwnsCurrentStream = shouldTreatTerminalEventAsCurrentStream(
-        streamThreadId,
-        streamRunId,
-        streamThreadIdRef.current,
-        streamRunIdRef.current,
-      );
-      const errorOwnsCurrentThread = Boolean(
-        streamThreadId && streamThreadId === streamThreadIdRef.current,
-      );
-      const errorOwnsCurrentUi =
-        errorOwnsCurrentStream || (errorOwnsCurrentThread && !streamRunId);
       if (
-        !streamErrorRecoveryRunRef.current ||
         errorOwnsCurrentUi ||
         isSameStreamErrorRecoveryRun(
           streamErrorRecoveryRunRef.current,
@@ -3237,11 +3732,13 @@ export function useThreadStream({
       if (errorOwnsCurrentUi && shouldShowStreamErrorToast(recoveryRun)) {
         toast.error(getStreamErrorMessage(error));
       }
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
+      if (errorOwnsCurrentUi) {
+        pendingUsageBaselineMessageIdsRef.current = new Set(
+          messagesRef.current
+            .map(messageIdentity)
+            .filter((id): id is string => Boolean(id)),
+        );
+      }
       if (streamThreadId && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(streamThreadId),
@@ -3252,23 +3749,43 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      const finishEventThreadId = run?.thread_id ?? null;
+      const finishEventRunId = run?.run_id ?? null;
       const finishMeta = resolveThreadStreamFinishMeta({
         run,
         streamOwner: streamOwnerSnapshotRef.current,
       });
       const streamThreadId = finishMeta.threadId;
       const streamRunId = finishMeta.runId;
-      releaseStreamClientThreadId(streamThreadId);
-      if (streamRunId) {
-        clearReconnectRun(streamThreadId, streamRunId);
-        stopBackgroundRunProbe(streamThreadId, streamRunId);
+      if (isDeletedThreadTombstoned(streamThreadId)) {
+        return;
+      }
+      const finishOwnsCurrentStream = shouldRunCurrentStreamFinishSideEffects({
+        eventThreadId: finishEventThreadId ?? streamThreadId,
+        eventRunId: finishEventRunId ?? streamRunId,
+        streamThreadId: streamThreadIdRef.current,
+        streamRunId: streamRunIdRef.current,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+        displayThreadId: currentViewThreadIdRef.current,
+      });
+      const finishSideEffectThreadId =
+        finishEventThreadId ??
+        (finishOwnsCurrentStream ? streamThreadId : null);
+      const finishSideEffectRunId =
+        finishEventRunId ?? (finishOwnsCurrentStream ? streamRunId : null);
+      if (finishOwnsCurrentStream) {
+        releaseStreamClientThreadId(streamThreadId);
+      }
+      if (finishSideEffectThreadId && finishSideEffectRunId) {
+        clearReconnectRun(finishSideEffectThreadId, finishSideEffectRunId);
+        stopBackgroundRunProbe(finishSideEffectThreadId, finishSideEffectRunId);
       }
       if (
-        !streamErrorRecoveryRunRef.current ||
+        (finishOwnsCurrentStream && !streamErrorRecoveryRunRef.current) ||
         isSameStreamErrorRecoveryRun(
           streamErrorRecoveryRunRef.current,
-          streamThreadId,
-          streamRunId,
+          finishSideEffectThreadId,
+          finishSideEffectRunId,
         )
       ) {
         setStreamErrorRecoveryRun(null);
@@ -3276,34 +3793,28 @@ export function useThreadStream({
       if (
         isSameStreamErrorRecoveryRun(
           locallySettledRunRef.current,
-          streamThreadId,
-          streamRunId,
+          finishSideEffectThreadId,
+          finishSideEffectRunId,
         )
       ) {
         setLocallySettledRun(null);
       }
-      if (streamThreadId) {
+      if (streamThreadId && finishOwnsCurrentStream) {
         markThreadFinished(streamThreadId);
         setThreadStatusInCaches(queryClient, streamThreadId, "idle");
       }
-      const finishOwnsCurrentStream = shouldRunCurrentStreamFinishSideEffects({
-        eventThreadId: streamThreadId,
-        eventRunId: streamRunId,
-        streamThreadId: streamThreadIdRef.current,
-        streamRunId: streamRunIdRef.current,
-      });
       if (finishOwnsCurrentStream) {
         streamFinishedRef.current = true;
         setQueueReleaseVersion((version) => version + 1);
         listeners.current.onFinish?.(state.values, finishMeta);
+        pendingUsageBaselineMessageIdsRef.current = new Set(
+          messagesRef.current
+            .map(messageIdentity)
+            .filter((id): id is string => Boolean(id)),
+        );
       }
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
-      if (streamThreadId) {
-        invalidateTerminalRunQueries(queryClient, streamThreadId);
+      if (finishSideEffectThreadId) {
+        invalidateTerminalRunQueries(queryClient, finishSideEffectThreadId);
       }
     },
   });
@@ -3383,22 +3894,35 @@ export function useThreadStream({
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
-    startedRef.current = false;
-    streamRunIdRef.current = null;
-    activeSendRequestRef.current = null;
-    sendInFlightRef.current = false;
-    streamFinishedRef.current = true;
-    setLocallySettledRun(null);
-    messagesRef.current = [];
-    summarizedRef.current = new Set<string>();
-    pendingUsageBaselineMessageIdsRef.current = new Set();
-    setPendingSupersededRunIds(new Set());
-    setPendingSupersededMessageIds(new Set());
-    setStreamErrorRecoveryRun(null);
-    setIsUploading(false);
+    const preserveRuntimeOwner = shouldPreserveRuntimeOwnerOnRouteSwitch({
+      currentOwner: getCurrentRuntimeOwner(),
+      nextDisplayThreadId: currentViewThreadIdRef.current,
+      streamFinished: streamFinishedRef.current,
+      sendInFlight: sendInFlightRef.current,
+    });
+    if (!preserveRuntimeOwner) {
+      startedRef.current = false;
+      streamRunIdRef.current = null;
+      activeSendRequestRef.current = null;
+      sendInFlightRef.current = false;
+      streamFinishedRef.current = true;
+      setLocallySettledRun(null);
+      messagesRef.current = [];
+      summarizedRef.current = new Set<string>();
+      pendingUsageBaselineMessageIdsRef.current = new Set();
+      setPendingSupersededRunIds(new Set());
+      setPendingSupersededMessageIds(new Set());
+      setStreamErrorRecoveryRun(null);
+      setIsUploading(false);
+    }
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-  }, [setLocallySettledRun, setStreamErrorRecoveryRun, threadId]);
+  }, [
+    getCurrentRuntimeOwner,
+    setLocallySettledRun,
+    setStreamErrorRecoveryRun,
+    threadId,
+  ]);
 
   useEffect(() => {
     if (
@@ -3488,6 +4012,19 @@ export function useThreadStream({
     [],
   );
 
+  const prepareStreamOwnerForSend = useCallback((targetThreadId: string) => {
+    const ownerThreadId =
+      streamThreadIdRef.current === targetThreadId ? targetThreadId : null;
+    startedRef.current = false;
+    streamRunIdRef.current = null;
+    streamOwnerSnapshotRef.current = createThreadRuntimeOwnerSnapshot({
+      threadId: ownerThreadId,
+      runId: null,
+      runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      displayThreadId: targetThreadId,
+    });
+  }, []);
+
   const sendMessage = useCallback(
     async (
       threadId: string,
@@ -3502,9 +4039,18 @@ export function useThreadStream({
           new Error("Attachments require a saved thread before upload."),
         );
       }
-      const targetThreadRecovering = isThreadRecoveringFromStreamError(
-        streamErrorRecoveryRunRef.current,
-        threadId,
+      const currentOwner = getCurrentRuntimeOwner();
+      const targetThreadRecovering = Boolean(
+        streamErrorRecoveryRunRef.current &&
+        (streamErrorRecoveryRunRef.current.threadId === threadId ||
+          currentOwner.displayThreadId === threadId) &&
+        isCurrentThreadRuntimeOwnerEvent({
+          eventThreadId: streamErrorRecoveryRunRef.current.threadId,
+          eventRunId: streamErrorRecoveryRunRef.current.runId,
+          currentOwner,
+          requireEventThreadId: true,
+          requireEventRunId: true,
+        }),
       );
       if (
         shouldQueueThreadMessage({
@@ -3562,11 +4108,24 @@ export function useThreadStream({
       const sendRequest = {
         requestId: createOptimisticMessageId("send"),
         threadId,
+        displayThreadId: currentViewThreadIdRef.current,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
       };
       activeSendRequestRef.current = sendRequest;
       const ownsSendRequest = () =>
-        isSameSendRequest(activeSendRequestRef.current, sendRequest) &&
-        !isDeletedThreadTombstoned(sendRequest.threadId);
+        shouldApplyUploadContinuation({
+          activeRequest: activeSendRequestRef.current,
+          request: sendRequest,
+          isDeletedThread: isDeletedThreadTombstoned(sendRequest.threadId),
+        });
+      const ownsVisibleSendRequest = () =>
+        shouldApplyUploadContinuation({
+          activeRequest: activeSendRequestRef.current,
+          request: sendRequest,
+          currentViewThreadId: currentViewThreadIdRef.current,
+          isDeletedThread: isDeletedThreadTombstoned(sendRequest.threadId),
+          visibleOnly: true,
+        });
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -3618,6 +4177,7 @@ export function useThreadStream({
       setLiveMessagesThreadTarget(threadId);
       setOptimisticMessages(newOptimistic);
       setLocallySettledRun(null);
+      prepareStreamOwnerForSend(threadId);
       streamFinishedRef.current = false;
       markThreadBusyInCaches(queryClient, threadId);
 
@@ -3656,6 +4216,9 @@ export function useThreadStream({
                 return;
               }
               uploadedFileInfo = uploadResponse.files;
+              void queryClient.invalidateQueries({
+                queryKey: uploadListQueryKey(threadId),
+              });
 
               // Update optimistic human message with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
@@ -3681,7 +4244,9 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            if (ownsVisibleSendRequest()) {
+              toast.error(errorMessage);
+            }
             setOptimisticMessages([]);
             setOptimisticThreadTarget(null);
             setLiveMessagesThreadTarget(null);
@@ -3768,8 +4333,10 @@ export function useThreadStream({
       context,
       queryClient,
       humanMessageCount,
+      getCurrentRuntimeOwner,
       isCurrentStreamLocallySettled,
       persistedMessages,
+      prepareStreamOwnerForSend,
       releaseStreamClientThreadId,
       setLocallySettledRun,
       setLiveMessagesThreadTarget,
@@ -3779,9 +4346,19 @@ export function useThreadStream({
 
   useEffect(() => {
     const next = queuedMessagesRef.current[0];
-    const currentThreadRecovering = isThreadRecoveringFromStreamError(
-      streamErrorRecoveryRun,
-      currentViewThreadId,
+    const currentOwner = getCurrentRuntimeOwner();
+    const currentThreadRecovering = Boolean(
+      streamErrorRecoveryRun &&
+      currentViewThreadId &&
+      (streamErrorRecoveryRun.threadId === currentViewThreadId ||
+        currentOwner.displayThreadId === currentViewThreadId) &&
+      isCurrentThreadRuntimeOwnerEvent({
+        eventThreadId: streamErrorRecoveryRun.threadId,
+        eventRunId: streamErrorRecoveryRun.runId,
+        currentOwner,
+        requireEventThreadId: true,
+        requireEventRunId: true,
+      }),
     );
     if (
       !shouldReleaseQueuedThreadMessage({
@@ -3789,7 +4366,7 @@ export function useThreadStream({
         sendInFlight: sendInFlightRef.current,
         recovering: currentThreadRecovering,
         queuedOwnerId: next?.ownerId,
-        currentOwnerId: currentRuntimeOwnerId,
+        currentOwnerId: currentOwner.runtimeOwnerId,
         queuedThreadId: next?.threadId,
         currentViewThreadId,
       })
@@ -3812,7 +4389,7 @@ export function useThreadStream({
     );
   }, [
     currentViewThreadId,
-    currentRuntimeOwnerId,
+    getCurrentRuntimeOwner,
     sendMessage,
     streamErrorRecoveryRun,
     queueReleaseVersion,
@@ -3889,6 +4466,7 @@ export function useThreadStream({
           return next;
         });
 
+        prepareStreamOwnerForSend(threadId);
         streamClientThreadIdLockedRef.current = true;
         await thread.submit(prepared.input, {
           threadId,
@@ -3947,6 +4525,7 @@ export function useThreadStream({
       context,
       humanMessageCount,
       persistedMessages,
+      prepareStreamOwnerForSend,
       queryClient,
       releaseStreamClientThreadId,
       setLocallySettledRun,
@@ -3966,9 +4545,19 @@ export function useThreadStream({
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
-  const hasVisibleStreamErrorRecovery = isThreadRecoveringFromStreamError(
-    streamErrorRecoveryRun,
-    currentViewThreadId,
+  const currentOwnerForRecovery = getCurrentRuntimeOwner();
+  const hasVisibleStreamErrorRecovery = Boolean(
+    streamErrorRecoveryRun &&
+    currentViewThreadId &&
+    (streamErrorRecoveryRun.threadId === currentViewThreadId ||
+      currentOwnerForRecovery.displayThreadId === currentViewThreadId) &&
+    isCurrentThreadRuntimeOwnerEvent({
+      eventThreadId: streamErrorRecoveryRun.threadId,
+      eventRunId: streamErrorRecoveryRun.runId,
+      currentOwner: currentOwnerForRecovery,
+      requireEventThreadId: true,
+      requireEventRunId: true,
+    }),
   );
   const hasLocallySettledCurrentStream = isSameStreamErrorRecoveryRun(
     locallySettledRun,
@@ -3991,29 +4580,47 @@ export function useThreadStream({
     : [];
 
   const stopCurrentStream = useCallback(async () => {
-    const owner = streamOwnerSnapshotRef.current;
+    const owner = getCurrentRuntimeOwner();
     const stopThreadId = owner?.threadId ?? streamThreadIdRef.current;
     const stopRunId = owner?.runId ?? streamRunIdRef.current;
+    if (isDeletedThreadTombstoned(stopThreadId)) {
+      return;
+    }
     const cancellation = beginLocalRunCancellation({
       queryClient,
       threadId: stopThreadId,
       runId: stopRunId,
     });
-    const ownsCurrentStream = shouldTreatTerminalEventAsCurrentStream(
-      stopThreadId,
-      stopRunId,
-      streamThreadIdRef.current,
-      streamRunIdRef.current,
-    );
+    const ownsCurrentStream = isCurrentThreadRuntimeOwnerEvent({
+      eventThreadId: stopThreadId,
+      eventRunId: stopRunId,
+      currentOwner: owner,
+      requireEventThreadId: true,
+      requireEventRunId: true,
+    });
+    const ownsCancellationNow = () =>
+      Boolean(
+        cancellation &&
+        isCurrentThreadRuntimeOwnerEvent({
+          eventThreadId: cancellation.threadId,
+          eventRunId: cancellation.runId,
+          eventRuntimeOwnerId: owner?.runtimeOwnerId,
+          currentOwner: getCurrentRuntimeOwner(),
+          requireEventThreadId: true,
+          requireEventRunId: true,
+        }),
+      );
 
     if (cancellation && ownsCurrentStream) {
-      streamFinishedRef.current = true;
       activeSendRequestRef.current = null;
       sendInFlightRef.current = false;
-      setStreamErrorRecoveryRun(null);
-      setLocallySettledRun(cancellation);
+      setStreamErrorRecoveryRun(cancellation);
+      setLocallySettledRun(null);
       releaseStreamClientThreadId(cancellation.threadId);
-      setQueueReleaseVersion((version) => version + 1);
+    }
+
+    if (cancellation) {
+      clearReconnectRun(cancellation.threadId, cancellation.runId);
     }
 
     try {
@@ -4022,21 +4629,86 @@ export function useThreadStream({
       if (!cancellation) {
         throw error;
       }
-    } finally {
-      if (cancellation) {
-        finishLocalRunCancellation({
+    }
+
+    if (!cancellation) {
+      return;
+    }
+
+    let cancelResult: { status: number; detail?: string } | null = null;
+    try {
+      cancelResult = await requestThreadRunCancel({
+        threadId: cancellation.threadId,
+        runId: cancellation.runId,
+      });
+    } catch (error) {
+      if (ownsCancellationNow()) {
+        keepRunCancellationRecovering({
           queryClient,
           threadId: cancellation.threadId,
           runId: cancellation.runId,
+          isMock,
           settleRunSubtasks,
         });
-        refreshHistoryRuns({
-          threadId: cancellation.threadId,
-          runIds: [cancellation.runId],
-        });
+        setStreamErrorRecoveryRun(cancellation);
+        toast.error(getStreamErrorMessage(error));
       }
+      return;
     }
+
+    if (!ownsCancellationNow()) {
+      return;
+    }
+
+    if (cancelResult.status === 204 || cancelResult.status === 409) {
+      const reconciliation = await reconcileRunCancellationFromAuthority({
+        queryClient,
+        threadId: cancellation.threadId,
+        runId: cancellation.runId,
+        isMock,
+        settleRunSubtasks,
+      });
+      if (!ownsCancellationNow()) {
+        return;
+      }
+      if (reconciliation === "terminal") {
+        streamFinishedRef.current = true;
+        setStreamErrorRecoveryRun(null);
+        setLocallySettledRun(null);
+        setQueueReleaseVersion((version) => version + 1);
+      } else {
+        keepRunCancellationRecovering({
+          queryClient,
+          threadId: cancellation.threadId,
+          runId: cancellation.runId,
+          isMock,
+          settleRunSubtasks,
+        });
+        setStreamErrorRecoveryRun(cancellation);
+        if (cancelResult.status === 409 && reconciliation === "unknown") {
+          toast.error(
+            cancelResult.detail ?? "Run cancellation requires recovery.",
+          );
+        }
+      }
+    } else {
+      keepRunCancellationRecovering({
+        queryClient,
+        threadId: cancellation.threadId,
+        runId: cancellation.runId,
+        isMock,
+        settleRunSubtasks,
+      });
+      setStreamErrorRecoveryRun(cancellation);
+    }
+
+    refreshHistoryRuns({
+      threadId: cancellation.threadId,
+      runIds: [cancellation.runId],
+    });
   }, [
+    getCurrentRuntimeOwner,
+    isMock,
     queryClient,
     refreshHistoryRuns,
     releaseStreamClientThreadId,
@@ -4448,6 +5120,9 @@ export function useThreadHistory(
         }
 
         const requestThreadId = threadIdRef.current;
+        if (isDeletedThreadTombstoned(requestThreadId)) {
+          return;
+        }
         loadingRunIdRef.current = run.run_id;
         const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
         const url = buildRunMessagesUrl(
@@ -4468,6 +5143,7 @@ export function useThreadHistory(
         if (
           loadGenerationRef.current !== loadGeneration ||
           threadIdRef.current !== requestThreadId ||
+          isDeletedThreadTombstoned(requestThreadId) ||
           !runsRef.current.some(
             (currentRun) => currentRun.run_id === run.run_id,
           )
@@ -4544,7 +5220,11 @@ export function useThreadHistory(
 
   useEffect(() => {
     const data = snapshot.data;
-    if (!enabled || data?.thread_id !== threadId) {
+    if (
+      !enabled ||
+      data?.thread_id !== threadId ||
+      isDeletedThreadTombstoned(threadId)
+    ) {
       return;
     }
 
@@ -4904,10 +5584,11 @@ function isDeletedThreadClientQueryKey(
   if (queryKey[0] === "thread-context-usage" && queryKey[1] === threadId) {
     return true;
   }
+  const deletedThreadUploadsKey = uploadListQueryKey(threadId);
   if (
-    queryKey[0] === "uploads" &&
-    queryKey[1] === "list" &&
-    queryKey[2] === threadId
+    queryKey[0] === deletedThreadUploadsKey[0] &&
+    queryKey[1] === deletedThreadUploadsKey[1] &&
+    queryKey[2] === deletedThreadUploadsKey[2]
   ) {
     return true;
   }
@@ -5089,22 +5770,7 @@ export function useDeleteThread() {
       threadId: string;
       onRemoteDeleted?: () => void;
     }) => {
-      await apiClient.threads.delete(threadId);
-      onRemoteDeleted?.();
-
-      const response = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
-        {
-          method: "DELETE",
-        },
-      );
-
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ detail: "Failed to delete local thread data." }));
-        throw new Error(error.detail ?? "Failed to delete local thread data.");
-      }
+      await deleteThreadRemote({ threadId, apiClient, onRemoteDeleted });
     },
     onSuccess(_, { threadId }) {
       clearDeletedThreadClientState(queryClient, threadId, {

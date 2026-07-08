@@ -402,6 +402,7 @@ export default function ChatPage() {
                     )}
                     isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
+                    composerSessionId={runtimeKey}
                     autoFocus={isWelcomeMode}
                     status={
                       thread.error

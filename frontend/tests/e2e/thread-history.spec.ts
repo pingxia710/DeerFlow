@@ -322,14 +322,15 @@ test.describe("Thread history", () => {
               content: [
                 {
                   type: "text",
-                  text: `请严格执行：\n1. 使用 write_file 创建 /mnt/user-data/outputs/shared.svg，内容包含 ${SVG_PROMPT_MARKER}\n2. 最终回复只输出 Markdown 图片。`,
+                  text: `请严格执行：\n1. 使用 write_file 创建 /Users/pingxia/projects/deer-flow/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e403dce5-e87d-44c3-886a-4294b3aced0b/user-data/outputs/shared.svg，内容包含 ${SVG_PROMPT_MARKER}\n2. 最终回复只输出 Markdown 图片。`,
                 },
               ],
             },
             {
               type: "ai",
               id: "msg-ai-svg-prompt",
-              content: "![shared artifact](/mnt/user-data/outputs/shared.svg)",
+              content:
+                "![shared artifact](/Users/pingxia/projects/deer-flow/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/e403dce5-e87d-44c3-886a-4294b3aced0b/user-data/outputs/shared.svg)",
             },
           ],
         },
@@ -347,6 +348,97 @@ test.describe("Thread history", () => {
     await page.waitForURL("**/workspace/chats/new");
 
     await expect(page.getByText(SVG_PROMPT_MARKER)).toBeHidden();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  });
+
+  test("deleting the active streaming chat ignores late stream events", async ({
+    page,
+  }) => {
+    const lateMarker = "DELETED-THREAD-LATE-STREAM-MUST-NOT-RETURN";
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let resolveFulfilled!: () => void;
+    const streamFulfilled = new Promise<void>((resolve) => {
+      resolveFulfilled = resolve;
+    });
+
+    mockLangGraphAPI(page);
+
+    const delayedStream = async (route: Route) => {
+      await streamReleased;
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: "00000000-0000-0000-0000-000000000780",
+            thread_id: MOCK_THREAD_ID,
+          },
+        },
+        {
+          event: "values",
+          data: {
+            messages: [
+              {
+                type: "human",
+                id: "msg-human-deleted-late-stream",
+                content: [{ type: "text", text: lateMarker }],
+              },
+              {
+                type: "ai",
+                id: "msg-ai-deleted-late-stream",
+                content: `Late answer containing ${lateMarker}`,
+              },
+            ],
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+      resolveFulfilled();
+    };
+
+    await page.route("**/api/langgraph/runs/stream", delayedStream);
+    await page.route("**/api/langgraph/threads/*/runs/stream", delayedStream);
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(lateMarker);
+    await textarea.press("Enter");
+    await expect(page.getByText(lateMarker)).toBeVisible();
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const streamingThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "New Chat",
+      })
+      .first();
+    await expect(streamingThreadItem).toBeVisible();
+    await streamingThreadItem.hover();
+    await streamingThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page.waitForURL("**/workspace/chats/new");
+    await expect(page.getByText(lateMarker)).toHaveCount(0);
+
+    releaseStream();
+    await streamFulfilled;
+
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(page.getByText(lateMarker)).toHaveCount(0);
+    await expect(
+      sidebar.locator(`a[href='/workspace/chats/${MOCK_THREAD_ID}']`),
+    ).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });
 

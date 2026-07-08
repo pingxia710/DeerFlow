@@ -13,6 +13,10 @@ import {
   type UploadResponse,
 } from "./api";
 
+export function uploadListQueryKey(threadId?: string | null) {
+  return ["uploads", "list", threadId] as const;
+}
+
 /**
  * Hook to upload files
  */
@@ -24,7 +28,7 @@ export function useUploadFiles(threadId: string) {
     onSuccess: () => {
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: ["uploads", "list", threadId],
+        queryKey: uploadListQueryKey(threadId),
       });
     },
   });
@@ -35,7 +39,7 @@ export function useUploadFiles(threadId: string) {
  */
 export function useUploadedFiles(threadId: string) {
   return useQuery({
-    queryKey: ["uploads", "list", threadId],
+    queryKey: uploadListQueryKey(threadId),
     queryFn: () => listUploadedFiles(threadId),
     enabled: !!threadId,
   });
@@ -52,7 +56,7 @@ export function useDeleteUploadedFile(threadId: string) {
     onSuccess: () => {
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: ["uploads", "list", threadId],
+        queryKey: uploadListQueryKey(threadId),
       });
     },
   });

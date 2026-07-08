@@ -1,5 +1,6 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
+import { uploadListQueryKey } from "@/core/uploads/hooks";
 import {
   type PromptInputFilePart,
   promptInputFilePartToFile,
@@ -12,6 +13,17 @@ afterEach(() => {
 
 test("exports the prompt-input file conversion helper", () => {
   expect(typeof promptInputFilePartToFile).toBe("function");
+});
+
+test("upload list query key includes the thread boundary", () => {
+  expect(uploadListQueryKey("thread-a")).toEqual([
+    "uploads",
+    "list",
+    "thread-a",
+  ]);
+  expect(uploadListQueryKey("thread-a")).not.toEqual(
+    uploadListQueryKey("thread-b"),
+  );
 });
 
 test("reuses the original File when a prompt attachment already has one", async () => {

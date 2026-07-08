@@ -89,7 +89,9 @@ import {
 
 import {
   getFollowupSuggestionsErrorAction,
+  getPromptInputComposerKey,
   shouldClearPromptInputForThreadChange,
+  shouldApplyPromptInputSubmitContinuation,
 } from "./input-box-state";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
@@ -193,6 +195,7 @@ export function InputBox({
   extraHeader,
   isWelcomeMode,
   threadId,
+  composerSessionId,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -220,6 +223,7 @@ export function InputBox({
    */
   isWelcomeMode?: boolean;
   threadId: string;
+  composerSessionId?: string | null;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -248,7 +252,14 @@ export function InputBox({
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerKey = useMemo(
+    () => getPromptInputComposerKey({ threadId, composerSessionId }),
+    [composerSessionId, threadId],
+  );
+  const composerKeyRef = useRef(composerKey);
+  composerKeyRef.current = composerKey;
   const previousThreadIdRef = useRef(lastPromptInputThreadId ?? threadId);
+  const previousComposerKeyRef = useRef(composerKey);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -353,18 +364,19 @@ export function InputBox({
     setFollowupsHidden(false);
     setFollowupsLoading(false);
     setPendingSuggestion(null);
-    if (
+    const shouldClear =
       shouldClearPromptInputForThreadChange(
         previousThreadIdRef.current,
         threadId,
-      )
-    ) {
+      ) || previousComposerKeyRef.current !== composerKey;
+    if (shouldClear) {
       previousThreadIdRef.current = threadId;
+      previousComposerKeyRef.current = composerKey;
       clearPromptInput();
       clearAttachments();
     }
     lastPromptInputThreadId = threadId;
-  }, [clearAttachments, clearPromptInput, threadId]);
+  }, [clearAttachments, clearPromptInput, composerKey, threadId]);
 
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
@@ -546,6 +558,14 @@ export function InputBox({
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+      const submitComposerKey = composerKey;
+      const submitIfCurrent = () =>
+        shouldApplyPromptInputSubmitContinuation(
+          composerKeyRef.current,
+          submitComposerKey,
+        )
+          ? onSubmit?.(message)
+          : undefined;
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
@@ -560,14 +580,15 @@ export function InputBox({
         });
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+            Promise.resolve(submitIfCurrent()).then(resolve).catch(reject);
           }, 0);
         });
       }
 
-      return onSubmit?.(message);
+      return submitIfCurrent();
     },
     [
+      composerKey,
       context,
       onContextChange,
       onSubmit,

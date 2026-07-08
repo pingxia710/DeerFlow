@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useState,
   type Dispatch,
   type ReactNode,
@@ -18,12 +19,15 @@ export interface SubtaskContextValue {
 export type SubtaskUpdate = Partial<Subtask> & {
   id: string;
   threadId?: string | null;
+  runId?: string | null;
+  roundId?: string | null;
   notify?: boolean;
 };
 
 export type RunTerminalSubtaskUpdate = {
   threadId: string;
   runId: string;
+  roundId?: string | null;
   status: string;
   terminalReason?: string;
 };
@@ -34,6 +38,8 @@ export type SubtaskStorageKeyInput = {
   runId?: string | null;
   roundId?: string | null;
 };
+
+export const SUBTASK_NO_ROUND_ID = "__no_round__";
 
 export function getLegacySubtaskStorageKey(
   id: string,
@@ -50,6 +56,16 @@ function normalizeSubtaskStorageKeyInput(
   threadId?: string | null,
 ): SubtaskStorageKeyInput {
   return typeof input === "string" ? { id: input, threadId } : input;
+}
+
+export function normalizeSubtaskRoundId(roundId?: string | null) {
+  return typeof roundId === "string" && roundId.length > 0
+    ? roundId
+    : SUBTASK_NO_ROUND_ID;
+}
+
+function getLegacyRunSubtaskStorageKey(input: SubtaskStorageKeyInput) {
+  return JSON.stringify(["subtask", input.threadId, input.runId, input.id]);
 }
 
 export function getSubtaskStorageKey(input: SubtaskStorageKeyInput): string;
@@ -69,6 +85,7 @@ export function getSubtaskStorageKey(
     "subtask",
     keyInput.threadId,
     keyInput.runId,
+    normalizeSubtaskRoundId(keyInput.roundId),
     keyInput.id,
   ]);
 }
@@ -76,25 +93,50 @@ export function getSubtaskStorageKey(
 export function getSubtaskLookupKeys(input: SubtaskStorageKeyInput): string[] {
   const storageKey = getSubtaskStorageKey(input);
   if (input.threadId && input.runId) {
-    return [storageKey];
+    return [
+      storageKey,
+      getLegacyRunSubtaskStorageKey(input),
+      getLegacySubtaskStorageKey(input.id, input.threadId),
+      input.id,
+    ].filter((key, index, keys) => keys.indexOf(key) === index);
   }
   const legacyKey = getLegacySubtaskStorageKey(input.id, input.threadId);
-  return storageKey === legacyKey ? [storageKey] : [storageKey, legacyKey];
+  return [storageKey, legacyKey, input.id].filter(
+    (key, index, keys) => keys.indexOf(key) === index,
+  );
 }
 
-function subtaskStorageKeyThreadId(storageKey: string) {
+function parseSubtaskStorageKey(storageKey: string): SubtaskStorageKeyInput {
   try {
     const parts = JSON.parse(storageKey) as unknown;
     if (!Array.isArray(parts)) {
-      return undefined;
+      return { id: storageKey };
     }
     if (parts[0] === "subtask") {
-      return typeof parts[1] === "string" ? parts[1] : undefined;
+      const hasRoundId = typeof parts[4] === "string";
+      return {
+        threadId: typeof parts[1] === "string" ? parts[1] : undefined,
+        runId: typeof parts[2] === "string" ? parts[2] : undefined,
+        roundId:
+          hasRoundId && typeof parts[3] === "string" ? parts[3] : undefined,
+        id: hasRoundId
+          ? parts[4]
+          : typeof parts[3] === "string"
+            ? parts[3]
+            : storageKey,
+      };
     }
-    return typeof parts[0] === "string" ? parts[0] : undefined;
+    return {
+      threadId: typeof parts[0] === "string" ? parts[0] : undefined,
+      id: typeof parts[1] === "string" ? parts[1] : storageKey,
+    };
   } catch {
-    return undefined;
+    return { id: storageKey };
   }
+}
+
+function subtaskStorageKeyThreadId(storageKey: string) {
+  return parseSubtaskStorageKey(storageKey).threadId;
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
@@ -136,11 +178,104 @@ export function useSubtask(
   const keyInput = normalizeSubtaskStorageKeyInput(input, threadId);
   for (const storageKey of getSubtaskLookupKeys(keyInput)) {
     const task = tasks[storageKey];
-    if (task) {
+    if (task && subtaskMatchesInput(task, keyInput)) {
       return task;
     }
   }
   return undefined;
+}
+
+function subtaskIdentity(task: Subtask) {
+  return JSON.stringify([
+    task.threadId ?? "",
+    task.runId ?? "",
+    normalizeSubtaskRoundId(task.roundId),
+    task.id,
+  ]);
+}
+
+function dedupeSubtasks(tasks: Subtask[]) {
+  const byIdentity = new Map<string, Subtask>();
+  for (const task of tasks) {
+    byIdentity.set(subtaskIdentity(task), task);
+  }
+  return [...byIdentity.values()];
+}
+
+function subtaskMatchesInput(task: Subtask, input: SubtaskStorageKeyInput) {
+  if (task.id !== input.id) {
+    return false;
+  }
+  if (input.threadId && task.threadId && task.threadId !== input.threadId) {
+    return false;
+  }
+  if (input.runId && task.runId && task.runId !== input.runId) {
+    return false;
+  }
+  if (
+    input.threadId &&
+    input.runId &&
+    task.roundId &&
+    normalizeSubtaskRoundId(task.roundId) !==
+      normalizeSubtaskRoundId(input.roundId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function selectSubtasksForRun(
+  tasks: Record<string, Subtask>,
+  threadId?: string | null,
+  runId?: string | null,
+  roundId?: string | null,
+): Subtask[] {
+  if (!threadId || !runId) {
+    return [];
+  }
+  const hasRoundFilter = roundId !== undefined;
+  const normalizedRoundId = normalizeSubtaskRoundId(roundId);
+  return dedupeSubtasks(
+    Object.values(tasks).filter(
+      (task) =>
+        task.threadId === threadId &&
+        task.runId === runId &&
+        (!hasRoundFilter ||
+          normalizeSubtaskRoundId(task.roundId) === normalizedRoundId),
+    ),
+  );
+}
+
+export function useSubtasksForRun(
+  threadId?: string | null,
+  runId?: string | null,
+  roundId?: string | null,
+): Subtask[] {
+  const { tasks } = useSubtaskContext();
+  return useMemo(
+    () => selectSubtasksForRun(tasks, threadId, runId, roundId),
+    [tasks, threadId, runId, roundId],
+  );
+}
+
+export function selectSubtasksForThread(
+  tasks: Record<string, Subtask>,
+  threadId?: string | null,
+): Subtask[] {
+  if (!threadId) {
+    return [];
+  }
+  return dedupeSubtasks(
+    Object.values(tasks).filter((task) => task.threadId === threadId),
+  );
+}
+
+export function useSubtasksForThread(threadId?: string | null): Subtask[] {
+  const { tasks } = useSubtaskContext();
+  return useMemo(
+    () => selectSubtasksForThread(tasks, threadId),
+    [tasks, threadId],
+  );
 }
 
 export function mergeSubtaskUpdate(
@@ -244,19 +379,23 @@ function getSubtaskUpdateStorageKey(
   tasks: Record<string, Subtask>,
   task: SubtaskUpdate,
 ) {
+  if (task.threadId && task.runId) {
+    return getSubtaskStorageKey({
+      id: task.id,
+      threadId: task.threadId,
+      runId: task.runId,
+      roundId: task.roundId,
+    });
+  }
+
   if (task.threadId && !task.runId) {
     const matchingStrongKeys = Object.keys(tasks).filter((storageKey) => {
-      try {
-        const parts = JSON.parse(storageKey) as unknown;
-        return (
-          Array.isArray(parts) &&
-          parts[0] === "subtask" &&
-          parts[1] === task.threadId &&
-          parts[3] === task.id
-        );
-      } catch {
-        return false;
-      }
+      const parsed = parseSubtaskStorageKey(storageKey);
+      return (
+        parsed.threadId === task.threadId &&
+        Boolean(parsed.runId) &&
+        parsed.id === task.id
+      );
     });
 
     if (matchingStrongKeys.length === 1) {
@@ -277,14 +416,28 @@ export function applySubtaskUpdateInState(
   task: SubtaskUpdate,
 ) {
   const storageKey = getSubtaskUpdateStorageKey(tasks, task);
-  const previous = tasks[storageKey];
+  const previousKey =
+    getSubtaskLookupKeys({
+      id: task.id,
+      threadId: task.threadId,
+      runId: task.runId,
+      roundId: task.roundId,
+    }).find((key) => {
+      const previousTask = tasks[key];
+      return previousTask && subtaskMatchesInput(previousTask, task);
+    }) ?? storageKey;
+  const previous = tasks[previousKey];
   const next = mergeSubtaskUpdate(previous, task);
 
-  if (!didSubtaskChange(previous, next)) {
+  if (previousKey === storageKey && !didSubtaskChange(previous, next)) {
     return tasks;
   }
 
-  return { ...tasks, [storageKey]: next };
+  const nextTasks = { ...tasks, [storageKey]: next };
+  if (previousKey !== storageKey) {
+    delete nextTasks[previousKey];
+  }
+  return nextTasks;
 }
 
 function runTerminalSubtaskError(status: string, terminalReason?: string) {
@@ -315,7 +468,10 @@ export function settleRunningSubtasksForRun(
     if (
       task.threadId !== terminal.threadId ||
       task.runId !== terminal.runId ||
-      task.status !== "in_progress"
+      task.status !== "in_progress" ||
+      (terminal.roundId &&
+        normalizeSubtaskRoundId(task.roundId) !==
+          normalizeSubtaskRoundId(terminal.roundId))
     ) {
       continue;
     }
@@ -324,6 +480,7 @@ export function settleRunningSubtasksForRun(
       id: task.id,
       threadId: terminal.threadId,
       runId: terminal.runId,
+      ...(task.roundId ? { roundId: task.roundId } : {}),
       status: "failed",
       error: runTerminalSubtaskError(terminal.status, terminal.terminalReason),
       actionResultStatus: terminal.status,

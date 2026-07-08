@@ -112,11 +112,32 @@ async function loadThreadHooksWithRunProbe(
   return import("@/core/threads/hooks");
 }
 
+async function loadThreadHooksWithRunAndFetch(
+  getRun: (threadId: string, runId: string) => Promise<unknown>,
+  fetchImpl: typeof fetch,
+) {
+  rs.resetModules();
+  rs.doMock("@/core/api", () => ({
+    clearReconnectRun: rs.fn(),
+    getAPIClient: () => ({
+      runs: {
+        get: getRun,
+      },
+    }),
+  }));
+  rs.doMock("@/core/api/fetcher", () => ({
+    DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS: 30_000,
+    fetch: fetchImpl,
+  }));
+  return import("@/core/threads/hooks");
+}
+
 afterEach(() => {
   rs.useRealTimers();
   rs.restoreAllMocks();
   rs.unstubAllGlobals();
   rs.doUnmock("@/core/api");
+  rs.doUnmock("@/core/api/fetcher");
   rs.resetModules();
 });
 
@@ -156,8 +177,14 @@ test("isSameSendRequest requires matching request and thread ownership", async (
 });
 
 test("async send ownership rejects stale upload and regenerate continuations after a thread switch", async () => {
-  const { isSameSendRequest } = await import("@/core/threads/hooks");
-  const uploadRequest = { requestId: "send-upload", threadId: "thread-a" };
+  const { isSameSendRequest, shouldApplyUploadContinuation } =
+    await import("@/core/threads/hooks");
+  const uploadRequest = {
+    requestId: "send-upload",
+    threadId: "thread-a",
+    displayThreadId: "thread-a",
+    runtimeOwnerId: "runtime-a",
+  };
   const regenerateRequest = { requestId: "regen-1", threadId: "thread-a" };
 
   expect(isSameSendRequest(null, uploadRequest)).toBe(false);
@@ -172,6 +199,35 @@ test("async send ownership rejects stale upload and regenerate continuations aft
       { requestId: "regen-1", threadId: "thread-b" },
       regenerateRequest,
     ),
+  ).toBe(false);
+  expect(
+    shouldApplyUploadContinuation({
+      activeRequest: uploadRequest,
+      request: uploadRequest,
+      currentViewThreadId: "thread-b",
+      visibleOnly: true,
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyUploadContinuation({
+      activeRequest: uploadRequest,
+      request: uploadRequest,
+      currentViewThreadId: "thread-a",
+      visibleOnly: true,
+    }),
+  ).toBe(true);
+  expect(
+    shouldApplyUploadContinuation({
+      activeRequest: uploadRequest,
+      request: uploadRequest,
+      isDeletedThread: true,
+    }),
+  ).toBe(false);
+  expect(
+    shouldApplyUploadContinuation({
+      activeRequest: { ...uploadRequest, requestId: "next-send" },
+      request: uploadRequest,
+    }),
   ).toBe(false);
 });
 
@@ -634,6 +690,7 @@ test("reconcileTerminalRunHistory refreshes run messages and invalidates runs pl
     threadId: string | null | undefined;
     runIds: string[];
   }> = [];
+  const settled: unknown[] = [];
   client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
   client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
 
@@ -645,6 +702,7 @@ test("reconcileTerminalRunHistory refreshes run messages and invalidates runs pl
         event_type: "run.terminal",
         thread_id: threadId,
         run_id: runId,
+        round_id: "terminal-round",
         status: "success",
         terminal_reason: "success",
       },
@@ -653,10 +711,20 @@ test("reconcileTerminalRunHistory refreshes run messages and invalidates runs pl
           threadId: params?.threadId,
           runIds: [...(params?.runIds ?? [])],
         }),
+      (terminal) => settled.push(terminal),
     ),
   ).toBe(true);
 
   expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
+  expect(settled).toEqual([
+    {
+      threadId,
+      runId,
+      roundId: "terminal-round",
+      status: "success",
+      terminalReason: "success",
+    },
+  ]);
   expect(
     client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
   ).toBe(true);
@@ -937,7 +1005,7 @@ test("shouldTreatTerminalEventAsCurrentStream only releases queue for the owned 
   ).toBe(false);
 });
 
-test("shouldTreatStreamFinishAsCurrentStream accepts same-thread finish without run metadata", async () => {
+test("shouldTreatStreamFinishAsCurrentStream requires run metadata for an owned run", async () => {
   const { shouldTreatStreamFinishAsCurrentStream } =
     await import("@/core/threads/hooks");
 
@@ -948,6 +1016,9 @@ test("shouldTreatStreamFinishAsCurrentStream accepts same-thread finish without 
       "thread-a",
       "run-a",
     ),
+  ).toBe(false);
+  expect(
+    shouldTreatStreamFinishAsCurrentStream("thread-a", null, "thread-a", null),
   ).toBe(true);
   expect(
     shouldTreatStreamFinishAsCurrentStream(
@@ -997,7 +1068,7 @@ test("current stream finish side effects ignore stale thread/run ownership", asy
   ).toBe(true);
 });
 
-test("metadata-less stale finish uses owner snapshot and cannot release B queue", async () => {
+test("metadata-less finish cannot claim an existing run owner", async () => {
   const {
     resolveThreadStreamFinishMeta,
     shouldReleaseQueuedThreadMessage,
@@ -1005,16 +1076,16 @@ test("metadata-less stale finish uses owner snapshot and cannot release B queue"
   } = await import("@/core/threads/hooks");
   const finishMeta = resolveThreadStreamFinishMeta({
     run: null,
-    streamOwner: { threadId: "thread-a", runId: "run-a" },
+    streamOwner: { threadId: "thread-b", runId: "run-b" },
   });
   const staleFinishOwnsCurrent = shouldRunCurrentStreamFinishSideEffects({
-    eventThreadId: finishMeta.threadId,
-    eventRunId: finishMeta.runId,
+    eventThreadId: null,
+    eventRunId: null,
     streamThreadId: "thread-b",
     streamRunId: "run-b",
   });
 
-  expect(finishMeta).toEqual({ threadId: "thread-a", runId: "run-a" });
+  expect(finishMeta).toEqual({ threadId: "thread-b", runId: "run-b" });
   expect(staleFinishOwnsCurrent).toBe(false);
   expect(
     shouldReleaseQueuedThreadMessage({
@@ -1027,24 +1098,59 @@ test("metadata-less stale finish uses owner snapshot and cannot release B queue"
   ).toBe(false);
 });
 
-test("metadata-less current finish is accepted when owner snapshot matches", async () => {
+test("metadata-less finish uses captured stream owner before releasing queue", async () => {
   const {
     resolveThreadStreamFinishMeta,
+    shouldReleaseQueuedThreadMessage,
     shouldRunCurrentStreamFinishSideEffects,
   } = await import("@/core/threads/hooks");
   const finishMeta = resolveThreadStreamFinishMeta({
     run: null,
-    streamOwner: { threadId: "thread-b", runId: "run-b" },
+    streamOwner: { threadId: "thread-a", runId: "run-a" },
   });
+  const finishOwnsCapturedStream = shouldRunCurrentStreamFinishSideEffects({
+    eventThreadId: finishMeta.threadId,
+    eventRunId: finishMeta.runId,
+    streamThreadId: "thread-a",
+    streamRunId: "run-a",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-b",
+  });
+
+  expect(finishOwnsCapturedStream).toBe(true);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: finishOwnsCapturedStream,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "slot-a",
+      currentOwnerId: "slot-a",
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-b",
+    }),
+  ).toBe(true);
+});
+
+test("metadata-less finish is accepted only before a run owner exists", async () => {
+  const { shouldRunCurrentStreamFinishSideEffects } =
+    await import("@/core/threads/hooks");
 
   expect(
     shouldRunCurrentStreamFinishSideEffects({
-      eventThreadId: finishMeta.threadId,
-      eventRunId: finishMeta.runId,
+      eventThreadId: "thread-b",
+      eventRunId: null,
+      streamThreadId: "thread-b",
+      streamRunId: null,
+    }),
+  ).toBe(true);
+  expect(
+    shouldRunCurrentStreamFinishSideEffects({
+      eventThreadId: "thread-b",
+      eventRunId: null,
       streamThreadId: "thread-b",
       streamRunId: "run-b",
     }),
-  ).toBe(true);
+  ).toBe(false);
 });
 
 test("stream title updates use event or stream owner, not current route fallback", async () => {
@@ -1096,6 +1202,15 @@ test("stream title updates use event or stream owner, not current route fallback
       viewThreadId: "thread-b",
       liveMessagesThreadId: "thread-b",
     }),
+  ).toBe(false);
+  expect(
+    shouldApplyStreamTitleUpdate({
+      eventThreadId: "thread-b",
+      streamThreadId: "thread-b",
+      streamRunId: null,
+      viewThreadId: "thread-b",
+      liveMessagesThreadId: "thread-b",
+    }),
   ).toBe(true);
 });
 
@@ -1130,6 +1245,278 @@ test("stale A stream finish/title cannot release B queue or update B title", asy
       streamRunId: "run-b",
       viewThreadId: "thread-b",
       liveMessagesThreadId: "thread-b",
+    }),
+  ).toBe(false);
+});
+
+test("old run finish after new run started does not release new queue or mark the thread idle", async () => {
+  const {
+    shouldReleaseQueuedThreadMessage,
+    shouldRunCurrentStreamFinishSideEffects,
+  } = await import("@/core/threads/hooks");
+  const oldFinishOwnsCurrent = shouldRunCurrentStreamFinishSideEffects({
+    eventThreadId: "thread-a",
+    eventRunId: "run-old",
+    streamThreadId: "thread-a",
+    streamRunId: "run-new",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+
+  expect(oldFinishOwnsCurrent).toBe(false);
+  expect(
+    shouldReleaseQueuedThreadMessage({
+      streamFinished: oldFinishOwnsCurrent,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "slot-a",
+      currentOwnerId: "slot-a",
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-a",
+    }),
+  ).toBe(false);
+});
+
+test("same-thread new run claim requires clearing the previous run owner first", async () => {
+  const { createThreadRuntimeOwnerSnapshot, shouldClaimThreadRuntimeOwner } =
+    await import("@/core/threads/hooks");
+  const previousRunOwner = createThreadRuntimeOwnerSnapshot({
+    threadId: "thread-a",
+    runId: "run-old",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+  const preparedOwner = createThreadRuntimeOwnerSnapshot({
+    threadId: "thread-a",
+    runId: null,
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+
+  expect(
+    shouldClaimThreadRuntimeOwner({
+      eventThreadId: "thread-a",
+      eventRunId: "run-new",
+      currentOwner: previousRunOwner,
+    }),
+  ).toBe(false);
+  expect(
+    shouldClaimThreadRuntimeOwner({
+      eventThreadId: "thread-a",
+      eventRunId: "run-new",
+      currentOwner: preparedOwner,
+    }),
+  ).toBe(true);
+});
+
+test("stale stream error from previous run does not own current recovery UI", async () => {
+  const {
+    createThreadRuntimeOwnerSnapshot,
+    getVisibleThreadError,
+    isCurrentThreadRuntimeOwnerEvent,
+  } = await import("@/core/threads/hooks");
+  const currentOwner = createThreadRuntimeOwnerSnapshot({
+    threadId: "thread-a",
+    runId: "run-new",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+  const staleErrorOwnsCurrentUi = isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId: "thread-a",
+    eventRunId: "run-old",
+    currentOwner,
+    requireEventThreadId: true,
+  });
+  const error = new Error("old stream failed");
+
+  expect(staleErrorOwnsCurrentUi).toBe(false);
+  expect(getVisibleThreadError(error, staleErrorOwnsCurrentUi)).toBe(error);
+});
+
+test("terminal event with mismatched run_id refreshes that run without current stream side effects", async () => {
+  const {
+    reconcileTerminalRunHistory,
+    shouldTreatTerminalEventAsCurrentStream,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "terminal-mismatch-thread";
+  const oldRunId = "run-old";
+  const refreshed: unknown[] = [];
+  const settled: unknown[] = [];
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: threadId, status: "busy", values: {}, metadata: {} }],
+  );
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  const ownsCurrent = shouldTreatTerminalEventAsCurrentStream(
+    threadId,
+    oldRunId,
+    threadId,
+    "run-new",
+  );
+  expect(ownsCurrent).toBe(false);
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: threadId,
+        run_id: oldRunId,
+        status: "success",
+        terminal_reason: "success",
+      },
+      (params) => refreshed.push(params),
+      (terminal) => settled.push(terminal),
+      { applyThreadSideEffects: ownsCurrent },
+    ),
+  ).toBe(true);
+
+  expect(refreshed).toEqual([{ threadId, runIds: [oldRunId] }]);
+  expect(settled).toEqual([]);
+  expect(
+    client.getQueryData<Array<{ status: string }>>(["threads", "search"])?.[0]
+      ?.status,
+  ).toBe("busy");
+});
+
+test("route switch during loading detaches visible live state without dropping background owner", async () => {
+  const {
+    createThreadRuntimeOwnerSnapshot,
+    shouldPreserveRuntimeOwnerOnRouteSwitch,
+    shouldShowLiveThreadState,
+  } = await import("@/core/threads/hooks");
+  const backgroundOwner = createThreadRuntimeOwnerSnapshot({
+    threadId: "thread-a",
+    runId: "run-a",
+    runtimeOwnerId: "slot-a",
+    displayThreadId: "thread-a",
+  });
+
+  expect(
+    shouldPreserveRuntimeOwnerOnRouteSwitch({
+      currentOwner: backgroundOwner,
+      nextDisplayThreadId: "thread-b",
+      streamFinished: false,
+      sendInFlight: false,
+    }),
+  ).toBe(true);
+  expect(shouldShowLiveThreadState("thread-b", "thread-a", "thread-a")).toBe(
+    false,
+  );
+});
+
+test("tombstoned deleted thread ignores late stream, history, probe, and task callbacks", async () => {
+  stubBrowserWindow();
+  const {
+    applyBackgroundRunProbeResult,
+    clearDeletedThreadClientState,
+    getThreadActivitySnapshot,
+    isCurrentThreadRuntimeOwnerEvent,
+    isDeletedThreadTombstoned,
+    markThreadBusyInCaches,
+    markThreadFinished,
+    reconcileTaskEventRunHistory,
+    reconcileTerminalRunHistory,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+    upsertThreadInSearchCache,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "tombstoned-thread";
+  const runId = "late-run";
+  const refreshed: unknown[] = [];
+  const settled: unknown[] = [];
+  client.setQueryData(["threads", "search"], []);
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  clearDeletedThreadClientState(client, threadId);
+  expect(isDeletedThreadTombstoned(threadId)).toBe(true);
+
+  markThreadBusyInCaches(client, threadId);
+  markThreadFinished(threadId);
+  upsertThreadInSearchCache(client, {
+    thread_id: threadId,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    metadata: {},
+    status: "busy",
+    values: { title: "late", messages: [], artifacts: [] },
+    interrupts: {},
+  });
+  expect(
+    applyBackgroundRunProbeResult(client, threadId, runId, "success"),
+  ).toBe(true);
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: threadId,
+        run_id: runId,
+        status: "success",
+        terminal_reason: "success",
+      },
+      (params) => refreshed.push(params),
+      (terminal) => settled.push(terminal),
+    ),
+  ).toBe(true);
+  expect(
+    reconcileTaskEventRunHistory(
+      client,
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "task-late",
+        thread_id: threadId,
+        run_id: runId,
+      },
+      (params) => refreshed.push(params),
+    ),
+  ).toBe(true);
+
+  expect(isCurrentThreadRuntimeOwnerEvent({ currentOwner: null })).toBe(false);
+  expect(client.getQueryData(["threads", "search"])).toEqual([]);
+  expect(client.getQueryData(threadRunsQueryKey(threadId))).toBeUndefined();
+  expect(
+    client.getQueryData(threadRuntimeSnapshotQueryKey(threadId)),
+  ).toBeUndefined();
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  expect(getThreadActivitySnapshot().finished.has(threadId)).toBe(false);
+  expect(refreshed).toEqual([]);
+  expect(settled).toEqual([]);
+});
+
+test("tombstoned deleted thread ignores late upload continuations", async () => {
+  const {
+    clearDeletedThreadClientState,
+    isDeletedThreadTombstoned,
+    shouldApplyUploadContinuation,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const request = {
+    requestId: "send-upload",
+    threadId: "deleted-thread",
+    displayThreadId: "deleted-thread",
+    runtimeOwnerId: "runtime-deleted",
+  };
+
+  clearDeletedThreadClientState(client, request.threadId);
+
+  expect(isDeletedThreadTombstoned(request.threadId)).toBe(true);
+  expect(
+    shouldApplyUploadContinuation({
+      activeRequest: request,
+      request,
+      currentViewThreadId: request.threadId,
+      isDeletedThread: isDeletedThreadTombstoned(request.threadId),
+      visibleOnly: true,
     }),
   ).toBe(false);
 });
@@ -1197,6 +1584,200 @@ test("local stop settlement releases same-run follow-up and refreshes snapshot f
   ).toBe(false);
 });
 
+test("cancel 202 keeps the run recoverable instead of marking interrupted", async () => {
+  const {
+    getThreadActivitySnapshot,
+    keepRunCancellationRecovering,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "cancel-accepted-thread";
+  const runId = "cancel-accepted-run";
+  const settled: unknown[] = [];
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: threadId, status: "running", values: {}, metadata: {} }],
+  );
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(
+    keepRunCancellationRecovering({
+      queryClient: client,
+      threadId,
+      runId,
+      isMock: true,
+      settleRunSubtasks: (terminal) => settled.push(terminal),
+    }),
+  ).toEqual({ threadId, runId });
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+  expect(
+    client.getQueryData<Array<{ status: string }>>(["threads", "search"])?.[0]
+      ?.status,
+  ).toBe("cancelling");
+  expect(settled).toEqual([]);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("cancel 204 settles only after authoritative terminal reconciliation", async () => {
+  const {
+    getThreadActivitySnapshot,
+    keepRunCancellationRecovering,
+    reconcileRunCancellationAuthority,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "cancel-204-thread";
+  const runId = "cancel-204-run";
+  const settled: unknown[] = [];
+
+  keepRunCancellationRecovering({
+    queryClient: client,
+    threadId,
+    runId,
+    isMock: true,
+    settleRunSubtasks: (terminal) => settled.push(terminal),
+  });
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+
+  expect(
+    reconcileRunCancellationAuthority({
+      queryClient: client,
+      threadId,
+      runId,
+      run: {
+        run_id: runId,
+        status: "interrupted",
+        terminal_reason: "user_cancelled",
+      },
+      settleRunSubtasks: (terminal) => settled.push(terminal),
+    }),
+  ).toBe("terminal");
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  expect(settled).toEqual([
+    {
+      threadId,
+      runId,
+      status: "interrupted",
+      terminalReason: "user_cancelled",
+    },
+  ]);
+});
+
+test("cancel 409 with terminal authority clears busy without generic recovery", async () => {
+  const {
+    getThreadActivitySnapshot,
+    keepRunCancellationRecovering,
+    reconcileRunCancellationAuthority,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "cancel-409-terminal-thread";
+  const runId = "cancel-409-terminal-run";
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: threadId, status: "cancelling", values: {}, metadata: {} }],
+  );
+
+  keepRunCancellationRecovering({
+    queryClient: client,
+    threadId,
+    runId,
+    isMock: true,
+  });
+  expect(
+    reconcileRunCancellationAuthority({
+      queryClient: client,
+      threadId,
+      runId,
+      run: { run_id: runId, status: "success" },
+    }),
+  ).toBe("terminal");
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  expect(
+    client.getQueryData<Array<{ status: string }>>(["threads", "search"])?.[0]
+      ?.status,
+  ).toBe("idle");
+});
+
+test("cancel 409 with active authority keeps recoverable busy state", async () => {
+  const { getThreadActivitySnapshot, reconcileRunCancellationAuthority } =
+    await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "cancel-409-active-thread";
+  const runId = "cancel-409-active-run";
+  const settled: unknown[] = [];
+  client.setQueryData(
+    ["threads", "search"],
+    [{ thread_id: threadId, status: "running", values: {}, metadata: {} }],
+  );
+
+  expect(
+    reconcileRunCancellationAuthority({
+      queryClient: client,
+      threadId,
+      runId,
+      run: { run_id: runId, status: "running" },
+      isMock: true,
+      settleRunSubtasks: (terminal) => settled.push(terminal),
+    }),
+  ).toBe("active");
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(true);
+  expect(
+    client.getQueryData<Array<{ status: string }>>(["threads", "search"])?.[0]
+      ?.status,
+  ).toBe("cancelling");
+  expect(settled).toEqual([]);
+});
+
+test("cancel 409 falls back to runtime snapshot when run detail is unavailable", async () => {
+  const threadId = "cancel-snapshot-thread";
+  const runId = "cancel-snapshot-run";
+  const getRun = rs.fn(async () => {
+    throw Object.assign(new Error("HTTP 409"), { status: 409 });
+  });
+  const fetchSnapshot = rs.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          thread_id: threadId,
+          runs: [{ run_id: runId, status: "worker_lost" }],
+          run_messages: [],
+        }),
+        { status: 200 },
+      ),
+  );
+  const {
+    getThreadActivitySnapshot,
+    reconcileRunCancellationFromAuthority,
+    threadRuntimeSnapshotQueryKey,
+  } = await loadThreadHooksWithRunAndFetch(getRun, fetchSnapshot);
+  const client = new QueryClient();
+
+  expect(
+    await reconcileRunCancellationFromAuthority({
+      queryClient: client,
+      threadId,
+      runId,
+      isMock: true,
+    }),
+  ).toBe("terminal");
+
+  expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+  expect(client.getQueryData(threadRuntimeSnapshotQueryKey(threadId))).toEqual({
+    thread_id: threadId,
+    runs: [{ run_id: runId, status: "worker_lost" }],
+    run_messages: [],
+  });
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+});
+
 test("double local stop settlement is idempotent and keeps snapshot fallback invalidated", async () => {
   const {
     finishLocalRunCancellation,
@@ -1258,6 +1839,45 @@ test("stream_recovery_required uses error thread/run owner for snapshot backfill
   ).toBe(true);
 });
 
+test("inactive stream 409 uses snapshot recovery and suppresses normal error toast", async () => {
+  const {
+    applyStreamErrorRecovery,
+    resolveRunStreamRecoveryErrorOwner,
+    shouldShowStreamErrorToast,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const { RunStreamRecoveryRequiredError } = await import("@/core/api");
+  const client = new QueryClient();
+  const threadId = "inactive-stream-thread";
+  const runId = "inactive-stream-run";
+  const error = new RunStreamRecoveryRequiredError({
+    threadId,
+    runId,
+    reason: "inactive_run_stream",
+    status: 409,
+  });
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  const owner = resolveRunStreamRecoveryErrorOwner(
+    error,
+    "visible-thread",
+    "visible-run",
+  );
+  const recoveryRun = applyStreamErrorRecovery({
+    queryClient: client,
+    threadId: owner?.threadId,
+    runId: owner?.runId,
+    isMock: true,
+  });
+
+  expect(recoveryRun).toEqual({ threadId, runId });
+  expect(shouldShowStreamErrorToast(recoveryRun)).toBe(false);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
 test("getVisibleThreadError hides transient stream errors while recovery owns the run", async () => {
   const { getVisibleThreadError } = await import("@/core/threads/hooks");
   const error = new Error("network stream dropped");
@@ -1312,6 +1932,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   } = await import("@/core/threads/hooks");
   const { threadContextUsageQueryKey, threadTokenUsageQueryKey } =
     await import("@/core/threads/token-usage");
+  const { uploadListQueryKey } = await import("@/core/uploads/hooks");
   const { THREAD_MODEL_KEY_PREFIX } = await import("@/core/settings/local");
   const { getThreadModelSnapshot, updateThreadSettings } =
     await import("@/core/settings/store");
@@ -1330,7 +1951,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   client.setQueryData(threadContextUsageQueryKey(threadId), {
     latest: { estimated_tokens: 1 },
   });
-  client.setQueryData(["uploads", "list", threadId], ["stale-upload"]);
+  client.setQueryData(uploadListQueryKey(threadId), ["stale-upload"]);
   client.setQueryData(["thread", threadId, "run", "run-1"], {
     run_id: "run-1",
   });
@@ -1344,7 +1965,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   client.setQueryData(threadRuntimeSnapshotQueryKey(otherThreadId), {
     thread_id: otherThreadId,
   });
-  client.setQueryData(["uploads", "list", otherThreadId], ["other-upload"]);
+  client.setQueryData(uploadListQueryKey(otherThreadId), ["other-upload"]);
   client.setQueryData(["artifact", "report.md", otherThreadId, false], {
     content: "other",
   });
@@ -1366,7 +1987,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   expect(
     client.getQueryData(threadContextUsageQueryKey(threadId)),
   ).toBeUndefined();
-  expect(client.getQueryData(["uploads", "list", threadId])).toBeUndefined();
+  expect(client.getQueryData(uploadListQueryKey(threadId))).toBeUndefined();
   expect(
     client.getQueryData(["thread", threadId, "run", "run-1"]),
   ).toBeUndefined();
@@ -1384,7 +2005,7 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   expect(
     client.getQueryData(threadRuntimeSnapshotQueryKey(otherThreadId)),
   ).toEqual({ thread_id: otherThreadId });
-  expect(client.getQueryData(["uploads", "list", otherThreadId])).toEqual([
+  expect(client.getQueryData(uploadListQueryKey(otherThreadId))).toEqual([
     "other-upload",
   ]);
   expect(
@@ -1394,6 +2015,35 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   expect(storage.getItem(`${THREAD_MODEL_KEY_PREFIX}${threadId}`)).toBeNull();
   expect(getThreadModelSnapshot(threadId)).toBeUndefined();
   expect(clearSubtasksForThread).toHaveBeenCalledWith(threadId);
+});
+
+test("deleteThreadRemote treats direct 404 after SDK delete as idempotent", async () => {
+  const threadId = "double-delete-thread";
+  const sdkDelete = rs.fn(async () => undefined);
+  const fetchDelete = rs.fn(
+    async () => new Response("missing", { status: 404 }),
+  );
+  const onRemoteDeleted = rs.fn();
+  const { deleteThreadRemote } = await loadThreadHooksWithRunAndFetch(
+    async () => ({}),
+    fetchDelete,
+  );
+
+  await expect(
+    deleteThreadRemote({
+      threadId,
+      apiClient: {
+        threads: {
+          delete: sdkDelete,
+        },
+      } as never,
+      onRemoteDeleted,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(sdkDelete).toHaveBeenCalledWith(threadId);
+  expect(fetchDelete).toHaveBeenCalledTimes(1);
+  expect(onRemoteDeleted).toHaveBeenCalledTimes(1);
 });
 
 test("stopBackgroundRunProbesForThread clears same-thread probes only", async () => {
@@ -1508,6 +2158,7 @@ test("applyTaskEventToSubtask preserves event identity across conversation switc
         task_id: "task-1",
         thread_id: "event-thread",
         run_id: "event-run",
+        round_id: "event-round",
       },
       (task) => updates.push(task),
       "current-view-or-stream-thread",
@@ -1519,10 +2170,86 @@ test("applyTaskEventToSubtask preserves event identity across conversation switc
       id: "task-1",
       threadId: "event-thread",
       runId: "event-run",
+      roundId: "event-round",
       notify: true,
       status: "in_progress",
     },
   ]);
+});
+
+test("applyTaskEventToSubtask resolves roundId with stable payload priority", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: SubtaskUpdate[] = [];
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "top-level-round",
+        roundId: "camel-round",
+        content: { round_id: "content-round" },
+        metadata: { round_id: "metadata-round" },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+  expect(updates[0]).toMatchObject({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "metadata-round",
+  });
+
+  updates.length = 0;
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "top-level-round",
+        roundId: "camel-round",
+        content: { round_id: "content-round" },
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+  expect(updates[0]).toMatchObject({ roundId: "content-round" });
+
+  updates.length = 0;
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "top-level-round",
+        roundId: "camel-round",
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+  expect(updates[0]).toMatchObject({ roundId: "top-level-round" });
+
+  updates.length = 0;
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        task_id: "task-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        roundId: "camel-round",
+      },
+      (task) => updates.push(task),
+    ),
+  ).toBe(true);
+  expect(updates[0]).toMatchObject({ roundId: "camel-round" });
 });
 
 test("applyTaskEventToSubtask accepts shared known task event fixtures", async () => {
@@ -1598,6 +2325,7 @@ test("asRunTerminalEvent accepts terminal custom replay without treating it as a
     event_type: "run.terminal",
     thread_id: "thread-1",
     run_id: "run-1",
+    round_id: "round-1",
     status: "success",
     terminal_reason: "success",
   };
@@ -1897,22 +2625,14 @@ test("applyTaskEventToSubtask ignores task_running message payload", async () =>
 
 test("run terminal settles task card after started and running events without task completion", async () => {
   const {
+    applySubtaskUpdateInState,
     getSubtaskStorageKey,
-    mergeSubtaskUpdate,
     settleRunningSubtasksForRun,
   } = await import("@/core/tasks/context");
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   let tasks: Record<string, Subtask> = {};
   const update = (task: SubtaskUpdate) => {
-    const storageKey = getSubtaskStorageKey({
-      id: task.id,
-      threadId: task.threadId,
-      runId: task.runId,
-    });
-    tasks = {
-      ...tasks,
-      [storageKey]: mergeSubtaskUpdate(tasks[storageKey], task),
-    };
+    tasks = applySubtaskUpdateInState(tasks, task);
   };
   const baseEvent = {
     schema_version: TASK_EVENT_CONTRACT.schema_version,
@@ -1969,20 +2689,12 @@ test("run terminal settles task card after started and running events without ta
 });
 
 test("late task events update only their own run-scoped subtask", async () => {
-  const { getSubtaskStorageKey, mergeSubtaskUpdate } =
+  const { applySubtaskUpdateInState, getSubtaskStorageKey } =
     await import("@/core/tasks/context");
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   let tasks: Record<string, Subtask> = {};
   const update = (task: SubtaskUpdate) => {
-    const storageKey = getSubtaskStorageKey({
-      id: task.id,
-      threadId: task.threadId,
-      runId: task.runId,
-    });
-    tasks = {
-      ...tasks,
-      [storageKey]: mergeSubtaskUpdate(tasks[storageKey], task),
-    };
+    tasks = applySubtaskUpdateInState(tasks, task);
   };
   const runAKey = getSubtaskStorageKey({
     id: "shared-task",
@@ -2035,6 +2747,74 @@ test("late task events update only their own run-scoped subtask", async () => {
     runId: "run-b",
     status: "in_progress",
     description: "run B task",
+  });
+});
+
+test("task events update only their own round-scoped subtask", async () => {
+  const { applySubtaskUpdateInState, getSubtaskStorageKey } =
+    await import("@/core/tasks/context");
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  let tasks: Record<string, Subtask> = {};
+  const update = (task: SubtaskUpdate) => {
+    tasks = applySubtaskUpdateInState(tasks, task);
+  };
+  const roundAKey = getSubtaskStorageKey({
+    id: "shared-task",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-a",
+  });
+  const roundBKey = getSubtaskStorageKey({
+    id: "shared-task",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-b",
+  });
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "shared-task",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "round-b",
+        status: "in_progress",
+        description: "round B task",
+        subagent_type: "executor",
+        prompt: "work B",
+      },
+      update,
+    ),
+  ).toBe(true);
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        schema_version: TASK_EVENT_CONTRACT.schema_version,
+        task_id: "shared-task",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "round-a",
+        status: "completed",
+        result_preview: "round A done",
+      },
+      update,
+    ),
+  ).toBe(true);
+
+  expect(tasks[roundAKey]).toMatchObject({
+    runId: "run-1",
+    roundId: "round-a",
+    status: "completed",
+    result: "round A done",
+  });
+  expect(tasks[roundBKey]).toMatchObject({
+    runId: "run-1",
+    roundId: "round-b",
+    status: "in_progress",
+    description: "round B task",
   });
 });
 
@@ -2146,7 +2926,67 @@ test("applyTaskEventRunMessages dedupes legacy task events without seq", async (
     }),
   ]);
   expect([...applied]).toEqual([
-    "run-legacy:thread-1:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
+    "run-legacy:thread-1::task-legacy:task_completed:2024-01-01T00:00:00.000Z",
+  ]);
+});
+
+test("applyTaskEventRunMessages keeps same task id in different rounds distinct without seq", async () => {
+  const { applyTaskEventRunMessages } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+  const applied = new Set<string>();
+  const baseMessage = {
+    run_id: "run-legacy",
+    created_at: "2024-01-01T00:00:00.000Z",
+    metadata: { caller: "task_event" },
+  };
+
+  applyTaskEventRunMessages(
+    [
+      {
+        ...baseMessage,
+        content: {
+          event_type: "task_completed",
+          schema_version: TASK_EVENT_CONTRACT.schema_version,
+          task_id: "task-legacy",
+          thread_id: "thread-1",
+          run_id: "run-legacy",
+          round_id: "round-a",
+          result_preview: "round A",
+        },
+      },
+      {
+        ...baseMessage,
+        content: {
+          event_type: "task_completed",
+          schema_version: TASK_EVENT_CONTRACT.schema_version,
+          task_id: "task-legacy",
+          thread_id: "thread-1",
+          run_id: "run-legacy",
+          round_id: "round-b",
+          result_preview: "round B",
+        },
+      },
+    ] as never,
+    (task) => updates.push(task),
+    "thread-1",
+    applied,
+  );
+
+  expect(updates).toEqual([
+    expect.objectContaining({
+      id: "task-legacy",
+      roundId: "round-a",
+      result: "round A",
+    }),
+    expect.objectContaining({
+      id: "task-legacy",
+      roundId: "round-b",
+      result: "round B",
+    }),
+  ]);
+  expect([...applied].sort()).toEqual([
+    "run-legacy:thread-1:round-a:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
+    "run-legacy:thread-1:round-b:task-legacy:task_completed:2024-01-01T00:00:00.000Z",
   ]);
 });
 
@@ -2396,5 +3236,193 @@ test("mergeSubtaskUpdate does not regress terminal task events back to running",
         notify: true,
       }),
     ).toMatchObject({ status: "failed" });
+  }
+});
+
+test("stream recovery required backfills messages from runtime snapshot", async () => {
+  const {
+    applySnapshotRunMessagePageState,
+    buildVisibleHistoryMessages,
+    getVisibleThreadError,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "snapshot-backfill-thread";
+  const runId = "snapshot-backfill-run";
+  const snapshotMessages = [
+    makeRunMessage(runId, 1, {
+      type: "human",
+      id: "snapshot-backfill-human",
+      content: [{ type: "text", text: "recover my visible prompt" }],
+    } as Message),
+    makeRunMessage(runId, 2, {
+      type: "ai",
+      id: "snapshot-backfill-ai",
+      content: "Recovered visible answer from runtime snapshot",
+    } as Message),
+  ];
+  const loadedRunIds = new Set<string>();
+  const runBeforeSeq = new Map<string, number>();
+
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), {
+    thread_id: threadId,
+    runs: [{ run_id: runId, status: "success" }],
+    run_messages: [{ run_id: runId, data: snapshotMessages, hasMore: false }],
+  });
+  applySnapshotRunMessagePageState(
+    [{ run_id: runId, data: snapshotMessages, hasMore: false }],
+    loadedRunIds,
+    runBeforeSeq,
+  );
+
+  expect(loadedRunIds.has(runId)).toBe(true);
+  expect(runBeforeSeq.has(runId)).toBe(false);
+  expect(
+    buildVisibleHistoryMessages(
+      snapshotMessages,
+      new Set(),
+      [],
+      [{ run_id: runId, status: "success" } as unknown as Run],
+    ).map((message) => message.content),
+  ).toEqual([
+    [{ type: "text", text: "recover my visible prompt" }],
+    "Recovered visible answer from runtime snapshot",
+  ]);
+  expect(
+    getVisibleThreadError(
+      new Error("transient recovery transport error"),
+      true,
+    ),
+  ).toBeUndefined();
+});
+
+test("late terminal event after local cancellation settle is idempotent and keeps thread settled", async () => {
+  const {
+    finishLocalRunCancellation,
+    getThreadActivitySnapshot,
+    reconcileTerminalRunHistory,
+    threadRunsQueryKey,
+    threadRuntimeSnapshotQueryKey,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "late-cancel-thread";
+  const runId = "late-cancel-run";
+  const settled: unknown[] = [];
+  const refreshed: unknown[] = [];
+  client.setQueryData(threadRunsQueryKey(threadId), "cached-runs");
+  client.setQueryData(threadRuntimeSnapshotQueryKey(threadId), "snapshot");
+
+  expect(
+    finishLocalRunCancellation({
+      queryClient: client,
+      threadId,
+      runId,
+      settleRunSubtasks: (terminal) => settled.push(terminal),
+    }),
+  ).toEqual({ threadId, runId });
+
+  expect(
+    reconcileTerminalRunHistory(
+      client,
+      {
+        type: "run.terminal",
+        event_type: "run.terminal",
+        thread_id: threadId,
+        run_id: runId,
+        status: "interrupted",
+        terminal_reason: "user_cancelled",
+      },
+      (params) => refreshed.push(params),
+    ),
+  ).toBe(true);
+
+  expect(getThreadActivitySnapshot().running.has(threadId)).toBe(false);
+  expect(settled).toEqual([
+    {
+      threadId,
+      runId,
+      status: "interrupted",
+      terminalReason: "user_cancelled",
+    },
+  ]);
+  expect(refreshed).toEqual([{ threadId, runIds: [runId] }]);
+  expect(
+    client.getQueryState(threadRunsQueryKey(threadId))?.isInvalidated,
+  ).toBe(true);
+  expect(
+    client.getQueryState(threadRuntimeSnapshotQueryKey(threadId))
+      ?.isInvalidated,
+  ).toBe(true);
+});
+
+test("taskLaneSubtaskUpdate maps completed lane result and duration_ms safely", async () => {
+  const { taskLaneSubtaskUpdate } = await import("@/core/threads/hooks");
+  const base = {
+    thread_id: "thread-lane",
+    run_id: "run-lane",
+    round_id: "round-lane",
+    task_id: "task-lane",
+    role: "researcher",
+    status: "completed",
+    completed_at: "2026-01-01T00:00:01.000Z",
+  };
+
+  expect(
+    taskLaneSubtaskUpdate({
+      ...base,
+      result: "COMPLETED_TASK_RESULT",
+      result_ref: "result-ref",
+      evidence_ref: "evidence-ref",
+      duration_ms: 1234,
+    }),
+  ).toMatchObject({
+    id: "task-lane",
+    threadId: "thread-lane",
+    runId: "run-lane",
+    roundId: "round-lane",
+    status: "completed",
+    result: "COMPLETED_TASK_RESULT",
+    durationMs: 1234,
+    metadata: {
+      refs: {
+        result_ref: "result-ref",
+        evidence_ref: "evidence-ref",
+      },
+    },
+  });
+
+  expect(
+    taskLaneSubtaskUpdate({ ...base, duration_ms: "1234" }),
+  ).not.toHaveProperty("durationMs");
+});
+
+test("applyTaskEventToSubtask maps valid duration_ms and ignores invalid duration_ms", async () => {
+  const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
+  const updates: unknown[] = [];
+  const base = {
+    schema_version: "deerflow.task-event/v1",
+    event_type: "task_completed",
+    task_id: "task-duration",
+    thread_id: "thread-duration",
+    run_id: "run-duration",
+    status: "completed",
+    completed_at: "2026-01-01T00:00:01.000Z",
+  };
+
+  expect(
+    applyTaskEventToSubtask({ ...base, duration_ms: 1234 }, (task) =>
+      updates.push(task),
+    ),
+  ).toBe(true);
+  expect(updates[0]).toMatchObject({ durationMs: 1234 });
+
+  for (const duration_ms of [null, -1, Number.NaN, Infinity, "1234"]) {
+    updates.length = 0;
+    expect(
+      applyTaskEventToSubtask({ ...base, duration_ms }, (task) =>
+        updates.push(task),
+      ),
+    ).toBe(true);
+    expect(updates[0]).not.toHaveProperty("durationMs");
   }
 });

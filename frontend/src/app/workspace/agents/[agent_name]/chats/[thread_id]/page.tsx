@@ -401,6 +401,7 @@ export default function AgentChatPage() {
                   )}
                   isWelcomeMode={isWelcomeMode}
                   threadId={threadId}
+                  composerSessionId={runtimeKey}
                   autoFocus={isWelcomeMode}
                   status={
                     thread.error

@@ -67,29 +67,55 @@ function restoreAnchorTop(
 export function SubtaskCard({
   className,
   runId,
+  roundId,
   taskId,
   threadId,
   isLoading,
 }: {
   className?: string;
   runId: string;
+  roundId?: string | null;
   taskId: string;
   threadId: string;
   isLoading: boolean;
 }) {
   const { t } = useI18n();
-  const { scrollRef, stopScroll } = useStickToBottomContext();
+  const storedTask = useSubtask({ id: taskId, threadId, runId, roundId });
   const task =
-    useSubtask({ id: taskId, threadId, runId }) ??
-    ({
-      id: taskId,
-      threadId,
-      runId,
-      status: "in_progress",
-      subagent_type: "",
-      description: t.subtasks.in_progress,
-      prompt: "",
-    } satisfies Subtask);
+    storedTask ??
+    (isLoading
+      ? ({
+          id: taskId,
+          threadId,
+          runId,
+          ...(roundId ? { roundId } : {}),
+          status: "in_progress",
+          subagent_type: "",
+          description: t.subtasks.in_progress,
+          prompt: "",
+        } satisfies Subtask)
+      : null);
+
+  if (!task) {
+    return null;
+  }
+
+  return (
+    <SubtaskCardBody className={className} isLoading={isLoading} task={task} />
+  );
+}
+
+function SubtaskCardBody({
+  className,
+  isLoading,
+  task,
+}: {
+  className?: string;
+  isLoading: boolean;
+  task: Subtask;
+}) {
+  const { t } = useI18n();
+  const { scrollRef, stopScroll } = useStickToBottomContext();
   const resultPreview = useMemo(
     () => task.result?.replace(/\s+/g, " ").trim() ?? "",
     [task.result],

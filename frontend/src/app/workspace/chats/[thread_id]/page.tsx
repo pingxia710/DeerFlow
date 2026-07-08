@@ -177,6 +177,7 @@ export default function ChatPage() {
     regenerateMessage,
     isUploading,
     isHistoryLoading,
+    historyRuns,
     historyError,
     terminalNotice,
     recoveryStatus,
@@ -343,6 +344,7 @@ export default function ChatPage() {
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
+                  historyRuns={historyRuns}
                   terminalNotice={terminalNotice}
                   recoveryStatus={recoveryStatus}
                   onRetryRecovery={retryRecovery}

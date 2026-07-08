@@ -2023,6 +2023,135 @@ test("stream_recovery_required uses error thread/run owner for snapshot backfill
   ).toBe(true);
 });
 
+test("stream recovery runtime owner uses captured stream owner instead of visible owner", async () => {
+  const {
+    applyStreamErrorRecovery,
+    createThreadRuntimeOwnerSnapshot,
+    resolveStreamErrorRecoveryRuntimeOwnerId,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "background-recovery-thread";
+  const runId = "background-recovery-run";
+
+  const runtimeOwnerId = resolveStreamErrorRecoveryRuntimeOwnerId({
+    eventThreadId: threadId,
+    eventRunId: runId,
+    streamOwner: createThreadRuntimeOwnerSnapshot({
+      threadId,
+      runId,
+      runtimeOwnerId: "slot-a",
+      displayThreadId: threadId,
+    }),
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: "visible-thread-b",
+      runId: "visible-run-b",
+      runtimeOwnerId: "slot-b",
+      displayThreadId: "visible-thread-b",
+    }),
+    errorOwnsCurrentUi: false,
+  });
+
+  expect(runtimeOwnerId).toBe("slot-a");
+  expect(
+    applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId,
+      runtimeOwnerId,
+      isMock: true,
+    }),
+  ).toEqual({ threadId, runId, runtimeOwnerId: "slot-a" });
+});
+
+test("stream recovery runtime owner does not retarget unmatched background errors", async () => {
+  const {
+    applyStreamErrorRecovery,
+    createThreadRuntimeOwnerSnapshot,
+    resolveStreamErrorRecoveryRuntimeOwnerId,
+  } = await import("@/core/threads/hooks");
+  const client = new QueryClient();
+  const threadId = "orphan-recovery-thread";
+  const runId = "orphan-recovery-run";
+
+  const runtimeOwnerId = resolveStreamErrorRecoveryRuntimeOwnerId({
+    eventThreadId: threadId,
+    eventRunId: runId,
+    streamOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: "previous-thread-c",
+      runId: "previous-run-c",
+      runtimeOwnerId: "slot-c",
+      displayThreadId: "previous-thread-c",
+    }),
+    currentOwner: createThreadRuntimeOwnerSnapshot({
+      threadId: "visible-thread-b",
+      runId: "visible-run-b",
+      runtimeOwnerId: "slot-b",
+      displayThreadId: "visible-thread-b",
+    }),
+    errorOwnsCurrentUi: false,
+  });
+
+  expect(runtimeOwnerId).toBeNull();
+  expect(
+    applyStreamErrorRecovery({
+      queryClient: client,
+      threadId,
+      runId,
+      runtimeOwnerId,
+      isMock: true,
+    }),
+  ).toEqual({ threadId, runId });
+});
+
+test("stream recovery runtime owner can fall back to current owner for current-ui errors", async () => {
+  const {
+    createThreadRuntimeOwnerSnapshot,
+    resolveStreamErrorRecoveryRuntimeOwnerId,
+  } = await import("@/core/threads/hooks");
+
+  expect(
+    resolveStreamErrorRecoveryRuntimeOwnerId({
+      eventThreadId: "visible-thread",
+      eventRunId: "visible-run",
+      streamOwner: null,
+      currentOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "visible-thread",
+        runId: "visible-run",
+        runtimeOwnerId: "slot-visible",
+        displayThreadId: "visible-thread",
+      }),
+      errorOwnsCurrentUi: true,
+    }),
+  ).toBe("slot-visible");
+});
+
+test("stream recovery runtime owner keeps captured thread slot before run id is known", async () => {
+  const {
+    createThreadRuntimeOwnerSnapshot,
+    resolveStreamErrorRecoveryRuntimeOwnerId,
+  } = await import("@/core/threads/hooks");
+
+  expect(
+    resolveStreamErrorRecoveryRuntimeOwnerId({
+      eventThreadId: "thread-a",
+      eventRunId: "run-a",
+      streamOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "thread-a",
+        runId: null,
+        runtimeOwnerId: "slot-a",
+        displayThreadId: "thread-a",
+      }),
+      currentOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "thread-b",
+        runId: "run-b",
+        runtimeOwnerId: "slot-b",
+        displayThreadId: "thread-b",
+      }),
+      errorOwnsCurrentUi: false,
+    }),
+  ).toBe("slot-a");
+});
+
 test("inactive stream 409 uses snapshot recovery and suppresses normal error toast", async () => {
   const {
     applyStreamErrorRecovery,

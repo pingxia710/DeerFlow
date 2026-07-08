@@ -2670,6 +2670,50 @@ export function resolveRunStreamRecoveryErrorOwner(
   return threadId && runId ? { threadId, runId } : null;
 }
 
+export function resolveStreamErrorRecoveryRuntimeOwnerId({
+  eventThreadId,
+  eventRunId,
+  streamOwner,
+  currentOwner,
+  errorOwnsCurrentUi,
+}: {
+  eventThreadId: string | null | undefined;
+  eventRunId: string | null | undefined;
+  streamOwner?: ThreadRuntimeOwnerSnapshot | null;
+  currentOwner?: ThreadRuntimeOwnerSnapshot | null;
+  errorOwnsCurrentUi: boolean;
+}) {
+  if (!eventThreadId || !eventRunId) {
+    return null;
+  }
+
+  const streamOwnerMatchesRecoveryEvent = isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId,
+    eventRunId,
+    currentOwner: streamOwner,
+    requireEventThreadId: true,
+    requireEventRunId: Boolean(streamOwner?.runId),
+    allowMissingCurrentRunId: true,
+  });
+  if (streamOwnerMatchesRecoveryEvent) {
+    return streamOwner?.runtimeOwnerId ?? null;
+  }
+
+  const currentOwnerMatchesRecoveryEvent = isCurrentThreadRuntimeOwnerEvent({
+    eventThreadId,
+    eventRunId,
+    currentOwner,
+    requireEventThreadId: true,
+    requireEventRunId: Boolean(currentOwner?.runId),
+    allowMissingCurrentRunId: true,
+  });
+  if (errorOwnsCurrentUi && currentOwnerMatchesRecoveryEvent) {
+    return currentOwner?.runtimeOwnerId ?? null;
+  }
+
+  return null;
+}
+
 export function applyStreamErrorRecovery({
   queryClient,
   threadId,
@@ -3914,11 +3958,18 @@ export function useThreadStream({
       ) {
         handleStreamStart(streamThreadId!, streamRunId!);
       }
+      const recoveryRuntimeOwnerId = resolveStreamErrorRecoveryRuntimeOwnerId({
+        eventThreadId: streamThreadId,
+        eventRunId: streamRunId,
+        streamOwner: streamOwnerSnapshotRef.current,
+        currentOwner,
+        errorOwnsCurrentUi,
+      });
       const recoveryRun = applyStreamErrorRecovery({
         queryClient,
         threadId: streamThreadId,
         runId: streamRunId,
-        runtimeOwnerId: currentOwner.runtimeOwnerId,
+        runtimeOwnerId: recoveryRuntimeOwnerId,
         isMock,
         settleRunSubtasks,
       });
@@ -5001,6 +5052,7 @@ export function useThreadStream({
 
   return {
     thread: mergedThread,
+    historyRuns,
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,

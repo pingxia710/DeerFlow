@@ -334,6 +334,51 @@ test("round-scoped update migrates matching legacy run key", () => {
   });
 });
 
+test("round-scoped terminal update migrates matching no-round running task", () => {
+  const noRoundKey = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+  });
+  const roundKey = getSubtaskStorageKey({
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+  });
+  const running = applySubtaskUpdateInState(
+    {},
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+      startedAt: 1_000,
+    }),
+  );
+  const completed = applySubtaskUpdateInState(
+    running,
+    subtaskFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      roundId: "round-1",
+      status: "completed",
+      result: "done",
+    }),
+  );
+
+  expect(running[noRoundKey]?.status).toBe("in_progress");
+  expect(completed[noRoundKey]).toBeUndefined();
+  expect(Object.keys(completed)).toEqual([roundKey]);
+  expect(completed[roundKey]).toMatchObject({
+    roundId: "round-1",
+    status: "completed",
+    result: "done",
+    startedAt: 1_000,
+  });
+});
+
 test("legacy update without runId updates unique existing run-scoped task without creating legacy duplicate", () => {
   const strongKey = getSubtaskStorageKey({
     id: "task-1",
@@ -663,6 +708,30 @@ test("settleRunningSubtasksForRun with roundId settles only matching round", () 
   expect(
     selectSubtasksForRun(settled, "thread-2", "run-1", "round-1")[0]?.status,
   ).toBe("in_progress");
+});
+
+test("settleRunningSubtasksForRun with roundId also settles no-round running task", () => {
+  const tasks = applySubtaskUpdateInState(
+    {},
+    subtaskUpdateFixture({
+      id: "task-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+    }),
+  );
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+    status: "error",
+  });
+
+  expect(selectSubtasksForRun(settled, "thread-1", "run-1")[0]).toMatchObject({
+    status: "failed",
+    terminalReason: "error",
+  });
 });
 
 test("selectSubtasksForRun and selectSubtasksForThread keep round-scoped task identities", () => {

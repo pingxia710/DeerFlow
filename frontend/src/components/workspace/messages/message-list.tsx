@@ -57,7 +57,10 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
-import { HISTORY_CREATED_AT_KEY } from "@/core/threads/hooks";
+import {
+  HISTORY_CREATED_AT_KEY,
+  isActiveRunStatus,
+} from "@/core/threads/hooks";
 import type {
   ThreadRunTerminalNotice,
   useThreadStream,
@@ -110,6 +113,10 @@ export function getSubtaskCardKey(
 type ThreadRecoveryStatus = ReturnType<
   typeof useThreadStream
 >["recoveryStatus"];
+type MessageListRun = {
+  run_id?: string | null;
+  status?: unknown;
+};
 
 function getMessageHistoryTime(message: Message) {
   const value = message.additional_kwargs?.[HISTORY_CREATED_AT_KEY];
@@ -162,6 +169,106 @@ export function hasTerminalSubtaskForTask(
       normalizeSubtaskRoundId(task.roundId) === normalizedRoundId &&
       isTerminalSubtask(task),
   );
+}
+
+export function isRuntimeOnlySubtaskForActiveTurn(
+  task: Pick<Subtask, "runId" | "roundId" | "startedAt">,
+  activeRunIds: ReadonlySet<string>,
+  activeRoundIdsByRunId: ReadonlyMap<string, ReadonlySet<string>>,
+  turnStartTime: number | null,
+) {
+  if (!task.runId) {
+    return false;
+  }
+  if (activeRunIds.size === 0) {
+    return (
+      turnStartTime !== null &&
+      task.startedAt !== undefined &&
+      task.startedAt >= turnStartTime
+    );
+  }
+  if (!activeRunIds.has(task.runId)) {
+    return false;
+  }
+  const activeRoundIds = activeRoundIdsByRunId.get(task.runId);
+  return (
+    !activeRoundIds ||
+    activeRoundIds.size === 0 ||
+    !task.roundId ||
+    activeRoundIds.has(normalizeSubtaskRoundId(task.roundId))
+  );
+}
+
+export function isInferredRunningSubtaskVisible({
+  runId,
+  startedAt,
+  groupIsLoading,
+  activeRunIds,
+  turnStartTime,
+}: {
+  runId?: string | null;
+  startedAt?: number;
+  groupIsLoading: boolean;
+  activeRunIds: ReadonlySet<string>;
+  turnStartTime: number | null;
+}) {
+  if (!runId) {
+    return false;
+  }
+  if (activeRunIds.has(runId)) {
+    return true;
+  }
+  if (!groupIsLoading) {
+    return false;
+  }
+  if (startedAt === undefined) {
+    return true;
+  }
+  return turnStartTime !== null && startedAt >= turnStartTime;
+}
+
+export function getActiveTurnSubtaskScope(
+  groupedMessages: ReturnType<typeof getMessageGroups>,
+) {
+  const runIds = new Set<string>();
+  const roundIdsByRunId = new Map<string, Set<string>>();
+
+  for (
+    let groupIndex = groupedMessages.length - 1;
+    groupIndex >= 0;
+    groupIndex--
+  ) {
+    const group = groupedMessages[groupIndex];
+    if (!group || group.type === "human") {
+      break;
+    }
+    for (
+      let messageIndex = group.messages.length - 1;
+      messageIndex >= 0;
+      messageIndex--
+    ) {
+      const message = group.messages[messageIndex];
+      if (!message) {
+        continue;
+      }
+      const runId = getMessageRunId(message);
+      if (!runId) {
+        continue;
+      }
+      runIds.add(runId);
+      const roundId = getMessageRoundId(message);
+      if (roundId) {
+        let roundIds = roundIdsByRunId.get(runId);
+        if (!roundIds) {
+          roundIds = new Set<string>();
+          roundIdsByRunId.set(runId, roundIds);
+        }
+        roundIds.add(normalizeSubtaskRoundId(roundId));
+      }
+    }
+  }
+
+  return { runIds, roundIdsByRunId };
 }
 
 function getMessagesHistoryStartTime(messages: Message[]) {
@@ -342,6 +449,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  historyRuns = [],
   terminalNotice,
   recoveryStatus,
   onRetryRecovery,
@@ -359,6 +467,7 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  historyRuns?: ReadonlyArray<MessageListRun>;
   terminalNotice?: ThreadRunTerminalNotice | null;
   recoveryStatus?: ThreadRecoveryStatus;
   onRetryRecovery?: () => void;
@@ -403,6 +512,25 @@ export function MessageList({
   const updateSubtask = useUpdateSubtask();
   const contextSubtasks = useSubtasksForThread(threadId);
   const lastGroupIndex = groupedMessages.length - 1;
+  const activeHistoryRunIds = useMemo(() => {
+    return new Set(
+      historyRuns
+        .filter((run) => isActiveRunStatus(run.status))
+        .map((run) => run.run_id)
+        .filter((runId): runId is string => Boolean(runId)),
+    );
+  }, [historyRuns]);
+  const activeTurnSubtaskScope = useMemo(
+    () => getActiveTurnSubtaskScope(groupedMessages),
+    [groupedMessages],
+  );
+  const activeTurnStartTime = useMemo(() => {
+    return (
+      getMessagesHistoryStartTime(
+        groupedMessages[lastGroupIndex]?.messages ?? [],
+      ) ?? turnStartTime
+    );
+  }, [groupedMessages, lastGroupIndex, turnStartTime]);
   const subtaskUpdates = useMemo<SubtaskUpdate[]>(() => {
     const updates: SubtaskUpdate[] = [];
     for (const [groupIndex, group] of groupedMessages.entries()) {
@@ -439,6 +567,18 @@ export function MessageList({
               continue;
             }
             const startedAt = getMessageHistoryTime(message);
+            if (
+              status === "in_progress" &&
+              !isInferredRunningSubtaskVisible({
+                runId,
+                startedAt,
+                groupIsLoading,
+                activeRunIds: activeHistoryRunIds,
+                turnStartTime: activeTurnStartTime,
+              })
+            ) {
+              continue;
+            }
             updates.push({
               id: toolCall.id,
               threadId,
@@ -473,6 +613,8 @@ export function MessageList({
     }
     return updates;
   }, [
+    activeHistoryRunIds,
+    activeTurnStartTime,
     groupedMessages,
     contextSubtasks,
     lastGroupIndex,
@@ -508,6 +650,12 @@ export function MessageList({
       (task) =>
         task.status === "in_progress" &&
         Boolean(task.runId) &&
+        isRuntimeOnlySubtaskForActiveTurn(
+          task,
+          activeTurnSubtaskScope.runIds,
+          activeTurnSubtaskScope.roundIdsByRunId,
+          activeTurnStartTime,
+        ) &&
         !hasTerminalSubtaskForTask(contextSubtasks, {
           threadId,
           runId: task.runId,
@@ -522,14 +670,14 @@ export function MessageList({
           ]),
         ),
     );
-  }, [anchoredSubtaskKeys, contextSubtasks, thread.isLoading, threadId]);
-  const activeTurnStartTime = useMemo(() => {
-    return (
-      getMessagesHistoryStartTime(
-        groupedMessages[lastGroupIndex]?.messages ?? [],
-      ) ?? turnStartTime
-    );
-  }, [groupedMessages, lastGroupIndex, turnStartTime]);
+  }, [
+    activeTurnStartTime,
+    activeTurnSubtaskScope,
+    anchoredSubtaskKeys,
+    contextSubtasks,
+    thread.isLoading,
+    threadId,
+  ]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
@@ -877,6 +1025,18 @@ export function MessageList({
                       continue;
                     }
                     const startedAt = getMessageHistoryTime(message);
+                    if (
+                      status === "in_progress" &&
+                      !isInferredRunningSubtaskVisible({
+                        runId,
+                        startedAt,
+                        groupIsLoading,
+                        activeRunIds: activeHistoryRunIds,
+                        turnStartTime: activeTurnStartTime,
+                      })
+                    ) {
+                      continue;
+                    }
                     const task: Subtask = {
                       id: taskId,
                       threadId,
@@ -936,6 +1096,24 @@ export function MessageList({
               const roundId = getMessageRoundId(message);
               if (runId) {
                 for (const taskId of taskIds ?? []) {
+                  const status = derivePendingSubtaskStatus(
+                    taskId,
+                    group.messages,
+                    groupIsLoading,
+                  );
+                  const startedAt = getMessageHistoryTime(message);
+                  if (
+                    status === "in_progress" &&
+                    !isInferredRunningSubtaskVisible({
+                      runId,
+                      startedAt,
+                      groupIsLoading,
+                      activeRunIds: activeHistoryRunIds,
+                      turnStartTime: activeTurnStartTime,
+                    })
+                  ) {
+                    continue;
+                  }
                   if (
                     hasTerminalSubtaskForTask(contextSubtasks, {
                       threadId,

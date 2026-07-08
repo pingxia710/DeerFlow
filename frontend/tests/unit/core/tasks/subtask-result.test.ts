@@ -41,6 +41,14 @@ describe("parseSubtaskResult", () => {
     expect(parsed.result).toBe("investigated and produced a 3-page report");
   });
 
+  it("recognises suggested-receiver success and extracts only the result body", () => {
+    const parsed = parseSubtaskResult(
+      "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
+    );
+    expect(parsed.status).toBe("completed");
+    expect(parsed.result).toBe("reviewed files");
+  });
+
   it("recognises the standard failure prefix", () => {
     const parsed = parseSubtaskResult(
       "Task failed. underlying tool raised RuntimeError",
@@ -280,6 +288,15 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     );
     expect(parsed.status).toBe("completed");
     expect(parsed.result).toBe("investigated and produced a 3-page report");
+  });
+
+  it("back-fills `result` from suggested-receiver success content when structured says completed", () => {
+    const parsed = parseSubtaskResult(
+      "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
+      { [SUBAGENT_STATUS_KEY]: "completed" },
+    );
+    expect(parsed.status).toBe("completed");
+    expect(parsed.result).toBe("reviewed files");
   });
 
   it("back-fills `error` from a wrapped-error body when structured says failed and no subagent_error", () => {

@@ -201,6 +201,7 @@ export default function AgentChatPage() {
     regenerateMessage,
     isUploading,
     isHistoryLoading,
+    historyRuns,
     terminalNotice,
     recoveryStatus,
     retryRecovery,
@@ -346,6 +347,7 @@ export default function AgentChatPage() {
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
+                historyRuns={historyRuns}
                 terminalNotice={terminalNotice}
                 recoveryStatus={recoveryStatus}
                 onRetryRecovery={retryRecovery}

@@ -456,6 +456,7 @@ function shouldEmitRuntimeSnapshot(
     previous.isUploading !== next.isUploading ||
     previous.isHistoryLoading !== next.isHistoryLoading ||
     previous.historyError !== next.historyError ||
+    !areSameHistoryRuns(previous.historyRuns, next.historyRuns) ||
     !areSameTerminalNotice(previous.terminalNotice, next.terminalNotice) ||
     !areSameRecoveryStatus(previous.recoveryStatus, next.recoveryStatus) ||
     previous.hasMoreHistory !== next.hasMoreHistory
@@ -499,6 +500,21 @@ function areSameRuntimeMessage<
     stableStringify(left.content) === stableStringify(right.content) &&
     stableStringify(left.additional_kwargs) ===
       stableStringify(right.additional_kwargs)
+  );
+}
+
+function areSameHistoryRuns(
+  left: ThreadRuntimeSnapshot["historyRuns"] = [],
+  right: ThreadRuntimeSnapshot["historyRuns"] = [],
+) {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every(
+    (run, index) => stableStringify(run) === stableStringify(right[index]),
   );
 }
 
@@ -624,6 +640,7 @@ function createIdleRuntimeSnapshot(
     regenerateMessage: asyncNoop,
     isUploading: false,
     isHistoryLoading: hasSavedThread,
+    historyRuns: [],
     historyError: null,
     terminalNotice: null,
     recoveryStatus: null,

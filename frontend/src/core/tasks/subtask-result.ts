@@ -57,6 +57,8 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
  * rather than dedicated prefixes because the wrapper already produces
  * exactly the right `terminal failed` shape.
  */
+export const SUCCESS_WITH_SUGGESTED_RECEIVER_PREFIX =
+  "Task Succeeded. Suggested next receiver";
 export const SUCCESS_PREFIX = "Task Succeeded. Result:";
 export const FAILURE_PREFIX = "Task failed.";
 export const TIMEOUT_PREFIX = "Task timed out";
@@ -151,6 +153,18 @@ export function derivePendingSubtaskStatus(
 }
 
 function parseFromText(trimmed: string): SubtaskResultUpdate {
+  if (trimmed.startsWith(SUCCESS_WITH_SUGGESTED_RECEIVER_PREFIX)) {
+    const resultMarker = "Result:";
+    const resultIndex = trimmed.indexOf(resultMarker);
+    return {
+      status: "completed",
+      result:
+        resultIndex >= 0
+          ? trimmed.slice(resultIndex + resultMarker.length).trim()
+          : "",
+    };
+  }
+
   if (trimmed.startsWith(SUCCESS_PREFIX)) {
     return {
       status: "completed",

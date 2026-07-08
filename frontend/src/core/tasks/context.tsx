@@ -93,12 +93,19 @@ export function getSubtaskStorageKey(
 export function getSubtaskLookupKeys(input: SubtaskStorageKeyInput): string[] {
   const storageKey = getSubtaskStorageKey(input);
   if (input.threadId && input.runId) {
+    const noRoundKey = input.roundId
+      ? getSubtaskStorageKey({ ...input, roundId: undefined })
+      : undefined;
     return [
       storageKey,
+      noRoundKey,
       getLegacyRunSubtaskStorageKey(input),
       getLegacySubtaskStorageKey(input.id, input.threadId),
       input.id,
-    ].filter((key, index, keys) => keys.indexOf(key) === index);
+    ].filter(
+      (key, index, keys): key is string =>
+        typeof key === "string" && keys.indexOf(key) === index,
+    );
   }
   const legacyKey = getLegacySubtaskStorageKey(input.id, input.threadId);
   return [storageKey, legacyKey, input.id].filter(
@@ -470,6 +477,7 @@ export function settleRunningSubtasksForRun(
       task.runId !== terminal.runId ||
       task.status !== "in_progress" ||
       (terminal.roundId &&
+        task.roundId &&
         normalizeSubtaskRoundId(task.roundId) !==
           normalizeSubtaskRoundId(terminal.roundId))
     ) {

@@ -168,15 +168,15 @@ def _archive_skill_md(data: bytes) -> str:
 
 
 async def fetch_skill_preview(app_config: AppConfig, source_name: str, skill_name: str) -> dict[str, Any]:
-    source, entry = _find_entry(app_config, source_name, skill_name)
+    source, entry = await asyncio.to_thread(_find_entry, app_config, source_name, skill_name)
     if urllib.parse.urlparse(entry.archive_url).scheme in {"http", "https"} and source.trust_level == "community" and not entry.sha256:
         raise ValueError("Community catalog entries must include sha256 before preview or install")
     data = await _read_url_bytes_async(entry.archive_url)
-    actual_sha256 = verify_archive_hash(data, entry.sha256)
-    preview_path = _preview_archive_path(app_config, source_name, entry.name)
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    actual_sha256 = await asyncio.to_thread(verify_archive_hash, data, entry.sha256)
+    preview_path = await asyncio.to_thread(_preview_archive_path, app_config, source_name, entry.name)
+    await asyncio.to_thread(preview_path.parent.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(preview_path.write_bytes, data)
-    skill_md = _archive_skill_md(data)
+    skill_md = await asyncio.to_thread(_archive_skill_md, data)
     scan = await scan_skill_content(skill_md, executable=False, location=f"{entry.name}/{SKILL_MD_FILE}", app_config=app_config)
     scanner_summary = {"decision": scan.decision, "reason": scan.reason}
     return {
@@ -201,8 +201,10 @@ async def install_catalog_skill(app_config: AppConfig, source_name: str, skill_n
             "message": "Skill catalog install requires human approval before local mutation.",
             "scanner_summary": preview["scannerSummary"],
         }
-    result = await get_or_new_skill_storage(app_config=app_config).ainstall_skill_from_archive(preview["previewPath"])
-    get_or_new_skill_storage(app_config=app_config).append_history(
+    storage = await asyncio.to_thread(get_or_new_skill_storage, app_config=app_config)
+    result = await storage.ainstall_skill_from_archive(preview["previewPath"])
+    await asyncio.to_thread(
+        storage.append_history,
         result["skill_name"],
         {
             "action": "catalog_install",

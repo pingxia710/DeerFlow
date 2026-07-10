@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -143,7 +144,7 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
 @require_auth
 async def list_skill_catalog(request: Request, config: AppConfig = Depends(get_config)) -> dict:
     try:
-        return {"skills": list_catalog_entries(config)}
+        return {"skills": await asyncio.to_thread(list_catalog_entries, config)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

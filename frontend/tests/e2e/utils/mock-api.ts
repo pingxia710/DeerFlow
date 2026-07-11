@@ -42,6 +42,7 @@ export type MockAgent = {
   name: string;
   description?: string;
   system_prompt?: string;
+  model?: string | null;
 };
 
 export type MockSkill = {
@@ -198,6 +199,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ connections: [] }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Command Room capability summary. Keep this mocked so an E2E page cannot
+  // accidentally hit a locally running authenticated Gateway and redirect.
+  void page.route("**/api/capabilities", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ command_room_runtime: null }),
       });
     }
     return route.fallback();

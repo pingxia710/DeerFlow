@@ -200,15 +200,17 @@ export function clearThreadModelNames(threadId: string) {
 export function applyThreadModelOverride(
   settings: LocalSettings,
   threadModelName: string | undefined,
+  defaultModelName?: string,
 ): LocalSettings {
-  if (!threadModelName) {
+  const modelName = threadModelName ?? defaultModelName;
+  if (!modelName) {
     return settings;
   }
   return {
     ...settings,
     context: {
       ...settings.context,
-      model_name: threadModelName,
+      model_name: modelName,
     },
   };
 }

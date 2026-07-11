@@ -54,6 +54,27 @@ test("same backend thread keeps chat and agent model overrides isolated", async 
   expect(storage.length).toBe(3);
 });
 
+test("agent default model wins globally saved model until the thread chooses", async () => {
+  const { DEFAULT_LOCAL_SETTINGS, applyThreadModelOverride } =
+    await import("@/core/settings/local");
+  const globallySaved = {
+    ...DEFAULT_LOCAL_SETTINGS,
+    context: {
+      ...DEFAULT_LOCAL_SETTINGS.context,
+      model_name: "gpt-5.5",
+    },
+  };
+
+  expect(
+    applyThreadModelOverride(globallySaved, undefined, "deepseek-command-room")
+      .context.model_name,
+  ).toBe("deepseek-command-room");
+  expect(
+    applyThreadModelOverride(globallySaved, "gpt-5.5", "deepseek-command-room")
+      .context.model_name,
+  ).toBe("gpt-5.5");
+});
+
 test("legacy value migrates deterministically per scope and cannot overwrite scoped value", async () => {
   storage.setItem("deerflow.thread-model.T", "legacy-model");
   const { getThreadModelName, saveThreadModelName } =

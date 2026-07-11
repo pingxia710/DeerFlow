@@ -91,7 +91,11 @@ export default function AgentChatPage() {
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const runtimeScope = `agent:${agent_name}` as const;
-  const [settings, setSettings] = useThreadSettings(runtimeScope, threadId);
+  const [settings, setSettings] = useThreadSettings(
+    runtimeScope,
+    threadId,
+    agent?.model ?? (isCommandRoom ? COMMAND_ROOM_DEFAULT_MODEL : undefined),
+  );
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(

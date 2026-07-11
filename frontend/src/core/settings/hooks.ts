@@ -32,6 +32,7 @@ export function useLocalSettings(): [LocalSettings, LocalSettingsSetter] {
 export function useThreadSettings(
   scope: SettingsScope,
   threadId: string,
+  defaultModelName?: string,
 ): [LocalSettings, LocalSettingsSetter] {
   const baseSettings = useSyncExternalStore(
     subscribe,
@@ -46,8 +47,9 @@ export function useThreadSettings(
   );
 
   const settings = useMemo(
-    () => applyThreadModelOverride(baseSettings, threadModelName),
-    [baseSettings, threadModelName],
+    () =>
+      applyThreadModelOverride(baseSettings, threadModelName, defaultModelName),
+    [baseSettings, defaultModelName, threadModelName],
   );
 
   const setSettings = useCallback<LocalSettingsSetter>(

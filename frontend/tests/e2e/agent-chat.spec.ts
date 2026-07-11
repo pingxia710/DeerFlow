@@ -1,6 +1,7 @@
 import { expect, test, type Route } from "@playwright/test";
 
 import {
+  handleRunStream,
   mockLangGraphAPI,
   MOCK_THREAD_ID,
   MOCK_THREAD_ID_2,
@@ -35,6 +36,76 @@ test.describe("Agent chat", () => {
     // The prompt input textarea should be visible
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("agent model beats the globally saved model until this thread chooses", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        "deerflow.local-settings",
+        JSON.stringify({ context: { model_name: "gpt-5.5" } }),
+      );
+    });
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          name: "command-room",
+          description: "Command Room",
+          model: "deepseek-command-room",
+        },
+      ],
+      models: [
+        {
+          id: "gpt-5.5",
+          name: "gpt-5.5",
+          provider: "OpenAI",
+          model: "gpt-5.5",
+          display_name: "GPT-5.5",
+          supports_thinking: true,
+          supports_reasoning_effort: true,
+        },
+        {
+          id: "deepseek-command-room",
+          name: "deepseek-command-room",
+          provider: "DeepSeek",
+          model: "deepseek-v4-pro",
+          display_name: "DeepSeek V4 Pro",
+          supports_thinking: true,
+        },
+      ],
+    });
+    let submittedModel: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        context?: { model_name?: string };
+      };
+      submittedModel = body.context?.model_name;
+      return handleRunStream(route);
+    });
+
+    const agentResponsePromise = page.waitForResponse((response) =>
+      response.url().endsWith("/api/agents/command-room"),
+    );
+    await page.goto("/workspace/agents/command-room/chats/new");
+    await expect(page).toHaveURL(
+      /\/workspace\/agents\/command-room\/chats\/new$/,
+    );
+    const agentResponse = await agentResponsePromise;
+    await expect(agentResponse.json()).resolves.toMatchObject({
+      model: "deepseek-command-room",
+    });
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByRole("button", { name: /DeepSeek V4 Pro/i }),
+    ).toBeVisible();
+    await textarea.fill("Verify the configured model");
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedModel, { timeout: 10_000 })
+      .toBe("deepseek-command-room");
   });
 
   test("agent chat page shows agent badge", async ({ page }) => {

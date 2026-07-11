@@ -106,6 +106,30 @@ async def test_artifact_provenance_repository_upserts_and_scopes_by_owner(artifa
 
 
 @pytest.mark.anyio
+async def test_artifact_provenance_repository_lists_by_thread_for_legacy_probe(
+    artifact_repo,
+) -> None:
+    await artifact_repo.upsert_many(
+        [
+            {
+                "thread_id": "thread-legacy-artifact",
+                "run_id": "run-1",
+                "virtual_path": "/mnt/user-data/outputs/report.md",
+            }
+        ],
+        user_id=None,
+    )
+
+    rows = await artifact_repo.list_by_thread(
+        "thread-legacy-artifact",
+        user_id=None,
+        limit=1,
+    )
+
+    assert len(rows) == 1
+
+
+@pytest.mark.anyio
 async def test_artifact_provenance_repository_normalizes_ownerless_entries(artifact_repo) -> None:
     assert (
         await artifact_repo.upsert_many(
@@ -124,6 +148,43 @@ async def test_artifact_provenance_repository_normalizes_ownerless_entries(artif
     rows = await artifact_repo.list_by_run("thread-1", "run-1", user_id=None)
 
     assert rows[0]["user_id"] == "default"
+
+
+@pytest.mark.anyio
+async def test_artifact_claim_converges_unique_collision_to_existing_owner(artifact_repo) -> None:
+    entry = {
+        "thread_id": "thread-collision",
+        "run_id": "run-collision",
+        "virtual_path": "/mnt/user-data/outputs/report.md",
+        "source_event_seq": 1,
+        "sha256": "a" * 64,
+    }
+    owner_entry = {**entry, "source_event_seq": 9, "sha256": "b" * 64}
+    assert await artifact_repo.upsert_many([owner_entry], user_id="owner-1") == 1
+    assert await artifact_repo.upsert_many([entry], user_id=None) == 1
+
+    assert await artifact_repo.claim_legacy_by_thread("thread-collision", "owner-1") == 1
+    rows = await artifact_repo.list_by_run("thread-collision", "run-collision", user_id="owner-1")
+    assert len(rows) == 1
+    assert rows[0]["source_event_seq"] == 9
+    assert rows[0]["sha256"] == "b" * 64
+    assert await artifact_repo.list_by_run("thread-collision", "run-collision", user_id="default") == []
+    assert await artifact_repo.claim_legacy_by_thread("thread-collision", "owner-1") == 0
+
+
+@pytest.mark.anyio
+async def test_artifact_claim_to_default_owner_does_not_delete_target(artifact_repo) -> None:
+    entry = {
+        "thread_id": "thread-default",
+        "run_id": "run-default",
+        "virtual_path": "/mnt/user-data/outputs/report.md",
+        "source_event_seq": 1,
+    }
+    assert await artifact_repo.upsert_many([entry], user_id=None) == 1
+
+    assert await artifact_repo.claim_legacy_by_thread("thread-default", "default") == 0
+    rows = await artifact_repo.list_by_run("thread-default", "run-default", user_id="default")
+    assert len(rows) == 1
 
 
 def test_build_artifact_index_from_task_event_artifact_refs() -> None:
@@ -292,7 +353,11 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
 
     event_store = EventStore()
     app.state.run_event_store = event_store
-    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=_run_record()))
+    app.state.run_manager = SimpleNamespace(
+        get=AsyncMock(return_value=_run_record()),
+        begin_thread_write=AsyncMock(),
+        end_thread_write=AsyncMock(),
+    )
     app.state.artifact_provenance_repo = SimpleNamespace(upsert_many=AsyncMock(return_value=3))
 
     with TestClient(app) as client:
@@ -315,6 +380,8 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
     assert missing_artifact["virtual_path"] == "/mnt/user-data/outputs/missing.bin"
     assert missing_artifact["available"] is False
     assert "sha256" not in missing_artifact
+    app.state.run_manager.begin_thread_write.assert_awaited_once_with("thread-1")
+    app.state.run_manager.end_thread_write.assert_awaited_once_with("thread-1")
     event_store.list_events.assert_awaited_once_with(
         "thread-1",
         "run-1",
@@ -330,3 +397,35 @@ def test_list_run_artifacts_endpoint_returns_runtime_observed_index(tmp_path, mo
         "/mnt/user-data/outputs/missing.bin",
     ]
     assert app.state.artifact_provenance_repo.upsert_many.await_args.kwargs == {"user_id": str(_USER_ID)}
+
+
+def test_artifact_file_metadata_rejects_ancestor_symlink_swap_after_resolution(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import UnsafePathError
+
+    outputs_dir = tmp_path / "owner" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    artifact_path = outputs_dir / "report.md"
+    artifact_path.write_bytes(b"owner artifact")
+
+    outside_dir = tmp_path / "other-owner"
+    outside_dir.mkdir()
+    (outside_dir / "report.md").write_bytes(b"other owner secret")
+
+    def _resolve_then_swap(_thread_id, _virtual_path, **_kwargs):
+        artifact_path.unlink()
+        outputs_dir.rmdir()
+        outputs_dir.symlink_to(outside_dir, target_is_directory=True)
+        return artifact_path
+
+    monkeypatch.setattr(
+        thread_runs,
+        "resolve_thread_virtual_path",
+        _resolve_then_swap,
+    )
+
+    with pytest.raises(UnsafePathError):
+        thread_runs._artifact_file_metadata(
+            "thread-1",
+            "/mnt/user-data/outputs/report.md",
+            user_id="owner",
+        )

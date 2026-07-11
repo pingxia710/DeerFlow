@@ -1,10 +1,12 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
+import asyncio
 import logging
 
 import pytest
 
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaConflictError, ThreadMetaRepository
+from deerflow.persistence.thread_meta.base import LEGACY_CLAIM_COMPLETE_METADATA_KEY
 
 
 @pytest.fixture
@@ -44,6 +46,16 @@ class TestThreadMetaRepository:
     async def test_create_with_metadata(self, repo):
         record = await repo.create("t1", metadata={"key": "value"})
         assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_create_is_same_owner_idempotent_and_rejects_other_owner(self, repo):
+        first = await repo.create("t1", user_id="user1", metadata={"winner": True})
+        same_owner = await repo.create("t1", user_id="user1", metadata={"winner": False})
+
+        assert same_owner == first
+        assert same_owner["metadata"] == {"winner": True}
+        with pytest.raises(ThreadMetaConflictError, match="already in use"):
+            await repo.create("t1", user_id="user2")
 
     @pytest.mark.anyio
     async def test_get_nonexistent(self, repo):
@@ -97,6 +109,21 @@ class TestThreadMetaRepository:
         assert await repo.check_access("t1", "anyone", require_existing=True) is False
 
     @pytest.mark.anyio
+    async def test_deleting_status_is_an_owner_barrier(self, repo):
+        await repo.create("t1", user_id="user1")
+        await repo.update_status("t1", "deleting", user_id="user1")
+
+        assert await repo.check_access("t1", "user1") is False
+        assert await repo.check_access("t1", "user1", require_existing=True) is False
+
+        await repo.update_status("t1", "running", user_id="user1")
+        assert (await repo.get("t1", user_id="user1"))["status"] == "deleting"
+
+        # Explicit migration/repair bypass may release a tombstone.
+        await repo.update_status("t1", "error", user_id=None)
+        assert (await repo.get("t1", user_id="user1"))["status"] == "error"
+
+    @pytest.mark.anyio
     async def test_update_status(self, repo):
         await repo.create("t1")
         await repo.update_status("t1", "busy")
@@ -122,6 +149,16 @@ class TestThreadMetaRepository:
         assert record["metadata"] == {"a": 1, "b": 99, "c": 3}
 
     @pytest.mark.anyio
+    async def test_concurrent_update_metadata_preserves_disjoint_keys(self, repo):
+        await repo.create("t-concurrent", metadata={})
+
+        await asyncio.gather(*(repo.update_metadata("t-concurrent", {f"key-{index}": index}) for index in range(30)))
+
+        record = await repo.get("t-concurrent")
+        assert record is not None
+        assert record["metadata"] == {f"key-{index}": index for index in range(30)}
+
+    @pytest.mark.anyio
     async def test_update_metadata_on_empty(self, repo):
         await repo.create("t1")
         await repo.update_metadata("t1", {"k": "v"})
@@ -144,6 +181,68 @@ class TestThreadMetaRepository:
         assert owner_row["user_id"] == "owner-1"
         assert owner_row["metadata"] == {"source": "channel"}
         assert default_row is None
+
+    @pytest.mark.anyio
+    async def test_claim_legacy_owner_is_atomic_and_same_owner_idempotent(self, repo):
+        await repo.create("t-legacy-claim", user_id="default")
+
+        assert await repo.claim_legacy_owner("t-legacy-claim", "owner-1") is True
+        assert await repo.claim_legacy_owner("t-legacy-claim", "owner-1") is True
+        assert await repo.claim_legacy_owner("t-legacy-claim", "owner-2") is False
+        assert await repo.is_legacy_claim_complete("t-legacy-claim", "owner-1") is False
+        assert await repo.mark_legacy_claim_complete("t-legacy-claim", "owner-1") is True
+        assert await repo.is_legacy_claim_complete("t-legacy-claim", "owner-1") is True
+
+        row = await repo.get("t-legacy-claim", user_id=None)
+        assert row is not None
+        assert row["user_id"] == "owner-1"
+        assert row["metadata"] == {}
+
+    @pytest.mark.anyio
+    async def test_client_metadata_cannot_forge_or_clear_legacy_claim_marker(self, repo):
+        created = await repo.create(
+            "t-marker",
+            user_id="owner-1",
+            metadata={LEGACY_CLAIM_COMPLETE_METADATA_KEY: "owner-1", "safe": 1},
+        )
+        assert created["metadata"] == {"safe": 1}
+        assert await repo.is_legacy_claim_complete("t-marker", "owner-1") is False
+
+        assert await repo.mark_legacy_claim_complete("t-marker", "owner-1") is True
+        await repo.update_metadata(
+            "t-marker",
+            {LEGACY_CLAIM_COMPLETE_METADATA_KEY: "attacker", "next": 2},
+            user_id="owner-1",
+        )
+
+        row = await repo.get("t-marker", user_id="owner-1")
+        assert row is not None
+        assert row["metadata"] == {"safe": 1, "next": 2}
+        assert await repo.is_legacy_claim_complete("t-marker", "owner-1") is True
+
+    @pytest.mark.anyio
+    async def test_deleting_thread_cannot_be_marked_as_claim_complete(self, repo):
+        await repo.create("t-deleting-marker", user_id="owner-1")
+        await repo.update_status(
+            "t-deleting-marker",
+            "deleting",
+            user_id="owner-1",
+        )
+
+        assert (
+            await repo.mark_legacy_claim_complete(
+                "t-deleting-marker",
+                "owner-1",
+            )
+            is False
+        )
+        assert (
+            await repo.is_legacy_claim_complete(
+                "t-deleting-marker",
+                "owner-1",
+            )
+            is False
+        )
 
     # --- search with metadata filter (SQL push-down) ---
 

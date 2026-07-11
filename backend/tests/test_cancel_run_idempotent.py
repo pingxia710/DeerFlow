@@ -154,6 +154,12 @@ class TestStreamExistingRunIdempotentCancel:
         )
 
         class _RunManager:
+            async def begin_thread_write(self, _thread_id: str) -> None:
+                return None
+
+            async def end_thread_write(self, _thread_id: str) -> None:
+                return None
+
             async def get(self, _run_id: str, *, user_id=None):
                 return record
 

@@ -3,9 +3,39 @@
 import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { shouldApplyVisibleThreadEffect } from "@/core/threads/effect-policy";
 import { uuid } from "@/core/utils/uuid";
 
 export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
+
+let pendingThreadChatPathname: string | null = null;
+
+export function markThreadChatNavigationIntent(pathname: string) {
+  pendingThreadChatPathname = pathname;
+}
+
+export function clearThreadChatNavigationIntent(pathname: string) {
+  if (pendingThreadChatPathname === pathname) {
+    pendingThreadChatPathname = null;
+  }
+}
+
+export function resetThreadChatNavigationIntent() {
+  pendingThreadChatPathname = null;
+}
+
+export function threadIdFromPendingNavigationIntent() {
+  return pendingThreadChatPathname
+    ? threadIdFromCommittedPathname(pendingThreadChatPathname)
+    : null;
+}
+
+export function pendingNavigationAllowsThreadStart(createdThreadId: string) {
+  return (
+    pendingThreadChatPathname === null ||
+    threadIdFromCommittedPathname(pendingThreadChatPathname) === createdThreadId
+  );
+}
 
 type ThreadChatResetDetail = {
   deletedThreadId?: string;
@@ -39,6 +69,38 @@ export function threadIdFromCommittedPathname(pathname: string) {
   } catch {
     return threadId;
   }
+}
+
+export function isNewThreadRoute({
+  threadIdFromPath,
+  actualPathname,
+  pendingPathname,
+}: {
+  threadIdFromPath: string;
+  actualPathname: string;
+  pendingPathname: string | null;
+}) {
+  return (
+    threadIdFromPath === "new" &&
+    (actualPathname.endsWith("/new") ||
+      pendingPathname?.endsWith("/new") === true)
+  );
+}
+
+export function isThreadFinishForVisibleChat({
+  finishThreadId,
+  visibleThreadId,
+  committedPathname,
+}: {
+  finishThreadId: string | null | undefined;
+  visibleThreadId: string | null | undefined;
+  committedPathname: string;
+}) {
+  return shouldApplyVisibleThreadEffect({
+    effectThreadId: finishThreadId,
+    visibleThreadId,
+    committedThreadId: threadIdFromCommittedPathname(committedPathname),
+  });
 }
 
 export function resolveThreadChatRouteSync({
@@ -90,7 +152,11 @@ export function useThreadChat() {
   // schedules a reset when window.location is stale during render.
   const actualPathname =
     typeof window === "undefined" ? pathname : window.location.pathname;
-  const isNewPath = actualPathname.endsWith("/new");
+  const isNewPath = isNewThreadRoute({
+    threadIdFromPath,
+    actualPathname,
+    pendingPathname: pendingThreadChatPathname,
+  });
   const newThreadIdRef = useRef<string | null>(
     threadIdFromPath === "new" ? uuid() : null,
   );
@@ -118,6 +184,7 @@ export function useThreadChat() {
   useEffect(() => {
     const committedPathname =
       typeof window === "undefined" ? pathname : window.location.pathname;
+    clearThreadChatNavigationIntent(committedPathname);
     const nextState = resolveThreadChatRouteSync({
       committedPathname,
       threadIdFromPath,

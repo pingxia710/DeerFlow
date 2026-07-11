@@ -9,7 +9,9 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  // Keep local full-suite cold starts below the point where parallel page loads
+  // can starve the production test server and miss the 30s navigation budget.
+  workers: process.env.CI ? 1 : 4,
   reporter: process.env.CI ? "github" : "html",
   timeout: 30_000,
 
@@ -36,6 +38,7 @@ export default defineConfig({
       DEER_FLOW_ENV: "test",
       ENVIRONMENT: "test",
       BETTER_AUTH_SECRET: "local-dev-secret",
+      NEXT_DIST_DIR: ".next-e2e-mock",
       PORT: E2E_PORT,
     },
   },

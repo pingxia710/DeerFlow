@@ -68,10 +68,10 @@ class DatabaseConfig(BaseModel):
 
     @property
     def _resolved_sqlite_dir(self) -> str:
-        """Resolve sqlite_dir to an absolute path (relative to CWD)."""
-        from pathlib import Path
+        """Resolve sqlite_dir under the configured DeerFlow runtime home."""
+        from deerflow.config.runtime_paths import resolve_runtime_path
 
-        return str(Path(self.sqlite_dir).resolve())
+        return str(resolve_runtime_path(self.sqlite_dir))
 
     @property
     def sqlite_path(self) -> str:

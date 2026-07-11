@@ -10,7 +10,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { canManageSkills } from "@/components/workspace/settings/skill-settings-state";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import {
@@ -18,6 +20,7 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
+import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "./context";
@@ -32,8 +35,13 @@ export function ArtifactFileList({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [installingFile, setInstallingFile] = useState<string | null>(null);
+  const canInstallSkill = canManageSkills(
+    user?.system_role,
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+  );
 
   const handleClick = useCallback(
     (filepath: string) => {
@@ -48,7 +56,7 @@ export function ArtifactFileList({
       e.stopPropagation();
       e.preventDefault();
 
-      if (installingFile) return;
+      if (!canInstallSkill || installingFile) return;
 
       setInstallingFile(filepath);
       try {
@@ -68,7 +76,7 @@ export function ArtifactFileList({
         setInstallingFile(null);
       }
     },
-    [threadId, installingFile],
+    [canInstallSkill, threadId, installingFile],
   );
 
   return (
@@ -90,7 +98,7 @@ export function ArtifactFileList({
               {getFileExtensionDisplayName(file)} file
             </CardDescription>
             <CardAction className="row-span-1 self-center">
-              {file.endsWith(".skill") && (
+              {canInstallSkill && file.endsWith(".skill") && (
                 <Button
                   variant="ghost"
                   disabled={installingFile === file}

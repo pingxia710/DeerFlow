@@ -24,6 +24,7 @@ export const enUS: Translations = {
     delete: "Delete",
     edit: "Edit",
     rename: "Rename",
+    renameFailed: "Failed to rename conversation",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
@@ -114,6 +115,14 @@ export const enUS: Translations = {
     reasoningEffortProDescription:
       "Maximum Reasoning Budget + Stronger Verification",
     reasoningEffortProShort: "Pro",
+    reasoningEffortMax: "Max (max)",
+    reasoningEffortMaxDescription:
+      "Maximum reasoning depth for the hardest tasks",
+    reasoningEffortMaxShort: "Max",
+    reasoningEffortUltra: "Ultra (ultra)",
+    reasoningEffortUltraDescription:
+      "Maximum reasoning with automatic task delegation",
+    reasoningEffortUltraShort: "Ultra",
     reasoningSummary: "Thinking Summary",
     reasoningSummaryAuto: "Auto",
     reasoningSummaryAutoDescription: "Let the model decide the summary detail",
@@ -253,6 +262,27 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
+  },
+
+  capabilities: {
+    title: "Capability status",
+    ready: "Ready",
+    attention: "Attention",
+    model: "Model",
+    directTools: "Direct tools",
+    delegatedTools: "Delegated tools",
+    tools: "tools",
+    skills: "Skills",
+    missingSkills: "Missing skills",
+    mcp: "MCP",
+    mcpAccess: "MCP access",
+    direct: "Direct",
+    delegatedOnly: "Delegated only",
+    notConfigured: "Not configured",
+    configuredNotLoaded: "Configured, not loaded",
+    loadFailed: "Load failed",
+    unavailable: "Unavailable",
+    none: "None",
   },
 
   // Breadcrumb
@@ -567,6 +597,7 @@ export const enUS: Translations = {
       description:
         "Manage the configuration and enabled status of the agent skills.",
       createSkill: "Create skill",
+      adminRequired: "Admin privileges are required to manage skills.",
       emptyTitle: "No agent skill yet",
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",

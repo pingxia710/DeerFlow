@@ -5,6 +5,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
+import { queryKeys } from "@/core/threads/query-keys";
+
 import {
   deleteUploadedFile,
   listUploadedFiles,
@@ -14,7 +16,7 @@ import {
 } from "./api";
 
 export function uploadListQueryKey(threadId?: string | null) {
-  return ["uploads", "list", threadId] as const;
+  return queryKeys.thread.uploads(threadId);
 }
 
 /**

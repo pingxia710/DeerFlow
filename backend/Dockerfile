@@ -55,6 +55,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
+ENV DEER_FLOW_PUBLIC_BIND_HOST=0.0.0.0
 
 # ── Stage 2: Dev ──────────────────────────────────────────────────────────────
 # Retains compiler toolchain from builder so startup-time `uv sync` can build
@@ -75,6 +76,7 @@ FROM python:3.12-slim-bookworm
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
+ENV DEER_FLOW_PUBLIC_BIND_HOST=0.0.0.0
 
 # Copy Node.js runtime from builder (provides npx for MCP servers)
 COPY --from=builder /usr/bin/node /usr/bin/node

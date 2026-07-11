@@ -38,6 +38,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
 from app.gateway.authz import AuthContext, Permissions
+from deerflow.runtime import RunManager
 
 # Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
 # in authz.py — kept inline so the tests don't import a private symbol.
@@ -108,6 +109,7 @@ def make_authed_test_app(
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
     app.state.thread_store = repo
+    app.state.run_manager = RunManager()
 
     return app
 

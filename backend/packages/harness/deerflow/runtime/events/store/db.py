@@ -6,8 +6,10 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,6 +28,17 @@ class DbRunEventStore(RunEventStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
+        self._sqlite_write_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _seq_write_guard(self, session: AsyncSession):
+        """Hold SQLite seq allocation until its transaction commits."""
+        bind = session.get_bind()
+        if bind is not None and bind.dialect.name == "sqlite":
+            async with self._sqlite_write_lock:
+                yield
+            return
+        yield
 
     @staticmethod
     def _row_to_dict(row: RunEventRow) -> dict:
@@ -138,21 +151,22 @@ class DbRunEventStore(RunEventStore):
         else:
             resolved_user_id = None if user_id is None else str(user_id)
         async with self._sf() as session:
-            async with session.begin():
-                max_seq = await self._max_seq_for_thread(session, thread_id)
-                seq = (max_seq or 0) + 1
-                row = RunEventRow(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    user_id=resolved_user_id,
-                    event_type=event_type,
-                    category=category,
-                    content=db_content,
-                    event_metadata=metadata,
-                    seq=seq,
-                    created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
-                )
-                session.add(row)
+            async with self._seq_write_guard(session):
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    seq = (max_seq or 0) + 1
+                    row = RunEventRow(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        user_id=resolved_user_id,
+                        event_type=event_type,
+                        category=category,
+                        content=db_content,
+                        event_metadata=metadata,
+                        seq=seq,
+                        created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
+                    )
+                    session.add(row)
             return self._row_to_dict(row)
 
     async def put_batch(self, events):
@@ -162,33 +176,34 @@ class DbRunEventStore(RunEventStore):
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
         user_id = self._user_id_from_context()
+        # All events belong to the same thread (validated above).
+        thread_id = events[0]["thread_id"]
         async with self._sf() as session:
-            async with session.begin():
-                # All events belong to the same thread (validated above).
-                thread_id = events[0]["thread_id"]
-                max_seq = await self._max_seq_for_thread(session, thread_id)
-                seq = max_seq or 0
-                rows = []
-                for e in events:
-                    seq += 1
-                    content = e.get("content", "")
-                    category = e.get("category", "trace")
-                    metadata = e.get("metadata")
-                    content, metadata = self._truncate_trace(category, content, metadata)
-                    db_content, metadata = self._content_to_db(content, metadata)
-                    row = RunEventRow(
-                        thread_id=e["thread_id"],
-                        run_id=e["run_id"],
-                        user_id=e.get("user_id", user_id),
-                        event_type=e["event_type"],
-                        category=category,
-                        content=db_content,
-                        event_metadata=metadata,
-                        seq=seq,
-                        created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
-                    )
-                    session.add(row)
-                    rows.append(row)
+            async with self._seq_write_guard(session):
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    seq = max_seq or 0
+                    rows = []
+                    for e in events:
+                        seq += 1
+                        content = e.get("content", "")
+                        category = e.get("category", "trace")
+                        metadata = e.get("metadata")
+                        content, metadata = self._truncate_trace(category, content, metadata)
+                        db_content, metadata = self._content_to_db(content, metadata)
+                        row = RunEventRow(
+                            thread_id=e["thread_id"],
+                            run_id=e["run_id"],
+                            user_id=e.get("user_id", user_id),
+                            event_type=e["event_type"],
+                            category=category,
+                            content=db_content,
+                            event_metadata=metadata,
+                            seq=seq,
+                            created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
+                        )
+                        session.add(row)
+                        rows.append(row)
             return [self._row_to_dict(r) for r in rows]
 
     async def list_messages(
@@ -287,6 +302,11 @@ class DbRunEventStore(RunEventStore):
             await session.commit()
             return result.rowcount or 0
 
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        async with self._sf() as session:
+            owners = await session.scalars(select(RunEventRow.user_id).where(RunEventRow.thread_id == thread_id).distinct())
+            return set(owners)
+
     async def count_messages(
         self,
         thread_id,
@@ -299,6 +319,19 @@ class DbRunEventStore(RunEventStore):
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
+
+    async def has_events(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.has_events")
+        stmt = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            return await session.scalar(stmt.limit(1)) is not None
 
     async def delete_by_thread(
         self,
@@ -317,6 +350,17 @@ class DbRunEventStore(RunEventStore):
                 await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
             return count
+
+    async def delete_legacy_by_thread(self, thread_id: str) -> int:
+        """Delete only ownerless events left by pre-auth versions."""
+        stmt = delete(RunEventRow).where(
+            RunEventRow.thread_id == thread_id,
+            RunEventRow.user_id.is_(None),
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0
 
     async def delete_by_run(
         self,

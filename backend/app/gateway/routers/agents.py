@@ -9,6 +9,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import require_admin_user
 from app.gateway.path_utils import get_request_storage_user_id
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
@@ -378,13 +379,14 @@ class UserProfileUpdateRequest(BaseModel):
     summary="Get User Profile",
     description="Read the global USER.md file that is injected into all custom agents.",
 )
-async def get_user_profile() -> UserProfileResponse:
+async def get_user_profile(request: Request) -> UserProfileResponse:
     """Return the current USER.md content.
 
     Returns:
         UserProfileResponse with content=None if USER.md does not exist yet.
     """
     _require_agents_api_enabled()
+    await require_admin_user(request, detail="Admin access is required to read the global user profile")
 
     try:
         user_md_path = get_paths().user_md_file
@@ -403,23 +405,24 @@ async def get_user_profile() -> UserProfileResponse:
     summary="Update User Profile",
     description="Write the global USER.md file that is injected into all custom agents.",
 )
-async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileResponse:
+async def update_user_profile(body: UserProfileUpdateRequest, request: Request) -> UserProfileResponse:
     """Create or overwrite the global USER.md.
 
     Args:
-        request: The update request with the new USER.md content.
+        body: The update request with the new USER.md content.
 
     Returns:
         UserProfileResponse with the saved content.
     """
     _require_agents_api_enabled()
+    await require_admin_user(request, detail="Admin access is required to update the global user profile")
 
     try:
         paths = get_paths()
         paths.base_dir.mkdir(parents=True, exist_ok=True)
-        paths.user_md_file.write_text(request.content, encoding="utf-8")
+        paths.user_md_file.write_text(body.content, encoding="utf-8")
         logger.info(f"Updated USER.md at {paths.user_md_file}")
-        return UserProfileResponse(content=request.content or None)
+        return UserProfileResponse(content=body.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")

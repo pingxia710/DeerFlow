@@ -77,6 +77,35 @@ def test_output_ref_only_evidence_cannot_support_pass():
     assert any("PASS requires concrete non-self-attested evidenceRefs" in error for error in errors)
 
 
+def test_runtime_evidence_can_support_pass_without_opposition_or_exemption():
+    contract = _contract()
+    round_record = copy.deepcopy(next(case["round"] for case in contract["cases"] if case["name"] == "pass_with_runtime_evidence_without_opposition"))
+    evidence_ref = "command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"
+    round_record["signals"][0].update(
+        {
+            "claim": "Focused acceptance test passed.",
+            "evidenceRefs": [evidence_ref],
+            "evidenceState": "SUPPORTED",
+            "selfAttestationOnly": False,
+            "unknownStale": [],
+            "conflicts": [],
+            "recommendedDecision": "PASS",
+        }
+    )
+    round_record["decisionSignals"].update(
+        {
+            "decision": "PASS",
+            "reason": "Runtime-observed acceptance evidence is complete.",
+            "evidenceRefs": [evidence_ref],
+        }
+    )
+    round_record["verdict"] = round_record["decisionSignals"]
+
+    errors = checker.validate_round(round_record, contract)
+
+    assert errors == []
+
+
 def test_target_role_and_round_advisory_gated_false_are_not_hard_gate_failures():
     contract = _contract()
     round_record = _valid_round(contract)

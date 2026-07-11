@@ -92,6 +92,7 @@ test.describe("Thread history", () => {
     await expect(
       page.getByText("Response in thread First conversation"),
     ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("button", { name: /loading/i })).toHaveCount(0);
   });
 
   test("switching existing chats and reloading keeps histories isolated", async ({
@@ -575,7 +576,7 @@ test.describe("Thread history", () => {
     await expect(textarea).toBeVisible({ timeout: 15_000 });
     await textarea.fill(delayedMarker);
     await textarea.press("Enter");
-    await expect(page.getByText(delayedMarker)).toBeVisible();
+    await expect(page.getByText(delayedMarker, { exact: true })).toBeVisible();
 
     await page.getByText("Destination conversation").click();
     await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
@@ -716,6 +717,7 @@ test.describe("Thread history", () => {
       ),
     ).toHaveAttribute("aria-label", /Finished/, { timeout: 15_000 });
     await expect(page.getByText(markerB, { exact: true })).toBeVisible();
+    await expect(page.getByTestId("run-recovery-notice")).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID_2));
   });
 
@@ -827,6 +829,8 @@ test.describe("Thread history", () => {
     });
     await expect(pageA.getByText(markerB)).toHaveCount(0);
     await expect(pageB.getByText(markerA)).toHaveCount(0);
+    await expect(pageA.getByTestId("run-recovery-notice")).toHaveCount(0);
+    await expect(pageB.getByTestId("run-recovery-notice")).toHaveCount(0);
     await pageB.close();
   });
 
@@ -1077,6 +1081,290 @@ test.describe("Thread history", () => {
       .poll(() => staleRunQueries, { timeout: 15_000 })
       .toBeGreaterThan(0);
     expect(activeRunMessageLoads).toBe(0);
+  });
+
+  test("runtime snapshot round change drops the previous round history", async ({
+    page,
+  }) => {
+    const oldRunId = "snapshot-old-round-run";
+    const newRunId = "snapshot-new-round-run";
+    const oldMarker = "SNAPSHOT-OLD-ROUND-MUST-DISAPPEAR";
+    const newMarker = "SNAPSHOT-NEW-ROUND-MARKER";
+    let currentRound = "old";
+    let snapshotLoads = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Snapshot round change",
+          updated_at: "2025-06-06T12:00:00Z",
+          messages: [],
+        },
+      ],
+    });
+
+    const run = (runId: string, roundId: string) => ({
+      run_id: runId,
+      thread_id: MOCK_THREAD_ID,
+      assistant_id: "lead_agent",
+      status: "success",
+      round_id: roundId,
+      metadata: {},
+      kwargs: {},
+      created_at: "2025-06-06T12:00:00Z",
+      updated_at: "2025-06-06T12:00:01Z",
+    });
+    const messagePage = (runId: string, marker: string) => ({
+      run_id: runId,
+      data: [
+        {
+          run_id: runId,
+          seq: 1,
+          content: { type: "ai", id: `${runId}-ai`, content: marker },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-06T12:00:01Z",
+        },
+      ],
+      hasMore: false,
+    });
+    const currentRuns = () =>
+      currentRound === "old"
+        ? [run(oldRunId, "round-old")]
+        : [run(newRunId, "round-new"), run(oldRunId, "round-old")];
+
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot$`),
+      (route) => {
+        snapshotLoads += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: MOCK_THREAD_ID,
+            runs: currentRuns(),
+            rounds:
+              currentRound === "old"
+                ? [
+                    {
+                      thread_id: MOCK_THREAD_ID,
+                      round_id: "round-old",
+                      current_run_id: oldRunId,
+                      state: "closed",
+                    },
+                  ]
+                : [
+                    {
+                      thread_id: MOCK_THREAD_ID,
+                      round_id: "round-new",
+                      current_run_id: newRunId,
+                      state: "closed",
+                    },
+                    {
+                      thread_id: MOCK_THREAD_ID,
+                      round_id: "round-old",
+                      current_run_id: oldRunId,
+                      state: "closed",
+                    },
+                  ],
+            run_messages:
+              currentRound === "old"
+                ? [messagePage(oldRunId, oldMarker)]
+                : [
+                    messagePage(newRunId, newMarker),
+                    messagePage(oldRunId, oldMarker),
+                  ],
+            task_lanes: [],
+            recovery: null,
+          }),
+        });
+      },
+    );
+    await page.route(/\/api\/langgraph\/threads\/[^/]+\/runs(\?|$)/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentRuns()),
+      }),
+    );
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runs/[^/]+/messages`),
+      (route) => {
+        const runId = route.request().url().includes(newRunId)
+          ? newRunId
+          : oldRunId;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            messagePage(runId, runId === newRunId ? newMarker : oldMarker),
+          ),
+        });
+      },
+    );
+
+    const handleRoundChange = (route: Route) => {
+      currentRound = "new";
+      const events = [
+        {
+          event: "metadata",
+          data: { run_id: newRunId, thread_id: MOCK_THREAD_ID },
+        },
+        {
+          event: "custom",
+          data: {
+            type: "run.terminal",
+            event_type: "run.terminal",
+            thread_id: MOCK_THREAD_ID,
+            run_id: newRunId,
+            round_id: "round-new",
+            status: "success",
+            terminal_reason: "success",
+          },
+        },
+        { event: "end", data: {} },
+      ];
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: events
+          .map(
+            (event) =>
+              `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`,
+          )
+          .join(""),
+      });
+    };
+    await page.route("**/api/langgraph/runs/stream", handleRoundChange);
+    await page.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      handleRoundChange,
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(oldMarker)).toBeVisible({ timeout: 15_000 });
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("start the next round");
+    await textarea.press("Enter");
+
+    await expect.poll(() => snapshotLoads).toBeGreaterThan(1);
+    await expect(page.getByText(newMarker)).toBeVisible();
+    await expect(page.getByText(oldMarker)).toHaveCount(0);
+  });
+
+  test("one load more action fetches one cursor page", async ({ page }) => {
+    const runId = "snapshot-paged-run";
+    const latestMarker = "SNAPSHOT-PAGED-LATEST";
+    let messageLoads = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Paged snapshot conversation",
+          updated_at: "2025-06-07T12:00:00Z",
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: runId,
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "lead_agent",
+                status: "success",
+                round_id: "round-paged",
+                metadata: {},
+                kwargs: {},
+                created_at: "2025-06-07T12:00:00Z",
+                updated_at: "2025-06-07T12:00:01Z",
+              },
+            ],
+            rounds: [
+              {
+                thread_id: MOCK_THREAD_ID,
+                round_id: "round-paged",
+                current_run_id: runId,
+                state: "closed",
+              },
+            ],
+            run_messages: [
+              {
+                run_id: runId,
+                data: [
+                  {
+                    run_id: runId,
+                    seq: 100,
+                    content: {
+                      type: "ai",
+                      id: "snapshot-paged-latest-ai",
+                      content: latestMarker,
+                    },
+                    metadata: { caller: "lead_agent" },
+                    created_at: "2025-06-07T12:00:01Z",
+                  },
+                ],
+                hasMore: true,
+              },
+            ],
+          },
+        },
+      ],
+    });
+    await page.route(/\/api\/langgraph\/threads\/[^/]+\/runs(\?|$)/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            run_id: runId,
+            thread_id: MOCK_THREAD_ID,
+            assistant_id: "lead_agent",
+            status: "success",
+            round_id: "round-paged",
+            metadata: {},
+            kwargs: {},
+            created_at: "2025-06-07T12:00:00Z",
+            updated_at: "2025-06-07T12:00:01Z",
+          },
+        ]),
+      }),
+    );
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runs/${runId}/messages`),
+      (route) => {
+        messageLoads += 1;
+        const seq = messageLoads === 1 ? 90 : 80;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: [
+              {
+                run_id: runId,
+                seq,
+                content: {
+                  type: "ai",
+                  id: `snapshot-paged-${seq}`,
+                  content: `older page ${seq}`,
+                },
+                metadata: { caller: "lead_agent" },
+                created_at: "2025-06-07T12:00:00Z",
+              },
+            ],
+            hasMore: messageLoads === 1,
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(latestMarker)).toBeVisible({ timeout: 15_000 });
+    expect(messageLoads).toBe(0);
+
+    await page.getByRole("button", { name: /load more/i }).click();
+    await expect.poll(() => messageLoads).toBeGreaterThan(0);
+    await page.waitForTimeout(250);
+
+    expect(messageLoads).toBe(1);
   });
 
   test("new chat resets immediately after a history-only thread URL update", async ({

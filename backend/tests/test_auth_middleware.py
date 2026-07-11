@@ -30,6 +30,8 @@ def test_public_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
+        "/healthcheck",
+        "/health/private",
         "/api/models",
         "/api/mcp/config",
         "/api/mcp/cache/reset",

@@ -5,6 +5,7 @@ set -e
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Get script directory
@@ -39,6 +40,38 @@ load_proxy_env_from_dotenv() {
             fi
         fi
     done
+}
+
+ensure_internal_auth_token() {
+    local token_file
+
+    if [ -n "${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}" ]; then
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        return
+    fi
+
+    DEER_FLOW_HOME="${DEER_FLOW_HOME:-$PROJECT_ROOT/backend/.deer-flow}"
+    token_file="$DEER_FLOW_HOME/.internal-auth-token"
+    mkdir -p "$DEER_FLOW_HOME"
+
+    if [ -s "$token_file" ]; then
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$token_file")"
+    elif command -v python3 >/dev/null 2>&1; then
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    elif command -v python >/dev/null 2>&1; then
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    elif command -v openssl >/dev/null 2>&1; then
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(openssl rand -hex 32)"
+    else
+        echo -e "${RED}✗ Cannot generate DEER_FLOW_INTERNAL_AUTH_TOKEN; set it before starting provisioner mode.${NC}" >&2
+        return 1
+    fi
+
+    if [ ! -s "$token_file" ]; then
+        printf '%s\n' "$DEER_FLOW_INTERNAL_AUTH_TOKEN" > "$token_file"
+    fi
+    chmod 600 "$token_file"
+    export DEER_FLOW_HOME DEER_FLOW_INTERNAL_AUTH_TOKEN
 }
 
 detect_sandbox_mode() {
@@ -193,6 +226,7 @@ start() {
 
     services="frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
+        ensure_internal_auth_token
         services="frontend gateway provisioner nginx"
     fi
 

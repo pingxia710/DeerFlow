@@ -61,7 +61,7 @@ Docker setup is local-first by default:
 
 - The nginx entrypoint binds to `127.0.0.1` unless explicitly configured otherwise. Only set `DEER_FLOW_BIND_HOST=0.0.0.0` when you intentionally expose the stack outside the host.
 - API docs are not exposed by default. Set `GATEWAY_ENABLE_DOCS=true` to enable the Gateway docs endpoints, and set `DEER_FLOW_EXPOSE_API_DOCS=true` only when you also need `/docs`, `/redoc`, or `/openapi.json` through Docker/nginx.
-- The sandbox API is not exposed by default. Set `DEER_FLOW_EXPOSE_SANDBOX_API=true` only for deliberate external testing.
+- The sandbox provisioner API is internal-only and is not exposed by nginx.
 - Do not publish the provisioner service on port `8002` directly. It is intended for Docker-internal backend access; nginx gates only the external entrypoint. Do not attach untrusted containers to the Docker internal network.
 
 ## Verification

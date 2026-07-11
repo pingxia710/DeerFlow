@@ -79,6 +79,8 @@ def test_existing_thread_stream_routes_pass_replay_context(monkeypatch, path):
     app.state.stream_bridge = MagicMock(name="stream_bridge")
     app.state.run_event_store = event_store
     app.state.run_manager = MagicMock(name="run_manager")
+    app.state.run_manager.begin_thread_write = AsyncMock()
+    app.state.run_manager.end_thread_write = AsyncMock()
     app.state.run_manager.get = AsyncMock(
         return_value=RunRecord(
             run_id="run-1",

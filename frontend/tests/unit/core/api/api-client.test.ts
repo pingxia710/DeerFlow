@@ -7,6 +7,7 @@ import {
   isRunStreamRecoveryRequiredError,
   RunStreamRecoveryRequiredError,
 } from "@/core/api/api-client";
+import { UNAUTHORIZED_EVENT } from "@/core/api/fetcher";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -74,7 +75,7 @@ test("keeps newer reconnect metadata", () => {
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
 });
 
-test("adds an abort signal to non-streaming SDK requests", async () => {
+test("adds credentials and an abort signal to non-streaming SDK requests", async () => {
   rs.stubGlobal("window", {
     location: { origin: "http://localhost:2026" },
     sessionStorage: makeSessionStorage(),
@@ -96,7 +97,86 @@ test("adds an abort signal to non-streaming SDK requests", async () => {
   await getAPIClient(true).threads.get("thread-1");
 
   const init = fetchMock.mock.calls[0]?.[1];
+  expect(init?.credentials).toBe("include");
   expect(init?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("includes credentials on SDK stream requests", async () => {
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("", { headers: { "Content-Type": "text/event-stream" } }),
+  );
+  rs.stubGlobal("fetch", fetchMock);
+
+  await getAPIClient(true)
+    .runs.stream("thread-1", "lead_agent", { input: {} })
+    .next();
+
+  const init = fetchMock.mock.calls[0]?.[1];
+  expect(init?.method).toBe("POST");
+  expect(init?.credentials).toBe("include");
+});
+
+test("SDK 401 notifies AuthProvider exactly once", async () => {
+  const dispatchEvent = rs.fn();
+  rs.stubGlobal("window", {
+    dispatchEvent,
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: "Authentication required" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ),
+  );
+
+  await expect(
+    getAPIClient(true).threads.get("thread-1"),
+  ).rejects.toMatchObject({ status: 401 });
+
+  expect(dispatchEvent).toHaveBeenCalledTimes(1);
+  expect(dispatchEvent.mock.calls[0]?.[0]).toMatchObject({
+    type: UNAUTHORIZED_EVENT,
+  });
+});
+
+test("SDK stream 401 notifies AuthProvider exactly once", async () => {
+  const dispatchEvent = rs.fn();
+  rs.stubGlobal("window", {
+    dispatchEvent,
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: "Authentication required" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ),
+  );
+
+  await expect(
+    getAPIClient(true)
+      .runs.stream("thread-1", "lead_agent", { input: {} })
+      .next(),
+  ).rejects.toMatchObject({ status: 401 });
+
+  expect(dispatchEvent).toHaveBeenCalledTimes(1);
+  expect(dispatchEvent.mock.calls[0]?.[0]).toMatchObject({
+    type: UNAUTHORIZED_EVENT,
+  });
 });
 
 test("ignores reconnect metadata storage access failures", () => {

@@ -387,3 +387,32 @@ test("clearThreadRuntime deletes saved slots across scopes without deleting pend
 
   expect(__threadRuntimeTestUtils.get(pending.slotId)).not.toBeNull();
 });
+
+test("workspace teardown clears saved and pending runtime slots", async () => {
+  const saved = __threadRuntimeTestUtils.register({
+    runtimeScope: "chat",
+    runtimeKey: "chat:thread-x",
+    threadId: "thread-x",
+    displayThreadId: "thread-x",
+    context: chatContext,
+  });
+  const pending = __threadRuntimeTestUtils.register({
+    runtimeScope: "chat",
+    runtimeKey: "new-chat:pending-thread",
+    displayThreadId: "pending-thread",
+    context: chatContext,
+  });
+  const runtimeModule = (await import("@/core/threads/runtime")) as Record<
+    string,
+    unknown
+  >;
+  const clearAllThreadRuntimes = runtimeModule.clearAllThreadRuntimes;
+
+  expect(typeof clearAllThreadRuntimes).toBe("function");
+  if (typeof clearAllThreadRuntimes !== "function") return;
+
+  clearAllThreadRuntimes();
+
+  expect(__threadRuntimeTestUtils.get(saved.slotId)).toBeNull();
+  expect(__threadRuntimeTestUtils.get(pending.slotId)).toBeNull();
+});

@@ -140,6 +140,105 @@ async def test_heartbeat_rejects_stale_token_or_generation(store_kind: str, tmp_
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("store_kind", STORE_KINDS)
+async def test_heartbeat_metadata_update_is_fenced_by_valid_lease(store_kind: str, tmp_path) -> None:
+    store = await _make_store(store_kind, tmp_path)
+    try:
+        now = datetime(2026, 7, 4, tzinfo=UTC)
+        await store.create_pending_run("run-1", thread_id="thread-1")
+        lease = await store.try_acquire_active_slot(
+            "thread-1",
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=now + timedelta(seconds=30),
+            now=now,
+        )
+        assert lease is not None
+
+        assert (
+            await store.heartbeat_lease(
+                "run-1",
+                lease_token="stale",
+                generation=lease.generation,
+                metadata_updates={"round_id": "stale-round"},
+                now=now,
+            )
+            is False
+        )
+        assert "round_id" not in (await store.get("run-1"))["metadata"]
+
+        assert (
+            await store.heartbeat_lease(
+                "run-1",
+                lease_token=lease.lease_token,
+                generation=lease.generation,
+                metadata_updates={
+                    "round_id": "round-1",
+                    "round_context": {"current_run_id": "run-1"},
+                },
+                now=now,
+            )
+            is True
+        )
+        metadata = (await store.get("run-1"))["metadata"]
+        assert metadata["round_id"] == "round-1"
+        assert metadata["round_context"] == {"current_run_id": "run-1"}
+    finally:
+        await _cleanup_store(store_kind)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_kind", STORE_KINDS)
+async def test_delete_legacy_by_thread_only_removes_unowned_rows(store_kind: str, tmp_path) -> None:
+    store = await _make_store(store_kind, tmp_path)
+    try:
+        await store.put("legacy", thread_id="thread-legacy", user_id=None)
+        await store.put("default", thread_id="thread-legacy", user_id="default")
+        await store.put("foreign", thread_id="thread-legacy", user_id="foreign")
+
+        deleted = await store.delete_legacy_by_thread("thread-legacy")
+
+        assert deleted == 1
+        assert await store.get("legacy", user_id=None) is None
+        assert await store.get("default", user_id=None) is not None
+        assert await store.get("foreign", user_id=None) is not None
+    finally:
+        await _cleanup_store(store_kind)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_kind", STORE_KINDS)
+async def test_active_status_cas_rejects_expired_lease(store_kind: str, tmp_path) -> None:
+    store = await _make_store(store_kind, tmp_path)
+    try:
+        now = datetime(2026, 7, 4, tzinfo=UTC)
+        await store.create_pending_run("run-1", thread_id="thread-1")
+        lease = await store.try_acquire_active_slot(
+            "thread-1",
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=now - timedelta(seconds=1),
+            now=now,
+        )
+        assert lease is not None
+
+        assert (
+            await store.cas_status(
+                "run-1",
+                from_statuses={"running"},
+                to_status="running",
+                lease_token=lease.lease_token,
+                generation=lease.generation,
+                now=now,
+            )
+            is False
+        )
+        assert (await store.get("run-1"))["status"] == "running"
+    finally:
+        await _cleanup_store(store_kind)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_kind", STORE_KINDS)
 async def test_late_completion_cannot_overwrite_terminal(store_kind: str, tmp_path) -> None:
     store = await _make_store(store_kind, tmp_path)
     try:

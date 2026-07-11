@@ -198,6 +198,28 @@ class TestInstallSkillFromArchive:
         assert result["skill_name"] == "test-skill"
         assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
 
+    def test_rejects_archive_behind_swapped_ancestor_symlink(self, tmp_path):
+        from deerflow.config.paths import UnsafePathError
+
+        owner_uploads = tmp_path / "owner" / "uploads"
+        owner_uploads.mkdir(parents=True)
+        owner_archive = self._make_skill_zip(owner_uploads)
+
+        other_uploads = tmp_path / "other-owner"
+        other_uploads.mkdir()
+        self._make_skill_zip(other_uploads)
+
+        owner_archive.unlink()
+        owner_uploads.rmdir()
+        owner_uploads.symlink_to(other_uploads, target_is_directory=True)
+
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        with pytest.raises(UnsafePathError):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(owner_archive)
+
+        assert not (skills_root / "custom" / "test-skill").exists()
+
     def test_installed_skill_tree_is_readable_by_sandbox_mount(self, tmp_path):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:

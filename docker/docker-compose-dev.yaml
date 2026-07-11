@@ -34,7 +34,8 @@ services:
       # Set these in your shell before running docker-compose:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
       - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
@@ -68,18 +69,16 @@ services:
       - "${DEER_FLOW_BIND_HOST:-127.0.0.1}:2026:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+      - ./nginx/generate-config.sh:/usr/local/bin/generate-deer-flow-nginx-config:ro
     environment:
       - DEER_FLOW_EXPOSE_API_DOCS=${DEER_FLOW_EXPOSE_API_DOCS:-false}
-      - DEER_FLOW_EXPOSE_SANDBOX_API=${DEER_FLOW_EXPOSE_SANDBOX_API:-false}
+      - DEER_FLOW_TRUSTED_OUTER_PROXIES=${DEER_FLOW_TRUSTED_OUTER_PROXIES:-}
     command:
       - sh
       - -c
       - |
         set -e
-        {
-          if [ "$${DEER_FLOW_EXPOSE_API_DOCS}" = "true" ]; then echo 'set $$expose_api_docs 1;'; else echo 'set $$expose_api_docs 0;'; fi
-          if [ "$${DEER_FLOW_EXPOSE_SANDBOX_API}" = "true" ]; then echo 'set $$expose_sandbox_api 1;'; else echo 'set $$expose_sandbox_api 0;'; fi
-        } > /etc/nginx/conf.d/deer-flow-exposure.conf
+        sh /usr/local/bin/generate-deer-flow-nginx-config /etc/nginx/conf.d/deer-flow-exposure.conf
         cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
         test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
         nginx -t
@@ -189,6 +188,8 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
+      - DEER_FLOW_PUBLIC_BIND_HOST=${DEER_FLOW_BIND_HOST:-127.0.0.1}
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal

@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0008_task_lane_ref_lists"
+HEAD = "0009_task_lane_display_metadata"
 BASELINE = "0001_baseline"
 
 
@@ -494,6 +494,27 @@ async def test_artifact_provenance_owner_normalization_migration(tmp_path: Path)
             ("thread-owner", "thread-from-thread", "run-2", "/mnt/user-data/outputs/thread.md"),
         ]
         assert user_id_col["nullable"] is False
+        assert await _alembic_version(engine) == HEAD
+    finally:
+        await engine.dispose()
+
+
+@asyncio_test
+async def test_0009_adds_task_lane_display_metadata(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "task-lane-display.db"))
+    try:
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(_upgrade, cfg, "0008_task_lane_ref_lists")
+        async with engine.connect() as conn:
+            before = await conn.run_sync(lambda c: {column["name"] for column in sa.inspect(c).get_columns("task_lanes")})
+
+        await asyncio.to_thread(_upgrade, cfg, HEAD)
+        async with engine.connect() as conn:
+            after = await conn.run_sync(lambda c: {column["name"] for column in sa.inspect(c).get_columns("task_lanes")})
+
+        expected = {"description", "result", "started_at", "finished_at", "duration_ms"}
+        assert expected.isdisjoint(before)
+        assert expected <= after
         assert await _alembic_version(engine) == HEAD
     finally:
         await engine.dispose()

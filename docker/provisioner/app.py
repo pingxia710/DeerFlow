@@ -32,11 +32,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 
 import urllib3
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
@@ -59,12 +61,14 @@ SANDBOX_IMAGE = os.environ.get(
     "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest",
 )
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
-THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
+THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+PVC_INIT_IMAGE = os.environ.get("PVC_INIT_IMAGE", "busybox:1.36")
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
+K8S_REQUEST_TIMEOUT = (5, 30)
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -74,6 +78,21 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+PROVISIONER_AUTH_TOKEN = os.environ.get("DEER_FLOW_INTERNAL_AUTH_TOKEN", "").strip()
+INTERNAL_AUTH_HEADER = "X-DeerFlow-Internal-Token"
+_SANDBOX_LIFECYCLE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _sandbox_lifecycle_lock(sandbox_id: str) -> threading.Lock:
+    return _SANDBOX_LIFECYCLE_LOCKS[hash(sandbox_id) % len(_SANDBOX_LIFECYCLE_LOCKS)]
+
+
+def _require_internal_token(request: Request) -> None:
+    if not PROVISIONER_AUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="Provisioner internal authentication is not configured")
+    supplied = request.headers.get(INTERNAL_AUTH_HEADER, "")
+    if not secrets.compare_digest(supplied, PROVISIONER_AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid internal authentication token")
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -110,27 +129,18 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
     """
     if os.path.exists(KUBECONFIG_PATH):
         if os.path.isdir(KUBECONFIG_PATH):
-            raise RuntimeError(
-                f"KUBECONFIG_PATH points to a directory, expected a file: {KUBECONFIG_PATH}"
-            )
+            raise RuntimeError(f"KUBECONFIG_PATH points to a directory, expected a file: {KUBECONFIG_PATH}")
         try:
             k8s_config.load_kube_config(config_file=KUBECONFIG_PATH)
             logger.info(f"Loaded kubeconfig from {KUBECONFIG_PATH}")
         except Exception as exc:
-            raise RuntimeError(
-                f"Failed to load kubeconfig from {KUBECONFIG_PATH}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to load kubeconfig from {KUBECONFIG_PATH}: {exc}") from exc
     else:
-        logger.warning(
-            f"Kubeconfig not found at {KUBECONFIG_PATH}; trying in-cluster config"
-        )
+        logger.warning(f"Kubeconfig not found at {KUBECONFIG_PATH}; trying in-cluster config")
         try:
             k8s_config.load_incluster_config()
         except Exception as exc:
-            raise RuntimeError(
-                "Failed to initialize Kubernetes client. "
-                f"No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to initialize Kubernetes client. No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}") from exc
 
     # When connecting from inside Docker to the host's K8s API, the
     # kubeconfig may reference ``localhost`` or ``127.0.0.1``.  We
@@ -156,25 +166,17 @@ def _wait_for_kubeconfig(timeout: int = 30) -> None:
                 logger.info(f"Found kubeconfig file at {KUBECONFIG_PATH}")
                 return
             if os.path.isdir(KUBECONFIG_PATH):
-                raise RuntimeError(
-                    "Kubeconfig path is a directory. "
-                    f"Please mount a kubeconfig file at {KUBECONFIG_PATH}."
-                )
-            raise RuntimeError(
-                f"Kubeconfig path exists but is not a regular file: {KUBECONFIG_PATH}"
-            )
+                raise RuntimeError(f"Kubeconfig path is a directory. Please mount a kubeconfig file at {KUBECONFIG_PATH}.")
+            raise RuntimeError(f"Kubeconfig path exists but is not a regular file: {KUBECONFIG_PATH}")
         logger.info(f"Waiting for kubeconfig at {KUBECONFIG_PATH} …")
         time.sleep(2)
-    logger.warning(
-        f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s; "
-        "will attempt in-cluster Kubernetes config"
-    )
+    logger.warning(f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s; will attempt in-cluster Kubernetes config")
 
 
 def _ensure_namespace() -> None:
     """Create the K8s namespace if it does not yet exist."""
     try:
-        core_v1.read_namespace(K8S_NAMESPACE)
+        core_v1.read_namespace(K8S_NAMESPACE, _request_timeout=K8S_REQUEST_TIMEOUT)
         logger.info(f"Namespace '{K8S_NAMESPACE}' already exists")
     except ApiException as exc:
         if exc.status == 404:
@@ -187,7 +189,7 @@ def _ensure_namespace() -> None:
                     },
                 )
             )
-            core_v1.create_namespace(ns)
+            core_v1.create_namespace(ns, _request_timeout=K8S_REQUEST_TIMEOUT)
             logger.info(f"Created namespace '{K8S_NAMESPACE}'")
         else:
             raise
@@ -222,6 +224,17 @@ class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str  # Direct access URL, e.g. http://host.docker.internal:{NodePort}
     status: str
+    ready: bool = False
+    sandbox_api_key: str | None = None
+
+
+class SandboxPodSnapshot:
+    __slots__ = ("status", "ready", "sandbox_api_key")
+
+    def __init__(self, status: str, ready: bool, sandbox_api_key: str | None):
+        self.status = status
+        self.ready = ready
+        self.sandbox_api_key = sandbox_api_key
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -240,7 +253,7 @@ def _sandbox_url(node_port: int) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
-def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
+def _build_volumes(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list[k8s_client.V1Volume]:
     """Build volume list: PVC when configured, otherwise hostPath."""
     if SKILLS_PVC_NAME:
         skills_vol = k8s_client.V1Volume(
@@ -270,12 +283,35 @@ def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
         userdata_vol = k8s_client.V1Volume(
             name="user-data",
             host_path=k8s_client.V1HostPathVolumeSource(
-                path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
+                path=join_host_path(THREADS_HOST_PATH, "users", user_id, "threads", thread_id, "user-data"),
                 type="DirectoryOrCreate",
             ),
         )
 
-    return [skills_vol, userdata_vol]
+    if USERDATA_PVC_NAME:
+        acp_workspace_vol = k8s_client.V1Volume(
+            name="acp-workspace",
+            persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                claim_name=USERDATA_PVC_NAME,
+            ),
+        )
+    else:
+        acp_workspace_vol = k8s_client.V1Volume(
+            name="acp-workspace",
+            host_path=k8s_client.V1HostPathVolumeSource(
+                path=join_host_path(
+                    THREADS_HOST_PATH,
+                    "users",
+                    user_id,
+                    "threads",
+                    thread_id,
+                    "acp-workspace",
+                ),
+                type="DirectoryOrCreate",
+            ),
+        )
+
+    return [skills_vol, userdata_vol, acp_workspace_vol]
 
 
 def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list[k8s_client.V1VolumeMount]:
@@ -287,6 +323,13 @@ def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list
     )
     if USERDATA_PVC_NAME:
         userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+    acp_workspace_mount = k8s_client.V1VolumeMount(
+        name="acp-workspace",
+        mount_path="/mnt/acp-workspace",
+        read_only=True,
+    )
+    if USERDATA_PVC_NAME:
+        acp_workspace_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/acp-workspace"
 
     return [
         k8s_client.V1VolumeMount(
@@ -295,11 +338,46 @@ def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list
             read_only=True,
         ),
         userdata_mount,
+        acp_workspace_mount,
     ]
 
 
-def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) -> k8s_client.V1Pod:
+def _build_pod(
+    sandbox_id: str,
+    thread_id: str,
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    sandbox_api_key: str,
+) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
+    init_containers = None
+    if USERDATA_PVC_NAME:
+        thread_root = f"/deer-flow-data/deer-flow/users/{user_id}/threads/{thread_id}"
+        directories = [
+            f"{thread_root}/user-data/workspace",
+            f"{thread_root}/user-data/uploads",
+            f"{thread_root}/user-data/outputs",
+            f"{thread_root}/acp-workspace",
+        ]
+        init_containers = [
+            k8s_client.V1Container(
+                name="initialize-user-data",
+                image=PVC_INIT_IMAGE,
+                command=["sh", "-c"],
+                args=[
+                    'mkdir -p -- "$@" && chmod 0777 -- "$@"',
+                    "deer-flow-pvc-init",
+                    *directories,
+                ],
+                volume_mounts=[
+                    k8s_client.V1VolumeMount(
+                        name="user-data",
+                        mount_path="/deer-flow-data",
+                    )
+                ],
+            )
+        ]
+
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -312,6 +390,7 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
             },
         ),
         spec=k8s_client.V1PodSpec(
+            init_containers=init_containers,
             containers=[
                 k8s_client.V1Container(
                     name="sandbox",
@@ -324,10 +403,22 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                             protocol="TCP",
                         )
                     ],
+                    env=[
+                        k8s_client.V1EnvVar(
+                            name="SANDBOX_API_KEY",
+                            value=sandbox_api_key,
+                        )
+                    ],
                     readiness_probe=k8s_client.V1Probe(
                         http_get=k8s_client.V1HTTPGetAction(
                             path="/v1/sandbox",
                             port=8080,
+                            http_headers=[
+                                k8s_client.V1HTTPHeader(
+                                    name="X-AIO-API-Key",
+                                    value=sandbox_api_key,
+                                )
+                            ],
                         ),
                         initial_delay_seconds=5,
                         period_seconds=5,
@@ -338,6 +429,12 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                         http_get=k8s_client.V1HTTPGetAction(
                             path="/v1/sandbox",
                             port=8080,
+                            http_headers=[
+                                k8s_client.V1HTTPHeader(
+                                    name="X-AIO-API-Key",
+                                    value=sandbox_api_key,
+                                )
+                            ],
                         ),
                         initial_delay_seconds=10,
                         period_seconds=10,
@@ -363,7 +460,7 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                     ),
                 )
             ],
-            volumes=_build_volumes(thread_id),
+            volumes=_build_volumes(thread_id, user_id=user_id),
             restart_policy="Always",
         ),
     )
@@ -403,22 +500,107 @@ def _build_service(sandbox_id: str) -> k8s_client.V1Service:
 def _get_node_port(sandbox_id: str) -> int | None:
     """Read the K8s-allocated NodePort from the Service."""
     try:
-        svc = core_v1.read_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
+        svc = core_v1.read_namespaced_service(
+            _svc_name(sandbox_id),
+            K8S_NAMESPACE,
+            _request_timeout=K8S_REQUEST_TIMEOUT,
+        )
         for port in svc.spec.ports or []:
             if port.name == "http":
                 return port.node_port
-    except ApiException:
-        pass
+    except ApiException as exc:
+        if exc.status != 404:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Kubernetes service lookup failed: {exc.reason}",
+            ) from exc
     return None
 
 
-def _get_pod_phase(sandbox_id: str) -> str:
-    """Return the Pod phase (Pending / Running / Succeeded / Failed / Unknown)."""
+def _get_pod_snapshot(sandbox_id: str) -> SandboxPodSnapshot | None:
+    """Read status, readiness, and scoped key from one Pod snapshot."""
     try:
-        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-        return pod.status.phase or "Unknown"
-    except ApiException:
-        return "NotFound"
+        pod = core_v1.read_namespaced_pod(
+            _pod_name(sandbox_id),
+            K8S_NAMESPACE,
+            _request_timeout=K8S_REQUEST_TIMEOUT,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise HTTPException(
+            status_code=503,
+            detail=f"Kubernetes pod lookup failed: {exc.reason}",
+        ) from exc
+
+    phase = pod.status.phase or "Unknown"
+    ready = phase == "Running" and any(status.name == "sandbox" and status.ready for status in (pod.status.container_statuses or []))
+    sandbox_api_key = None
+    for container in pod.spec.containers or []:
+        if container.name != "sandbox":
+            continue
+        for item in container.env or []:
+            if item.name == "SANDBOX_API_KEY" and item.value:
+                sandbox_api_key = item.value
+                break
+        break
+    return SandboxPodSnapshot(
+        status=phase,
+        ready=ready,
+        sandbox_api_key=sandbox_api_key,
+    )
+
+
+def _get_pod_state(sandbox_id: str) -> tuple[str, bool]:
+    """Backward-compatible phase/readiness view of one Pod snapshot."""
+    snapshot = _get_pod_snapshot(sandbox_id)
+    if snapshot is None:
+        return "NotFound", False
+    return snapshot.status, snapshot.ready
+
+
+def _get_pod_phase(sandbox_id: str) -> str:
+    """Backward-compatible phase-only view of ``_get_pod_state``."""
+    return _get_pod_state(sandbox_id)[0]
+
+
+def _get_sandbox_api_key(sandbox_id: str) -> str | None:
+    """Read the scoped execution key from a managed Pod specification."""
+    snapshot = _get_pod_snapshot(sandbox_id)
+    return snapshot.sandbox_api_key if snapshot is not None else None
+
+
+def _delete_sandbox_resources(
+    sandbox_id: str,
+    *,
+    delete_service: bool,
+    delete_pod: bool,
+) -> list[str]:
+    """Best-effort cleanup that preserves every non-404 failure for callers."""
+    errors: list[str] = []
+    if delete_service:
+        try:
+            core_v1.delete_namespaced_service(
+                _svc_name(sandbox_id),
+                K8S_NAMESPACE,
+                _request_timeout=K8S_REQUEST_TIMEOUT,
+            )
+            logger.info(f"Deleted Service {_svc_name(sandbox_id)}")
+        except Exception as exc:
+            if not isinstance(exc, ApiException) or exc.status != 404:
+                errors.append(f"service: {getattr(exc, 'reason', None) or exc}")
+    if delete_pod:
+        try:
+            core_v1.delete_namespaced_pod(
+                _pod_name(sandbox_id),
+                K8S_NAMESPACE,
+                _request_timeout=K8S_REQUEST_TIMEOUT,
+            )
+            logger.info(f"Deleted Pod {_pod_name(sandbox_id)}")
+        except Exception as exc:
+            if not isinstance(exc, ApiException) or exc.status != 404:
+                errors.append(f"pod: {getattr(exc, 'reason', None) or exc}")
+    return errors
 
 
 # ── API endpoints ────────────────────────────────────────────────────────
@@ -430,8 +612,14 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/sandboxes", response_model=SandboxResponse)
-async def create_sandbox(req: CreateSandboxRequest):
+@app.post("/api/sandboxes", response_model=SandboxResponse, dependencies=[Depends(_require_internal_token)])
+def create_sandbox(req: CreateSandboxRequest):
+    """Serialize lifecycle mutations for one deterministic sandbox ID."""
+    with _sandbox_lifecycle_lock(req.sandbox_id):
+        return _create_sandbox_locked(req)
+
+
+def _create_sandbox_locked(req: CreateSandboxRequest) -> SandboxResponse:
     """Create a sandbox Pod + NodePort Service for *sandbox_id*.
 
     If the sandbox already exists, returns the existing information
@@ -451,36 +639,82 @@ async def create_sandbox(req: CreateSandboxRequest):
     # ── Fast path: sandbox already exists ────────────────────────────
     existing_port = _get_node_port(sandbox_id)
     if existing_port:
-        return SandboxResponse(
-            sandbox_id=sandbox_id,
-            sandbox_url=_sandbox_url(existing_port),
-            status=_get_pod_phase(sandbox_id),
-        )
+        snapshot = _get_pod_snapshot(sandbox_id)
+        if snapshot is not None:
+            if not snapshot.sandbox_api_key or secrets.compare_digest(
+                snapshot.sandbox_api_key,
+                PROVISIONER_AUTH_TOKEN,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Existing sandbox lacks a scoped API key and must be deleted before reuse",
+                )
+            return SandboxResponse(
+                sandbox_id=sandbox_id,
+                sandbox_url=_sandbox_url(existing_port),
+                status=snapshot.status,
+                ready=snapshot.ready,
+                sandbox_api_key=snapshot.sandbox_api_key,
+            )
 
     # ── Create Pod ───────────────────────────────────────────────────
+    sandbox_api_key = secrets.token_urlsafe(32)
+    created_pod = False
     try:
-        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id, user_id=user_id))
+        core_v1.create_namespaced_pod(
+            K8S_NAMESPACE,
+            _build_pod(
+                sandbox_id,
+                thread_id,
+                user_id=user_id,
+                sandbox_api_key=sandbox_api_key,
+            ),
+            _request_timeout=K8S_REQUEST_TIMEOUT,
+        )
+        created_pod = True
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
-    except ApiException as exc:
-        if exc.status != 409:  # 409 = AlreadyExists
-            raise HTTPException(
-                status_code=500, detail=f"Pod creation failed: {exc.reason}"
+    except Exception as exc:
+        conflict = isinstance(exc, ApiException) and exc.status == 409
+        snapshot = _get_pod_snapshot(sandbox_id)
+        if snapshot is None:
+            detail = getattr(exc, "reason", None) or str(exc)
+            raise HTTPException(status_code=500, detail=f"Pod creation failed: {detail}") from exc
+        if (
+            not snapshot.sandbox_api_key
+            or secrets.compare_digest(
+                snapshot.sandbox_api_key,
+                PROVISIONER_AUTH_TOKEN,
             )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Existing sandbox lacks a scoped API key and must be deleted before reuse",
+            ) from exc
+        created_pod = not conflict and secrets.compare_digest(
+            snapshot.sandbox_api_key,
+            sandbox_api_key,
+        )
+        sandbox_api_key = snapshot.sandbox_api_key
 
     # ── Create Service ───────────────────────────────────────────────
     try:
-        core_v1.create_namespaced_service(K8S_NAMESPACE, _build_service(sandbox_id))
+        core_v1.create_namespaced_service(
+            K8S_NAMESPACE,
+            _build_service(sandbox_id),
+            _request_timeout=K8S_REQUEST_TIMEOUT,
+        )
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
-    except ApiException as exc:
-        if exc.status != 409:
-            # Roll back the Pod on failure
-            try:
-                core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-            except ApiException:
-                pass
-            raise HTTPException(
-                status_code=500, detail=f"Service creation failed: {exc.reason}"
+    except Exception as exc:
+        if not isinstance(exc, ApiException) or exc.status != 409:
+            cleanup_errors = _delete_sandbox_resources(
+                sandbox_id,
+                delete_service=True,
+                delete_pod=created_pod,
             )
+            detail = f"Service creation failed: {getattr(exc, 'reason', None) or exc}"
+            if cleanup_errors:
+                detail += f"; rollback failed: {', '.join(cleanup_errors)}"
+            raise HTTPException(status_code=500, detail=detail) from exc
 
     # ── Read the auto-allocated NodePort ─────────────────────────────
     node_port: int | None = None
@@ -491,72 +725,75 @@ async def create_sandbox(req: CreateSandboxRequest):
         time.sleep(0.5)
 
     if not node_port:
-        raise HTTPException(
-            status_code=500, detail="NodePort was not allocated in time"
+        cleanup_errors = _delete_sandbox_resources(
+            sandbox_id,
+            delete_service=True,
+            delete_pod=created_pod,
         )
+        detail = "NodePort was not allocated in time"
+        if cleanup_errors:
+            detail += f"; rollback failed: {', '.join(cleanup_errors)}"
+        raise HTTPException(status_code=500, detail=detail)
 
+    snapshot = _get_pod_snapshot(sandbox_id)
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=_sandbox_url(node_port),
-        status=_get_pod_phase(sandbox_id),
+        status=snapshot.status if snapshot is not None else "NotFound",
+        ready=snapshot.ready if snapshot is not None else False,
+        sandbox_api_key=sandbox_api_key,
     )
 
 
-@app.delete("/api/sandboxes/{sandbox_id}")
-async def destroy_sandbox(sandbox_id: str):
+@app.delete("/api/sandboxes/{sandbox_id}", dependencies=[Depends(_require_internal_token)])
+def destroy_sandbox(sandbox_id: str):
+    """Serialize deletion against creation of the same sandbox ID."""
+    with _sandbox_lifecycle_lock(sandbox_id):
+        return _destroy_sandbox_locked(sandbox_id)
+
+
+def _destroy_sandbox_locked(sandbox_id: str) -> dict[str, object]:
     """Destroy a sandbox Pod + Service."""
-    errors: list[str] = []
-
-    # Delete Service
-    try:
-        core_v1.delete_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
-        logger.info(f"Deleted Service {_svc_name(sandbox_id)}")
-    except ApiException as exc:
-        if exc.status != 404:
-            errors.append(f"service: {exc.reason}")
-
-    # Delete Pod
-    try:
-        core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-        logger.info(f"Deleted Pod {_pod_name(sandbox_id)}")
-    except ApiException as exc:
-        if exc.status != 404:
-            errors.append(f"pod: {exc.reason}")
+    errors = _delete_sandbox_resources(
+        sandbox_id,
+        delete_service=True,
+        delete_pod=True,
+    )
 
     if errors:
-        raise HTTPException(
-            status_code=500, detail=f"Partial cleanup: {', '.join(errors)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Partial cleanup: {', '.join(errors)}")
 
     return {"ok": True, "sandbox_id": sandbox_id}
 
 
-@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
-async def get_sandbox(sandbox_id: str):
+@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse, dependencies=[Depends(_require_internal_token)])
+def get_sandbox(sandbox_id: str):
     """Return current status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
     if not node_port:
         raise HTTPException(status_code=404, detail=f"Sandbox '{sandbox_id}' not found")
 
+    snapshot = _get_pod_snapshot(sandbox_id)
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=_sandbox_url(node_port),
-        status=_get_pod_phase(sandbox_id),
+        status=snapshot.status if snapshot is not None else "NotFound",
+        ready=snapshot.ready if snapshot is not None else False,
+        sandbox_api_key=snapshot.sandbox_api_key if snapshot is not None else None,
     )
 
 
-@app.get("/api/sandboxes")
-async def list_sandboxes():
+@app.get("/api/sandboxes", dependencies=[Depends(_require_internal_token)])
+def list_sandboxes():
     """List every sandbox currently managed in the namespace."""
     try:
         services = core_v1.list_namespaced_service(
             K8S_NAMESPACE,
             label_selector="app=deer-flow-sandbox",
+            _request_timeout=K8S_REQUEST_TIMEOUT,
         )
     except ApiException as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to list services: {exc.reason}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to list services: {exc.reason}")
 
     sandboxes: list[SandboxResponse] = []
     for svc in services.items:
@@ -569,11 +806,14 @@ async def list_sandboxes():
                 node_port = port.node_port
                 break
         if node_port:
+            snapshot = _get_pod_snapshot(sid)
             sandboxes.append(
                 SandboxResponse(
                     sandbox_id=sid,
                     sandbox_url=_sandbox_url(node_port),
-                    status=_get_pod_phase(sid),
+                    status=snapshot.status if snapshot is not None else "NotFound",
+                    ready=snapshot.ready if snapshot is not None else False,
+                    sandbox_api_key=snapshot.sandbox_api_key if snapshot is not None else None,
                 )
             )
 

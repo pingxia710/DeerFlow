@@ -350,7 +350,7 @@ function MessageContent_({
       <AIElementMessageContent className={className}>
         <Reasoning
           isStreaming={isLoading}
-          startTimeProp={turnStartTime}
+          startTimeProp={isLoading ? turnStartTime : undefined}
           duration={turnDuration}
           onTurnDurationChange={handleDurationChange}
         >
@@ -393,7 +393,7 @@ function MessageContent_({
         (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
           <Reasoning
             isStreaming={isLoading}
-            startTimeProp={turnStartTime}
+            startTimeProp={isLoading ? turnStartTime : undefined}
             duration={turnDuration}
             onTurnDurationChange={handleDurationChange}
           >

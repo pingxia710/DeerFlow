@@ -1,6 +1,7 @@
 export interface Model {
   id: string;
   name: string;
+  provider?: string | null;
   model: string;
   display_name: string;
   description?: string | null;

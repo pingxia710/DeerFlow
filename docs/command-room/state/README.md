@@ -14,5 +14,6 @@ only for major risk, redlines, or permission expansion such as production or
 customer-visible effects, secrets/customer/payment data, destructive cleanup or
 history/evidence deletion, real provider cost or external side effects, changed
 architecture commitments, deploy/public exposure, or bottom-boundary changes.
-Autonomy does not remove boundary, evidence, or opposition checks, and worker
-self-claims alone cannot support PASS.
+Autonomy does not remove boundary or evidence checks, and worker self-claims
+alone cannot support PASS. Opposition is risk-triggered rather than a mandatory
+step before ordinary completion.

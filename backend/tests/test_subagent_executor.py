@@ -14,6 +14,7 @@ the real implementation in isolation.
 """
 
 import asyncio
+import hashlib
 import importlib
 import re
 import sys
@@ -24,6 +25,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from deerflow.skills.types import Skill
 
@@ -54,6 +56,77 @@ def _clear_stale_executor_package_attr() -> None:
     subagents_pkg = sys.modules.get("deerflow.subagents")
     if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
         delattr(subagents_pkg, "executor")
+
+
+def test_runtime_tool_results_become_redacted_reproducible_evidence_refs(_setup_executor_classes):
+    executor_module = sys.modules["deerflow.subagents.executor"]
+    AIMessage = _setup_executor_classes["AIMessage"]
+    bash_output = "3 passed in 0.12s"
+    write_output = "Successfully wrote file"
+    sensitive_command = "curl -H 'Authorization: Bearer top-secret-token' https://example.com"
+    sensitive_output = "request completed"
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "bash",
+                    "args": {
+                        "description": "run focused tests",
+                        "command": "pytest backend/tests/test_example.py -q",
+                    },
+                    "id": "call-bash",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content=bash_output, tool_call_id="call-bash", name="bash"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {
+                        "description": "write implementation",
+                        "path": "backend/example.py",
+                        "content": "token=secret-value",
+                    },
+                    "id": "call-write",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "bash",
+                    "args": {"description": "never executed", "command": "pytest orphan.py"},
+                    "id": "call-orphan",
+                    "type": "tool_call",
+                },
+            ],
+        ),
+        ToolMessage(content=write_output, tool_call_id="call-write", name="write_file"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "bash",
+                    "args": {"description": "call authenticated endpoint", "command": sensitive_command},
+                    "id": "call-sensitive-bash",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content=sensitive_output, tool_call_id="call-sensitive-bash", name="bash"),
+    ]
+
+    refs = executor_module._collect_observed_tool_evidence_refs(messages)
+
+    assert refs == [
+        f"command: pytest backend/tests/test_example.py -q; exit code: 0; output_sha256: {hashlib.sha256(bash_output.encode()).hexdigest()}",
+        f"tool: write_file; path: backend/example.py; status: success; output_sha256: {hashlib.sha256(write_output.encode()).hexdigest()}",
+        f"command: [redacted sensitive command]; command_sha256: {hashlib.sha256(sensitive_command.encode()).hexdigest()}; exit code: 0; output_sha256: {hashlib.sha256(sensitive_output.encode()).hexdigest()}",
+    ]
+    assert "secret-value" not in str(refs)
+    assert "top-secret-token" not in str(refs)
+    assert "orphan.py" not in str(refs)
 
 
 @pytest.fixture(autouse=True)
@@ -319,6 +392,7 @@ class TestAgentConstruction:
             "model_name": "parent-model",
             "lazy_init": True,
             "deferred_setup": None,
+            "max_model_calls": 10,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
@@ -2407,6 +2481,23 @@ class TestSubagentTracingWiring:
         # cannot displace the token-accounting callback).
         assert len(callbacks) >= 2, "existing callbacks must be preserved when tracing is injected"
         assert result.status.value == SubagentStatus.COMPLETED.value
+
+    @pytest.mark.anyio
+    async def test_aexecute_uses_structural_recursion_budget_not_model_turn_limit(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        executor = self._make_executor(classes)
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        assert fake_agent.captured_config is not None
+        assert fake_agent.captured_config["recursion_limit"] > executor.config.max_turns
 
     @pytest.mark.anyio
     async def test_aexecute_injects_langfuse_session_user_and_trace_name(

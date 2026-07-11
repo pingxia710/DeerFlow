@@ -41,7 +41,7 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
 - **Location**: `config.yaml` should be in `deer-flow/` (project root)
 - **Git**: `config.yaml` is automatically ignored by git (contains secrets)
 - **Runtime root**: Set `DEER_FLOW_PROJECT_ROOT` if DeerFlow may start from outside the project root
-- **Runtime data**: State defaults to `.deer-flow` under the project root; set `DEER_FLOW_HOME` to move it
+- **Runtime data**: This source checkout defaults to `backend/.deer-flow`; standalone harness projects default to `.deer-flow` under their project root. Set `DEER_FLOW_HOME` to move it
 - **Skills**: Skills default to `skills/` under the project root; set `DEER_FLOW_SKILLS_PATH` or `skills.path` to move them
 
 ## Configuration File Locations

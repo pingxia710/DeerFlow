@@ -3,9 +3,12 @@
 Uses temp SQLite DB for ORM tests.
 """
 
+import asyncio
+
 import pytest
 
 from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 
 async def _make_feedback_repo(tmp_path):
@@ -185,6 +188,38 @@ class TestFeedbackRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_concurrent_upsert_is_idempotent(self, tmp_path, monkeypatch):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        repo = await _make_feedback_repo(tmp_path)
+        original_execute = AsyncSession.execute
+        first_selects = 0
+        both_selected = asyncio.Event()
+
+        async def coordinated_execute(session, statement, *args, **kwargs):
+            nonlocal first_selects
+            result = await original_execute(session, statement, *args, **kwargs)
+            if "FROM feedback" in str(statement) and first_selects < 2:
+                first_selects += 1
+                if first_selects == 2:
+                    both_selected.set()
+                else:
+                    await both_selected.wait()
+            return result
+
+        monkeypatch.setattr(AsyncSession, "execute", coordinated_execute)
+
+        results = await asyncio.gather(
+            repo.upsert(run_id="r-race", thread_id="t-race", rating=1, user_id="u-race", comment="first"),
+            repo.upsert(run_id="r-race", thread_id="t-race", rating=-1, user_id="u-race", comment="second"),
+        )
+
+        rows = await repo.list_by_run("t-race", "r-race", user_id="u-race")
+        assert len(rows) == 1
+        assert {result["feedback_id"] for result in results} == {rows[0]["feedback_id"]}
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_upsert_different_users_separate(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
         r1 = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
@@ -233,6 +268,73 @@ class TestFeedbackRepository:
         assert [row["run_id"] for row in await repo.list_by_thread("t1", user_id="u2")] == ["r3"]
         assert [row["run_id"] for row in await repo.list_by_thread("t2", user_id="u1")] == ["r4"]
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_delete_legacy_by_thread_only_removes_null_owner(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.create(run_id="r-null", thread_id="t1", rating=1, user_id=None)
+        await repo.create(run_id="r-owner", thread_id="t1", rating=1, user_id="u1")
+        await repo.create(run_id="r-other", thread_id="t2", rating=1, user_id=None)
+
+        assert await repo.delete_legacy_by_thread("t1") == 1
+        assert [row["run_id"] for row in await repo.list_by_thread("t1", user_id=None)] == ["r-owner"]
+        assert [row["run_id"] for row in await repo.list_by_thread("t2", user_id=None)] == ["r-other"]
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_legacy_converges_unique_collision_to_existing_owner(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            owner = await repo.create(
+                run_id="r-collision",
+                thread_id="t-collision",
+                rating=-1,
+                user_id="owner-1",
+                comment="owner wins",
+            )
+            await repo.create(
+                run_id="r-collision",
+                thread_id="t-collision",
+                rating=1,
+                user_id=DEFAULT_USER_ID,
+                comment="legacy loses",
+            )
+
+            assert await repo.claim_legacy_by_thread("t-collision", "owner-1") == 1
+            rows = await repo.list_by_run("t-collision", "r-collision", user_id="owner-1")
+            assert len(rows) == 1
+            assert rows[0]["feedback_id"] == owner["feedback_id"]
+            assert rows[0]["rating"] == -1
+            assert rows[0]["comment"] == "owner wins"
+            assert await repo.list_by_run("t-collision", "r-collision", user_id=DEFAULT_USER_ID) == []
+            assert await repo.claim_legacy_by_thread("t-collision", "owner-1") == 0
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_to_default_owner_preserves_existing_default_row(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            owner = await repo.create(
+                run_id="r-default",
+                thread_id="t-default",
+                rating=-1,
+                user_id=DEFAULT_USER_ID,
+            )
+            await repo.create(
+                run_id="r-default",
+                thread_id="t-default",
+                rating=1,
+                user_id=None,
+            )
+
+            assert await repo.claim_legacy_by_thread("t-default", DEFAULT_USER_ID) == 1
+            rows = await repo.list_by_run("t-default", "r-default", user_id=DEFAULT_USER_ID)
+            assert len(rows) == 1
+            assert rows[0]["feedback_id"] == owner["feedback_id"]
+            assert rows[0]["rating"] == -1
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_list_by_thread_grouped(self, tmp_path):

@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import shlex
 import subprocess
 from datetime import datetime
 
 from deerflow.utils.network import get_free_port, release_port
 
-from .backend import SandboxBackend, wait_for_sandbox_ready
+from .backend import SandboxAuthProbeError, SandboxBackend, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,7 @@ class LocalContainerBackend(SandboxBackend):
         """
         del user_id
         container_name = f"{self._container_prefix}-{sandbox_id}"
+        sandbox_api_key = secrets.token_urlsafe(32)
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
@@ -319,7 +321,12 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             try:
-                container_id = self._start_container(container_name, port, extra_mounts)
+                container_id = self._start_container(
+                    container_name,
+                    port,
+                    extra_mounts,
+                    sandbox_api_key=sandbox_api_key,
+                )
                 break
             except RuntimeError as exc:
                 release_port(port)
@@ -350,6 +357,7 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_url=f"http://{sandbox_host}:{port}",
             container_name=container_name,
             container_id=container_id,
+            sandbox_api_key=sandbox_api_key,
         )
 
     def destroy(self, info: SandboxInfo) -> None:
@@ -409,13 +417,32 @@ class LocalContainerBackend(SandboxBackend):
 
         sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
         sandbox_url = f"http://{sandbox_host}:{port}"
-        if not wait_for_sandbox_ready(sandbox_url, timeout=5):
+        inspection = self._batch_inspect([container_name]).get(container_name)
+        sandbox_api_key = inspection[2] if inspection is not None else None
+        if not sandbox_api_key:
+            logger.warning("Refusing to adopt sandbox %s without a scoped API key", container_name)
+            return None
+        try:
+            ready = wait_for_sandbox_ready(
+                sandbox_url,
+                timeout=5,
+                api_key=sandbox_api_key,
+            )
+        except SandboxAuthProbeError as exc:
+            logger.warning(
+                "Could not verify sandbox authentication for %s during discovery: %s",
+                container_name,
+                exc,
+            )
+            return None
+        if not ready:
             return None
 
         return SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url=sandbox_url,
             container_name=container_name,
+            sandbox_api_key=sandbox_api_key,
         )
 
     def list_running(self) -> list[SandboxInfo]:
@@ -479,7 +506,7 @@ class LocalContainerBackend(SandboxBackend):
             if data is None:
                 # Container disappeared between ps and inspect, or inspect failed
                 continue
-            created_at, host_port = data
+            created_at, host_port, sandbox_api_key = data
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
             sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
@@ -489,16 +516,21 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_url=sandbox_url,
                     container_name=container_name,
                     created_at=created_at,
+                    sandbox_api_key=sandbox_api_key,
                 )
             )
 
         logger.info(f"Found {len(infos)} running sandbox container(s)")
         return infos
 
-    def _batch_inspect(self, container_names: list[str]) -> dict[str, tuple[float, int | None]]:
+    def _batch_inspect(
+        self,
+        container_names: list[str],
+    ) -> dict[str, tuple[float, int | None, str | None]]:
         """Batch-inspect containers in a single subprocess call.
 
-        Returns a mapping of ``container_name -> (created_at, host_port)``.
+        Returns a mapping of
+        ``container_name -> (created_at, host_port, sandbox_api_key)``.
         Missing containers or parse failures are silently dropped from the result.
         """
         if not container_names:
@@ -530,7 +562,7 @@ class LocalContainerBackend(SandboxBackend):
             logger.warning(f"Failed to parse docker inspect output as JSON: {e}")
             return {}
 
-        out: dict[str, tuple[float, int | None]] = {}
+        out: dict[str, tuple[float, int | None, str | None]] = {}
         for entry in payload:
             # ``Name`` is prefixed with ``/`` in the docker inspect response
             name = (entry.get("Name") or "").lstrip("/")
@@ -538,7 +570,12 @@ class LocalContainerBackend(SandboxBackend):
                 continue
             created_at = _parse_docker_timestamp(entry.get("Created", ""))
             host_port = _extract_host_port(entry, 8080)
-            out[name] = (created_at, host_port)
+            sandbox_api_key = None
+            for value in (entry.get("Config") or {}).get("Env") or []:
+                if isinstance(value, str) and value.startswith("SANDBOX_API_KEY="):
+                    sandbox_api_key = value.split("=", 1)[1] or None
+                    break
+            out[name] = (created_at, host_port, sandbox_api_key)
         return out
 
     # ── Container operations ─────────────────────────────────────────────
@@ -548,6 +585,8 @@ class LocalContainerBackend(SandboxBackend):
         container_name: str,
         port: int,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        sandbox_api_key: str | None = None,
     ) -> str:
         """Start a new container.
 
@@ -584,7 +623,10 @@ class LocalContainerBackend(SandboxBackend):
         )
 
         # Environment variables
-        for key, value in self._environment.items():
+        environment = dict(self._environment)
+        if sandbox_api_key:
+            environment["SANDBOX_API_KEY"] = sandbox_api_key
+        for key, value in environment.items():
             cmd.extend(["-e", f"{key}={value}"])
 
         # Config-level volume mounts
@@ -635,7 +677,11 @@ class LocalContainerBackend(SandboxBackend):
             )
             logger.info(f"Stopped container {container_id} using {self._runtime}")
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
+            stderr = e.stderr or ""
+            if _is_no_such_container_error(stderr, container_id):
+                logger.info(f"Container {container_id} was already absent")
+                return
+            raise RuntimeError(f"Failed to stop container {container_id}: {stderr.strip()}") from e
 
     def _is_container_running(self, container_name: str) -> bool:
         """Check if a named container is currently running.

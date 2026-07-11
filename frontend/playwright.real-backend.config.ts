@@ -60,6 +60,7 @@ export default defineConfig({
         SKIP_ENV_VALIDATION: "1",
         DEER_FLOW_AUTH_DISABLED: "1",
         BETTER_AUTH_SECRET: "local-dev-secret",
+        NEXT_DIST_DIR: ".next-e2e-real",
         PORT: FRONTEND_PORT,
         // Leave NEXT_PUBLIC_* unset so the frontend uses its built-in
         // next.config rewrites (same-origin proxy) instead of talking to the

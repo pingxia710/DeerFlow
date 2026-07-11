@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import threading
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from deerflow.command_room.file_records import append_jsonl_record, read_jsonl_text
 from deerflow.config.paths import get_paths
 
 ReviewerRole = Literal["evidence_checker", "opposition", "synthesis_checker", "reviewer"]
@@ -20,7 +20,6 @@ REVIEW_INVOCATION_STATUSES = frozenset({"requested", "completed", "cancelled"})
 _TEXT_LIMIT = 2000
 _REF_LIMIT = 20
 _COMPACT_TEXT_LIMIT = 240
-_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -200,11 +199,7 @@ def _review_invocations_file(thread_id: str, user_id: str | None, base_dir: Path
 
 def record_review_invocation(invocation: ReviewInvocation, *, user_id: str | None = None, base_dir: Path | None = None) -> Path:
     path = _review_invocations_file(invocation.thread_id, user_id, base_dir=base_dir)
-    with _WRITE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(invocation.as_dict(), ensure_ascii=False, sort_keys=True) + "\n")
-    return path
+    return append_jsonl_record(path, invocation.as_dict())
 
 
 def list_review_invocations(
@@ -218,11 +213,12 @@ def list_review_invocations(
     base_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     path = _review_invocations_file(thread_id, user_id, base_dir=base_dir)
-    if not path.exists():
+    text = read_jsonl_text(path)
+    if text is None:
         return []
     latest: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:

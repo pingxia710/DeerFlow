@@ -39,7 +39,13 @@
     "**/*.cjs",
     "**/*.js",
     ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts"
+    ".next/dev/types/**/*.ts",
+    ".next-e2e-real/types/**/*.ts",
+    ".next-e2e-real/dev/types/**/*.ts",
+    ".next-e2e-mock/types/**/*.ts",
+    ".next-e2e-mock/dev/types/**/*.ts",
+    ".next-e2e-record/types/**/*.ts",
+    ".next-e2e-record/dev/types/**/*.ts"
   ],
   "exclude": ["node_modules", "generated"]
 }

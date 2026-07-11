@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
@@ -189,6 +190,71 @@ def test_capability_snapshot_labels_tools_skills_middleware_and_policy(tmp_path:
     assert snapshot["approval_policy"]["program_makes_next_step_decisions"] is False
     assert "credential or raw sensitive-data disclosure" in snapshot["approval_policy"]["stop_before"]
     assert {item["label"] for item in snapshot["filesystem_permissions"]} >= {"read", "write", "execute", "approval_required", "denied"}
+
+
+def test_command_room_runtime_snapshot_distinguishes_direct_and_delegated_capabilities(tmp_path: Path, monkeypatch):
+    from deerflow.config import paths as paths_module
+
+    home = tmp_path / "home"
+    agent_dir = home / "users" / "user-1" / "agents" / "command-room"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "name: command-room",
+                "model: missing-model",
+                "skills:",
+                "  - command-room-chair",
+                "  - missing-skill",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.setattr(paths_module, "_paths", None)
+    monkeypatch.setattr(
+        "deerflow.mcp.cache.get_mcp_cache_status",
+        lambda: {
+            "initialized": True,
+            "stale": False,
+            "tool_count": 2,
+            "tool_names": ["github_search", "github_read"],
+            "last_error_type": None,
+        },
+    )
+
+    snapshot = build_capability_snapshot(_app_config(tmp_path), user_id="user-1")
+    runtime = snapshot["command_room_runtime"]
+
+    assert runtime["agent_config"]["status"] == "loaded"
+    assert runtime["agent_config"]["requested_model"] == "missing-model"
+    assert runtime["agent_config"]["resolved_model"] == "main"
+    assert runtime["agent_config"]["model_fallback"] is True
+    assert runtime["skills"]["loaded"] == ["command-room-chair"]
+    assert runtime["skills"]["missing"] == ["missing-skill"]
+    assert runtime["direct"]["include_mcp"] is False
+    assert runtime["direct"]["tool_groups"] == ["file:read"]
+    assert "read_file" in runtime["direct"]["configured_tools"]
+    assert "bash" not in runtime["direct"]["configured_tools"]
+    assert runtime["delegated"]["include_mcp"] is True
+    assert runtime["delegated"]["mcp_servers_configured"] == ["github"]
+    assert runtime["delegated"]["mcp_cache"]["tool_names"] == ["github_search", "github_read"]
+
+
+def test_mcp_cache_status_is_read_only_and_reports_loaded_tools(monkeypatch):
+    from deerflow.mcp import cache
+
+    monkeypatch.setattr(cache, "_cache_initialized", True)
+    monkeypatch.setattr(cache, "_mcp_tools_cache", [SimpleNamespace(name="search"), SimpleNamespace(name="read")])
+    monkeypatch.setattr(cache, "_config_mtime", None)
+
+    assert cache.get_mcp_cache_status() == {
+        "initialized": True,
+        "stale": False,
+        "tool_count": 2,
+        "tool_names": ["search", "read"],
+        "last_error_type": None,
+    }
 
 
 def test_capability_api_returns_global_snapshot(tmp_path: Path):

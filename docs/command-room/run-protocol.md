@@ -10,13 +10,13 @@ The role/process/loop/round control contract lives in
 | Class | Use When | Required Shape |
 | --- | --- | --- |
 | Small | Read-only lookup, stable explanation, one command, or one local check. | Chair handles directly; Evidence may be lightweight. Do not force Planner, Boundary, or Opposition. |
-| Ordinary | Code, docs, tests, bug fixes, project investigation, or local reversible changes. | Planner, Boundary, Evidence, Chair, Executor, Evidence, Chair. Opposition is used when the round reaches a non-trivial PASS or contested conclusion. |
+| Ordinary | Code, docs, tests, bug fixes, project investigation, or local reversible changes. | One implementation/executor lane plus the focused verification required by acceptance. Add governance roles only for a concrete risk, conflict, or evidence gap. |
 | High-impact | Architecture, AI-AI protocol, AGENTS, skills, SkillOpt, permissions, bottom boundaries, production, public behavior, credentials, customer/payment data, or destructive actions. | Planner, Boundary, Evidence, Opposition, Chair, Executor, Evidence, Opposition, Chair, Recorder. Run SkillOpt when rules, skills, SOPs, or safety-critical automation changed. |
 
 ## Chair Activation Check
 
-For DeerFlow architecture, AI-AI, roles, loops, governance, quality, boundary,
-development execution, or durable-rule work, Chair starts with:
+For high-impact DeerFlow architecture, AI-AI, roles, loops, governance, quality,
+boundary expansion, or durable-rule work, Chair starts with:
 
 ```text
 Goal:
@@ -102,7 +102,10 @@ Every serious Chair decision should label current evidence as exactly one of:
 Only Strong evidence can support `PASS`. Weak or Unverified evidence must
 produce `Minimum Evidence Action` or a `NEEDS_MORE` decision.
 
-## Fixed Role Order
+## High-Impact Role Sequence
+
+This sequence is available for high-impact work. It is not the default path for
+ordinary local development.
 
 1. Planner proposes candidate direction and tradeoffs.
 2. Boundary names redlines, missing authorization, and safe scope.
@@ -113,6 +116,11 @@ produce `Minimum Evidence Action` or a `NEEDS_MORE` decision.
 7. Evidence checks results against the standard.
 8. Chair decides PASS, NEEDS_MORE, BLOCKED, or STOP_CONFIRM.
 9. Recorder writes durable decisions, state, `Progress.md`, docs, skills, AGENTS, or SkillOpt only when they changed.
+
+For ordinary work, Chair may dispatch one Executor, consume runtime-observed
+evidence, run the smallest focused verification, and stop when acceptance is met.
+Later role criticism must cite stronger conflicting evidence; it does not erase
+observed edits or passing commands.
 
 ## Thin Handoff Runtime
 

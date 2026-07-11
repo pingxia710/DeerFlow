@@ -7,6 +7,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_aio_client_uses_configured_api_key():
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as client:
+        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+        AioSandbox(id="secured", base_url="http://sandbox:8080", api_key="expected-token")
+
+    client.assert_called_once_with(
+        base_url="http://sandbox:8080",
+        headers={"X-AIO-API-Key": "expected-token"},
+        timeout=600,
+    )
+
+
 @pytest.fixture()
 def sandbox():
     """Create an AioSandbox with a mocked client."""

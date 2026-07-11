@@ -1,4 +1,6 @@
+import asyncio
 import re
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -7,15 +9,17 @@ import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
+from app.gateway.authz import AuthContext, Permissions
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaCreateResult
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
-from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 _HISTORY_USER_ID = UUID("22222222-2222-2222-2222-222222222222")
@@ -69,6 +73,7 @@ def _build_thread_app(*, user_factory=None) -> tuple[FastAPI, InMemoryStore, InM
     app.state.store = store
     app.state.checkpointer = checkpointer
     app.state.thread_store = _PermissiveThreadMetaStore(store)
+    app.state.run_manager = RunManager()
     app.include_router(threads.router)
     return app, store, checkpointer
 
@@ -120,7 +125,20 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create("thread-route", user_id=user_id))
     app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    app.state.thread_store = thread_store
+    app.state.run_manager = SimpleNamespace(
+        begin_thread_delete=AsyncMock(),
+        list_by_thread=AsyncMock(return_value=[]),
+        cancel=AsyncMock(),
+    )
+    app.state.stream_bridge = SimpleNamespace(cleanup=AsyncMock())
+    app.state.checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+    app.state.run_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=0))
+    app.state.run_event_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=0))
+    app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=0))
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -151,7 +169,23 @@ def test_delete_thread_route_uses_trusted_internal_owner_bucket(tmp_path):
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
         state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source="internal"),
-        app=SimpleNamespace(state=SimpleNamespace(thread_store=thread_store, checkpointer=None)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+                run_manager=SimpleNamespace(
+                    begin_thread_delete=AsyncMock(),
+                    list_by_thread=AsyncMock(return_value=[]),
+                    cancel=AsyncMock(),
+                ),
+                stream_bridge=SimpleNamespace(cleanup=AsyncMock()),
+                run_store=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                run_event_store=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                feedback_repo=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        ),
     )
 
     async def _scenario():
@@ -185,7 +219,18 @@ def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
 def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
     paths = Paths(tmp_path)
 
-    app = make_authed_test_app()
+    user = _make_user()
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create("thread.with.dot", user_id=str(user.id)))
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.state.thread_store = thread_store
+    app.state.run_manager = SimpleNamespace(
+        begin_thread_delete=AsyncMock(),
+        list_by_thread=AsyncMock(return_value=[]),
+        cancel=AsyncMock(),
+    )
+    app.state.stream_bridge = SimpleNamespace(cleanup=AsyncMock())
+    app.state.checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -212,6 +257,518 @@ def test_delete_thread_data_returns_generic_500_error(tmp_path):
     log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")
 
 
+@pytest.mark.parametrize("owner_kind", ["missing", "null"])
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("get", "/api/threads/legacy-checkpoint", None),
+        ("get", "/api/threads/legacy-checkpoint/state", None),
+        ("post", "/api/threads/legacy-checkpoint/history", {"limit": 10}),
+    ],
+)
+def test_checkpointer_reads_require_explicit_thread_owner(owner_kind, method, path, json):
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": "legacy-checkpoint", "checkpoint_ns": ""}}
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"title": "secret"}
+    asyncio.run(
+        checkpointer.aput(
+            config,
+            checkpoint,
+            {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
+            {},
+        )
+    )
+    if owner_kind == "null":
+        asyncio.run(thread_store.create("legacy-checkpoint", user_id=None))
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    app.state.thread_store = thread_store
+    app.state.checkpointer = checkpointer
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        response = getattr(client, method)(path, json=json) if json is not None else getattr(client, method)(path)
+
+    assert response.status_code == 404
+
+
+def test_explicit_thread_create_cannot_claim_metadata_less_legacy_checkpoint():
+    thread_id = "legacy-create-takeover"
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    checkpointer = InMemorySaver()
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {
+        "messages": [{"type": "human", "content": "legacy-secret"}],
+    }
+    asyncio.run(
+        checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            checkpoint,
+            {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
+            {},
+        )
+    )
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    app.state.thread_store = thread_store
+    app.state.checkpointer = checkpointer
+    app.state.run_manager = RunManager()
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+
+    assert response.status_code == 409
+    assert asyncio.run(thread_store.get(thread_id, user_id=None)) is None
+
+
+def test_explicit_thread_create_cannot_claim_metadata_less_nonroot_checkpoint():
+    thread_id = "legacy-nonroot-takeover"
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    checkpointer = InMemorySaver()
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"]["messages"] = [
+        {"type": "human", "content": "hidden legacy secret"},
+    ]
+    checkpoint["channel_versions"]["messages"] = "1"
+    asyncio.run(
+        checkpointer.aput(
+            {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "hidden-subgraph",
+                }
+            },
+            checkpoint,
+            {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
+            {"messages": "1"},
+        )
+    )
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    app.state.thread_store = thread_store
+    app.state.checkpointer = checkpointer
+    app.state.run_manager = RunManager()
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+
+    assert response.status_code == 409
+    assert asyncio.run(thread_store.get(thread_id, user_id=None)) is None
+
+
+def test_thread_history_lists_only_root_checkpoint_namespace():
+    thread_id = "root-history-only"
+    owner_id = str(_HISTORY_USER_ID)
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    checkpointer = InMemorySaver()
+    asyncio.run(thread_store.create(thread_id, user_id=owner_id))
+
+    for namespace, content in (("", "root message"), ("hidden-subgraph", "hidden secret")):
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"]["messages"] = [
+            {"type": "human", "content": content},
+        ]
+        checkpoint["channel_versions"]["messages"] = "1"
+        asyncio.run(
+            checkpointer.aput(
+                {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": namespace,
+                    }
+                },
+                checkpoint,
+                {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
+                {"messages": "1"},
+            )
+        )
+
+    app = make_authed_test_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
+    app.state.thread_store = thread_store
+    app.state.checkpointer = checkpointer
+    app.state.run_manager = RunManager()
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert [message["content"] for entry in response.json() for message in entry["values"].get("messages", [])] == ["root message"]
+
+
+def test_thread_history_before_returns_strictly_older_page():
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-before-cursor"
+    checkpoint_ids = ["0001", "0002", "0003"]
+
+    async def _seed() -> None:
+        await app.state.thread_store.create(thread_id)
+        for checkpoint_id in checkpoint_ids:
+            checkpoint = empty_checkpoint()
+            checkpoint["id"] = checkpoint_id
+            await checkpointer.aput(
+                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+                checkpoint,
+                {"created_at": f"2026-01-01T00:00:0{checkpoint_id[-1]}+00:00"},
+                {},
+            )
+
+    asyncio.run(_seed())
+
+    alist_calls = []
+    original_alist = checkpointer.alist
+
+    async def recording_alist(config, *, filter=None, before=None, limit=None):
+        alist_calls.append({"config": config, "before": before, "limit": limit})
+        async for item in original_alist(config, filter=filter, before=before, limit=limit):
+            yield item
+
+    checkpointer.alist = recording_alist
+
+    with TestClient(app) as client:
+        first_page = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 1},
+        )
+        cursor = first_page.json()[0]["checkpoint_id"]
+        second_page = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 1, "before": cursor},
+        )
+
+    assert first_page.status_code == 200, first_page.text
+    assert second_page.status_code == 200, second_page.text
+    assert cursor == "0003"
+    assert [entry["checkpoint_id"] for entry in second_page.json()] == ["0002"]
+    assert alist_calls[1]["config"]["configurable"].get("checkpoint_id") is None
+    assert alist_calls[1]["before"]["configurable"]["checkpoint_id"] == cursor
+
+
+@pytest.mark.parametrize(
+    ("repo_name", "probe_name", "probe_result", "probe_kwargs"),
+    [
+        ("run_event_store", "has_events", True, {"user_id": None}),
+        ("feedback_repo", "list_by_thread", [{"id": "feedback"}], {"user_id": None, "limit": 1}),
+        ("artifact_provenance_repo", "list_by_thread", [{"id": "artifact"}], {"user_id": None, "limit": 1}),
+        ("round_state_store", "list_by_thread", [{"id": "round"}], {"user_id": None, "limit": 1}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_metadata_less_thread_detects_every_legacy_repository_surface(
+    tmp_path,
+    repo_name,
+    probe_name,
+    probe_result,
+    probe_kwargs,
+):
+    probe = AsyncMock(return_value=probe_result)
+    repository = SimpleNamespace(**{probe_name: probe})
+    state = SimpleNamespace(
+        checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+        run_store=SimpleNamespace(list_by_thread=AsyncMock(return_value=[])),
+        run_event_store=None,
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+    )
+    setattr(state, repo_name, repository)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        found = await threads._metadata_less_thread_has_legacy_surfaces(
+            "legacy-repository-only",
+            "owner-a",
+            request,
+        )
+
+    assert found is True
+    probe.assert_awaited_once_with("legacy-repository-only", **probe_kwargs)
+
+
+@pytest.mark.parametrize("category", ["trace", "lifecycle"])
+@pytest.mark.asyncio
+async def test_metadata_less_thread_detects_ownerless_non_message_event(
+    tmp_path,
+    category,
+):
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id="legacy-event-only",
+        run_id="legacy-run",
+        event_type="run_start" if category == "lifecycle" else "llm_end",
+        category=category,
+        user_id=None,
+    )
+    state = SimpleNamespace(
+        checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+        run_store=SimpleNamespace(list_by_thread=AsyncMock(return_value=[])),
+        run_event_store=event_store,
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        found = await threads._metadata_less_thread_has_legacy_surfaces(
+            "legacy-event-only",
+            "owner-a",
+            request,
+        )
+
+    assert found is True
+    assert await event_store.count_messages("legacy-event-only", user_id=None) == 0
+
+
+@pytest.mark.asyncio
+async def test_metadata_less_thread_event_probe_keeps_count_messages_fallback(
+    tmp_path,
+):
+    count_messages = AsyncMock(return_value=1)
+    state = SimpleNamespace(
+        checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+        run_store=SimpleNamespace(list_by_thread=AsyncMock(return_value=[])),
+        run_event_store=SimpleNamespace(count_messages=count_messages),
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        found = await threads._metadata_less_thread_has_legacy_surfaces(
+            "legacy-message-only",
+            "owner-a",
+            request,
+        )
+
+    assert found is True
+    count_messages.assert_awaited_once_with("legacy-message-only", user_id=None)
+
+
+@pytest.mark.asyncio
+async def test_trusted_internal_create_rejects_metadata_less_foreign_owner_run(
+    tmp_path,
+):
+    from app.gateway.internal_auth import (
+        INTERNAL_OWNER_USER_ID_HEADER_NAME,
+        INTERNAL_SYSTEM_ROLE,
+    )
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_id = "foreign-owned-run"
+    run_store = MemoryRunStore()
+    await run_store.put(
+        "foreign-run",
+        thread_id=thread_id,
+        status="success",
+        user_id="owner-a",
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    state = SimpleNamespace(
+        checkpointer=InMemorySaver(),
+        thread_store=thread_store,
+        run_store=run_store,
+        run_event_store=None,
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+        run_manager=RunManager(),
+    )
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-b"},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+        ),
+        app=SimpleNamespace(state=state),
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id=thread_id),
+            request,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert await thread_store.get(thread_id, user_id=None) is None
+
+
+@pytest.mark.asyncio
+async def test_second_owner_preflight_rolls_back_new_claim_reservation(tmp_path):
+    from app.gateway.internal_auth import (
+        INTERNAL_OWNER_USER_ID_HEADER_NAME,
+        INTERNAL_SYSTEM_ROLE,
+    )
+
+    thread_id = "owner-race-during-claim"
+    repository = SimpleNamespace(
+        list_owners_by_thread=AsyncMock(side_effect=[{"default"}, {"foreign-owner"}]),
+        claim_legacy_by_thread=AsyncMock(),
+    )
+    checkpointer = InMemorySaver()
+    await checkpointer.aput(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        empty_checkpoint(),
+        {"step": -1, "source": "input", "writes": None},
+        {},
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    state = SimpleNamespace(
+        checkpointer=checkpointer,
+        thread_store=thread_store,
+        run_store=repository,
+        run_event_store=None,
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+        run_manager=RunManager(),
+    )
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-a"},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+        ),
+        app=SimpleNamespace(state=state),
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id=thread_id),
+            request,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert await thread_store.get(thread_id, user_id=None) is None
+    repository.claim_legacy_by_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_metadata_less_thread_detects_foreign_user_filesystem_bucket(tmp_path):
+    paths = Paths(tmp_path)
+    foreign_thread = paths.thread_dir("foreign-files", user_id="owner-a")
+    foreign_thread.mkdir(parents=True)
+    state = SimpleNamespace(
+        checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+        run_store=None,
+        run_event_store=None,
+        feedback_repo=None,
+        artifact_provenance_repo=None,
+        round_state_store=None,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        found = await threads._metadata_less_thread_has_legacy_surfaces(
+            "foreign-files",
+            "owner-b",
+            request,
+        )
+
+    assert found is True
+
+
+@pytest.mark.asyncio
+async def test_trusted_internal_create_converges_metadata_less_legacy_thread(
+    tmp_path,
+):
+    from app.gateway.internal_auth import (
+        INTERNAL_OWNER_USER_ID_HEADER_NAME,
+        INTERNAL_SYSTEM_ROLE,
+    )
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    thread_id = "legacy-internal-create"
+    owner_id = "owner-a"
+    paths = Paths(tmp_path)
+    legacy_dir = paths.thread_dir(thread_id)
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy.txt").write_text("legacy", encoding="utf-8")
+
+    checkpointer = InMemorySaver()
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"title": "keep legacy checkpoint"}
+    await checkpointer.aput(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        checkpoint,
+        {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
+        {},
+    )
+    before_checkpoint = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    run_store = MemoryRunStore()
+    await run_store.put(
+        "legacy-run",
+        thread_id=thread_id,
+        status="success",
+        user_id=DEFAULT_USER_ID,
+    )
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_id},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id=DEFAULT_USER_ID, system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source="internal",
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=run_store,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        ),
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        response = await call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id=thread_id),
+            request,
+        )
+
+    assert response.thread_id == thread_id
+    assert await thread_store.is_legacy_claim_complete(thread_id, owner_id)
+    assert await run_store.get("legacy-run", user_id=owner_id) is not None
+    assert (paths.thread_dir(thread_id, user_id=owner_id) / "legacy.txt").read_text(
+        encoding="utf-8",
+    ) == "legacy"
+    current = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    assert current is not None and before_checkpoint is not None
+    assert current.checkpoint["id"] == before_checkpoint.checkpoint["id"]
+
+
 # ── Server-reserved metadata key stripping ──────────────────────────────────
 
 
@@ -235,6 +792,38 @@ def test_strip_reserved_metadata_empty_input():
 def test_strip_reserved_metadata_strips_all_reserved_keys():
     out = threads._strip_reserved_metadata({"user_id": "x", "keep": "me"})
     assert out == {"keep": "me"}
+
+
+def test_client_metadata_cannot_set_legacy_claim_completion_marker():
+    from deerflow.persistence.thread_meta.base import (
+        LEGACY_CLAIM_COMPLETE_METADATA_KEY,
+    )
+
+    create = threads.ThreadCreateRequest(
+        metadata={LEGACY_CLAIM_COMPLETE_METADATA_KEY: "attacker", "keep": "yes"},
+    )
+    patch = threads.ThreadPatchRequest(
+        metadata={LEGACY_CLAIM_COMPLETE_METADATA_KEY: "attacker", "keep": "yes"},
+    )
+
+    assert create.metadata == {"keep": "yes"}
+    assert patch.metadata == {"keep": "yes"}
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["bad.thread", "../escape", "space id", "trailing-newline\n", "", "t" * 256],
+)
+def test_thread_create_request_rejects_ids_outside_runtime_path_contract(
+    thread_id: str,
+) -> None:
+    with pytest.raises(ValueError):
+        threads.ThreadCreateRequest(thread_id=thread_id)
+
+
+def test_paths_reject_thread_id_with_trailing_newline(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        Paths(tmp_path).thread_dir("looks-safe\n")
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +884,11 @@ def test_create_and_search_threads_use_request_auth_user_without_contextvar() ->
 
     user_id = _HISTORY_USER_ID
     thread_store = RecordingThreadStore()
+    run_manager = SimpleNamespace(
+        begin_thread_recreate=AsyncMock(return_value=False),
+        end_thread_write=AsyncMock(),
+        end_thread_delete=AsyncMock(),
+    )
     request = SimpleNamespace(
         headers={},
         state=SimpleNamespace(
@@ -304,7 +898,13 @@ def test_create_and_search_threads_use_request_auth_user_without_contextvar() ->
                 permissions=[Permissions.THREADS_WRITE, Permissions.THREADS_READ],
             ),
         ),
-        app=SimpleNamespace(state=SimpleNamespace(checkpointer=RecordingCheckpointer(), thread_store=thread_store)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=RecordingCheckpointer(),
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
     )
 
     async def _scenario():
@@ -325,6 +925,9 @@ def test_create_and_search_threads_use_request_auth_user_without_contextvar() ->
     ]
     assert thread_store.create_calls == [{"thread_id": "auth-thread", "assistant_id": None, "user_id": str(user_id), "metadata": {}}]
     assert thread_store.search_calls == [{"metadata": None, "status": None, "limit": 100, "offset": 0, "user_id": str(user_id)}]
+    run_manager.begin_thread_recreate.assert_awaited_once_with("auth-thread")
+    run_manager.end_thread_write.assert_awaited_once_with("auth-thread")
+    run_manager.end_thread_delete.assert_not_awaited()
 
 
 def test_create_thread_rejects_thread_id_owned_by_another_user() -> None:
@@ -363,7 +966,13 @@ def test_create_thread_rejects_thread_id_owned_by_another_user() -> None:
                 permissions=[Permissions.THREADS_WRITE],
             ),
         ),
-        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+            )
+        ),
     )
 
     async def _scenario():
@@ -410,7 +1019,13 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
         state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source="internal"),
-        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+            )
+        ),
     )
 
     async def _scenario():
@@ -428,6 +1043,504 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     assert owner_row is not None
     assert owner_row["user_id"] == "owner-1"
     assert internal_row is None
+
+
+@pytest.mark.asyncio
+async def test_create_thread_checkpoint_write_blocks_delete_gate():
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+
+    class BlockingCheckpointer:
+        async def aput(self, config, checkpoint, metadata, writes):
+            write_started.set()
+            await release_write.wait()
+            return config
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    run_manager = RunManager()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="user-a")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=BlockingCheckpointer(),
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+
+    create_task = asyncio.create_task(
+        call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id="create-delete-race"),
+            request,
+        )
+    )
+    await write_started.wait()
+
+    delete_gate = asyncio.create_task(run_manager.begin_thread_delete("create-delete-race"))
+    await asyncio.sleep(0)
+    assert not delete_gate.done()
+
+    release_write.set()
+    await create_task
+    await delete_gate
+
+
+@pytest.mark.asyncio
+async def test_create_thread_initial_checkpoint_blocks_run_creation():
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+
+    class BlockingCheckpointer:
+        async def aput(self, config, checkpoint, metadata, writes):
+            write_started.set()
+            await release_write.wait()
+            return config
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    run_manager = RunManager()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="user-a")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=BlockingCheckpointer(),
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+
+    create_task = asyncio.create_task(
+        call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id="create-run-race"),
+            request,
+        )
+    )
+    await write_started.wait()
+
+    run_task = asyncio.create_task(run_manager.create_or_reject("create-run-race", user_id="user-a"))
+    await asyncio.sleep(0)
+    assert not run_task.done()
+
+    release_write.set()
+    await create_task
+    run = await run_task
+    assert run.thread_id == "create-run-race"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requested_thread_create_allows_only_one_foreign_owner():
+    second_create_arrived = asyncio.Event()
+    create_calls = 0
+
+    class CoordinatedThreadStore(MemoryThreadMetaStore):
+        async def create(self, *args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            if create_calls == 1:
+                await second_create_arrived.wait()
+            else:
+                second_create_arrived.set()
+            return await super().create(*args, **kwargs)
+
+    class RecordingCheckpointer:
+        def __init__(self):
+            self.calls = 0
+
+        async def aput(self, *args, **kwargs):
+            self.calls += 1
+
+    thread_store = CoordinatedThreadStore(InMemoryStore())
+    checkpointer = RecordingCheckpointer()
+    app_state = SimpleNamespace(
+        checkpointer=checkpointer,
+        thread_store=thread_store,
+        run_manager=RunManager(),
+    )
+
+    def request_for(user_id: str):
+        return SimpleNamespace(headers={}, state=SimpleNamespace(user=SimpleNamespace(id=user_id)), app=SimpleNamespace(state=app_state))
+
+    results = await asyncio.gather(
+        call_unwrapped(threads.create_thread, threads.ThreadCreateRequest(thread_id="owner-race"), request_for("user-a")),
+        call_unwrapped(threads.create_thread, threads.ThreadCreateRequest(thread_id="owner-race"), request_for("user-b")),
+        return_exceptions=True,
+    )
+
+    responses = [result for result in results if isinstance(result, threads.ThreadResponse)]
+    errors = [result for result in results if isinstance(result, HTTPException)]
+    assert len(responses) == 1
+    assert len(errors) == 1
+    assert errors[0].status_code == 409
+    row = await thread_store.get("owner-race", user_id=None)
+    assert row is not None
+    assert row["user_id"] in {"user-a", "user-b"}
+    assert checkpointer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_owner_checkpoint_failure_keeps_successful_metadata():
+    second_create_arrived = asyncio.Event()
+    first_checkpoint_done = asyncio.Event()
+    create_calls = 0
+
+    class CoordinatedThreadStore(MemoryThreadMetaStore):
+        async def create(self, *args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            if create_calls == 1:
+                await second_create_arrived.wait()
+            else:
+                second_create_arrived.set()
+                await first_checkpoint_done.wait()
+            return await super().create(*args, **kwargs)
+
+    class OneSuccessCheckpointer:
+        def __init__(self):
+            self.calls = 0
+            self.saver = InMemorySaver()
+
+        async def aput(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                first_checkpoint_done.set()
+                raise RuntimeError("checkpoint failed")
+            return await self.saver.aput(*args, **kwargs)
+
+        async def aget_tuple(self, config):
+            return await self.saver.aget_tuple(config)
+
+    thread_store = CoordinatedThreadStore(InMemoryStore())
+    checkpointer = OneSuccessCheckpointer()
+    app_state = SimpleNamespace(
+        checkpointer=checkpointer,
+        thread_store=thread_store,
+        run_manager=RunManager(),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(state=app_state),
+    )
+
+    results = await asyncio.gather(
+        call_unwrapped(threads.create_thread, threads.ThreadCreateRequest(thread_id="same-owner-race"), request),
+        call_unwrapped(threads.create_thread, threads.ThreadCreateRequest(thread_id="same-owner-race"), request),
+        return_exceptions=True,
+    )
+
+    responses = [result for result in results if isinstance(result, threads.ThreadResponse)]
+    errors = [result for result in results if isinstance(result, HTTPException)]
+    assert len(responses) == 1
+    assert len(errors) == 1
+    assert errors[0].status_code == 500
+    row = await thread_store.get("same-owner-race", user_id="same-owner")
+    assert row is not None
+    assert row["user_id"] == "same-owner"
+    assert checkpointer.calls == 2
+    assert await checkpointer.aget_tuple({"configurable": {"thread_id": "same-owner-race", "checkpoint_ns": ""}}) is not None
+
+
+@pytest.mark.asyncio
+async def test_existing_same_owner_post_heals_missing_initial_checkpoint():
+    class FailOnceCheckpointer:
+        def __init__(self):
+            self.calls = 0
+            self.saver = InMemorySaver()
+
+        async def aput(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("checkpoint failed")
+            return await self.saver.aput(*args, **kwargs)
+
+        async def aget_tuple(self, config):
+            return await self.saver.aget_tuple(config)
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    checkpointer = FailOnceCheckpointer()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+            )
+        ),
+    )
+    body = threads.ThreadCreateRequest(thread_id="retry-initial-checkpoint", metadata={"source": "first"})
+
+    with pytest.raises(HTTPException) as first_error:
+        await call_unwrapped(threads.create_thread, body, request)
+    second = await call_unwrapped(threads.create_thread, body, request)
+
+    assert first_error.value.status_code == 500
+    assert second.thread_id == "retry-initial-checkpoint"
+    checkpoint = await checkpointer.aget_tuple({"configurable": {"thread_id": "retry-initial-checkpoint", "checkpoint_ns": ""}})
+    assert checkpoint is not None
+    assert checkpointer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_recreate_retry_heals_checkpoint_and_reopens_delete_gate():
+    class FailOnceCheckpointer:
+        def __init__(self):
+            self.calls = 0
+            self.saver = InMemorySaver()
+
+        async def aput(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("checkpoint failed")
+            return await self.saver.aput(*args, **kwargs)
+
+        async def aget_tuple(self, config):
+            return await self.saver.aget_tuple(config)
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    checkpointer = FailOnceCheckpointer()
+    run_manager = RunManager()
+    await run_manager.begin_thread_delete("retry-recreate")
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+    body = threads.ThreadCreateRequest(thread_id="retry-recreate")
+
+    with pytest.raises(HTTPException) as first_error:
+        await call_unwrapped(threads.create_thread, body, request)
+    response = await call_unwrapped(threads.create_thread, body, request)
+
+    assert first_error.value.status_code == 500
+    assert response.thread_id == "retry-recreate"
+    await run_manager.begin_thread_write("retry-recreate")
+    await run_manager.end_thread_write("retry-recreate")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recreate_success_reopens_gate_when_winner_checkpoint_fails():
+    winner_created = asyncio.Event()
+    create_calls = 0
+
+    class CoordinatedThreadStore(MemoryThreadMetaStore):
+        async def create(self, *args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            if create_calls == 1:
+                await winner_created.wait()
+                return await super().create(*args, **kwargs)
+            result = await super().create(*args, **kwargs)
+            winner_created.set()
+            return result
+
+    class FirstCheckpointFails:
+        def __init__(self):
+            self.calls = 0
+            self.saver = InMemorySaver()
+
+        async def aput(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("winner checkpoint failed")
+            return await self.saver.aput(*args, **kwargs)
+
+        async def aget_tuple(self, config):
+            return await self.saver.aget_tuple(config)
+
+    thread_store = CoordinatedThreadStore(InMemoryStore())
+    checkpointer = FirstCheckpointFails()
+    run_manager = RunManager()
+    await run_manager.begin_thread_delete("concurrent-recreate")
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+    body = threads.ThreadCreateRequest(thread_id="concurrent-recreate")
+
+    results = await asyncio.gather(
+        call_unwrapped(threads.create_thread, body, request),
+        call_unwrapped(threads.create_thread, body, request),
+        return_exceptions=True,
+    )
+
+    assert len([result for result in results if isinstance(result, threads.ThreadResponse)]) == 1
+    assert len([result for result in results if isinstance(result, HTTPException)]) == 1
+    await run_manager.begin_thread_write("concurrent-recreate")
+    await run_manager.end_thread_write("concurrent-recreate")
+
+
+@pytest.mark.asyncio
+async def test_existing_same_owner_post_does_not_overwrite_checkpoint():
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    checkpointer = InMemorySaver()
+    await thread_store.create("existing-checkpoint", user_id="same-owner")
+    config = {"configurable": {"thread_id": "existing-checkpoint", "checkpoint_ns": ""}}
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"title": "keep me"}
+    await checkpointer.aput(config, checkpoint, {"step": 0, "source": "loop", "writes": {}}, {})
+    before = await checkpointer.aget_tuple(config)
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+            )
+        ),
+    )
+
+    response = await call_unwrapped(
+        threads.create_thread,
+        threads.ThreadCreateRequest(thread_id="existing-checkpoint"),
+        request,
+    )
+
+    after = await checkpointer.aget_tuple(config)
+    assert response.thread_id == "existing-checkpoint"
+    assert after is not None and before is not None
+    assert after.checkpoint["id"] == before.checkpoint["id"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_owner_post_returns_canonical_created_record():
+    canonical = ThreadMetaCreateResult(
+        {
+            "thread_id": "canonical-thread",
+            "status": "idle",
+            "created_at": "2026-01-02T03:04:05+00:00",
+            "updated_at": "2026-01-02T03:04:06+00:00",
+            "metadata": {"winner": "stored"},
+            "user_id": "same-owner",
+        },
+        created=False,
+    )
+
+    class ConcurrentWinnerStore:
+        async def get(self, thread_id, **kwargs):
+            return None
+
+        async def create(self, thread_id, **kwargs):
+            return canonical
+
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=InMemorySaver(),
+                thread_store=ConcurrentWinnerStore(),
+                run_manager=RunManager(),
+            )
+        ),
+    )
+
+    response = await call_unwrapped(
+        threads.create_thread,
+        threads.ThreadCreateRequest(
+            thread_id="canonical-thread",
+            metadata={"winner": "request"},
+        ),
+        request,
+    )
+
+    assert response.status == canonical["status"]
+    assert response.created_at == canonical["created_at"]
+    assert response.updated_at == canonical["updated_at"]
+    assert response.metadata == canonical["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_same_owner_post_rejects_durable_deleting_tombstone_after_restart():
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("deleting-thread", user_id="same-owner")
+    await thread_store.update_status("deleting-thread", "deleting", user_id="same-owner")
+    checkpointer = InMemorySaver()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=thread_store,
+                run_manager=RunManager(),
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id="deleting-thread"),
+            request,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert await checkpointer.aget_tuple({"configurable": {"thread_id": "deleting-thread", "checkpoint_ns": ""}}) is None
+
+
+@pytest.mark.asyncio
+async def test_existing_post_does_not_bypass_delete_that_started_after_first_read():
+    calls = 0
+
+    class DeletingAfterFirstReadStore:
+        async def get(self, thread_id, **kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "thread_id": thread_id,
+                "user_id": "same-owner",
+                "status": "idle" if calls == 1 else "deleting",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "metadata": {},
+            }
+
+    run_manager = RunManager()
+    await run_manager.begin_thread_delete("delete-race")
+    checkpointer = SimpleNamespace(aput=AsyncMock())
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="same-owner")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                thread_store=DeletingAfterFirstReadStore(),
+                run_manager=run_manager,
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_unwrapped(
+            threads.create_thread,
+            threads.ThreadCreateRequest(thread_id="delete-race"),
+            request,
+        )
+
+    assert exc_info.value.status_code == 409
+    checkpointer.aput.assert_not_awaited()
 
 
 def test_internal_owner_header_cannot_reassign_real_owner_thread() -> None:
@@ -637,6 +1750,7 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     import asyncio
 
     asyncio.run(_seed())
+    asyncio.run(app.state.thread_store.create(thread_id))
 
     with TestClient(app) as client:
         response = client.get(f"/api/threads/{thread_id}/state")
@@ -668,6 +1782,7 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     import asyncio
 
     asyncio.run(_seed())
+    asyncio.run(app.state.thread_store.create(thread_id))
 
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
@@ -745,7 +1860,7 @@ def test_get_thread_history_scopes_turn_duration_to_current_user() -> None:
 
     class FakeCheckpointer:
         async def alist(self, config, limit=None):
-            assert config == {"configurable": {"thread_id": thread_id}}
+            assert config == {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
             assert limit == 10
             yield SimpleNamespace(
                 config={"configurable": {"checkpoint_id": "checkpoint-a"}},
@@ -776,6 +1891,7 @@ def test_get_thread_history_scopes_turn_duration_to_current_user() -> None:
     app.state.checkpointer = FakeCheckpointer()
     app.state.run_manager = run_manager
     app.state.run_event_store = event_store
+    asyncio.run(app.state.thread_store.create(thread_id))
 
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
@@ -1071,6 +2187,58 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_thread_state_holds_checkpoint_write_barrier() -> None:
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+
+    class BlockingCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                checkpoint={"id": "old", "channel_values": {}},
+                metadata={"created_at": "2026-01-01T00:00:00+00:00"},
+            )
+
+        async def aput(self, _config, checkpoint, _metadata, _writes):
+            write_started.set()
+            await release_write.wait()
+            return {
+                "configurable": {
+                    "thread_id": "thread-write",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint["id"],
+                }
+            }
+
+    run_manager = RunManager()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=BlockingCheckpointer(),
+                thread_store=MemoryThreadMetaStore(InMemoryStore()),
+                run_manager=run_manager,
+            )
+        )
+    )
+    body = threads.ThreadStateUpdateRequest(values={"draft": "value"})
+
+    update_task = asyncio.create_task(threads.update_thread_state.__wrapped__("thread-write", body, request))
+    await write_started.wait()
+    delete_task = asyncio.create_task(run_manager.begin_thread_delete("thread-write"))
+    await asyncio.sleep(0)
+
+    assert not delete_task.done()
+
+    release_write.set()
+    response = await update_task
+    await delete_task
+    assert response.values == {"draft": "value"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await threads.update_thread_state.__wrapped__("thread-write", body, request)
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path):
     from app.gateway.routers.threads import delete_thread_data
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -1090,23 +2258,460 @@ async def test_delete_thread_cleans_runs_and_events_with_owner_boundary(tmp_path
     request.app.state = AppState()
     request.app.state.run_store = MemoryRunStore()
     request.app.state.run_event_store = MemoryRunEventStore()
-    request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=1))
-    request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
+    request.app.state.feedback_repo = SimpleNamespace(
+        delete_by_thread=AsyncMock(return_value=1),
+        delete_legacy_by_thread=AsyncMock(return_value=1),
+    )
+    request.app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    request.app.state.run_manager = SimpleNamespace(
+        begin_thread_delete=AsyncMock(),
+        list_by_thread=AsyncMock(return_value=[]),
+        cancel=AsyncMock(),
+    )
+    request.app.state.stream_bridge = SimpleNamespace(cleanup=AsyncMock())
+    request.app.state.checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+    request.app.state.round_state_store = None
     request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
 
+    await request.app.state.thread_store.create("thread-x", user_id="user-a")
     await request.app.state.run_store.put("run-a", thread_id="thread-x", user_id="user-a")
     await request.app.state.run_store.put("run-b", thread_id="thread-x", user_id="user-b")
+    await request.app.state.run_store.put("run-legacy", thread_id="thread-x", user_id=None)
     await request.app.state.run_event_store.put(thread_id="thread-x", run_id="run-a", event_type="message", category="message", content="a", user_id="user-a")
     await request.app.state.run_event_store.put(thread_id="thread-x", run_id="run-b", event_type="message", category="message", content="b", user_id="user-b")
+    await request.app.state.run_event_store.put(thread_id="thread-x", run_id="run-legacy", event_type="message", category="message", content="legacy", user_id=None)
 
     response = await delete_thread_data.__wrapped__("thread-x", request)
 
     assert response.success is True
     request.app.state.feedback_repo.delete_by_thread.assert_awaited_once_with("thread-x", user_id="user-a")
+    request.app.state.feedback_repo.delete_legacy_by_thread.assert_awaited_once_with("thread-x")
     assert await request.app.state.run_store.list_by_thread("thread-x", user_id="user-a") == []
     assert len(await request.app.state.run_event_store.list_messages("thread-x", user_id="user-a")) == 0
     assert [r["run_id"] for r in await request.app.state.run_store.list_by_thread("thread-x", user_id="user-b")] == ["run-b"]
     assert len(await request.app.state.run_event_store.list_messages("thread-x", user_id="user-b")) == 1
+    assert [r["run_id"] for r in await request.app.state.run_store.list_by_thread("thread-x", user_id=None)] == ["run-b"]
+    assert [e["run_id"] for e in await request.app.state.run_event_store.list_messages("thread-x", user_id=None)] == ["run-b"]
+
+
+@pytest.mark.asyncio
+async def test_patch_thread_write_finishes_before_delete_barrier():
+    class BlockingThreadStore(MemoryThreadMetaStore):
+        def __init__(self, store):
+            super().__init__(store)
+            self.write_started = asyncio.Event()
+            self.allow_write = asyncio.Event()
+
+        async def update_metadata(self, *args, **kwargs):
+            self.write_started.set()
+            await self.allow_write.wait()
+            await super().update_metadata(*args, **kwargs)
+
+    user = SimpleNamespace(id="user-a", system_role="user")
+    thread_store = BlockingThreadStore(InMemoryStore())
+    await thread_store.create("thread-patch", user_id="user-a")
+    run_manager = RunManager()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            user=user,
+            auth=AuthContext(
+                user=user,
+                permissions=[Permissions.THREADS_WRITE],
+            ),
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+    patch_task = asyncio.create_task(
+        threads.patch_thread(
+            thread_id="thread-patch",
+            body=threads.ThreadPatchRequest(metadata={"key": "value"}),
+            request=request,
+        )
+    )
+    await asyncio.wait_for(thread_store.write_started.wait(), timeout=1)
+    delete_task = asyncio.create_task(run_manager.begin_thread_delete("thread-patch"))
+    await asyncio.sleep(0)
+    try:
+        assert not delete_task.done()
+    finally:
+        thread_store.allow_write.set()
+
+    await patch_task
+    await delete_task
+
+
+@pytest.mark.asyncio
+async def test_legacy_claim_moves_all_default_thread_state_to_owner(tmp_path):
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    thread_id = "thread-legacy-claim"
+    owner_id = "owner-a"
+    paths = Paths(tmp_path)
+    default_dir = paths.thread_dir(thread_id, user_id=DEFAULT_USER_ID)
+    legacy_dir = paths.thread_dir(thread_id)
+    (default_dir / "audit").mkdir(parents=True)
+    (default_dir / "audit" / "role_state.jsonl").write_text("default", encoding="utf-8")
+    (legacy_dir / "user-data").mkdir(parents=True)
+    (legacy_dir / "user-data" / "legacy.txt").write_text("legacy", encoding="utf-8")
+
+    run_store = MemoryRunStore()
+    await run_store.put(
+        "run-default",
+        thread_id=thread_id,
+        status="success",
+        user_id=DEFAULT_USER_ID,
+    )
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id="run-default",
+        event_type="message",
+        category="message",
+        user_id=DEFAULT_USER_ID,
+    )
+    round_store = MemoryRoundStateStore()
+    await round_store.bind_run(
+        thread_id=thread_id,
+        run_id="run-default",
+        user_id=DEFAULT_USER_ID,
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(thread_id, user_id=DEFAULT_USER_ID)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=run_store,
+                run_event_store=event_store,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=round_store,
+            )
+        )
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        await threads._claim_legacy_thread_related_data(thread_id, owner_id, request)
+
+    claimed_run = await run_store.get("run-default", user_id=owner_id)
+    assert claimed_run is not None
+    assert await event_store.count_messages(thread_id, user_id=owner_id) == 1
+    assert len(await round_store.list_by_thread(thread_id, user_id=owner_id)) == 1
+    owner_dir = paths.thread_dir(thread_id, user_id=owner_id)
+    assert (owner_dir / "audit" / "role_state.jsonl").read_text(encoding="utf-8") == "default"
+    assert (owner_dir / "user-data" / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+    assert not default_dir.exists()
+    assert not legacy_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_legacy_claim_failure_is_not_silently_ignored(tmp_path):
+    failing_repo = SimpleNamespace(
+        list_owners_by_thread=AsyncMock(return_value=set()),
+        claim_legacy_by_thread=AsyncMock(side_effect=RuntimeError("claim failed")),
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-claim-failure", user_id="default")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=failing_repo,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(RuntimeError, match="claim failed"),
+    ):
+        await threads._claim_legacy_thread_related_data(
+            "thread-claim-failure",
+            "owner-a",
+            request,
+        )
+
+    reserved = await thread_store.get("thread-claim-failure", user_id=None)
+    assert reserved is not None
+    assert reserved["user_id"] == "owner-a"
+    assert (
+        await thread_store.is_legacy_claim_complete(
+            "thread-claim-failure",
+            "owner-a",
+        )
+        is False
+    )
+
+    failing_repo.claim_legacy_by_thread.side_effect = None
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        await threads._claim_legacy_thread_related_data(
+            "thread-claim-failure",
+            "owner-a",
+            request,
+        )
+    assert (
+        await thread_store.is_legacy_claim_complete(
+            "thread-claim-failure",
+            "owner-a",
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.asyncio
+async def test_incomplete_legacy_claim_stays_inaccessible_until_retry_completes(
+    tmp_path,
+    failure_type,
+):
+    repository = SimpleNamespace(
+        list_owners_by_thread=AsyncMock(return_value={"default"}),
+        claim_legacy_by_thread=AsyncMock(side_effect=failure_type("claim interrupted")),
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-partial-claim", user_id="default")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=repository,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(failure_type),
+    ):
+        await threads._claim_legacy_thread_related_data(
+            "thread-partial-claim",
+            "owner-a",
+            request,
+        )
+
+    assert (
+        await thread_store.check_access(
+            "thread-partial-claim",
+            "owner-a",
+            require_existing=True,
+        )
+        is False
+    )
+
+    repository.claim_legacy_by_thread.side_effect = None
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        await threads._claim_legacy_thread_related_data(
+            "thread-partial-claim",
+            "owner-a",
+            request,
+        )
+
+    assert await thread_store.is_legacy_claim_complete("thread-partial-claim", "owner-a") is True
+    assert (
+        await thread_store.check_access(
+            "thread-partial-claim",
+            "owner-a",
+            require_existing=True,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_claims_for_different_threads_do_not_share_delete_gate(tmp_path):
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def claim(thread_id, _owner_user_id):
+        if thread_id == "thread-a":
+            first_started.set()
+            await release_first.wait()
+
+    repository = SimpleNamespace(
+        list_owners_by_thread=AsyncMock(return_value={"default"}),
+        claim_legacy_by_thread=AsyncMock(side_effect=claim),
+    )
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-a", user_id="default")
+    await thread_store.create("thread-b", user_id="default")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=repository,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        first = asyncio.create_task(threads._claim_legacy_thread_related_data("thread-a", "owner-a", request))
+        await first_started.wait()
+        await asyncio.wait_for(
+            threads._claim_legacy_thread_related_data("thread-b", "owner-b", request),
+            timeout=0.5,
+        )
+        release_first.set()
+        await first
+
+    assert await thread_store.is_legacy_claim_complete("thread-a", "owner-a") is True
+    assert await thread_store.is_legacy_claim_complete("thread-b", "owner-b") is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_filesystem_claim_finishes_before_releasing_delete_gate(tmp_path):
+    paths = Paths(tmp_path)
+    migration_started = threading.Event()
+    release_migration = threading.Event()
+
+    def slow_claim(_thread_id, _owner_user_id):
+        migration_started.set()
+        release_migration.wait(1.0)
+        return 0
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-filesystem-cancel", user_id="default")
+    run_manager = RunManager()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=run_manager,
+                run_store=None,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch.object(paths, "claim_legacy_thread_dirs", side_effect=slow_claim),
+    ):
+        task = asyncio.create_task(
+            threads._claim_legacy_thread_related_data(
+                "thread-filesystem-cancel",
+                "owner-a",
+                request,
+            )
+        )
+        await asyncio.to_thread(migration_started.wait, 1.0)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert task.done() is False
+        assert "thread-filesystem-cancel" in run_manager._deleting_threads
+        release_migration.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert "thread-filesystem-cancel" not in run_manager._deleting_threads
+    assert (
+        await thread_store.check_access(
+            "thread-filesystem-cancel",
+            "owner-a",
+            require_existing=True,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_claim_validates_paths_before_reserving_or_claiming(tmp_path):
+    claim_repo = SimpleNamespace(claim_legacy_by_thread=AsyncMock())
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-invalid-owner", user_id="default")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=RunManager(),
+                run_store=claim_repo,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(ValueError, match="user_id"),
+    ):
+        await threads._claim_legacy_thread_related_data(
+            "thread-invalid-owner",
+            "bad@owner",
+            request,
+        )
+
+    claim_repo.claim_legacy_by_thread.assert_not_awaited()
+    row = await thread_store.get("thread-invalid-owner", user_id=None)
+    assert row is not None
+    assert row["user_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_legacy_claim_rejects_active_run_before_reserving_owner(tmp_path):
+    claim_repo = SimpleNamespace(claim_legacy_by_thread=AsyncMock())
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-active-claim", user_id="default")
+    run_manager = RunManager()
+    await run_manager.create("thread-active-claim", user_id="default")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=run_manager,
+                run_store=claim_repo,
+                run_event_store=None,
+                feedback_repo=None,
+                artifact_provenance_repo=None,
+                round_state_store=None,
+            )
+        )
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await threads._claim_legacy_thread_related_data(
+            "thread-active-claim",
+            "owner-a",
+            request,
+        )
+
+    assert exc_info.value.status_code == 409
+    claim_repo.claim_legacy_by_thread.assert_not_awaited()
+    row = await thread_store.get("thread-active-claim", user_id=None)
+    assert row is not None
+    assert row["user_id"] == "default"
 
 
 @pytest.mark.asyncio
@@ -1143,6 +2748,7 @@ async def test_delete_thread_cancels_active_runs_and_cleans_streams(tmp_path):
     request.app = App()
     request.app.state = AppState()
     request.app.state.run_manager = SimpleNamespace(
+        begin_thread_delete=AsyncMock(),
         list_by_thread=AsyncMock(return_value=[running, finished]),
         cancel=AsyncMock(return_value=True),
     )
@@ -1150,15 +2756,30 @@ async def test_delete_thread_cancels_active_runs_and_cleans_streams(tmp_path):
     request.app.state.run_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
     request.app.state.run_event_store = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
     request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=2))
-    request.app.state.thread_store = SimpleNamespace(delete=AsyncMock())
-    request.app.state.checkpointer = None
+    request.app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    request.app.state.checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+    request.app.state.round_state_store = None
     request.state = SimpleNamespace(user=SimpleNamespace(id="user-a"))
+
+    await request.app.state.thread_store.create("thread-x", user_id="user-a")
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    running.task = task
+
+    async def cancel_run(run_id):
+        assert run_id == running.run_id
+        running.status = RunStatus.interrupted
+        task.cancel()
+        return True
+
+    request.app.state.run_manager.cancel = AsyncMock(side_effect=cancel_run)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
         response = await delete_thread_data.__wrapped__("thread-x", request)
 
     assert response.success is True
-    request.app.state.run_manager.list_by_thread.assert_awaited_once_with("thread-x", user_id="user-a", limit=100000)
+    request.app.state.run_manager.begin_thread_delete.assert_awaited_once_with("thread-x")
+    assert request.app.state.run_manager.list_by_thread.await_count == 2
     request.app.state.run_manager.cancel.assert_awaited_once_with("run-active")
     assert request.app.state.stream_bridge.cleanup.await_args_list == [
         (("run-active",),),
@@ -1167,34 +2788,318 @@ async def test_delete_thread_cancels_active_runs_and_cleans_streams(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delete_thread_without_runs_or_events_is_idempotent():
-    from app.gateway.routers.threads import delete_thread_data
-    from deerflow.runtime.events.store.memory import MemoryRunEventStore
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
+async def test_delete_thread_missing_owner_row_fails_closed():
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=SimpleNamespace(list_by_thread=AsyncMock(return_value=[]), cancel=AsyncMock()),
+    )
 
-    class AppState:
-        pass
+    with pytest.raises(HTTPException) as exc_info:
+        await threads.delete_thread_data.__wrapped__("missing-thread", request)
 
-    class App:
-        pass
+    assert exc_info.value.status_code == 409
 
-    class Request:
-        pass
 
-    request = Request()
-    request.app = App()
-    request.app.state = AppState()
-    request.app.state.run_store = MemoryRunStore()
-    request.app.state.run_event_store = MemoryRunEventStore()
-    request.app.state.feedback_repo = SimpleNamespace(delete_by_thread=AsyncMock(return_value=0))
-    request.app.state.thread_store = type("ThreadStore", (), {"delete": AsyncMock()})()
-    request.state = type("State", (), {"user": type("User", (), {"id": "user-a"})()})()
+@pytest.mark.asyncio
+async def test_delete_waits_for_exclusive_gate_before_writing_tombstone():
+    thread_id = "delete-claim-race"
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(thread_id, user_id="user-a")
+    run_manager = RunManager()
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=run_manager,
+    )
+    await run_manager.begin_thread_delete(thread_id)
 
-    first = await delete_thread_data.__wrapped__("missing-thread", request)
-    second = await delete_thread_data.__wrapped__("missing-thread", request)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await threads.delete_thread_data.__wrapped__(thread_id, request)
 
-    assert first.success is True
-    assert second.success is True
+        assert exc_info.value.status_code == 409
+        row = await thread_store.get(thread_id, user_id="user-a")
+        assert row is not None
+        assert row["status"] == "idle"
+    finally:
+        await run_manager.end_thread_delete(thread_id)
+
+
+def _delete_request(*, thread_store, checkpointer, run_manager, round_store=None):
+    if not hasattr(run_manager, "begin_thread_delete"):
+        run_manager.begin_thread_delete = AsyncMock()
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                checkpointer=checkpointer,
+                run_manager=run_manager,
+                stream_bridge=SimpleNamespace(cleanup=AsyncMock()),
+                run_store=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                run_event_store=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                feedback_repo=SimpleNamespace(delete_by_thread=AsyncMock(return_value=0)),
+                artifact_provenance_repo=None,
+                round_state_store=round_store,
+            )
+        ),
+        state=SimpleNamespace(user=SimpleNamespace(id="user-a")),
+        headers={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_memory_backend_skips_absent_feedback_repo(tmp_path):
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=SimpleNamespace(
+            begin_thread_delete=AsyncMock(),
+            list_by_thread=AsyncMock(return_value=[]),
+            cancel=AsyncMock(),
+        ),
+    )
+    request.app.state.feedback_repo = None
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        response = await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+    assert response.success is True
+    assert await thread_store.get("thread-x", user_id="user-a") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_keeps_owner_barrier_when_checkpoint_delete_fails(tmp_path):
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    checkpointer = SimpleNamespace(adelete_thread=AsyncMock(side_effect=RuntimeError("checkpoint busy")))
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=checkpointer,
+        run_manager=SimpleNamespace(list_by_thread=AsyncMock(return_value=[]), cancel=AsyncMock()),
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+    assert exc_info.value.status_code == 500
+    row = await thread_store.get("thread-x", user_id="user-a")
+    assert row is not None
+    assert row["status"] == "deleting"
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_retry_reuses_closed_barrier_after_checkpoint_failure(
+    tmp_path,
+):
+    thread_id = "retry-delete"
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(thread_id, user_id="user-a")
+    checkpointer = SimpleNamespace(adelete_thread=AsyncMock(side_effect=[RuntimeError("checkpoint busy"), None]))
+    run_manager = RunManager()
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=checkpointer,
+        run_manager=run_manager,
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as first_error,
+    ):
+        await threads.delete_thread_data.__wrapped__(thread_id, request)
+
+    assert first_error.value.status_code == 500
+    assert thread_id not in run_manager._deleting_threads
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        response = await threads.delete_thread_data.__wrapped__(thread_id, request)
+
+    assert response.success is True
+    assert checkpointer.adelete_thread.await_count == 2
+    assert await thread_store.get(thread_id, user_id="user-a") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_retry_converges_after_cancelled_repository_cleanup(tmp_path):
+    thread_id = "cancelled-delete-retry"
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(thread_id, user_id="user-a")
+    run_manager = RunManager()
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=run_manager,
+    )
+    request.app.state.run_event_store = SimpleNamespace(
+        delete_by_thread=AsyncMock(side_effect=[asyncio.CancelledError(), 0]),
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await threads.delete_thread_data.__wrapped__(thread_id, request)
+
+    row = await thread_store.get(thread_id, user_id="user-a")
+    assert row is not None
+    assert row["status"] == "deleting"
+    assert thread_id not in run_manager._deleting_threads
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        response = await threads.delete_thread_data.__wrapped__(thread_id, request)
+
+    assert response.success is True
+    assert await thread_store.get(thread_id, user_id="user-a") is None
+
+
+@pytest.mark.parametrize(
+    "repository_name",
+    [
+        "run_event_store",
+        "run_store",
+        "feedback_repo",
+        "artifact_provenance_repo",
+    ],
+)
+@pytest.mark.asyncio
+async def test_delete_thread_keeps_owner_barrier_when_owned_cleanup_fails(
+    tmp_path,
+    repository_name,
+):
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=SimpleNamespace(
+            begin_thread_delete=AsyncMock(),
+            list_by_thread=AsyncMock(return_value=[]),
+            cancel=AsyncMock(),
+        ),
+    )
+    repository = SimpleNamespace(delete_by_thread=AsyncMock(side_effect=RuntimeError("storage busy")))
+    setattr(request.app.state, repository_name, repository)
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+    assert exc_info.value.status_code == 500
+    row = await thread_store.get("thread-x", user_id="user-a")
+    assert row is not None
+    assert row["status"] == "deleting"
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_keeps_owner_barrier_when_checkpointer_is_unavailable(tmp_path):
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=None,
+        run_manager=SimpleNamespace(list_by_thread=AsyncMock(return_value=[]), cancel=AsyncMock()),
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+    assert exc_info.value.status_code == 500
+    row = await thread_store.get("thread-x", user_id="user-a")
+    assert row is not None
+    assert row["status"] == "deleting"
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_keeps_owner_barrier_when_local_task_does_not_stop(tmp_path):
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def stubborn_task():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    task = asyncio.create_task(stubborn_task())
+    await started.wait()
+    record = RunRecord(
+        run_id="run-active",
+        thread_id="thread-x",
+        assistant_id=None,
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id="user-a",
+    )
+    record.task = task
+
+    async def cancel_run(run_id):
+        assert run_id == record.run_id
+        task.cancel()
+        record.status = RunStatus.interrupted
+        return True
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=checkpointer,
+        run_manager=SimpleNamespace(
+            list_by_thread=AsyncMock(return_value=[record]),
+            cancel=AsyncMock(side_effect=cancel_run),
+        ),
+    )
+
+    try:
+        with (
+            patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)),
+            patch("app.gateway.routers.threads._DELETE_RUN_DRAIN_TIMEOUT_SECONDS", 0.01, create=True),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+        assert exc_info.value.status_code == 409
+        assert await thread_store.get("thread-x", user_id="user-a") is not None
+        checkpointer.adelete_thread.assert_not_awaited()
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_clears_owner_scoped_round_state(tmp_path):
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-x", user_id="user-a")
+    round_store = MemoryRoundStateStore()
+    await round_store.bind_run(thread_id="thread-x", run_id="run-a", user_id="user-a")
+    request = _delete_request(
+        thread_store=thread_store,
+        checkpointer=SimpleNamespace(adelete_thread=AsyncMock()),
+        run_manager=SimpleNamespace(list_by_thread=AsyncMock(return_value=[]), cancel=AsyncMock()),
+        round_store=round_store,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)):
+        response = await threads.delete_thread_data.__wrapped__("thread-x", request)
+
+    assert response.success is True
+    assert await round_store.list_by_thread("thread-x", user_id="user-a") == []
+    assert await thread_store.get("thread-x", user_id="user-a") is None
 
 
 @pytest.mark.asyncio
@@ -1258,9 +3163,16 @@ async def test_list_runs_syncs_thread_error_for_latest_worker_lost() -> None:
     thread_id = "worker-lost-thread"
 
     class RecordingRunManager:
-        async def list_by_thread(self, requested_thread_id: str, *, user_id: str | None = None):
+        async def list_by_thread(
+            self,
+            requested_thread_id: str,
+            *,
+            user_id: str | None = None,
+            limit: int = 100,
+        ):
             assert requested_thread_id == thread_id
             assert user_id == expected_user_id
+            assert limit == 100
             return [
                 RunRecord(
                     run_id="run-worker-lost",

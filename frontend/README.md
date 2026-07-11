@@ -88,6 +88,12 @@ NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 
+When these URLs point directly at the Gateway, browser auth calls and LangGraph
+ordinary/SSE requests use that origin with credentials. Add the exact frontend
+origin to `GATEWAY_CORS_ORIGINS`. The current double-submit CSRF cookies support
+same-host splits such as `localhost:3000` → `localhost:8001`; a different
+hostname requires an explicit cookie/CSRF deployment design.
+
 ## Project Structure
 
 ```

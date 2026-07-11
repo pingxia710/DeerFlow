@@ -35,6 +35,7 @@ import {
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   markThreadBusyInCaches,
   mergeFetchedRunMessages,
+  mergeSnapshotRunMessages,
   mergeMessages,
   mergeRunsWithTerminalPrecedence,
   partitionKnownRunIds,
@@ -379,7 +380,7 @@ test("late terminal event from thread A settles A without mutating visible threa
   ]);
 });
 
-test("round id changes revalidate thread history without clearing visible rows", () => {
+test("round id changes reset history to the current run", () => {
   const oldRow = {
     run_id: "run-1",
     seq: 1,
@@ -415,7 +416,7 @@ test("round id changes revalidate thread history without clearing visible rows",
       previousRoundId: "round-1",
       latestRoundId: "round-2",
     }),
-  ).toBe("revalidate");
+  ).toBe("clear");
 
   const mergedRows = mergeFetchedRunMessages([oldRow], [newRow], "run-2", true);
 
@@ -430,7 +431,7 @@ test("round id changes revalidate thread history without clearing visible rows",
       [appended],
       [{ run_id: "run-2", round_id: "round-2" } as unknown as Run],
     ).map((message) => message.id),
-  ).toEqual(["new-ai", "old-ai", "appended-ai"]);
+  ).toEqual(["new-ai", "appended-ai"]);
 });
 
 test("thread id or disabled history still clears thread history state", () => {
@@ -826,6 +827,34 @@ test("applySnapshotRunMessagePageState keeps paged snapshot runs loadable", () =
   expect(runBeforeSeq).toEqual(new Map([["run-paged", 7]]));
 });
 
+test("applySnapshotRunMessagePageState replaces stale pagination state on refresh", () => {
+  const loadedRunIds = new Set(["run-paged"]);
+  const runBeforeSeq = new Map([
+    ["run-complete", 3],
+    ["run-paged", 99],
+  ]);
+
+  applySnapshotRunMessagePageState(
+    [
+      {
+        run_id: "run-complete",
+        data: [runMessage(4)],
+        has_more: false,
+      },
+      {
+        run_id: "run-paged",
+        data: [runMessage(9), runMessage(7)],
+        has_more: true,
+      },
+    ],
+    loadedRunIds,
+    runBeforeSeq,
+  );
+
+  expect(loadedRunIds).toEqual(new Set(["run-complete"]));
+  expect(runBeforeSeq).toEqual(new Map([["run-paged", 7]]));
+});
+
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
@@ -1054,7 +1083,6 @@ test("task cancelled and timed out events replay as visible terminal failed subt
       actionResultStatus: "cancelled",
       terminalReason: "user_cancelled",
       error: "User cancelled task.",
-      finishedAt: 1779408000000,
     },
     {
       id: "task-timeout",
@@ -1065,7 +1093,6 @@ test("task cancelled and timed out events replay as visible terminal failed subt
       actionResultStatus: "timed_out",
       terminalReason: "timed_out",
       error: "Task timed out.",
-      finishedAt: 1779408001000,
     },
   ]);
 });
@@ -1113,7 +1140,6 @@ test("task event run messages update subtask state without entering visible hist
       notify: true,
       status: "completed",
       result: "done",
-      finishedAt: 1779408000000,
     },
   ]);
   expect(
@@ -1171,7 +1197,6 @@ test("mixed task event replay preserves each event identity", () => {
       notify: true,
       status: "completed",
       result: "done b",
-      finishedAt: 1779408001000,
     },
   ]);
 });
@@ -1202,7 +1227,6 @@ test("legacy task event run messages without metadata still restore subtask stat
       notify: true,
       status: "completed",
       result: "legacy done",
-      finishedAt: 1779408000000,
     },
   ]);
   expect(buildVisibleHistoryMessages([taskEventRow], new Set(), [])).toEqual(
@@ -1511,7 +1535,6 @@ test("task event run messages are idempotent and scoped to the requested thread 
       notify: true,
       status: "completed",
       result: "legacy done",
-      finishedAt: 1779408001000,
     },
     {
       id: "call-legacy",
@@ -1520,7 +1543,6 @@ test("task event run messages are idempotent and scoped to the requested thread 
       notify: true,
       status: "completed",
       result: "legacy done",
-      finishedAt: 1779408001000,
     },
   ]);
 });
@@ -1915,6 +1937,46 @@ test("mergeMessages lets live messages replace overlapping scoped history", () =
   ).toEqual(["live copy"]);
 });
 
+test("mergeMessages unscoped live overlap preserves the same message id from an older run", () => {
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-old",
+        seq: 1,
+        content: {
+          id: "shared-id",
+          type: "human",
+          content: "old turn",
+        } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-06-18T00:00:01Z",
+      },
+      {
+        run_id: "run-current",
+        seq: 2,
+        content: {
+          id: "shared-id",
+          type: "human",
+          content: "current turn history copy",
+        } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-06-18T00:00:02Z",
+      },
+    ],
+    new Set(),
+    [],
+  );
+  const live = {
+    id: "shared-id",
+    type: "human",
+    content: "current turn live copy",
+  } as Message;
+
+  expect(
+    mergeMessages(history, [live], []).map((message) => message.content),
+  ).toEqual(["old turn", "current turn live copy"]);
+});
+
 test("mergeMessages replaces same-run history copies when later history rows are not live", () => {
   const rows: RunMessage[] = [
     {
@@ -2191,6 +2253,49 @@ test("mergeFetchedRunMessages preserves older loaded rows outside a refreshed la
       (message) => message.content,
     ),
   ).toEqual(["older answer"]);
+});
+
+test("mergeSnapshotRunMessages refreshes snapshot windows without dropping loaded history", () => {
+  const previous = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: { id: "old-1", type: "ai", content: "loaded older" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: { id: "old-2", type: "ai", content: "stale latest" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+    {
+      run_id: "run-older",
+      seq: 1,
+      content: { id: "older-run", type: "ai", content: "older run" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-17T00:00:01Z",
+    },
+  ] satisfies RunMessage[];
+  const refreshed = {
+    run_id: "run-1",
+    seq: 2,
+    content: { id: "new-2", type: "ai", content: "final latest" } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-06-18T00:00:03Z",
+  } satisfies RunMessage;
+
+  const merged = mergeSnapshotRunMessages(previous, [
+    { run_id: "run-1", data: [refreshed], has_more: true },
+  ]);
+
+  expect(merged.map((row) => [row.run_id, row.seq, row.content])).toEqual([
+    ["run-1", 1, previous[0]!.content],
+    ["run-older", 1, previous[2]!.content],
+    ["run-1", 2, refreshed.content],
+  ]);
 });
 
 test("mergeFetchedRunMessages keeps existing rows when loading an older page", () => {

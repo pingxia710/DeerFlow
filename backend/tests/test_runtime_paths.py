@@ -11,7 +11,7 @@ from deerflow.config import skills_config as skills_config_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
-from deerflow.config.runtime_paths import project_root
+from deerflow.config.runtime_paths import project_root, resolve_runtime_path, runtime_home
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.skills.storage import get_or_new_skill_storage
 
@@ -43,6 +43,87 @@ def test_default_runtime_paths_resolve_from_current_project(tmp_path: Path, monk
     assert Paths().base_dir == tmp_path / ".deer-flow"
     assert SkillsConfig().get_skills_path() == tmp_path / "skills"
     assert get_or_new_skill_storage(skills_path=SkillsConfig().get_skills_path()).get_skills_root_path() == tmp_path / "skills"
+
+
+def test_source_checkout_runtime_home_uses_backend_state_directory(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    repo_root = tmp_path / "deer-flow"
+    (repo_root / "backend" / "packages" / "harness" / "deerflow").mkdir(parents=True)
+    (repo_root / "frontend").mkdir()
+    monkeypatch.chdir(repo_root)
+
+    assert runtime_home() == repo_root / "backend" / ".deer-flow"
+    assert Paths().base_dir == repo_root / "backend" / ".deer-flow"
+
+
+def test_source_checkout_runtime_home_preserves_legacy_state_when_canonical_is_empty(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    repo_root = tmp_path / "deer-flow"
+    (repo_root / "backend" / "packages" / "harness" / "deerflow").mkdir(parents=True)
+    (repo_root / "frontend").mkdir()
+    (repo_root / ".deer-flow" / "users").mkdir(parents=True)
+    monkeypatch.chdir(repo_root)
+
+    assert runtime_home() == repo_root / ".deer-flow"
+    assert Paths().base_dir == repo_root / ".deer-flow"
+
+
+def test_source_checkout_started_from_backend_uses_repo_project_root(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    repo_root = tmp_path / "deer-flow"
+    backend = repo_root / "backend"
+    (backend / "packages" / "harness" / "deerflow").mkdir(parents=True)
+    (repo_root / "frontend").mkdir()
+    (repo_root / "skills").mkdir()
+    monkeypatch.chdir(backend)
+
+    assert project_root() == repo_root
+    assert runtime_home() == backend / ".deer-flow"
+    assert SkillsConfig(path="skills").get_skills_path() == repo_root / "skills"
+
+
+def test_runtime_path_legacy_prefix_resolves_inside_runtime_home(tmp_path: Path, monkeypatch):
+    _clear_path_env(monkeypatch)
+    home = tmp_path / "runtime-home"
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    assert resolve_runtime_path(".deer-flow/data") == home / "data"
+    assert resolve_runtime_path("checkpoints.db") == home / "checkpoints.db"
+
+
+def test_claim_legacy_thread_dirs_rejects_conflicts_between_legacy_sources(tmp_path: Path):
+    paths = Paths(tmp_path)
+    thread_id = "thread-conflicting-legacy-sources"
+    legacy_dir = paths.thread_dir(thread_id)
+    default_dir = paths.thread_dir(thread_id, user_id="default")
+    target_dir = paths.thread_dir(thread_id, user_id="owner-a")
+    (legacy_dir / "user-data").mkdir(parents=True)
+    (default_dir / "user-data").mkdir(parents=True)
+    (legacy_dir / "user-data" / "state.json").write_text("legacy", encoding="utf-8")
+    (default_dir / "user-data" / "state.json").write_text("default", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="user-data/state.json"):
+        paths.claim_legacy_thread_dirs(thread_id, "owner-a")
+
+    assert not target_dir.exists()
+    assert legacy_dir.exists()
+    assert default_dir.exists()
+
+
+def test_claim_legacy_thread_dirs_to_default_owner_keeps_target_directory(tmp_path: Path):
+    paths = Paths(tmp_path)
+    thread_id = "thread-default-owner"
+    default_dir = paths.thread_dir(thread_id, user_id="default")
+    legacy_dir = paths.thread_dir(thread_id)
+    (default_dir / "audit").mkdir(parents=True)
+    (default_dir / "audit" / "existing.jsonl").write_text("default", encoding="utf-8")
+    (legacy_dir / "user-data").mkdir(parents=True)
+    (legacy_dir / "user-data" / "legacy.txt").write_text("legacy", encoding="utf-8")
+
+    assert paths.claim_legacy_thread_dirs(thread_id, "default") == 1
+    assert (default_dir / "audit" / "existing.jsonl").read_text(encoding="utf-8") == "default"
+    assert (default_dir / "user-data" / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+    assert not legacy_dir.exists()
 
 
 def test_deer_flow_project_root_overrides_current_directory(tmp_path: Path, monkeypatch):

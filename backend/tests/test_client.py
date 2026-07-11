@@ -130,6 +130,7 @@ class TestConfigQueries:
         assert result["models"][0]["name"] == "test-model"
         # Verify Gateway-aligned fields are present
         assert "model" in result["models"][0]
+        assert "provider" in result["models"][0]
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
 
@@ -1020,8 +1021,8 @@ class TestEnsureAgent:
         assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
         assert mock_get_tools.call_args.kwargs["include_mcp"] is False
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
-        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"naxus-round"}
-        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"naxus-round"}
+        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"naxus-round", "command-room-chair"}
+        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"naxus-round", "command-room-chair"}
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -1116,6 +1117,7 @@ class TestGetModel:
         result = client.get_model("test-model")
         assert result == {
             "name": "test-model",
+            "provider": None,
             "model": "test-model",
             "display_name": "Test Model",
             "description": "A test model",

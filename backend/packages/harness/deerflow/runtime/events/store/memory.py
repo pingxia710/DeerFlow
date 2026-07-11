@@ -10,6 +10,7 @@ import bisect
 from datetime import UTC, datetime
 
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 
 class MemoryRunEventStore(RunEventStore):
@@ -155,6 +156,12 @@ class MemoryRunEventStore(RunEventStore):
             messages = [e for e in messages if self._matches_user(e, user_id)]
         return len(messages)
 
+    async def has_events(self, thread_id, *, user_id=None):
+        events = self._events.get(thread_id, [])
+        if user_id is None:
+            return bool(events)
+        return any(self._matches_user(event, user_id) for event in events)
+
     async def delete_by_thread(self, thread_id, *, user_id=None):
         events = self._events.get(thread_id, [])
         if user_id is None:
@@ -175,6 +182,32 @@ class MemoryRunEventStore(RunEventStore):
             if e["category"] == "message":
                 self._messages_by_run[thread_id].setdefault(e["run_id"], []).append(e)
         return removed
+
+    async def delete_legacy_by_thread(self, thread_id):
+        events = self._events.get(thread_id, [])
+        remaining = [event for event in events if event.get("user_id") is not None]
+        removed = len(events) - len(remaining)
+        self._events[thread_id] = remaining
+        self._messages[thread_id] = [event for event in remaining if event["category"] == "message"]
+        self._events_by_run[thread_id] = {}
+        self._messages_by_run[thread_id] = {}
+        for event in remaining:
+            self._events_by_run[thread_id].setdefault(event["run_id"], []).append(event)
+            if event["category"] == "message":
+                self._messages_by_run[thread_id].setdefault(event["run_id"], []).append(event)
+        return removed
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        claimed = 0
+        for event in self._events.get(thread_id, []):
+            if event.get("user_id") not in {None, DEFAULT_USER_ID}:
+                continue
+            event["user_id"] = owner_user_id
+            claimed += 1
+        return claimed
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        return {event.get("user_id") for event in self._events.get(thread_id, [])}
 
     async def delete_by_run(self, thread_id, run_id, *, user_id=None):
         all_events = self._events.get(thread_id, [])

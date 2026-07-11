@@ -55,6 +55,7 @@ export type MockSkill = {
 export type MockModel = {
   id: string;
   name: string;
+  provider?: string;
   model: string;
   display_name: string;
   supports_thinking?: boolean;
@@ -72,6 +73,7 @@ const DEFAULT_MODELS: MockModel[] = [
   {
     id: "mock-model",
     name: "mock-model",
+    provider: "Mock Provider",
     model: "mock-model",
     display_name: "Mock Model",
     supports_thinking: true,
@@ -241,7 +243,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         thread_id: MOCK_THREAD_ID,
         title: "New Chat",
         updated_at: new Date().toISOString(),
-        messages: mockStreamMessages(),
+        messages: [],
       });
       return route.fulfill({
         status: 200,

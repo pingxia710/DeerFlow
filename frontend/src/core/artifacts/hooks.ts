@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
+import { queryKeys } from "@/core/threads/query-keys";
 
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
 
@@ -25,8 +26,8 @@ export function useArtifactContent({
     return null;
   }, [filepath, isWriteFile, thread]);
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["artifact", filepath, threadId, isMock],
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: queryKeys.thread.artifact(threadId, filepath, isMock),
     queryFn: () => {
       return loadArtifactContent({ filepath, threadId, isMock });
     },
@@ -39,5 +40,6 @@ export function useArtifactContent({
     url: isWriteFile ? undefined : data?.url,
     isLoading,
     error,
+    refetch,
   };
 }

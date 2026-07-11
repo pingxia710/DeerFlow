@@ -1,6 +1,10 @@
 import asyncio
+import errno
 import logging
 import mimetypes
+import os
+import stat
+import weakref
 import zipfile
 from pathlib import Path
 from urllib.parse import quote
@@ -10,6 +14,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.authz import require_permission
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
+from deerflow.config.paths import UnsafePathError, open_file_no_symlinks
+from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +30,64 @@ ARTIFACT_SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff"}
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
+
+
+def _close_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _open_regular_artifact(path: Path) -> tuple[int, os.stat_result]:
+    """Open one validated artifact inode without following a replaced symlink."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = open_file_no_symlinks(path, flags)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {path.name}") from exc
+    except UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=f"Unsafe artifact path: {path.name}") from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+            raise HTTPException(status_code=400, detail=f"Unsafe artifact path: {path.name}") from exc
+        raise
+    file_stat = os.fstat(fd)
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        _close_fd(fd)
+        raise HTTPException(status_code=400, detail=f"Path is not a safe regular file: {path.name}")
+    return fd, file_stat
+
+
+class _DuplicatingFileDescriptor:
+    """Give each ``open()`` call ownership of a fresh descriptor."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+
+    def __index__(self) -> int:
+        return os.dup(self.fd)
+
+
+class _OpenedFileResponse(FileResponse):
+    """FileResponse bound to an already-opened inode instead of a mutable path."""
+
+    def __init__(self, fd: int, *, stat_result: os.stat_result, **kwargs) -> None:
+        super().__init__(_DuplicatingFileDescriptor(fd), stat_result=stat_result, **kwargs)
+        self._fd_finalizer = weakref.finalize(self, _close_fd, fd)
+
+    async def __call__(self, scope, receive, send) -> None:
+        # ``http.response.pathsend`` accepts path names, not descriptors.
+        extensions = dict(scope.get("extensions", {}))
+        extensions.pop("http.response.pathsend", None)
+        try:
+            await super().__call__({**scope, "extensions": extensions}, receive, send)
+        finally:
+            self._fd_finalizer()
 
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
@@ -73,7 +137,7 @@ def _read_skill_archive_member(zip_ref: zipfile.ZipFile, info: zipfile.ZipInfo) 
     return b"".join(chunks)
 
 
-def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> bytes | None:
+def _extract_file_from_skill_archive(zip_path, internal_path: str) -> bytes | None:
     """Extract a file from a .skill ZIP archive.
 
     Args:
@@ -115,18 +179,16 @@ def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, in
     ``HTTPException``s propagate through ``asyncio.to_thread`` unchanged,
     preserving status codes.
     """
-    if not actual_skill_path.exists():
-        raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
-    if not actual_skill_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
-    content = _extract_file_from_skill_archive(actual_skill_path, internal_path)
+    fd, _ = _open_regular_artifact(actual_skill_path)
+    with os.fdopen(fd, "rb") as file:
+        content = _extract_file_from_skill_archive(file, internal_path)
     if content is None:
         raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
     mime_type, _ = mimetypes.guess_type(internal_path)
     return content, mime_type
 
 
-def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tuple[str, str | None, bytes | str | None]:
+def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tuple[str, str | None, bytes | str | tuple[int, os.stat_result]]:
     """Worker-thread body for the regular branch of ``get_artifact``.
 
     Stat probes, MIME sniffing (``mimetypes`` lazily stats the system MIME
@@ -136,19 +198,42 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
     it), ``("text", mime, str)``, or ``("bytes", mime, bytes)``. Behavior/error
     codes match the previous inline logic.
     """
-    if not actual_path.exists():
-        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
-    if not actual_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
-    mime_type, _ = mimetypes.guess_type(actual_path)
-    # Active content / explicit download is streamed by FileResponse — no read here.
-    if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
-        return ("file", mime_type, None)
-    if mime_type and mime_type.startswith("text/"):
-        return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
-    if is_text_file_by_content(actual_path):
-        return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
-    return ("bytes", mime_type, actual_path.read_bytes())
+    fd, file_stat = _open_regular_artifact(actual_path)
+    keep_open = False
+    try:
+        mime_type, _ = mimetypes.guess_type(actual_path)
+        # Keep the descriptor open so the response streams the inode that was
+        # validated here even if the sandbox replaces the visible path.
+        if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
+            keep_open = True
+            return ("file", mime_type, (fd, file_stat))
+        with os.fdopen(fd, "rb") as file:
+            fd = -1
+            content = file.read()
+        if mime_type and mime_type.startswith("text/"):
+            return ("text", mime_type, content.decode("utf-8"))
+        if _looks_like_text(content):
+            return ("text", mime_type, content.decode("utf-8"))
+        return ("bytes", mime_type, content)
+    finally:
+        if fd >= 0 and not keep_open:
+            _close_fd(fd)
+
+
+async def _read_artifact_payload_completion_safe(actual_path: Path, path: str, download: bool):
+    """Close a worker-opened descriptor before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(_read_artifact_payload, actual_path, path, download))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        try:
+            result = await await_task_through_repeated_cancellation(task)
+        except BaseException:
+            pass
+        else:
+            if result[0] == "file":
+                _close_fd(result[2][0])
+        raise cancelled
 
 
 @router.get(
@@ -231,12 +316,13 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
     # Offload path stat + MIME sniff + file reads (all blocking filesystem IO).
     # Active content and explicit downloads are streamed by FileResponse, so the
     # worker only reports the kind; inline text/binary payloads are read in-thread.
-    kind, mime_type, payload = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
+    kind, mime_type, payload = await _read_artifact_payload_completion_safe(actual_path, path, download)
 
     if kind == "file":
         # Always force download for active content types to prevent script
         # execution in the application origin when users open generated artifacts.
-        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
+        fd, file_stat = payload
+        return _OpenedFileResponse(fd, stat_result=file_stat, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
 
     if kind == "text":
         return PlainTextResponse(content=payload, media_type=mime_type, headers=_artifact_headers())

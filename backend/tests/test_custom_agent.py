@@ -450,13 +450,19 @@ class TestMemoryFilePath:
 # ===========================================================================
 
 
-def _make_test_app(tmp_path: Path):
+def _make_test_app(tmp_path: Path, *, system_role: str = "admin"):
     """Create a FastAPI app with the agents router, patching paths to tmp_path."""
     from fastapi import FastAPI
 
     from app.gateway.routers.agents import router
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_test_user(request, call_next):
+        request.state.user = SimpleNamespace(id="test-user-autouse", system_role=system_role)
+        return await call_next(request)
+
     app.include_router(router)
     return app
 
@@ -676,6 +682,20 @@ class TestAgentsAPI:
 
 
 class TestUserProfileAPI:
+    def test_user_profile_routes_require_admin(self, tmp_path):
+        import app.gateway.routers.agents as agents_router
+
+        paths_instance = _make_paths(tmp_path)
+        previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+        with patch.object(agents_router, "get_paths", return_value=paths_instance):
+            set_agents_api_config(AgentsApiConfig(enabled=True))
+            try:
+                with TestClient(_make_test_app(tmp_path, system_role="user")) as client:
+                    assert client.get("/api/user-profile").status_code == 403
+                    assert client.put("/api/user-profile", json={"content": "blocked"}).status_code == 403
+            finally:
+                set_agents_api_config(previous_config)
+
     def test_get_user_profile_empty(self, agent_client):
         response = agent_client.get("/api/user-profile")
         assert response.status_code == 200

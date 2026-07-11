@@ -146,7 +146,7 @@ async def test_sse_consumer_forwards_task_custom_event_without_extra_data_wrappe
 
 
 @pytest.mark.asyncio
-async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_recovery():
+async def test_sse_consumer_gap_requires_snapshot_without_durable_or_retained_replay():
     from app.gateway.services import sse_consumer
 
     thread_id = "thread-replay"
@@ -208,11 +208,50 @@ async def test_sse_consumer_replays_persisted_task_events_when_bridge_requires_r
     ):
         frames.append(frame)
 
-    events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events == ["custom", "messages", "stream_recovery_required", "values", "end"]
-    assert json.loads(_parse_sse_frame(frames[0])["data"]) == task_event
-    assert json.loads(_parse_sse_frame(frames[1])["data"]) == [{"type": "ai", "content": "durable reply", "id": "ai-1"}, {"caller": "lead_agent"}]
-    assert json.loads(_parse_sse_frame(frames[3])["data"]) == {"live": True}
+    assert [_parse_sse_frame(frame)["event"] for frame in frames] == ["stream_recovery_required"]
+
+
+@pytest.mark.asyncio
+async def test_sse_consumer_hands_initial_cursor_gap_to_snapshot_without_replay():
+    from app.gateway.services import sse_consumer
+
+    thread_id = "thread-initial-cursor"
+    run_id = "run-initial-cursor"
+    user_id = "user-initial-cursor"
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    event_store = MemoryRunEventStore()
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.values",
+        category="stream",
+        content={"event": "values", "data": {"step": "durable"}},
+        user_id=user_id,
+    )
+    await bridge.publish(run_id, "values", {"step": "evicted"})
+    await bridge.publish(run_id, "values", {"step": "retained"})
+    await bridge.publish_end(run_id)
+
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = []
+    async for frame in sse_consumer(
+        bridge,
+        record,
+        _NeverDisconnectedRequest(headers={"Last-Event-ID": "-1"}),
+        _CancelRecorder(),
+        event_store=event_store,
+        user_id=user_id,
+    ):
+        frames.append(frame)
+
+    assert [_parse_sse_frame(frame)["event"] for frame in frames] == ["stream_recovery_required"]
 
 
 @pytest.mark.asyncio
@@ -222,7 +261,6 @@ async def test_sse_consumer_replays_persisted_task_events_across_pages(monkeypat
     thread_id = "thread-replay-pages"
     run_id = "run-replay-pages"
     user_id = "user-replay-pages"
-    bridge = MemoryStreamBridge(queue_maxsize=1)
     event_store = MemoryRunEventStore()
     monkeypatch.setattr(gateway_services, "_TASK_EVENT_REPLAY_PAGE_SIZE", 2)
     for index in range(3):
@@ -244,43 +282,28 @@ async def test_sse_consumer_replays_persisted_task_events_across_pages(monkeypat
             user_id=user_id,
         )
 
-    await bridge.publish(run_id, "values", {"old": True})
-    last_event_id = bridge._streams[run_id].events[0].id
-    await bridge.publish(run_id, "values", {"missed": True})
-    await bridge.publish(run_id, "values", {"live": True})
-    await bridge.publish_end(run_id)
-
     record = RunRecord(
         run_id=run_id,
         thread_id=thread_id,
         assistant_id="lead_agent",
-        status=RunStatus.running,
+        status=RunStatus.success,
         on_disconnect=DisconnectMode.continue_,
         user_id=user_id,
     )
-    frames = []
-    async for frame in gateway_services.sse_consumer(
-        bridge,
-        record,
-        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
-        _CancelRecorder(),
-        event_store=event_store,
-        user_id=user_id,
-    ):
-        frames.append(frame)
+    frames = await gateway_services._durable_replay_frames(event_store, record, user_id=user_id) or []
 
-    task_ids = [json.loads(_parse_sse_frame(frame)["data"])["task_id"] for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    payloads = [json.loads(_parse_sse_frame(frame)["data"]) for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    task_ids = [payload["task_id"] for payload in payloads if "task_id" in payload]
     assert task_ids == ["task-0", "task-1", "task-2"]
 
 
 @pytest.mark.asyncio
 async def test_sse_consumer_replays_only_current_owner_task_events():
-    from app.gateway.services import sse_consumer
+    from app.gateway.services import _durable_replay_frames
 
     thread_id = "thread-owner-replay"
     run_id = "run-owner-replay"
     user_id = "user-a"
-    bridge = MemoryStreamBridge(queue_maxsize=1)
     event_store = MemoryRunEventStore()
     for owner, task_id in [("user-a", "task-a"), ("user-b", "task-b")]:
         await event_store.put(
@@ -301,33 +324,104 @@ async def test_sse_consumer_replays_only_current_owner_task_events():
             user_id=owner,
         )
 
-    await bridge.publish(run_id, "values", {"old": True})
-    last_event_id = bridge._streams[run_id].events[0].id
-    await bridge.publish(run_id, "values", {"missed": True})
-    await bridge.publish(run_id, "values", {"live": True})
-    await bridge.publish_end(run_id)
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        user_id=user_id,
+    )
+    frames = await _durable_replay_frames(event_store, record, user_id=user_id) or []
+
+    payloads = [json.loads(_parse_sse_frame(frame)["data"]) for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
+    assert [payload["task_id"] for payload in payloads if "task_id" in payload] == ["task-a"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_replay_merges_stream_and_task_events_by_seq_without_duplicates():
+    from app.gateway.services import _durable_replay_frames
+
+    thread_id = "thread-merged-replay"
+    run_id = "run-merged-replay"
+    user_id = "user-a"
+    event_store = MemoryRunEventStore()
+
+    def task_event(task_id: str) -> dict:
+        return {
+            "type": "task_completed",
+            "event_type": "task_completed",
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "task_id": task_id,
+            "status": "completed",
+        }
+
+    duplicated = task_event("task-streamed")
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.metadata",
+        category="stream",
+        content={"event": "metadata", "data": {"run_id": run_id, "thread_id": thread_id}},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="stream.custom",
+        category="stream",
+        content={"event": "custom", "data": duplicated},
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_completed",
+        category="task",
+        content=duplicated,
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_completed",
+        category="task",
+        content=task_event("task-durable-only"),
+        user_id=user_id,
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="task_completed",
+        category="task",
+        content=task_event("task-foreign-owner"),
+        user_id="user-b",
+    )
+    await event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="run.terminal",
+        category="lifecycle",
+        content={"status": "success", "terminal_reason": "success"},
+        user_id=user_id,
+    )
 
     record = RunRecord(
         run_id=run_id,
         thread_id=thread_id,
         assistant_id="lead_agent",
-        status=RunStatus.running,
+        status=RunStatus.success,
         on_disconnect=DisconnectMode.continue_,
         user_id=user_id,
     )
-    frames = []
-    async for frame in sse_consumer(
-        bridge,
-        record,
-        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
-        _CancelRecorder(),
-        event_store=event_store,
-        user_id=user_id,
-    ):
-        frames.append(frame)
+    frames = await _durable_replay_frames(event_store, record, user_id=user_id) or []
+    parsed = [(_parse_sse_frame(frame)["event"], json.loads(_parse_sse_frame(frame)["data"])) for frame in frames]
 
-    payloads = [json.loads(_parse_sse_frame(frame)["data"]) for frame in frames if _parse_sse_frame(frame)["event"] == "custom"]
-    assert [payload["task_id"] for payload in payloads] == ["task-a"]
+    assert [event for event, _payload in parsed] == ["metadata", "custom", "custom", "custom"]
+    task_ids = [payload["task_id"] for event, payload in parsed if event == "custom" and "task_id" in payload]
+    assert task_ids == ["task-streamed", "task-durable-only"]
+    assert parsed[-1][1]["event_type"] == "run.terminal"
 
 
 @pytest.mark.asyncio
@@ -707,13 +801,12 @@ async def test_sse_consumer_synthesizes_normalized_worker_lost_terminal_reason()
 
 
 @pytest.mark.asyncio
-async def test_sse_consumer_replays_persisted_messages_and_keeps_recovery_signal():
+async def test_sse_consumer_replays_persisted_messages_for_terminal_run():
     from app.gateway.services import sse_consumer
 
     thread_id = "thread-empty-replay"
     run_id = "run-empty-replay"
     user_id = "user-empty-replay"
-    bridge = MemoryStreamBridge(queue_maxsize=1)
     event_store = MemoryRunEventStore()
     await event_store.put(
         thread_id=thread_id,
@@ -725,26 +818,25 @@ async def test_sse_consumer_replays_persisted_messages_and_keeps_recovery_signal
         user_id=user_id,
     )
 
-    await bridge.publish(run_id, "values", {"old": True})
-    last_event_id = bridge._streams[run_id].events[0].id
-    await bridge.publish(run_id, "values", {"missed": True})
-    await bridge.publish(run_id, "values", {"live": True})
-    await bridge.publish_end(run_id)
-
     record = RunRecord(
         run_id=run_id,
         thread_id=thread_id,
         assistant_id="lead_agent",
-        status=RunStatus.running,
+        status=RunStatus.success,
         on_disconnect=DisconnectMode.continue_,
         user_id=user_id,
     )
-    request = _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id})
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal replay should use durable rows only")
+            yield
+
     frames = []
     async for frame in sse_consumer(
-        bridge,
+        _CleanedBridge(),
         record,
-        request,
+        _NeverDisconnectedRequest(),
         _CancelRecorder(),
         event_store=event_store,
         user_id=user_id,
@@ -752,19 +844,17 @@ async def test_sse_consumer_replays_persisted_messages_and_keeps_recovery_signal
         frames.append(frame)
 
     events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events == ["messages", "stream_recovery_required", "values", "end"]
+    assert events == ["messages", "custom", "end"]
     assert json.loads(_parse_sse_frame(frames[0])["data"]) == [{"type": "ai", "content": "replayed message", "id": "ai-replay"}, {"caller": "lead_agent"}]
-    assert json.loads(_parse_sse_frame(frames[2])["data"]) == {"live": True}
 
 
 @pytest.mark.asyncio
-async def test_sse_consumer_prefers_persisted_stream_frames_for_durable_replay():
+async def test_sse_consumer_prefers_persisted_stream_frames_for_terminal_replay():
     from app.gateway.services import sse_consumer
 
     thread_id = "thread-stream-projection"
     run_id = "run-stream-projection"
     user_id = "user-stream-projection"
-    bridge = MemoryStreamBridge(queue_maxsize=1)
     event_store = MemoryRunEventStore()
     await event_store.put(
         thread_id=thread_id,
@@ -799,25 +889,25 @@ async def test_sse_consumer_prefers_persisted_stream_frames_for_durable_replay()
         user_id=user_id,
     )
 
-    await bridge.publish(run_id, "values", {"old": True})
-    last_event_id = bridge._streams[run_id].events[0].id
-    await bridge.publish(run_id, "values", {"missed": True})
-    await bridge.publish(run_id, "values", {"live": True})
-    await bridge.publish_end(run_id)
-
     record = RunRecord(
         run_id=run_id,
         thread_id=thread_id,
         assistant_id="lead_agent",
-        status=RunStatus.running,
+        status=RunStatus.success,
         on_disconnect=DisconnectMode.continue_,
         user_id=user_id,
     )
+
+    class _CleanedBridge:
+        async def subscribe(self, *_args, **_kwargs):
+            raise AssertionError("terminal replay should use durable rows only")
+            yield
+
     frames = []
     async for frame in sse_consumer(
-        bridge,
+        _CleanedBridge(),
         record,
-        _NeverDisconnectedRequest(headers={"Last-Event-ID": last_event_id}),
+        _NeverDisconnectedRequest(),
         _CancelRecorder(),
         event_store=event_store,
         user_id=user_id,
@@ -825,7 +915,7 @@ async def test_sse_consumer_prefers_persisted_stream_frames_for_durable_replay()
         frames.append(frame)
 
     events = [_parse_sse_frame(frame)["event"] for frame in frames]
-    assert events[:4] == ["metadata", "messages", "values", "stream_recovery_required"]
+    assert events == ["metadata", "messages", "values", "custom", "end"]
     assert "fallback duplicate" not in "\n".join(frames)
     assert json.loads(_parse_sse_frame(frames[1])["data"])[0]["content"] == "stream token"
     assert json.loads(_parse_sse_frame(frames[2])["data"])["messages"][0]["content"] == "full state"

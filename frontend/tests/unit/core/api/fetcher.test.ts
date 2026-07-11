@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
@@ -62,4 +65,35 @@ test("isUnauthorizedError recognizes typed and status-shaped 401 errors", () => 
   expect(isUnauthorizedError(new UnauthorizedError())).toBe(true);
   expect(isUnauthorizedError({ status: 401 })).toBe(true);
   expect(isUnauthorizedError(new Error("Unauthorized"))).toBe(false);
+});
+
+test("401 responses notify AuthProvider without redirecting in fetch", async () => {
+  const fetcherModule = (await import("@/core/api/fetcher")) as Record<
+    string,
+    unknown
+  >;
+  const unauthorizedEvent = fetcherModule.UNAUTHORIZED_EVENT;
+  const dispatchEvent = rs.fn();
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(async () => new Response(null, { status: 401 })),
+  );
+  rs.stubGlobal("window", { dispatchEvent });
+
+  expect(typeof unauthorizedEvent).toBe("string");
+  if (typeof unauthorizedEvent !== "string") return;
+
+  await expect(fetch("/api/query")).rejects.toBeInstanceOf(UnauthorizedError);
+  expect(dispatchEvent).toHaveBeenCalledTimes(1);
+  expect(dispatchEvent.mock.calls[0]?.[0]).toMatchObject({
+    type: unauthorizedEvent,
+  });
+
+  const authProviderSource = readFileSync(
+    resolve(process.cwd(), "src/core/auth/AuthProvider.tsx"),
+    "utf-8",
+  );
+  expect(authProviderSource).toContain(
+    "window.addEventListener(UNAUTHORIZED_EVENT",
+  );
 });

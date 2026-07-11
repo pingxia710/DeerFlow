@@ -42,7 +42,7 @@ Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, mi
 
 ## Exposure and network safety
 
-The provisioner listens on the Docker-internal `8002` service for backend containers. Do not publish `8002` directly to untrusted networks. Docker nginx binds externally to `127.0.0.1` by default; set `DEER_FLOW_BIND_HOST=0.0.0.0` only for intentional external exposure. API docs stay off unless the Gateway enables them with `GATEWAY_ENABLE_DOCS=true` and nginx exposes them with `DEER_FLOW_EXPOSE_API_DOCS=true`. The sandbox API remains off at the nginx entrypoint unless explicitly enabled with `DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+The provisioner listens on the Docker-internal `8002` service for backend containers and requires the shared internal auth token. Do not publish `8002` directly to untrusted networks. Docker nginx never proxies the provisioner API. API docs stay off unless the Gateway enables them with `GATEWAY_ENABLE_DOCS=true` and nginx exposes them with `DEER_FLOW_EXPOSE_API_DOCS=true`.
 
 The nginx gate protects only the external entrypoint. Containers attached to the internal Docker network can still reach internal services, so do not join untrusted containers to that network.
 
@@ -148,9 +148,15 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
+| `PVC_INIT_IMAGE` | `busybox:1.36` | Init-container image used to create a fresh user-data PVC subPath before the sandbox starts |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+| `DEER_FLOW_INTERNAL_AUTH_TOKEN` | required | Shared control-plane token used only for authenticated backend → provisioner requests |
+
+Each Pod receives a separately generated `SANDBOX_API_KEY`. The provisioner
+returns that scoped key only over its authenticated internal API; the Gateway
+control-plane token is never injected into executable sandboxes.
 
 ### Custom sandbox image
 
@@ -173,6 +179,13 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 ```
 
 This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
+
+`USERDATA_PVC_NAME` is a shared-storage deployment contract: the Gateway's
+`.deer-flow` data root and the provisioner must refer to the same PVC and the
+same `deer-flow/` prefix. The provided Compose files do not automatically mount
+that Kubernetes PVC into the Gateway. Configure the shared mount explicitly
+before enabling this option; otherwise the sandbox and Gateway will see
+different files even though each mount is individually healthy.
 
 ### Important: K8S_API_SERVER Override
 
@@ -241,22 +254,26 @@ The compose file:
 # Health check
 curl http://localhost:8002/health
 
+# Reuse the deployment's internal token without writing it into the command.
+AUTH_HEADER="X-DeerFlow-Internal-Token: ${DEER_FLOW_INTERNAL_AUTH_TOKEN}"
+
 # Create a sandbox (via provisioner container for internal DNS)
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
+  -H "$AUTH_HEADER" \
   -H "Content-Type: application/json" \
   -d '{"sandbox_id":"test-001","thread_id":"thread-001","user_id":"user-001"}'
 
 # Check sandbox status
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl -H "$AUTH_HEADER" http://localhost:8002/api/sandboxes/test-001
 
 # List all sandboxes
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes
+docker exec deer-flow-provisioner curl -H "$AUTH_HEADER" http://localhost:8002/api/sandboxes
 
 # Verify Pod and Service in K8s
 kubectl get pod,svc -n deer-flow -l sandbox-id=test-001
 
 # Delete sandbox
-docker exec deer-flow-provisioner curl -X DELETE http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl -X DELETE -H "$AUTH_HEADER" http://localhost:8002/api/sandboxes/test-001
 ```
 
 ### Verify from Backend Containers
@@ -264,11 +281,14 @@ docker exec deer-flow-provisioner curl -X DELETE http://localhost:8002/api/sandb
 Once a sandbox is created, the backend containers (gateway, langgraph) can access it:
 
 ```bash
-# Get sandbox URL from provisioner
-SANDBOX_URL=$(docker exec deer-flow-provisioner curl -s http://localhost:8002/api/sandboxes/test-001 | jq -r .sandbox_url)
+# Get sandbox URL and its scoped API key from provisioner
+SANDBOX_INFO=$(docker exec deer-flow-provisioner curl -s -H "$AUTH_HEADER" http://localhost:8002/api/sandboxes/test-001)
+SANDBOX_URL=$(printf '%s' "$SANDBOX_INFO" | jq -r .sandbox_url)
+SANDBOX_API_KEY=$(printf '%s' "$SANDBOX_INFO" | jq -r .sandbox_api_key)
 
 # Test from gateway container
-docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
+SANDBOX_API_HEADER="X-AIO-API-Key: ${SANDBOX_API_KEY}"
+docker exec deer-flow-gateway curl -s -H "$SANDBOX_API_HEADER" "$SANDBOX_URL/v1/sandbox"
 ```
 
 ## Troubleshooting

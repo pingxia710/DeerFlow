@@ -188,6 +188,21 @@ async def test_hydrates_store_only_recovery_status() -> None:
     assert [row.status for row in rows] == ["worker_lost"]
 
 
+def test_record_from_store_preserves_top_level_completion_time() -> None:
+    record = RunManager._record_from_store(
+        {
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "status": "success",
+            "created_at": "2026-06-20T10:00:00Z",
+            "updated_at": "2026-07-20T10:00:00Z",
+            "completed_at": "2026-06-20T10:00:05Z",
+        }
+    )
+
+    assert record.metadata["completed_at"] == "2026-06-20T10:00:05Z"
+
+
 @pytest.mark.anyio
 async def test_status_transitions(manager: RunManager):
     """Status should transition pending -> running -> success."""
@@ -351,19 +366,19 @@ async def test_status_persistence_retries_transient_sqlite_lock():
 
 
 @pytest.mark.anyio
-async def test_status_persistence_recreates_missing_store_row():
-    """A final status update should recreate a run row if initial persistence was lost."""
+async def test_status_persistence_does_not_recreate_deleted_store_row():
+    """A missing row is an explicit deletion boundary, not a repair invitation."""
     store = MissingRowStatusRunStore()
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
     await store.delete(record.run_id)
 
-    await manager.set_status(record.run_id, RunStatus.error, error="boom")
+    committed = await manager.set_status(record.run_id, RunStatus.error, error="boom")
 
     stored = await store.get(record.run_id)
-    assert stored is not None
-    assert stored["status"] == "error"
-    assert stored["error"] == "boom"
+    assert committed is False
+    assert stored is None
+    assert record.status == RunStatus.pending
 
 
 @pytest.mark.anyio
@@ -382,8 +397,8 @@ async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
 
 
 @pytest.mark.anyio
-async def test_completion_persistence_recreates_missing_store_row():
-    """Completion updates should recreate a missing row and persist final counters."""
+async def test_completion_persistence_does_not_recreate_deleted_store_row():
+    """Late completion counters must not resurrect an explicitly deleted run."""
     store = MissingCompletionRunStore()
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
@@ -400,17 +415,13 @@ async def test_completion_persistence_recreates_missing_store_row():
     )
 
     stored = await store.get(record.run_id)
-    assert stored is not None
-    assert stored["status"] == "success"
-    assert stored["total_tokens"] == 42
-    assert stored["llm_call_count"] == 2
-    assert stored["last_ai_message"] == "done"
-    assert store.completion_update_attempts == 2
+    assert stored is None
+    assert store.completion_update_attempts == 1
 
 
 @pytest.mark.anyio
-async def test_completion_persistence_warns_when_recreated_row_still_missing(caplog):
-    """A second zero-row completion update after recreation should not be silent."""
+async def test_completion_persistence_warns_when_store_row_is_missing(caplog):
+    """A zero-row completion update should fail closed and remain observable."""
     store = AlwaysMissingCompletionRunStore()
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
@@ -419,8 +430,8 @@ async def test_completion_persistence_warns_when_recreated_row_still_missing(cap
 
     await manager.update_run_completion(record.run_id, status="success", total_tokens=42)
 
-    assert store.completion_update_attempts == 2
-    assert "affected no rows after row recreation" in caplog.text
+    assert store.completion_update_attempts == 1
+    assert "affected no rows; refusing to recreate" in caplog.text
 
 
 @pytest.mark.anyio
@@ -467,6 +478,10 @@ async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
         "rolling-back-run": "error",
         "success-run": "success",
     }
+    for run_id in ("pending-run", "running-run", "cancelling-run", "rolling-back-run"):
+        stored = await store.get(run_id)
+        assert stored is not None
+        assert stored["terminal_reason"] == "worker_lost"
 
 
 @pytest.mark.anyio
@@ -608,14 +623,17 @@ async def test_list_by_thread(manager: RunManager):
 
 @pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Ordering should keep the later-created run first even when timestamps tie."""
+    """Equal timestamps use the immutable run ID as a stable cursor tie-breaker."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
 
     runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r2.run_id, r1.run_id]
+    assert [run.run_id for run in runs] == sorted(
+        [r1.run_id, r2.run_id],
+        reverse=True,
+    )
 
 
 @pytest.mark.anyio
@@ -835,29 +853,74 @@ async def test_create_does_not_expose_run_until_store_persist_completes():
 
     store.put = blocking_put
     create_task = asyncio.create_task(manager.create("thread-1"))
-    list_task = None
-
     try:
         await put_started.wait()
-        list_task = asyncio.create_task(manager.list_by_thread("thread-1"))
-        await asyncio.sleep(0)
-        assert not list_task.done()
+        assert await manager.list_by_thread("thread-1") == []
 
         allow_put.set()
         record = await create_task
-        runs = await list_task
+        runs = await manager.list_by_thread("thread-1")
 
         assert [run.run_id for run in runs] == [record.run_id]
     finally:
         allow_put.set()
         cleanup_tasks = []
-        for task in (list_task, create_task):
-            if task is None:
-                continue
+        for task in (create_task,):
             if not task.done():
                 task.cancel()
             cleanup_tasks.append(task)
         await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_cancelled_create_rolls_back_persisted_run_and_round_binding():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    second_put_started = asyncio.Event()
+
+    class BlockingSecondPutStore(MemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_count = 0
+
+        async def put(self, run_id: str, *, thread_id: str, **kwargs):
+            self.put_count += 1
+            if self.put_count == 2:
+                second_put_started.set()
+                await asyncio.Event().wait()
+            return await super().put(run_id, thread_id=thread_id, **kwargs)
+
+    store = BlockingSecondPutStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=store, round_store=round_store)
+    create_task = asyncio.create_task(manager.create("thread-cancelled-create", user_id="owner-a"))
+
+    await second_put_started.wait()
+    create_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+
+    assert (
+        await store.list_by_thread(
+            "thread-cancelled-create",
+            user_id="owner-a",
+        )
+        == []
+    )
+    assert (
+        await round_store.list_by_thread(
+            "thread-cancelled-create",
+            user_id="owner-a",
+        )
+        == []
+    )
+    assert (
+        await manager.list_by_thread(
+            "thread-cancelled-create",
+            user_id="owner-a",
+        )
+        == []
+    )
 
 
 @pytest.mark.anyio
@@ -955,6 +1018,386 @@ async def test_create_or_reject_reject_uses_active_slot_across_managers():
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_store_write_failure_leaves_no_round():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class FailingPendingRunStore(MemoryRunStore):
+        async def create_pending_run(self, run_id, *, thread_id, **kwargs):
+            raise ValueError("pending run write failed")
+
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=FailingPendingRunStore(), round_store=round_store)
+
+    with pytest.raises(ValueError, match="pending run write failed"):
+        await manager.create_or_reject("thread-round-write-failure")
+
+    assert await round_store.list_by_thread("thread-round-write-failure") == []
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_slot_conflict_preserves_active_round():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class HiddenInflightRunStore(MemoryRunStore):
+        hide_inflight = False
+
+        async def list_inflight(self, *, before=None):
+            if self.hide_inflight:
+                return []
+            return await super().list_inflight(before=before)
+
+    store = HiddenInflightRunStore()
+    round_store = MemoryRoundStateStore()
+    owner = RunManager(store=store, round_store=round_store, worker_id="owner")
+    active = await owner.create_or_reject(
+        "thread-round-slot-conflict",
+        kwargs={"input": {"messages": [{"role": "user", "content": "original intent"}]}},
+    )
+    [before] = await round_store.list_by_thread("thread-round-slot-conflict")
+    before_events = list(round_store.events[before["round_id"]])
+    store.hide_inflight = True
+
+    contender = RunManager(store=store, round_store=round_store, worker_id="contender")
+    with pytest.raises(ConflictError, match="already has an active run"):
+        await contender.create_or_reject(
+            "thread-round-slot-conflict",
+            kwargs={"input": {"messages": [{"role": "user", "content": "contender intent"}]}},
+        )
+
+    [after] = await round_store.list_by_thread("thread-round-slot-conflict")
+    assert after["current_run_id"] == active.run_id
+    assert after["current_intent"] == "original intent"
+    assert round_store.events[after["round_id"]] == before_events
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_round_bind_cancellation_compensates_slot_run_and_round(monkeypatch):
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=store, round_store=round_store)
+
+    bind_round = manager._bind_round_to_run
+
+    async def cancel_after_round_bind(record):
+        await bind_round(record)
+        [bound_round] = await round_store.list_by_thread("thread-round-cancel")
+        assert bound_round["current_run_id"] == record.run_id
+        assert record.metadata["round_id"] == bound_round["round_id"]
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(manager, "_bind_round_to_run", cancel_after_round_bind)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.create_or_reject("thread-round-cancel")
+
+    assert await round_store.list_by_thread("thread-round-cancel") == []
+    assert await store.list_by_thread("thread-round-cancel") == []
+    assert store._active_slots == {}
+    assert manager._runs == {}
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_cancellation_after_slot_commit_compensates_run_and_slot():
+    class CancelAfterSlotCommitStore(MemoryRunStore):
+        async def try_acquire_active_slot(self, *args, **kwargs):
+            lease = await super().try_acquire_active_slot(*args, **kwargs)
+            assert lease is not None
+            raise asyncio.CancelledError
+
+    store = CancelAfterSlotCommitStore()
+    manager = RunManager(store=store)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.create_or_reject("thread-slot-commit-cancel")
+
+    assert await store.list_by_thread("thread-slot-commit-cancel") == []
+    assert store._active_slots == {}
+    assert manager._runs == {}
+
+
+@pytest.mark.anyio
+async def test_round_bind_cannot_revive_run_recovered_after_lease_expiry():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class BlockingRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.bound = asyncio.Event()
+            self.allow_return = asyncio.Event()
+
+        async def bind_run(self, **kwargs):
+            result = await super().bind_run(**kwargs)
+            self.bound.set()
+            await self.allow_return.wait()
+            return result
+
+    store = MemoryRunStore()
+    round_store = BlockingRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-round-lease-race"))
+
+    await round_store.bound.wait()
+    lease = store._active_slots["thread-round-lease-race"]
+    now = datetime.now(UTC)
+    store._active_slots["thread-round-lease-race"] = replace(
+        lease,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    assert await store.recover_expired_lease(
+        lease.run_id,
+        generation=lease.generation,
+        now=now,
+        error="worker lost during round bind",
+    )
+    round_store.allow_return.set()
+
+    with pytest.raises(ConflictError, match="lost its active lease"):
+        await create_task
+
+    stored = await store.get(lease.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["terminal_reason"] == "lease_expired_recovered"
+    assert await round_store.list_by_thread("thread-round-lease-race") == []
+    assert manager._runs == {}
+
+
+@pytest.mark.anyio
+async def test_running_round_projection_cannot_revive_recovered_lease():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class BlockingRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.block_state = False
+            self.state_written = asyncio.Event()
+            self.allow_return = asyncio.Event()
+
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if self.block_state:
+                self.state_written.set()
+                await self.allow_return.wait()
+            return result
+
+    store = MemoryRunStore()
+    round_store = BlockingRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-round-status-race")
+    round_store.block_state = True
+    status_task = asyncio.create_task(manager.set_status(record.run_id, RunStatus.running))
+
+    await round_store.state_written.wait()
+    lease = store._active_slots[record.thread_id]
+    now = datetime.now(UTC)
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    assert await store.recover_expired_lease(
+        record.run_id,
+        generation=lease.generation,
+        now=now,
+        error="worker lost during round projection",
+    )
+    round_store.allow_return.set()
+
+    assert await status_task is False
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["terminal_reason"] == "lease_expired_recovered"
+    assert record.run_id not in manager._runs
+    visible = await manager.get(record.run_id)
+    assert visible is not None
+    assert visible.status == RunStatus.error
+    assert visible.terminal_reason == "lease_expired_recovered"
+
+
+@pytest.mark.anyio
+async def test_terminal_round_failure_keeps_active_slot_and_rejects_replacement():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class FailingTerminalRoundStore(MemoryRoundStateStore):
+        async def set_run_state(self, *args, **kwargs):
+            if kwargs.get("state") in {"closed", "blocked"}:
+                raise RuntimeError("round terminal write failed")
+            return await super().set_run_state(*args, **kwargs)
+
+    store = MemoryRunStore()
+    round_store = FailingTerminalRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-round-terminal-failure")
+    assert await manager.set_status(record.run_id, RunStatus.running) is True
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id)
+    [round_info] = await round_store.list_by_thread("thread-round-terminal-failure")
+    assert committed is False
+    assert persisted is not None
+    assert persisted["status"] == RunStatus.running.value
+    assert round_info["state"] == "executing"
+    with pytest.raises(ConflictError):
+        await manager.create_or_reject("thread-round-terminal-failure")
+
+
+@pytest.mark.anyio
+async def test_running_round_projection_failure_prevents_agent_execution_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class FailingRunningRoundStore(MemoryRoundStateStore):
+        async def set_run_state(self, *args, **kwargs):
+            if kwargs.get("state") == "executing":
+                raise RuntimeError("round running write failed")
+            return await super().set_run_state(*args, **kwargs)
+
+    store = MemoryRunStore()
+    round_store = FailingRunningRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-round-running-failure")
+
+    committed = await manager.set_status(record.run_id, RunStatus.running)
+
+    persisted = await store.get(record.run_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+    assert committed is False
+    assert persisted is not None
+    assert persisted["status"] == RunStatus.running.value
+    assert round_info["state"] == "open"
+
+
+@pytest.mark.anyio
+async def test_slow_terminal_projection_does_not_block_unrelated_threads():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class BlockingTerminalRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_written = asyncio.Event()
+            self.allow_terminal_return = asyncio.Event()
+
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if kwargs.get("state") in {"closed", "blocked"}:
+                self.terminal_written.set()
+                await self.allow_terminal_return.wait()
+            return result
+
+    manager = RunManager(
+        store=MemoryRunStore(),
+        round_store=BlockingTerminalRoundStore(),
+    )
+    record = await manager.create_or_reject("thread-blocked-round")
+    assert await manager.set_status(record.run_id, RunStatus.running) is True
+    terminal_task = asyncio.create_task(manager.set_status(record.run_id, RunStatus.success, terminal_reason="success"))
+    await manager._round_store.terminal_written.wait()
+    unrelated_probe = asyncio.create_task(manager.has_inflight("thread-unrelated"))
+    try:
+        assert await asyncio.wait_for(asyncio.shield(unrelated_probe), timeout=0.1) is False
+    finally:
+        manager._round_store.allow_terminal_return.set()
+        await terminal_task
+        await unrelated_probe
+
+
+@pytest.mark.anyio
+async def test_stale_recovery_does_not_recreate_run_after_thread_delete():
+    class BlockingStatusStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.update_started = asyncio.Event()
+            self.allow_update = asyncio.Event()
+
+        async def update_status(self, *args, **kwargs):
+            self.update_started.set()
+            await self.allow_update.wait()
+            return await super().update_status(*args, **kwargs)
+
+    store = BlockingStatusStore()
+    manager = RunManager(store=store)
+    run_id = "legacy-run-delete-recovery-race"
+    stale_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    await store.put(
+        run_id,
+        thread_id="thread-delete-recovery-race",
+        status=RunStatus.running.value,
+        created_at=stale_time,
+    )
+    store._runs[run_id]["updated_at"] = stale_time
+
+    recovery_task = asyncio.create_task(manager.recover_stale_inflight_runs(thread_id="thread-delete-recovery-race"))
+    await store.update_started.wait()
+    await manager.begin_thread_delete("thread-delete-recovery-race")
+    assert await store.delete_by_thread("thread-delete-recovery-race") == 1
+    store.allow_update.set()
+    await recovery_task
+
+    assert await store.get(run_id) is None
+    assert run_id not in manager._runs
+
+
+@pytest.mark.anyio
+async def test_expired_lease_recovery_commit_is_cancellation_safe():
+    class CancelAfterRecoveryCommitStore(MemoryRunStore):
+        async def recover_expired_lease(self, *args, **kwargs):
+            recovered = await super().recover_expired_lease(*args, **kwargs)
+            assert recovered is True
+            raise asyncio.CancelledError
+
+    store = CancelAfterRecoveryCommitStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-recovery-cancel")
+    lease = store._active_slots[record.thread_id]
+    now = datetime.now(UTC)
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.recover_stale_inflight_runs(thread_id=record.thread_id)
+
+    visible = await manager.get(record.run_id)
+    assert visible is not None
+    assert visible.status == RunStatus.error
+    assert visible.terminal_reason == "lease_expired_recovered"
+    replacement = await manager.create_or_reject(record.thread_id)
+    assert replacement.run_id != record.run_id
+
+
+@pytest.mark.anyio
+async def test_expired_rollback_lease_recovery_syncs_local_and_round_state():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-expired-rollback")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    await store.request_cancel(record.run_id, "rollback")
+    lease = store._active_slots[record.thread_id]
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    recovered = await manager.recover_stale_inflight_runs(thread_id=record.thread_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+
+    assert [item.run_id for item in recovered] == [record.run_id]
+    assert record.status == RunStatus.error
+    assert record.terminal_reason == "rollback_failed_owner_lost"
+    assert round_info["state"] == "blocked"
+
+
+@pytest.mark.anyio
 async def test_create_or_reject_reject_uses_sql_active_slot_across_managers(tmp_path):
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.persistence.run import RunRepository
@@ -1010,12 +1453,99 @@ async def test_failed_lease_terminal_cas_does_not_fallback_to_put():
     record = await manager.create_or_reject("thread-lease", multitask_strategy="reject")
 
     await manager.set_status(record.run_id, RunStatus.running)
-    await manager.set_status(record.run_id, RunStatus.success, terminal_reason="success")
+    committed = await manager.set_status(record.run_id, RunStatus.success, terminal_reason="success")
 
     stored = await store.get(record.run_id)
+    assert committed is False
     assert record.status == RunStatus.running
     assert stored is not None
     assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_failed_lease_terminal_cas_rolls_back_terminal_round_projection():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = RejectingCompleteRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        worker_id="worker-a",
+    )
+    record = await manager.create_or_reject(
+        "thread-terminal-round-cas",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running) is True
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    rounds = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert committed is False
+    assert rounds[0]["state"] == "executing"
+
+    lease = store._active_slots[record.thread_id]
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    await manager.recover_stale_inflight_runs(thread_id=record.thread_id)
+
+    recovered_rounds = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert recovered_rounds[0]["state"] == "blocked"
+
+
+@pytest.mark.anyio
+async def test_late_terminal_loser_projects_winning_durable_terminal_round():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        worker_id="worker-a",
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-terminal-winner",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    assert await store.complete_run(
+        record.run_id,
+        from_statuses={RunStatus.running.value},
+        terminal_status=RunStatus.error.value,
+        lease_token=record.lease_token or "",
+        generation=record.lease_generation or 0,
+        terminal_reason="lease_expired_recovered",
+        error="lease owner lost",
+    )
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(record.thread_id, user_id="owner-a")
+    assert committed is False
+    assert persisted is not None and persisted["status"] == RunStatus.error.value
+    assert record.status == RunStatus.error
+    assert record.terminal_reason == "lease_expired_recovered"
+    assert round_info["state"] == "blocked"
 
 
 @pytest.mark.anyio
@@ -1033,8 +1563,9 @@ async def test_failed_lease_terminal_cas_leaves_run_recoverable_by_expired_lease
 
     stored = await store.get(record.run_id)
     assert [run.run_id for run in recovered] == [record.run_id]
-    assert record.status == RunStatus.error
-    assert record.terminal_reason == "lease_expired_recovered"
+    assert record.status == RunStatus.running
+    assert recovered[0].status == RunStatus.error
+    assert recovered[0].terminal_reason == "lease_expired_recovered"
     assert stored is not None
     assert stored["status"] == "error"
     assert stored["terminal_reason"] == "lease_expired_recovered"
@@ -1059,6 +1590,583 @@ async def test_cancel_store_only_lease_run_records_cancel_intent():
     stored = await store.get(record.run_id)
     assert stored is not None
     assert stored["status"] == "rolling_back"
+
+
+@pytest.mark.anyio
+async def test_cancel_store_failure_still_stops_local_run():
+    class FailingCancelStore(MemoryRunStore):
+        async def request_cancel(self, *args, **kwargs):
+            raise RuntimeError("cancel store unavailable")
+
+    manager = RunManager(store=FailingCancelStore())
+    record = await manager.create_or_reject("thread-local-cancel-failure")
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+
+    assert await manager.cancel(record.run_id) is True
+    await asyncio.sleep(0)
+
+    assert record.abort_event.is_set()
+    assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_cancel_store_failure_is_not_reported_as_success_for_store_only_run():
+    class ToggleCancelStore(MemoryRunStore):
+        fail_cancel = False
+
+        async def request_cancel(self, *args, **kwargs):
+            if self.fail_cancel:
+                raise RuntimeError("cancel store unavailable")
+            return await super().request_cancel(*args, **kwargs)
+
+    store = ToggleCancelStore()
+    owner = RunManager(store=store, worker_id="owner")
+    other = RunManager(store=store, worker_id="other")
+    record = await owner.create_or_reject("thread-store-only-cancel-failure")
+    store.fail_cancel = True
+
+    with pytest.raises(RuntimeError, match="cancel store unavailable"):
+        await other.cancel(record.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("terminal_status", "terminal_reason", "expected_result"),
+    [
+        ("success", "completed", False),
+        ("interrupted", "cancelled", True),
+    ],
+)
+async def test_cancel_uses_durable_terminal_result_and_evicts_stale_local_control(
+    terminal_status: str,
+    terminal_reason: str,
+    expected_result: bool,
+):
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-cancel-durable-terminal",
+        user_id="owner-a",
+    )
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    before_rounds = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+
+    assert await store.complete_run(
+        record.run_id,
+        from_statuses={"running"},
+        terminal_status=terminal_status,
+        lease_token=record.lease_token or "",
+        generation=record.lease_generation or 0,
+        terminal_reason=terminal_reason,
+    )
+
+    assert await manager.cancel(record.run_id) is expected_result
+    await asyncio.gather(record.task, return_exceptions=True)
+
+    durable = await store.get(record.run_id, user_id="owner-a")
+    hydrated = await manager.get(record.run_id, user_id="owner-a")
+    after_rounds = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert record.abort_event.is_set()
+    assert record.task.cancelled()
+    assert durable is not None and durable["status"] == terminal_status
+    assert hydrated is not None and hydrated.status == RunStatus(terminal_status)
+    assert hydrated is not record
+    assert after_rounds == before_rounds
+
+
+@pytest.mark.anyio
+async def test_cancel_intent_returning_after_terminal_commit_cannot_regress_local_status():
+    class BlockingCancelIntentStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.intent_consumed = asyncio.Event()
+            self.allow_intent_return = asyncio.Event()
+
+        async def consume_cancel_intent(self, *args, **kwargs):
+            intent = await super().consume_cancel_intent(*args, **kwargs)
+            self.intent_consumed.set()
+            await self.allow_intent_return.wait()
+            return intent
+
+    store = BlockingCancelIntentStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-cancel-terminal-race")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    await store.request_cancel(record.run_id, "interrupt")
+
+    consume_task = asyncio.create_task(manager.consume_cancel_intent(record))
+    await store.intent_consumed.wait()
+    assert await manager.set_status(
+        record.run_id,
+        RunStatus.interrupted,
+        terminal_reason="cancelled",
+    )
+    store.allow_intent_return.set()
+
+    assert await consume_task is None
+    assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.anyio
+async def test_terminal_round_projection_retries_on_ordinary_run_read():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class FailOnceTerminalRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def set_run_state(self, *args, **kwargs):
+            if kwargs.get("state") in {"closed", "blocked"}:
+                self.terminal_attempts += 1
+                if self.terminal_attempts == 1:
+                    raise RuntimeError("transient round failure")
+            return await super().set_run_state(*args, **kwargs)
+
+    store = MemoryRunStore()
+    round_store = FailOnceTerminalRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-round-read-retry")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    lease = store._active_slots[record.thread_id]
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    await manager.recover_stale_inflight_runs(thread_id=record.thread_id)
+    [before] = await round_store.list_by_thread(record.thread_id)
+    assert before["state"] == "executing"
+
+    visible = await manager.get(record.run_id)
+    [after] = await round_store.list_by_thread(record.thread_id)
+
+    assert visible is not None
+    assert visible.status == RunStatus.error
+    assert round_store.terminal_attempts == 2
+    assert after["state"] == "blocked"
+
+
+@pytest.mark.anyio
+async def test_terminal_round_projection_retry_is_idempotent_after_ambiguous_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenFailRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if kwargs.get("state") in {"closed", "blocked"}:
+                self.terminal_attempts += 1
+                if self.terminal_attempts == 1:
+                    raise RuntimeError("terminal commit acknowledgement lost")
+            return result
+
+    store = MemoryRunStore()
+    round_store = CommitThenFailRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-round-ambiguous-retry")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    lease = store._active_slots[record.thread_id]
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    await manager.recover_stale_inflight_runs(thread_id=record.thread_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+    event_count = len(round_store.events[round_info["round_id"]])
+    await manager.get(record.run_id)
+
+    assert round_store.terminal_attempts == 2
+    assert len(round_store.events[round_info["round_id"]]) == event_count
+    assert record.run_id not in manager._pending_terminal_round_projections
+
+
+@pytest.mark.anyio
+async def test_terminal_round_projection_ack_failure_rolls_back_ambiguous_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenFailRoundStore(MemoryRoundStateStore):
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if kwargs.get("state") == "closed":
+                raise RuntimeError("terminal projection acknowledgement lost")
+            return result
+
+    store = MemoryRunStore()
+    round_store = CommitThenFailRoundStore()
+    manager = RunManager(store=store, round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-round-ambiguous-terminal")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+    assert committed is False
+    assert record.status == RunStatus.running
+    assert persisted is not None and persisted["status"] == RunStatus.running.value
+    assert round_info["state"] == "executing"
+
+
+@pytest.mark.anyio
+async def test_terminal_round_projection_cancellation_rolls_back_ambiguous_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenCancelRoundStore(MemoryRoundStateStore):
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if kwargs.get("state") == "closed":
+                raise asyncio.CancelledError
+            return result
+
+    store = MemoryRunStore()
+    round_store = CommitThenCancelRoundStore()
+    manager = RunManager(store=store, round_store=round_store, terminal_cleanup_delay=-1)
+    record = await manager.create_or_reject("thread-round-cancelled-terminal")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.set_status(
+            record.run_id,
+            RunStatus.success,
+            terminal_reason="success",
+        )
+
+    persisted = await store.get(record.run_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+    assert persisted is not None and persisted["status"] == RunStatus.running.value
+    assert round_info["state"] == "executing"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_commit_ack_loss_confirms_idempotent_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenFailRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def complete_run(self, *args, **kwargs):
+            result = await super().complete_run(*args, **kwargs)
+            self.terminal_attempts += 1
+            if self.terminal_attempts == 1:
+                raise RuntimeError("terminal commit acknowledgement lost")
+            return result
+
+    store = CommitThenFailRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-run-ambiguous-terminal",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert committed is True
+    assert store.terminal_attempts == 2
+    assert record.status == RunStatus.success
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_commit_repeated_ack_loss_reads_durable_terminal():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenAlwaysFailRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def complete_run(self, *args, **kwargs):
+            await super().complete_run(*args, **kwargs)
+            self.terminal_attempts += 1
+            raise RuntimeError("terminal commit acknowledgement lost")
+
+    store = CommitThenAlwaysFailRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-run-repeated-ambiguous-terminal",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert committed is True
+    assert store.terminal_attempts == 2
+    assert record.status == RunStatus.success
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_commit_cancellation_confirms_idempotent_commit():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CancelThenCommitRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def complete_run(self, *args, **kwargs):
+            self.terminal_attempts += 1
+            if self.terminal_attempts == 1:
+                raise asyncio.CancelledError
+            return await super().complete_run(*args, **kwargs)
+
+    store = CancelThenCommitRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-run-cancelled-terminal",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert committed is True
+    assert store.terminal_attempts == 2
+    assert record.status == RunStatus.success
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_commit_repeated_cancellation_rolls_back_round():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class AlwaysCancelRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def complete_run(self, *args, **kwargs):
+            self.terminal_attempts += 1
+            raise asyncio.CancelledError
+
+    store = AlwaysCancelRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-run-repeated-cancel-terminal",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.set_status(
+            record.run_id,
+            RunStatus.success,
+            terminal_reason="success",
+        )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert store.terminal_attempts == 2
+    assert persisted is not None and persisted["status"] == RunStatus.running.value
+    assert round_info["state"] == "executing"
+
+
+@pytest.mark.anyio
+async def test_terminal_run_commit_repeated_ack_cancellation_reads_durable_terminal():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenCancelRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_attempts = 0
+
+        async def complete_run(self, *args, **kwargs):
+            await super().complete_run(*args, **kwargs)
+            self.terminal_attempts += 1
+            raise asyncio.CancelledError
+
+    store = CommitThenCancelRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create_or_reject(
+        "thread-run-repeated-ack-cancel-terminal",
+        user_id="owner-a",
+    )
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(
+        record.thread_id,
+        user_id="owner-a",
+    )
+    assert committed is True
+    assert store.terminal_attempts == 2
+    assert record.status == RunStatus.success
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_unleased_terminal_ack_loss_reads_durable_terminal():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenFailStatusStore(MemoryRunStore):
+        async def update_status(self, run_id, status, **kwargs):
+            result = await super().update_status(run_id, status, **kwargs)
+            if status == RunStatus.success.value:
+                raise RuntimeError("terminal status acknowledgement lost")
+            return result
+
+    store = CommitThenFailStatusStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create("thread-unleased-ack-loss", user_id="owner-a")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(record.thread_id, user_id="owner-a")
+    assert committed is True
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_unleased_terminal_ack_cancellation_reads_durable_terminal():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    class CommitThenCancelStatusStore(MemoryRunStore):
+        async def update_status(self, run_id, status, **kwargs):
+            result = await super().update_status(run_id, status, **kwargs)
+            if status == RunStatus.success.value:
+                raise asyncio.CancelledError
+            return result
+
+    store = CommitThenCancelStatusStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(
+        store=store,
+        round_store=round_store,
+        terminal_cleanup_delay=-1,
+    )
+    record = await manager.create("thread-unleased-ack-cancel", user_id="owner-a")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        terminal_reason="success",
+    )
+
+    persisted = await store.get(record.run_id, user_id="owner-a")
+    [round_info] = await round_store.list_by_thread(record.thread_id, user_id="owner-a")
+    assert committed is True
+    assert persisted is not None and persisted["status"] == RunStatus.success.value
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_cancel_keeps_strongest_durable_action_on_local_record():
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    record = await manager.create_or_reject("thread-cancel-action")
+
+    assert await manager.cancel(record.run_id, action="rollback") is True
+    assert await manager.cancel(record.run_id, action="interrupt") is True
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["cancel_action"] == "rollback"
+    assert record.abort_action == "rollback"
 
 
 @pytest.mark.anyio
@@ -1555,6 +2663,50 @@ async def test_create_or_reject_rejects_persisted_inflight_same_thread():
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_recovers_expired_same_thread_lease_before_conflict_check():
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    expired = await owner.create_or_reject("thread-expired-create")
+    lease = store._active_slots[expired.thread_id]
+    store._active_slots[expired.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    replacement = await RunManager(store=store, worker_id="worker-b").create_or_reject(
+        expired.thread_id,
+    )
+
+    stored_expired = await store.get(expired.run_id)
+    assert stored_expired is not None
+    assert stored_expired["status"] == RunStatus.error.value
+    assert stored_expired["terminal_reason"] == "lease_expired_recovered"
+    assert replacement.run_id != expired.run_id
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_persists_round_binding_under_active_lease():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=store, round_store=round_store, worker_id="worker-a")
+
+    record = await manager.create_or_reject(
+        "thread-durable-round",
+        kwargs={"input": {"messages": [{"role": "user", "content": "inspect"}]}},
+    )
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["metadata"]["round_id"] == record.round_id
+    assert stored["metadata"]["round_context"]["current_run_id"] == record.run_id
+    hydrated = await RunManager(store=store).get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.round_id == record.round_id
+
+
+@pytest.mark.anyio
 async def test_create_or_reject_persisted_terminal_and_other_thread_do_not_block():
     store = MemoryRunStore()
     await store.put("terminal", thread_id="thread-1", status="success")
@@ -1575,3 +2727,219 @@ async def test_create_or_reject_without_store_still_rejects_memory_inflight(mana
         await manager.create_or_reject("thread-1", multitask_strategy="reject")
 
     assert first.run_id in manager._runs
+
+
+@pytest.mark.asyncio
+async def test_thread_delete_gate_blocks_new_runs_until_explicit_recreation(manager: RunManager):
+    await manager.begin_thread_delete("thread-delete")
+
+    with pytest.raises(ConflictError, match="being deleted"):
+        await manager.create_or_reject("thread-delete", multitask_strategy="reject")
+
+    await manager.end_thread_delete("thread-delete")
+
+    record = await manager.create_or_reject("thread-delete", multitask_strategy="reject")
+    assert record.thread_id == "thread-delete"
+
+
+@pytest.mark.asyncio
+async def test_thread_delete_gate_has_single_exclusive_owner(manager: RunManager):
+    await manager.begin_thread_delete("thread-exclusive-delete")
+
+    with pytest.raises(ConflictError, match="already being deleted"):
+        await manager.begin_thread_delete("thread-exclusive-delete")
+
+    await manager.end_thread_delete("thread-exclusive-delete")
+    await manager.begin_thread_delete("thread-exclusive-delete")
+
+
+@pytest.mark.asyncio
+async def test_thread_delete_waits_for_existing_checkpoint_writer(manager: RunManager):
+    await manager.begin_thread_write("thread-write")
+
+    delete_task = asyncio.create_task(manager.begin_thread_delete("thread-write"))
+    await asyncio.sleep(0)
+    assert not delete_task.done()
+
+    await manager.end_thread_write("thread-write")
+    await delete_task
+
+    with pytest.raises(ConflictError, match="being deleted"):
+        await manager.begin_thread_write("thread-write")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_thread_delete_wait_releases_gate_for_retry(
+    manager: RunManager,
+):
+    thread_id = "thread-cancelled-delete"
+    await manager.begin_thread_write(thread_id)
+    delete_task = asyncio.create_task(manager.begin_thread_delete(thread_id))
+    await asyncio.sleep(0)
+
+    delete_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delete_task
+    await manager.end_thread_write(thread_id)
+
+    await manager.begin_thread_delete(thread_id)
+
+
+@pytest.mark.asyncio
+async def test_existing_run_can_commit_terminal_status_during_thread_delete():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject(
+        "thread-delete-terminal",
+        user_id="owner-a",
+    )
+    await manager.begin_thread_delete("thread-delete-terminal")
+
+    committed = await manager.set_status(
+        record.run_id,
+        RunStatus.interrupted,
+        terminal_reason="cancelled",
+    )
+
+    stored = await store.get(record.run_id, user_id="owner-a")
+    assert committed is True
+    assert record.status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_create_or_reject_waits_for_existing_checkpoint_writer(manager: RunManager):
+    await manager.begin_thread_write("thread-initial-checkpoint")
+
+    create_task = asyncio.create_task(manager.create_or_reject("thread-initial-checkpoint"))
+    await asyncio.sleep(0)
+    assert not create_task.done()
+
+    await manager.end_thread_write("thread-initial-checkpoint")
+    record = await create_task
+    assert record.thread_id == "thread-initial-checkpoint"
+
+
+@pytest.mark.asyncio
+async def test_thread_status_update_if_latest_serializes_with_new_run_creation(manager: RunManager):
+    updater = getattr(manager, "update_thread_status_if_latest", None)
+    assert callable(updater)
+
+    class BlockingThreadStore:
+        def __init__(self):
+            self.status = "running"
+            self.update_started = asyncio.Event()
+            self.allow_update = asyncio.Event()
+
+        async def update_status(self, thread_id, status, *, user_id=None):
+            self.update_started.set()
+            await self.allow_update.wait()
+            self.status = status
+
+    thread_store = BlockingThreadStore()
+    failed = await manager.create("thread-latest-status", user_id="owner-a")
+    assert await manager.set_status(failed.run_id, RunStatus.error, terminal_reason="failed")
+
+    update_task = asyncio.create_task(updater(failed, thread_store, "error"))
+    await thread_store.update_started.wait()
+    create_task = asyncio.create_task(manager.create_or_reject("thread-latest-status", user_id="owner-a"))
+    await asyncio.sleep(0)
+    assert not create_task.done()
+
+    thread_store.allow_update.set()
+    assert await update_task is True
+    replacement = await create_task
+    await thread_store.update_status("thread-latest-status", "running", user_id="owner-a")
+    assert thread_store.status == "running"
+
+    assert await updater(failed, thread_store, "error") is False
+    assert replacement.run_id != failed.run_id
+    assert thread_store.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_thread_status_update_if_latest_does_not_block_unrelated_thread(manager: RunManager):
+    record = await manager.create("thread-status-a", user_id="owner-a")
+    assert await manager.set_status(record.run_id, RunStatus.error, terminal_reason="failed")
+    update_started = asyncio.Event()
+    allow_update = asyncio.Event()
+
+    class BlockingThreadStore:
+        async def update_status(self, thread_id, status, *, user_id=None):
+            update_started.set()
+            await allow_update.wait()
+
+    update_task = asyncio.create_task(
+        manager.update_thread_status_if_latest(
+            record,
+            BlockingThreadStore(),
+            "error",
+        )
+    )
+    await update_started.wait()
+    create_task = asyncio.create_task(manager.create_or_reject("thread-status-b", user_id="owner-a"))
+
+    try:
+        replacement = await asyncio.wait_for(asyncio.shield(create_task), timeout=0.2)
+    finally:
+        allow_update.set()
+        await asyncio.gather(update_task, create_task, return_exceptions=True)
+
+    assert replacement.thread_id == "thread-status-b"
+
+
+@pytest.mark.asyncio
+async def test_slow_leased_run_creation_does_not_block_unrelated_thread():
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+
+    class BlockingCreateStore(MemoryRunStore):
+        async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs):
+            if thread_id == "thread-slow-create":
+                create_started.set()
+                await allow_create.wait()
+            return await super().create_pending_run(
+                run_id,
+                thread_id=thread_id,
+                **kwargs,
+            )
+
+    manager = RunManager(store=BlockingCreateStore())
+    slow_task = asyncio.create_task(manager.create_or_reject("thread-slow-create", user_id="owner-a"))
+    await create_started.wait()
+    fast_task = asyncio.create_task(manager.create_or_reject("thread-fast-create", user_id="owner-a"))
+
+    try:
+        fast_record = await asyncio.wait_for(asyncio.shield(fast_task), timeout=0.2)
+    finally:
+        allow_create.set()
+        await asyncio.gather(slow_task, fast_task, return_exceptions=True)
+
+    assert fast_record.thread_id == "thread-fast-create"
+
+
+@pytest.mark.asyncio
+async def test_slow_legacy_run_creation_does_not_block_unrelated_thread():
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+
+    class BlockingPutStore(MemoryRunStore):
+        async def put(self, run_id: str, *, thread_id: str, **kwargs):
+            if thread_id == "thread-slow-legacy":
+                create_started.set()
+                await allow_create.wait()
+            return await super().put(run_id, thread_id=thread_id, **kwargs)
+
+    manager = RunManager(store=BlockingPutStore())
+    slow_task = asyncio.create_task(manager.create("thread-slow-legacy"))
+    await create_started.wait()
+    fast_task = asyncio.create_task(manager.create("thread-fast-legacy"))
+
+    try:
+        fast_record = await asyncio.wait_for(asyncio.shield(fast_task), timeout=0.2)
+    finally:
+        allow_create.set()
+        await asyncio.gather(slow_task, fast_task, return_exceptions=True)
+
+    assert fast_record.thread_id == "thread-fast-legacy"

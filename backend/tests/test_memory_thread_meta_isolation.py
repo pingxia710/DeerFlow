@@ -6,11 +6,13 @@ the in-memory LangGraph Store backend used when database.backend=memory.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from langgraph.store.memory import InMemoryStore
 
+from deerflow.persistence.thread_meta.base import LEGACY_CLAIM_COMPLETE_METADATA_KEY
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -163,3 +165,147 @@ async def test_strict_access_denies_null_owner(store):
 
     assert await store.check_access("legacy", "user-a") is True
     assert await store.check_access("legacy", "user-a", require_existing=True) is False
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_claim_legacy_owner_is_atomic_and_same_owner_idempotent(store):
+    await store.create("legacy-claim", user_id="default")
+
+    assert await store.claim_legacy_owner("legacy-claim", "owner-1") is True
+    assert await store.claim_legacy_owner("legacy-claim", "owner-1") is True
+    assert await store.claim_legacy_owner("legacy-claim", "owner-2") is False
+    assert await store.is_legacy_claim_complete("legacy-claim", "owner-1") is False
+    assert await store.mark_legacy_claim_complete("legacy-claim", "owner-1") is True
+    assert await store.is_legacy_claim_complete("legacy-claim", "owner-1") is True
+
+    row = await store.get("legacy-claim", user_id=None)
+    assert row is not None
+    assert row["user_id"] == "owner-1"
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_client_metadata_cannot_persist_internal_legacy_claim_marker(store):
+    created = await store.create(
+        "marker",
+        user_id="owner-1",
+        metadata={LEGACY_CLAIM_COMPLETE_METADATA_KEY: "forged", "safe": 1},
+    )
+    assert created["metadata"] == {"safe": 1}
+
+    await store.update_metadata(
+        "marker",
+        {LEGACY_CLAIM_COMPLETE_METADATA_KEY: "forged-again", "next": 2},
+        user_id="owner-1",
+    )
+    row = await store.get("marker", user_id="owner-1")
+    assert row is not None
+    assert row["metadata"] == {"safe": 1, "next": 2}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_deleting_thread_cannot_be_marked_as_claim_complete(store):
+    await store.create("deleting-claim", user_id="owner-1")
+    await store.update_status("deleting-claim", "deleting", user_id="owner-1")
+
+    assert await store.mark_legacy_claim_complete("deleting-claim", "owner-1") is False
+    assert await store.is_legacy_claim_complete("deleting-claim", "owner-1") is False
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_deleting_status_is_an_owner_barrier(store):
+    await store.create("t-alpha", user_id="user-a")
+    await store.update_status("t-alpha", "deleting", user_id="user-a")
+
+    assert await store.check_access("t-alpha", "user-a") is False
+    assert await store.check_access("t-alpha", "user-a", require_existing=True) is False
+
+    await store.update_status("t-alpha", "running", user_id="user-a")
+    assert (await store.get("t-alpha", user_id="user-a"))["status"] == "deleting"
+
+    await store.update_status("t-alpha", "error", user_id=None)
+    assert (await store.get("t-alpha", user_id="user-a"))["status"] == "error"
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_deleting_status_cannot_be_overwritten_by_stale_worker_update():
+    read_started = asyncio.Event()
+    resume_worker = asyncio.Event()
+
+    class PausingStore(InMemoryStore):
+        pause_next_read = False
+
+        async def aget(self, namespace, key):
+            item = await super().aget(namespace, key)
+            if self.pause_next_read:
+                self.pause_next_read = False
+                read_started.set()
+                await resume_worker.wait()
+            return item
+
+    base_store = PausingStore()
+    thread_store = MemoryThreadMetaStore(base_store)
+    await thread_store.create("t-alpha", user_id="user-a")
+
+    base_store.pause_next_read = True
+    worker_update = asyncio.create_task(thread_store.update_status("t-alpha", "running", user_id="user-a"))
+    await read_started.wait()
+    delete_barrier = asyncio.create_task(thread_store.update_status("t-alpha", "deleting", user_id="user-a"))
+    await asyncio.sleep(0)
+    resume_worker.set()
+    await asyncio.gather(worker_update, delete_barrier)
+
+    assert (await thread_store.get("t-alpha", user_id="user-a"))["status"] == "deleting"
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_stale_metadata_update_cannot_overwrite_deleting_status():
+    read_started = asyncio.Event()
+    resume_metadata_update = asyncio.Event()
+
+    class PausingStore(InMemoryStore):
+        pause_next_read = False
+
+        async def aget(self, namespace, key):
+            item = await super().aget(namespace, key)
+            if self.pause_next_read:
+                self.pause_next_read = False
+                read_started.set()
+                await resume_metadata_update.wait()
+            return item
+
+    base_store = PausingStore()
+    thread_store = MemoryThreadMetaStore(base_store)
+    await thread_store.create("t-alpha", user_id="user-a", metadata={"before": True})
+
+    base_store.pause_next_read = True
+    metadata_update = asyncio.create_task(thread_store.update_metadata("t-alpha", {"after": True}, user_id="user-a"))
+    await read_started.wait()
+    delete_barrier = asyncio.create_task(thread_store.update_status("t-alpha", "deleting", user_id="user-a"))
+    await asyncio.sleep(0)
+    resume_metadata_update.set()
+    await asyncio.gather(metadata_update, delete_barrier)
+
+    row = await thread_store.get("t-alpha", user_id="user-a")
+    assert row["status"] == "deleting"
+    assert row["metadata"] == {"before": True, "after": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_cannot_overwrite_deleting_tombstone(store):
+    await store.create("t-alpha", user_id="user-a", metadata={"before": True})
+    await store.update_status("t-alpha", "deleting", user_id="user-a")
+
+    with pytest.raises(RuntimeError, match="while it is being deleted"):
+        await store.create("t-alpha", user_id="user-b", metadata={"after": True})
+
+    row = await store.get("t-alpha", user_id=None)
+    assert row["user_id"] == "user-a"
+    assert row["status"] == "deleting"
+    assert row["metadata"] == {"before": True}

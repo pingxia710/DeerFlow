@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -62,6 +62,8 @@ class TaskLaneRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     role: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="in_progress")
+    description: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[str | None] = mapped_column(Text)
     result_ref: Mapped[str | None] = mapped_column(Text)
     evidence_ref: Mapped[str | None] = mapped_column(Text)
     evidence_refs_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -69,6 +71,9 @@ class TaskLaneRow(Base):
     output_refs_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     handoff_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 

@@ -1,10 +1,12 @@
 import {
+  AlertCircleIcon,
   Code2Icon,
   CopyIcon,
   DownloadIcon,
   EyeIcon,
   LoaderIcon,
   PackageIcon,
+  RefreshCcwIcon,
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
@@ -29,6 +31,7 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
+import { canManageSkills } from "@/components/workspace/settings/skill-settings-state";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import {
   appendHtmlPreviewBaseHref,
@@ -38,6 +41,7 @@ import {
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -72,8 +76,13 @@ export function ArtifactFileDetail({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { artifacts, setOpen, select } = useArtifacts();
   const { thread, isMock } = useThread();
+  const canInstallSkill = canManageSkills(
+    user?.system_role,
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+  );
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
@@ -121,7 +130,7 @@ export function ArtifactFileDetail({
     isSupportPreview,
     toolResult,
   });
-  const { content, url } = useArtifactContent({
+  const { content, url, isLoading, error, refetch } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -144,7 +153,7 @@ export function ArtifactFileDetail({
   }, [artifactViewState.initialViewMode]);
 
   const handleInstallSkill = useCallback(async () => {
-    if (isInstalling) return;
+    if (!canInstallSkill || isInstalling) return;
 
     setIsInstalling(true);
     try {
@@ -163,7 +172,7 @@ export function ArtifactFileDetail({
     } finally {
       setIsInstalling(false);
     }
-  }, [threadId, filepath, isInstalling]);
+  }, [canInstallSkill, threadId, filepath, isInstalling]);
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
@@ -214,16 +223,13 @@ export function ArtifactFileDetail({
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
-            {!isWriteFile && filepath.endsWith(".skill") && (
+            {canInstallSkill && !isWriteFile && isSkillFile && (
               <Tooltip content={t.toolCalls.skillInstallTooltip}>
                 <ArtifactAction
                   icon={isInstalling ? LoaderIcon : PackageIcon}
                   label={t.common.install}
                   tooltip={t.common.install}
-                  disabled={
-                    isInstalling ||
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                  }
+                  disabled={isInstalling}
                   onClick={handleInstallSkill}
                 />
               </Tooltip>
@@ -296,7 +302,29 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="p-0">
-        {artifactViewState.canPreview &&
+        {isCodeFile && !isWriteFile && isLoading && (
+          <div className="text-muted-foreground flex size-full items-center justify-center gap-2 text-sm">
+            <LoaderIcon className="size-4 animate-spin" />
+            {t.common.loading}
+          </div>
+        )}
+        {isCodeFile && !isWriteFile && error && (
+          <div className="flex size-full flex-col items-center justify-center gap-3 p-6 text-center">
+            <AlertCircleIcon className="text-destructive size-5" />
+            <p className="text-muted-foreground max-w-md text-sm">
+              {error instanceof Error
+                ? error.message
+                : "Failed to load artifact"}
+            </p>
+            <Button size="sm" variant="outline" onClick={() => void refetch()}>
+              <RefreshCcwIcon className="size-4" />
+              {t.common.retry}
+            </Button>
+          </div>
+        )}
+        {!error &&
+          !isLoading &&
+          artifactViewState.canPreview &&
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
@@ -306,13 +334,16 @@ export function ArtifactFileDetail({
               url={url}
             />
           )}
-        {isCodeFile && viewMode === "code" && (
-          <CodeEditor
-            className="size-full resize-none rounded-none border-none"
-            value={visibleContent ?? ""}
-            readonly
-          />
-        )}
+        {isCodeFile &&
+          (!isLoading || isWriteFile) &&
+          !error &&
+          viewMode === "code" && (
+            <CodeEditor
+              className="size-full resize-none rounded-none border-none"
+              value={visibleContent ?? ""}
+              readonly
+            />
+          )}
         {!isCodeFile && canPreviewInBrowser && (
           <iframe
             className="size-full"

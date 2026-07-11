@@ -43,7 +43,7 @@ class ChannelRuntimeConfigStore:
                 return {str(name): dict(value) for name, value in raw.items() if isinstance(value, dict)}
         return {}
 
-    def _save(self) -> None:
+    def _save(self, data: dict[str, dict[str, Any]]) -> None:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             dir=self._path.parent,
@@ -55,7 +55,7 @@ class ChannelRuntimeConfigStore:
                 Path(fd.name).chmod(0o600)
             except OSError:
                 logger.debug("Unable to chmod temporary channel runtime config store at %s", fd.name, exc_info=True)
-            json.dump(self._data, fd, indent=2, ensure_ascii=False)
+            json.dump(data, fd, indent=2, ensure_ascii=False)
             fd.close()
             Path(fd.name).replace(self._path)
             try:
@@ -78,23 +78,29 @@ class ChannelRuntimeConfigStore:
 
     def set_provider_config(self, provider: str, config: dict[str, Any]) -> None:
         with self._lock:
-            self._data[provider] = dict(config)
-            self._save()
+            updated = {**self._data, provider: dict(config)}
+            self._save(updated)
+            self._data = updated
 
     def set_provider_disconnected(self, provider: str) -> None:
         with self._lock:
-            self._data[provider] = {
-                "enabled": False,
-                RUNTIME_CHANNEL_DISABLED_FLAG: True,
+            updated = {
+                **self._data,
+                provider: {
+                    "enabled": False,
+                    RUNTIME_CHANNEL_DISABLED_FLAG: True,
+                },
             }
-            self._save()
+            self._save(updated)
+            self._data = updated
 
     def remove_provider_config(self, provider: str) -> bool:
         with self._lock:
             if provider not in self._data:
                 return False
-            del self._data[provider]
-            self._save()
+            updated = {name: config for name, config in self._data.items() if name != provider}
+            self._save(updated)
+            self._data = updated
             return True
 
 

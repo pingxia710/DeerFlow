@@ -104,3 +104,21 @@ sandbox:
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
+
+
+def test_internal_auth_token_is_generated_and_persisted_for_docker_start():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        token_home = tmp_root / "runtime"
+        command = f"""
+            source '{SCRIPT_PATH}'
+            PROJECT_ROOT='{tmp_root}'
+            DEER_FLOW_HOME='{token_home}'
+            unset DEER_FLOW_INTERNAL_AUTH_TOKEN
+            ensure_internal_auth_token >/dev/null
+            test -n "$DEER_FLOW_INTERNAL_AUTH_TOKEN"
+            test -s "$DEER_FLOW_HOME/.internal-auth-token"
+            test "$DEER_FLOW_INTERNAL_AUTH_TOKEN" = "$(cat "$DEER_FLOW_HOME/.internal-auth-token")"
+        """
+
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])

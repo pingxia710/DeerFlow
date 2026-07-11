@@ -8,12 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
+import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
+from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
+from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import MemoryStreamBridge, RunManager, RunRecord, RunStatus
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -70,6 +73,11 @@ class _RoundStoreForSnapshotTests:
                 "round_id": round_id,
                 "user_id": user_id,
                 "role": "evidence",
+                "description": "Collect runtime evidence",
+                "result": "Evidence ready",
+                "started_at": "2026-01-01T00:01:00+00:00",
+                "finished_at": "2026-01-01T00:01:02+00:00",
+                "duration_ms": 2000,
                 "status": "completed",
             }
         ][:limit]
@@ -201,6 +209,22 @@ def test_returns_paginated_envelope():
     assert len(body["data"]) == 3
 
 
+@pytest.mark.parametrize("owner_kind", ["missing", "null"])
+def test_run_messages_require_explicit_thread_owner(owner_kind):
+    event_store = _make_event_store([_make_message(1)])
+    app = _make_app(event_store=event_store)
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if owner_kind == "null":
+        asyncio.run(thread_store.create("thread-1", user_id=None))
+    app.state.thread_store = thread_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 404
+    event_store.list_messages_by_run.assert_not_awaited()
+
+
 def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     """GET /api/threads/{tid}/runtime-snapshot returns one recovery envelope."""
     user_id = str(_TEST_USER_ID)
@@ -292,6 +316,12 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     assert body["run_messages"][1]["data"][0]["content"]["content"] == "older question"
     assert body["rounds"][0]["round_id"] == "round-1"
     assert body["task_lanes"][0]["task_id"] == "task-1"
+    assert body["task_lanes"][0]["subagent_type"] == "evidence"
+    assert body["task_lanes"][0]["description"] == "Collect runtime evidence"
+    assert body["task_lanes"][0]["result"] == "Evidence ready"
+    assert body["task_lanes"][0]["duration_ms"] == 2000
+    assert body["task_lanes"][0]["completed_at"] == "2026-01-01T00:01:02+00:00"
+    assert body["task_lanes"][0]["prompt"] is None
     assert body.get("recovery") is None
     assert round_store.seen_user_id == user_id
 
@@ -826,6 +856,31 @@ def test_list_run_events_passes_after_seq_to_event_store():
     )
 
 
+def test_event_and_evidence_limits_reject_non_positive_values_before_store_io():
+    thread_id = "thread-bounded"
+    run_id = "run-bounded"
+    event_store = MagicMock()
+    event_store.list_events = AsyncMock(return_value=[])
+    run_manager = AsyncMock()
+    run_manager.get.return_value = RunRecord(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect="cancel",
+        user_id=str(_TEST_USER_ID),
+    )
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        events = client.get(f"/api/threads/{thread_id}/runs/{run_id}/events?limit=0")
+        evidence = client.get(f"/api/threads/{thread_id}/runs/{run_id}/evidence?limit=-1")
+
+    assert events.status_code == 422
+    assert evidence.status_code == 422
+    event_store.list_events.assert_not_awaited()
+
+
 def test_run_thread_mismatch_returns_404_without_reading_events():
     """The run resolver must reject mismatched thread/run pairs before event reads."""
     rows = [_make_message(1)]
@@ -1001,6 +1056,21 @@ def test_stream_store_only_terminal_run_replays_persisted_events_after_restart()
     }
 
 
+def test_compute_run_durations_prefers_terminal_completion_time():
+    run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-07-20T10:00:00Z",
+        metadata={"completed_at": "2026-06-20T10:00:05Z"},
+    )
+
+    assert thread_runs.compute_run_durations([run]) == {"run-1": 5}
+
+
 def test_list_run_messages_injects_turn_duration():
     """Verify that list_run_messages injects turn_duration into ALL AI messages for the run."""
     from unittest.mock import AsyncMock
@@ -1133,6 +1203,22 @@ def test_list_thread_messages_attaches_display_visibility_contract():
     }
 
 
+def test_list_thread_messages_rejects_non_positive_limit():
+    event_store = _make_event_store([])
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = SimpleNamespace(list_by_thread_grouped=AsyncMock(return_value={}))
+
+    with TestClient(app) as client:
+        negative = client.get("/api/threads/thread-1/messages?limit=-1")
+        zero = client.get("/api/threads/thread-1/messages?limit=0")
+
+    assert negative.status_code == 422
+    assert zero.status_code == 422
+    event_store.list_messages.assert_not_awaited()
+
+
 def test_list_thread_messages_scopes_events_to_current_user():
     user_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     user_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -1227,8 +1313,97 @@ def test_list_runs_uses_trusted_internal_owner_header():
 
     response = asyncio.run(_scenario())
 
-    run_manager.list_by_thread.assert_awaited_once_with("thread-1", user_id="owner-1")
+    run_manager.list_by_thread.assert_awaited_once_with(
+        "thread-1",
+        user_id="owner-1",
+        limit=100,
+    )
     assert response[0].run_id == "run-owner"
+
+
+def test_list_runs_supports_cursor_pagination_for_older_history():
+    thread_id = "thread-run-history"
+    user_id = str(_TEST_USER_ID)
+    run_store = MemoryRunStore()
+
+    async def _seed_runs() -> None:
+        for index in range(105):
+            await run_store.put(
+                f"run-{index:03d}",
+                thread_id=thread_id,
+                user_id=user_id,
+                status="success",
+                created_at=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
+            )
+
+    asyncio.run(_seed_runs())
+    app = _make_app(run_manager=RunManager(store=run_store))
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/runs?limit=5&before=run-005")
+
+    assert response.status_code == 200
+    assert [row["run_id"] for row in response.json()] == [
+        "run-004",
+        "run-003",
+        "run-002",
+        "run-001",
+        "run-000",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_history_cursor_is_stable_when_newer_run_is_inserted():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    thread_id = "thread-cursor-stability"
+    for index in range(1, 4):
+        await store.put(
+            f"run-{index}",
+            thread_id=thread_id,
+            status="success",
+            created_at=f"2026-01-01T00:00:0{index}+00:00",
+        )
+
+    first_page = await manager.list_by_thread(thread_id, limit=2)
+    await store.put(
+        "run-4",
+        thread_id=thread_id,
+        status="success",
+        created_at="2026-01-01T00:00:04+00:00",
+    )
+    second_page = await manager.list_by_thread(
+        thread_id,
+        limit=2,
+        before=first_page[-1].run_id,
+    )
+
+    assert [record.run_id for record in first_page] == ["run-3", "run-2"]
+    assert [record.run_id for record in second_page] == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_history_cursor_has_stable_tie_breaker_for_equal_timestamps():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    thread_id = "thread-cursor-ties"
+    for run_id in ("run-a", "run-b", "run-c"):
+        await store.put(
+            run_id,
+            thread_id=thread_id,
+            status="success",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    first_page = await manager.list_by_thread(thread_id, limit=1)
+    second_page = await manager.list_by_thread(
+        thread_id,
+        limit=1,
+        before=first_page[-1].run_id,
+    )
+
+    assert [record.run_id for record in first_page] == ["run-c"]
+    assert [record.run_id for record in second_page] == ["run-b"]
 
 
 def test_list_thread_messages_run_id_filters_to_requested_run():

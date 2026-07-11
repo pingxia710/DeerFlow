@@ -3,9 +3,36 @@ import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";
 
+export class SkillRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "SkillRequestError";
+    this.status = status;
+  }
+
+  get isAdminRequired() {
+    return this.status === 403;
+  }
+}
+
+async function readErrorDetail(response: Response, fallback: string) {
+  const error = (await response.json().catch(() => ({}))) as {
+    detail?: unknown;
+  };
+  return typeof error.detail === "string" ? error.detail : fallback;
+}
+
 export async function loadSkills() {
-  const skills = await fetch(`${getBackendBaseURL()}/api/skills`);
-  const json = await skills.json();
+  const response = await fetch(`${getBackendBaseURL()}/api/skills`);
+  if (!response.ok) {
+    throw new SkillRequestError(
+      response.status,
+      await readErrorDetail(response, "Failed to load skills"),
+    );
+  }
+  const json = await response.json();
   return json.skills as Skill[];
 }
 
@@ -22,6 +49,12 @@ export async function enableSkill(skillName: string, enabled: boolean) {
       }),
     },
   );
+  if (!response.ok) {
+    throw new SkillRequestError(
+      response.status,
+      await readErrorDetail(response, "Failed to update skill"),
+    );
+  }
   return response.json();
 }
 

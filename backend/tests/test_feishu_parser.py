@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -82,6 +83,77 @@ def test_feishu_is_not_running_when_ws_thread_exits():
     channel._thread.is_alive.return_value = False
 
     assert channel.is_running is False
+
+
+def test_feishu_stop_disconnects_ws_client_and_joins_thread(monkeypatch):
+    async def go():
+        import lark_oapi as lark
+        import lark_oapi.ws.client as ws_client_module
+
+        started = threading.Event()
+        disconnected = threading.Event()
+
+        class FakeWSClient:
+            instance = None
+
+            def __init__(self, **_kwargs):
+                self._auto_reconnect = True
+                self.loop = None
+                FakeWSClient.instance = self
+
+            def start(self):
+                self.loop = ws_client_module.loop
+                started.set()
+                self.loop.run_forever()
+
+            async def _disconnect(self):
+                disconnected.set()
+
+        monkeypatch.setattr(lark.ws, "Client", FakeWSClient)
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._running = True
+        channel._thread = threading.Thread(
+            target=channel._run_ws,
+            args=("test", "test", "https://open.feishu.cn"),
+            daemon=True,
+        )
+        thread = channel._thread
+        thread.start()
+        assert await asyncio.to_thread(started.wait, 1)
+
+        try:
+            await channel.stop()
+            assert disconnected.is_set()
+            assert not thread.is_alive()
+            assert channel._thread is None
+        finally:
+            if thread.is_alive():
+                instance = FakeWSClient.instance
+                assert instance is not None and instance.loop is not None
+                instance.loop.call_soon_threadsafe(instance.loop.stop)
+                await asyncio.to_thread(thread.join, 1)
+
+    _run(go())
+
+
+def test_feishu_ignores_messages_after_stop():
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._make_inbound = MagicMock()
+    _run(channel.stop())
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.message.parent_id = None
+    event.event.message.thread_id = None
+    event.event.message.content = json.dumps({"text": "after stop"})
+    event.event.sender.sender_id.open_id = "user_1"
+
+    channel._on_message(event)
+
+    channel._make_inbound.assert_not_called()
 
 
 def test_feishu_event_handler_ignores_non_content_message_events():
@@ -191,6 +263,120 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
         assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
         provider.acquire.assert_called_once_with("thread-1", user_id="ou-user")
         sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
+
+    _run(go())
+
+
+def test_feishu_receive_file_rejects_preexisting_upload_symlink(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        uploads_dir = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        uploads_dir.mkdir(parents=True)
+        protected_file = tmp_path / "protected.txt"
+        protected_file.write_bytes(b"protected")
+        upload_path = uploads_dir / "report.md"
+        upload_path.symlink_to(protected_file)
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        builder = MagicMock()
+        builder.message_id.return_value = builder
+        builder.file_key.return_value = builder
+        builder.type.return_value = builder
+        builder.build.return_value = object()
+        channel._GetMessageResourceRequest.builder.return_value = builder
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"attacker-controlled")
+        response.file_name = "report.md"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        provider = MagicMock()
+        provider.acquire.return_value = "local"
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file(
+            "message-1",
+            "file-key",
+            "file",
+            "thread-1",
+            user_id="ou-user",
+        )
+
+        assert protected_file.read_bytes() == b"protected"
+        assert result == "Failed to obtain the [file]"
+        assert upload_path.is_symlink()
+
+    _run(go())
+
+
+@pytest.mark.parametrize("blocking_stage", ["acquire", "update_file"])
+def test_feishu_receive_file_keeps_sandbox_io_off_event_loop(tmp_path, monkeypatch, blocking_stage):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        builder = MagicMock()
+        builder.message_id.return_value = builder
+        builder.file_key.return_value = builder
+        builder.type.return_value = builder
+        builder.build.return_value = object()
+        channel._GetMessageResourceRequest.builder.return_value = builder
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"file-bytes")
+        response.file_name = "report.md"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        blocking_call_started = threading.Event()
+        release_blocking_call = threading.Event()
+        released_while_blocked = False
+
+        def block_if_selected(stage):
+            nonlocal released_while_blocked
+            if stage == blocking_stage:
+                blocking_call_started.set()
+                released_while_blocked = release_blocking_call.wait(timeout=0.5)
+
+        class Sandbox:
+            def update_file(self, *_args):
+                block_if_selected("update_file")
+
+        class Provider:
+            def acquire(self, *_args, **_kwargs):
+                block_if_selected("acquire")
+                return "aio-1"
+
+            def get(self, *_args):
+                return Sandbox()
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: Provider())
+
+        async def release_from_event_loop():
+            assert await asyncio.to_thread(blocking_call_started.wait, 1)
+            release_blocking_call.set()
+
+        await asyncio.gather(
+            channel._receive_single_file(
+                "message-1",
+                "file-key",
+                "file",
+                "thread-1",
+                user_id="ou-user",
+            ),
+            release_from_event_loop(),
+        )
+
+        assert released_while_blocked is True
 
     _run(go())
 

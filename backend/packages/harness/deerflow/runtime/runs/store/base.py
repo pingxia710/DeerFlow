@@ -80,6 +80,7 @@ class RunStore(abc.ABC):
         *,
         user_id: str | None = None,
         limit: int = 100,
+        before: str | None = None,
     ) -> list[dict[str, Any]]:
         pass
 
@@ -108,6 +109,18 @@ class RunStore(abc.ABC):
         for run in runs:
             await self.delete(run["run_id"])
         return len(runs)
+
+    async def delete_legacy_by_thread(self, thread_id: str) -> int:
+        """Delete only ownerless legacy rows for *thread_id*.
+
+        Implementations must match ``user_id IS NULL`` exactly. In particular,
+        default-owned and concrete foreign-owned rows are not legacy rows.
+        """
+        raise NotImplementedError
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        """Return every persisted owner marker for *thread_id*."""
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def update_model_name(
@@ -194,6 +207,7 @@ class RunStore(abc.ABC):
         lease_token: str,
         generation: int,
         lease_expires_at: datetime | None = None,
+        metadata_updates: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> bool:
         raise NotImplementedError

@@ -6,13 +6,18 @@
   },
   {
     "id": "val-skill-change-probe",
-    "must_include": ["bash scripts/skillopt-probe.sh", "non-trivial `PASS`"],
-    "forbidden": ["skip the probe"]
+    "must_include": ["bash scripts/skillopt-probe.sh", "Opposition is risk-triggered", "not a universal pre-PASS gate"],
+    "forbidden": ["skip the probe", "always dispatch opposition before PASS"]
   },
   {
     "id": "test-evidence-gate",
     "must_include": ["acceptance/evidence standard", "Strong", "Weak", "Unverified", "EvidenceStrength", "findings.md", "reproducible refs", "summary-only output", "Only Strong evidence", "action_result", "worker status is not a PASS"],
     "forbidden": ["PASS because worker said so"]
+  },
+  {
+    "id": "test-stop-after-observed-implementation",
+    "must_include": ["one implementation lane plus focused acceptance verification", "Runtime-observed paired tool results", "facts", "Stop dispatching", "Opposition is risk-triggered"],
+    "forbidden": ["default Planner/Boundary/Evidence/Opposition/Recorder sequence", "later criticism erases observed evidence", "dispatch roles only to complete a sequence"]
   },
   {
     "id": "test-no-role-pipeline",
@@ -56,7 +61,7 @@
   },
   {
     "id": "test-risk-graded-run-protocol",
-    "must_include": ["docs/command-room/run-protocol.md", "small tasks do not force full roles", "high-impact tasks require Planner, Boundary, Evidence, Opposition, Chair, Recorder, and SkillOpt"],
+    "must_include": ["docs/command-room/run-protocol.md", "small tasks do not force full roles", "ordinary low-risk development defaults to one implementation lane plus focused acceptance verification", "high-impact tasks use separated governance roles and SkillOpt"],
     "forbidden": ["always run the full role pipeline"]
   },
   {

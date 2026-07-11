@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { fetch as fetcher } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { getBackendBaseURL } from "@/core/config";
 
 type SetupMode = "loading" | "init_admin" | "change_password";
 
@@ -36,7 +37,7 @@ export default function SetupPage() {
       setMode("change_password");
     } else if (!isAuthenticated) {
       // Check if the system has no users yet
-      void fetcher("/api/v1/auth/setup-status")
+      void fetcher(`${getBackendBaseURL()}/api/v1/auth/setup-status`)
         .then((r) => r.json())
         .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
@@ -72,14 +73,17 @@ export default function SetupPage() {
 
     setLoading(true);
     try {
-      const res = await fetcher("/api/v1/auth/initialize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password: newPassword,
-        }),
-      });
+      const res = await fetcher(
+        `${getBackendBaseURL()}/api/v1/auth/initialize`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email,
+            password: newPassword,
+          }),
+        },
+      );
 
       if (!res.ok) {
         const data = await res.json();
@@ -112,17 +116,20 @@ export default function SetupPage() {
 
     setLoading(true);
     try {
-      const res = await fetcher("/api/v1/auth/change-password", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const res = await fetcher(
+        `${getBackendBaseURL()}/api/v1/auth/change-password`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            current_password: currentPassword,
+            new_password: newPassword,
+            new_email: email || undefined,
+          }),
         },
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_password: newPassword,
-          new_email: email || undefined,
-        }),
-      });
+      );
 
       if (!res.ok) {
         const data = await res.json();

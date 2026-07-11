@@ -4,6 +4,8 @@ Uses a helper to create the store for each backend type.
 Memory tests run directly; DB and JSONL tests create stores inside each test.
 """
 
+import asyncio
+
 import pytest
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -237,6 +239,21 @@ class TestCountMessages:
         await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
         assert await store.count_messages("t1") == 2
 
+    @pytest.mark.anyio
+    async def test_memory_has_events_detects_ownerless_trace_only_thread(self, store):
+        await store.put(
+            thread_id="trace-only",
+            run_id="r1",
+            event_type="llm_end",
+            category="trace",
+            user_id=None,
+        )
+
+        assert await store.count_messages("trace-only", user_id=None) == 0
+        assert await store.has_events("trace-only", user_id=None) is True
+        assert await store.has_events("trace-only", user_id="owner-a") is False
+        assert await store.has_events("missing", user_id=None) is False
+
 
 # -- put_batch --
 
@@ -393,6 +410,30 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_has_events_detects_ownerless_trace_only_thread(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'has-events.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+        try:
+            await s.put(
+                thread_id="trace-only",
+                run_id="r1",
+                event_type="llm_end",
+                category="trace",
+                user_id=None,
+            )
+
+            assert await s.count_messages("trace-only", user_id=None) == 0
+            assert await s.has_events("trace-only", user_id=None) is True
+            assert await s.has_events("trace-only", user_id="owner-a") is False
+            assert await s.has_events("missing", user_id=None) is False
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
     async def test_put_accepts_explicit_user_id(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
@@ -529,6 +570,62 @@ class TestDbRunEventStore:
         results = await s.put_batch(events)
         seqs = [r["seq"] for r in results]
         assert seqs == list(range(1, 51))
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_sqlite_concurrent_put_and_batch_allocate_unique_seq(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        store = DbRunEventStore(get_session_factory())
+
+        writes = []
+        for index in range(15):
+            writes.append(
+                store.put(
+                    thread_id="t-race",
+                    run_id="r-race",
+                    event_type="message",
+                    category="message",
+                    content=f"put-{index}",
+                )
+            )
+            writes.append(
+                store.put_batch(
+                    [
+                        {
+                            "thread_id": "t-race",
+                            "run_id": "r-race",
+                            "event_type": "message",
+                            "category": "message",
+                            "content": f"batch-{index}",
+                        }
+                    ]
+                )
+            )
+
+        await asyncio.gather(*writes)
+        messages = await store.list_messages("t-race", limit=100, user_id=None)
+        assert [message["seq"] for message in messages] == list(range(1, 31))
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_delete_legacy_by_thread_only_removes_null_owner(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        store = DbRunEventStore(get_session_factory())
+        await store.put(thread_id="t1", run_id="r-null", event_type="message", category="message", user_id=None)
+        await store.put(thread_id="t1", run_id="r-owner", event_type="message", category="message", user_id="u1")
+        await store.put(thread_id="t2", run_id="r-other", event_type="message", category="message", user_id=None)
+
+        assert await store.delete_legacy_by_thread("t1") == 1
+        assert [row["run_id"] for row in await store.list_messages("t1", user_id=None)] == ["r-owner"]
+        assert [row["run_id"] for row in await store.list_messages("t2", user_id=None)] == ["r-other"]
         await close_engine()
 
     @pytest.mark.anyio
@@ -676,6 +773,29 @@ class TestJsonlRunEventStore:
         assert len(messages) == 1
 
     @pytest.mark.anyio
+    async def test_has_events_detects_ownerless_trace_only_thread(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        s._write_record(
+            {
+                "thread_id": "trace-only",
+                "run_id": "r1",
+                "event_type": "llm_end",
+                "category": "trace",
+                "content": "",
+                "metadata": {},
+                "seq": 1,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+
+        assert await s.count_messages("trace-only", user_id=None) == 0
+        assert await s.has_events("trace-only", user_id=None) is True
+        assert await s.has_events("trace-only", user_id="owner-a") is False
+        assert await s.has_events("missing", user_id=None) is False
+
+    @pytest.mark.anyio
     async def test_file_at_correct_path(self, tmp_path):
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
@@ -741,3 +861,229 @@ async def test_db_claim_legacy_by_thread_only_ownerless_and_default(tmp_path):
     assert await s.count_messages("t-claim", user_id="other-user") == 1
 
     await close_engine()
+
+
+@pytest.mark.anyio
+async def test_memory_claim_legacy_by_thread_only_ownerless_and_default():
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    s = MemoryRunEventStore()
+    await s.put(thread_id="t-claim", run_id="r-null", event_type="human", category="message", user_id=None)
+    await s.put(thread_id="t-claim", run_id="r-default", event_type="ai", category="message", user_id=DEFAULT_USER_ID)
+    await s.put(thread_id="t-claim", run_id="r-other", event_type="ai", category="message", user_id="other-user")
+
+    assert await s.claim_legacy_by_thread("t-claim", "new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="other-user") == 1
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_legacy_by_thread_moves_files_and_owner(tmp_path):
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    s._write_record(
+        {
+            "thread_id": "t-claim",
+            "run_id": "r-null",
+            "event_type": "human",
+            "category": "message",
+            "content": "",
+            "metadata": {},
+            "seq": 1,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    await s.put(thread_id="t-claim", run_id="r-default", event_type="ai", category="message", user_id=DEFAULT_USER_ID)
+    await s.put(thread_id="t-claim", run_id="r-other", event_type="ai", category="message", user_id="other-user")
+
+    assert await s.claim_legacy_by_thread("t-claim", "new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="new-owner") == 2
+    assert await s.count_messages("t-claim", user_id="other-user") == 1
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_to_default_owner_does_not_rewrite_target_as_source(tmp_path):
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    await s.put(
+        thread_id="t-default-claim",
+        run_id="r-default",
+        event_type="ai",
+        category="message",
+        user_id=DEFAULT_USER_ID,
+    )
+
+    assert (
+        await s.claim_legacy_by_thread(
+            "t-default-claim",
+            DEFAULT_USER_ID,
+        )
+        == 0
+    )
+    assert (
+        await s.count_messages(
+            "t-default-claim",
+            user_id=DEFAULT_USER_ID,
+        )
+        == 1
+    )
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_dedupes_same_event_after_owner_normalization(tmp_path):
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    event = {
+        "thread_id": "t-claim",
+        "run_id": "r-1",
+        "event_type": "human",
+        "category": "message",
+        "content": "same",
+        "metadata": {},
+        "seq": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    s._write_record(event)
+    s._write_record({**event, "user_id": "owner-1"})
+
+    assert await s.claim_legacy_by_thread("t-claim", "owner-1") == 0
+    assert await s.list_messages("t-claim", user_id="owner-1") == [{**event, "user_id": "owner-1"}]
+    assert await s.list_messages("t-claim", after_seq=1, user_id="owner-1") == []
+    assert not s._run_file("t-claim", "r-1").exists()
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_rejects_conflicting_seq_before_writing_any_file(tmp_path):
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    base_event = {
+        "thread_id": "t-claim",
+        "run_id": "r-1",
+        "event_type": "human",
+        "category": "message",
+        "metadata": {},
+        "seq": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    s._write_record({**base_event, "content": "legacy"})
+    s._write_record({**base_event, "content": "owner", "user_id": "owner-1"})
+    before = {path: path.read_bytes() for path in sorted((tmp_path / "jsonl").rglob("*.jsonl"))}
+
+    with pytest.raises(ValueError, match="Conflicting event seq 1"):
+        await s.claim_legacy_by_thread("t-claim", "owner-1")
+
+    after = {path: path.read_bytes() for path in sorted((tmp_path / "jsonl").rglob("*.jsonl"))}
+    assert after == before
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_repairs_identical_duplicate_target_cursors(tmp_path):
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    event = {
+        "thread_id": "t-claim",
+        "run_id": "r-1",
+        "event_type": "human",
+        "category": "message",
+        "content": "same",
+        "metadata": {},
+        "seq": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "user_id": "owner-1",
+    }
+    s._write_record(event)
+    s._write_record(event)
+
+    assert await s.claim_legacy_by_thread("t-claim", "owner-1") == 0
+    assert await s.list_messages("t-claim", user_id="owner-1") == [event]
+
+
+def test_jsonl_rewrite_failure_preserves_existing_file(tmp_path, monkeypatch):
+    from deerflow.runtime.events.store import jsonl as jsonl_module
+
+    s = jsonl_module.JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    path = s._run_file("t-atomic", "r-1", user_id="owner-1")
+    original = {
+        "thread_id": "t-atomic",
+        "run_id": "r-1",
+        "event_type": "original",
+        "category": "message",
+        "seq": 1,
+        "user_id": "owner-1",
+    }
+    s._rewrite_events_file(path, [original])
+    before = path.read_bytes()
+    real_dumps = jsonl_module.json.dumps
+    calls = 0
+
+    def fail_second_dump(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated JSONL write failure")
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(jsonl_module.json, "dumps", fail_second_dump)
+    replacements = [
+        {**original, "event_type": "replacement-1"},
+        {**original, "event_type": "replacement-2", "seq": 2},
+    ]
+
+    with pytest.raises(OSError, match="simulated JSONL write failure"):
+        s._rewrite_events_file(path, replacements)
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.anyio
+async def test_jsonl_claim_replace_failure_preserves_files_and_is_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+    legacy_event = {
+        "thread_id": "t-claim-atomic",
+        "run_id": "r-1",
+        "event_type": "legacy",
+        "category": "message",
+        "content": "move me",
+        "metadata": {},
+        "seq": 2,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    owner_event = {
+        **legacy_event,
+        "event_type": "owner",
+        "content": "keep me",
+        "seq": 1,
+        "user_id": "owner-1",
+    }
+    s._write_record(legacy_event)
+    s._write_record(owner_event)
+    before = {path: path.read_bytes() for path in sorted((tmp_path / "jsonl").rglob("*.jsonl"))}
+    real_replace = os.replace
+
+    def fail_replace(source, destination):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        await s.claim_legacy_by_thread("t-claim-atomic", "owner-1")
+
+    after_failure = {path: path.read_bytes() for path in sorted((tmp_path / "jsonl").rglob("*.jsonl"))}
+    assert after_failure == before
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert await s.claim_legacy_by_thread("t-claim-atomic", "owner-1") == 1
+    assert [event["content"] for event in await s.list_messages("t-claim-atomic", user_id="owner-1")] == ["keep me", "move me"]

@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from weakref import WeakValueDictionary
 
 try:
     import fcntl
@@ -90,6 +91,16 @@ async def _acquire_thread_lock_async(lock: threading.Lock) -> None:
         raise RuntimeError("Failed to acquire sandbox thread lock")
 
 
+async def _await_task_through_repeated_cancellation(task: asyncio.Task):
+    """Wait for cleanup-critical work even if the caller is cancelled again."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
 def _release_cancelled_lock_acquire(lock: threading.Lock, task: asyncio.Future[bool]) -> None:
     """Release a lock acquired after its awaiting coroutine was cancelled."""
     if task.cancelled():
@@ -134,7 +145,8 @@ class AioSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
-        self._thread_locks: dict[tuple[str, str], threading.Lock] = {}  # (user_id, thread_id) -> in-process lock
+        self._thread_locks: WeakValueDictionary[tuple[str, str], threading.Lock] = WeakValueDictionary()
+        self._sandbox_locks: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -182,6 +194,10 @@ class AioSandboxProvider(SandboxProvider):
         """
         provisioner_url = self._config.get("provisioner_url")
         if provisioner_url:
+            unsupported_options = [option for option in ("mounts", "environment") if self._config.get(option)]
+            if unsupported_options:
+                options = ", ".join(unsupported_options)
+                raise ValueError(f"Provisioner mode does not support sandbox {options}; configure these options in the provisioner deployment instead")
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
             return RemoteSandboxBackend(provisioner_url=provisioner_url)
 
@@ -204,6 +220,7 @@ class AioSandboxProvider(SandboxProvider):
 
         idle_timeout = getattr(sandbox_config, "idle_timeout", None)
         replicas = getattr(sandbox_config, "replicas", None)
+        environment = self._resolve_env_vars(sandbox_config.environment or {})
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
@@ -212,7 +229,7 @@ class AioSandboxProvider(SandboxProvider):
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
-            "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "environment": environment,
             "seccomp_unconfined": bool(getattr(sandbox_config, "seccomp_unconfined", False)),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
@@ -235,9 +252,9 @@ class AioSandboxProvider(SandboxProvider):
     def _reconcile_orphans(self) -> None:
         """Reconcile orphaned containers left by previous process lifecycles.
 
-        On startup, enumerate all running containers matching our prefix
-        and adopt them all into the warm pool.  The idle checker will reclaim
-        containers that nobody re-acquires within ``idle_timeout``.
+        On startup, enumerate all running containers matching our prefix and
+        adopt authenticated ones into the warm pool. Containers without a
+        scoped execution key are legacy/unsecured and are destroyed.
 
         All containers are adopted unconditionally because we cannot
         distinguish "orphaned" from "actively used by another process"
@@ -262,6 +279,23 @@ class AioSandboxProvider(SandboxProvider):
         adopted = 0
 
         for info in running:
+            with self._lock:
+                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
+                    continue
+            if not info.sandbox_api_key:
+                logger.warning(
+                    "Destroying unmanaged sandbox %s without a scoped API key",
+                    info.sandbox_id,
+                )
+                try:
+                    self._destroy_backend_or_restore(info.sandbox_id, info)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to destroy unsecured sandbox %s: %s",
+                        info.sandbox_id,
+                        e,
+                    )
+                continue
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
             # Single lock acquisition per container: atomic check-and-insert.
             # Avoids a TOCTOU window between the "already tracked?" check and
@@ -292,7 +326,7 @@ class AioSandboxProvider(SandboxProvider):
         Includes user_id so a previously-created default-bucket sandbox cannot be
         reused for an auth/channel run that should mount a user-scoped bucket.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:8]
+        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:32]
 
     # ── Mount helpers ────────────────────────────────────────────────────
 
@@ -375,7 +409,7 @@ class AioSandboxProvider(SandboxProvider):
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         current_time = time.time()
         active_to_destroy = []
-        warm_to_destroy: list[tuple[str, SandboxInfo]] = []
+        warm_to_destroy: list[tuple[str, SandboxInfo, float]] = []
 
         with self._lock:
             # Active sandboxes: tracked via _last_activity
@@ -389,36 +423,42 @@ class AioSandboxProvider(SandboxProvider):
             for sandbox_id, (info, release_ts) in list(self._warm_pool.items()):
                 warm_duration = current_time - release_ts
                 if warm_duration > idle_timeout:
-                    warm_to_destroy.append((sandbox_id, info))
-                    del self._warm_pool[sandbox_id]
+                    warm_to_destroy.append((sandbox_id, info, release_ts))
                     logger.info(f"Warm-pool sandbox {sandbox_id} idle for {warm_duration:.1f}s, marking for destroy")
 
         # Destroy active sandboxes (re-verify still idle before acting)
         for sandbox_id in active_to_destroy:
             try:
-                # Re-verify the sandbox is still idle under the lock before destroying.
-                # Between the snapshot above and here, the sandbox may have been
-                # re-acquired (last_activity updated) or already released/destroyed.
-                with self._lock:
-                    last_activity = self._last_activity.get(sandbox_id)
-                    if last_activity is None:
-                        # Already released or destroyed by another path — skip.
-                        logger.info(f"Sandbox {sandbox_id} already gone before idle destroy, skipping")
-                        continue
-                    if (time.time() - last_activity) < idle_timeout:
-                        # Re-acquired (activity updated) since the snapshot — skip.
-                        logger.info(f"Sandbox {sandbox_id} was re-acquired before idle destroy, skipping")
-                        continue
-                logger.info(f"Destroying idle sandbox {sandbox_id}")
-                self.destroy(sandbox_id)
+                with self._get_sandbox_lock(sandbox_id):
+                    # Re-verify under the same lifecycle lock used by acquire.
+                    with self._lock:
+                        last_activity = self._last_activity.get(sandbox_id)
+                        if last_activity is None:
+                            logger.info(f"Sandbox {sandbox_id} already gone before idle destroy, skipping")
+                            continue
+                        if (time.time() - last_activity) < idle_timeout:
+                            logger.info(f"Sandbox {sandbox_id} was re-acquired before idle destroy, skipping")
+                            continue
+                    logger.info(f"Destroying idle sandbox {sandbox_id}")
+                    self._destroy_sandbox_locked(sandbox_id)
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
-        # Destroy warm-pool sandboxes (already removed from _warm_pool under lock above)
-        for sandbox_id, info in warm_to_destroy:
+        # Destroy warm-pool sandboxes if they were not reclaimed after the snapshot.
+        for sandbox_id, info, release_ts in warm_to_destroy:
             try:
-                self._backend.destroy(info)
-                logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
+                with self._get_sandbox_lock(sandbox_id):
+                    with self._lock:
+                        current = self._warm_pool.get(sandbox_id)
+                        if current is None or current[0] is not info or current[1] != release_ts:
+                            continue
+                        del self._warm_pool[sandbox_id]
+                    self._destroy_backend_or_restore(
+                        sandbox_id,
+                        info,
+                        release_timestamp=release_ts,
+                    )
+                    logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
             except Exception as e:
                 logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
 
@@ -462,13 +502,27 @@ class AioSandboxProvider(SandboxProvider):
         """Get or create an in-process lock for a specific user/thread scope."""
         key = self._thread_key(thread_id, user_id)
         with self._lock:
-            if key not in self._thread_locks:
-                self._thread_locks[key] = threading.Lock()
-            return self._thread_locks[key]
+            lock = self._thread_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._thread_locks[key] = lock
+            return lock
+
+    def _get_sandbox_lock(self, sandbox_id: str) -> threading.Lock:
+        """Serialize create/reuse/release/destroy for one sandbox id."""
+        with self._lock:
+            locks = getattr(self, "_sandbox_locks", None)
+            if locks is None:
+                locks = self._sandbox_locks = WeakValueDictionary()
+            lock = locks.get(sandbox_id)
+            if lock is None:
+                lock = threading.Lock()
+                locks[sandbox_id] = lock
+            return lock
 
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
-        return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else str(uuid.uuid4())[:8]
+        return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else uuid.uuid4().hex
 
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
@@ -493,6 +547,13 @@ class AioSandboxProvider(SandboxProvider):
             self._drop_unhealthy_sandbox(
                 existing_id,
                 "in-process cache failed health check",
+                expected_info=info,
+            )
+            return None
+        if info is not None and not self._wait_for_tracked_sandbox_ready(info):
+            self._drop_unhealthy_sandbox(
+                existing_id,
+                "in-process cache failed readiness check",
                 expected_info=info,
             )
             return None
@@ -537,13 +598,31 @@ class AioSandboxProvider(SandboxProvider):
                 expected_info=info,
             )
             return None
+        if not info.sandbox_api_key:
+            self._drop_unhealthy_sandbox(
+                sandbox_id,
+                "warm-pool sandbox has no scoped API key",
+                expected_info=info,
+            )
+            return None
+        if not self._wait_for_tracked_sandbox_ready(info, force=True):
+            self._drop_unhealthy_sandbox(
+                sandbox_id,
+                "warm-pool cache failed readiness check",
+                expected_info=info,
+            )
+            return None
 
         with self._lock:
             warm_item = self._warm_pool.pop(sandbox_id, None)
             if warm_item is None:
                 return None
             info, _ = warm_item
-            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+            sandbox = AioSandbox(
+                id=sandbox_id,
+                base_url=info.sandbox_url,
+                api_key=info.sandbox_api_key,
+            )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
@@ -564,7 +643,13 @@ class AioSandboxProvider(SandboxProvider):
 
     def _register_discovered_sandbox(self, thread_id: str, info: SandboxInfo, *, user_id: str) -> str:
         """Track a sandbox discovered through the backend."""
-        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+        if not info.sandbox_api_key:
+            raise RuntimeError(f"Sandbox {info.sandbox_id} has no scoped API key")
+        sandbox = AioSandbox(
+            id=info.sandbox_id,
+            base_url=info.sandbox_url,
+            api_key=info.sandbox_api_key,
+        )
         key = self._thread_key(thread_id, user_id)
         with self._lock:
             self._sandboxes[info.sandbox_id] = sandbox
@@ -577,7 +662,13 @@ class AioSandboxProvider(SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        if not info.sandbox_api_key:
+            raise RuntimeError(f"Sandbox {sandbox_id} has no scoped API key")
+        sandbox = AioSandbox(
+            id=sandbox_id,
+            base_url=info.sandbox_url,
+            api_key=info.sandbox_api_key,
+        )
         with self._lock:
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
@@ -595,6 +686,84 @@ class AioSandboxProvider(SandboxProvider):
         except Exception as e:
             logger.warning(f"Failed to check sandbox {sandbox_id} health: {e}")
             return None
+
+    @staticmethod
+    def _wait_for_tracked_sandbox_ready(
+        info: SandboxInfo,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Do not hand a known-unready remote sandbox back to a caller."""
+        if not force and info.ready is not False:
+            return True
+        if not wait_for_sandbox_ready(
+            info.sandbox_url,
+            timeout=60,
+            api_key=info.sandbox_api_key,
+        ):
+            return False
+        info.status = "Running"
+        info.ready = True
+        return True
+
+    def _restore_destroy_retry(
+        self,
+        sandbox_id: str,
+        info: SandboxInfo,
+        *,
+        release_timestamp: float | None = None,
+    ) -> None:
+        """Keep a failed teardown tracked so a later cleanup can retry it."""
+        with self._lock:
+            if sandbox_id in self._sandboxes or sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool:
+                return
+            self._warm_pool[sandbox_id] = (
+                info,
+                time.time() if release_timestamp is None else release_timestamp,
+            )
+
+    def _destroy_backend_or_restore(
+        self,
+        sandbox_id: str,
+        info: SandboxInfo,
+        *,
+        release_timestamp: float | None = None,
+    ) -> None:
+        try:
+            self._backend.destroy(info)
+        except Exception:
+            self._restore_destroy_retry(
+                sandbox_id,
+                info,
+                release_timestamp=release_timestamp,
+            )
+            raise
+
+    async def _destroy_created_sandbox_async(
+        self,
+        sandbox_id: str,
+        info: SandboxInfo,
+    ) -> None:
+        """Finish compensating a created sandbox before cancellation escapes."""
+        cleanup_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._destroy_backend_or_restore,
+                sandbox_id,
+                info,
+            )
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as cancel_exc:
+            try:
+                await _await_task_through_repeated_cancellation(cleanup_task)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to compensate cancelled sandbox creation %s: %s",
+                    sandbox_id,
+                    cleanup_error,
+                )
+            raise cancel_exc
 
     def _remove_tracked_sandbox(
         self,
@@ -646,7 +815,11 @@ class AioSandboxProvider(SandboxProvider):
 
         if info is not None:
             try:
-                self._backend.destroy(info)
+                self._destroy_backend_or_restore(
+                    sandbox_id,
+                    info,
+                    release_timestamp=0.0,
+                )
             except Exception as e:
                 logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
 
@@ -691,7 +864,9 @@ class AioSandboxProvider(SandboxProvider):
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id, effective_user_id)
             with thread_lock:
-                return self._acquire_internal(thread_id, user_id=effective_user_id)
+                sandbox_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
+                with self._get_sandbox_lock(sandbox_id):
+                    return self._acquire_internal(thread_id, user_id=effective_user_id)
         else:
             return self._acquire_internal(thread_id, user_id=effective_user_id)
 
@@ -707,7 +882,13 @@ class AioSandboxProvider(SandboxProvider):
             thread_lock = self._get_thread_lock(thread_id, effective_user_id)
             await _acquire_thread_lock_async(thread_lock)
             try:
-                return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+                sandbox_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
+                sandbox_lock = self._get_sandbox_lock(sandbox_id)
+                await _acquire_thread_lock_async(sandbox_lock)
+                try:
+                    return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+                finally:
+                    sandbox_lock.release()
             finally:
                 thread_lock.release()
 
@@ -787,7 +968,10 @@ class AioSandboxProvider(SandboxProvider):
                 # Backend discovery: another process may have created the container.
                 discovered = self._backend.discover(sandbox_id)
                 if discovered is not None:
-                    return self._register_discovered_sandbox(thread_id, discovered, user_id=effective_user_id)
+                    if discovered.sandbox_api_key:
+                        return self._register_discovered_sandbox(thread_id, discovered, user_id=effective_user_id)
+                    logger.warning("Replacing unsecured discovered sandbox %s", sandbox_id)
+                    self._destroy_backend_or_restore(sandbox_id, discovered)
 
                 return self._create_sandbox(thread_id, sandbox_id, user_id=effective_user_id)
             finally:
@@ -816,7 +1000,14 @@ class AioSandboxProvider(SandboxProvider):
             # Docker and perform a health check; keep it off the event loop.
             discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
             if discovered is not None:
-                return self._register_discovered_sandbox(thread_id, discovered, user_id=effective_user_id)
+                if discovered.sandbox_api_key:
+                    return self._register_discovered_sandbox(thread_id, discovered, user_id=effective_user_id)
+                logger.warning("Replacing unsecured discovered sandbox %s", sandbox_id)
+                await asyncio.to_thread(
+                    self._destroy_backend_or_restore,
+                    sandbox_id,
+                    discovered,
+                )
 
             return await self._create_sandbox_async(thread_id, sandbox_id, user_id=effective_user_id)
         finally:
@@ -834,14 +1025,25 @@ class AioSandboxProvider(SandboxProvider):
             if not self._warm_pool:
                 return None
             oldest_id = min(self._warm_pool, key=lambda sid: self._warm_pool[sid][1])
-            info, _ = self._warm_pool.pop(oldest_id)
+            info, release_ts = self._warm_pool[oldest_id]
 
-        try:
-            self._backend.destroy(info)
-            logger.info(f"Destroyed warm-pool sandbox {oldest_id}")
-        except Exception as e:
-            logger.error(f"Failed to destroy warm-pool sandbox {oldest_id}: {e}")
-            return None
+        with self._get_sandbox_lock(oldest_id):
+            with self._lock:
+                current = self._warm_pool.get(oldest_id)
+                if current is None or current[0] is not info or current[1] != release_ts:
+                    return None
+                del self._warm_pool[oldest_id]
+
+            try:
+                self._destroy_backend_or_restore(
+                    oldest_id,
+                    info,
+                    release_timestamp=release_ts,
+                )
+                logger.info(f"Destroyed warm-pool sandbox {oldest_id}")
+            except Exception as e:
+                logger.error(f"Failed to destroy warm-pool sandbox {oldest_id}: {e}")
+                return None
         return oldest_id
 
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
@@ -868,11 +1070,27 @@ class AioSandboxProvider(SandboxProvider):
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         info = self._backend.create(thread_id, sandbox_id, extra_mounts=extra_mounts or None, user_id=effective_user_id)
+        if not info.sandbox_api_key:
+            self._destroy_backend_or_restore(sandbox_id, info)
+            raise RuntimeError(f"Sandbox {sandbox_id} was created without a scoped API key")
 
-        # Wait for sandbox to be ready
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
-            self._backend.destroy(info)
+        # Wait for sandbox to be ready. Unknown probe failures still require
+        # compensating a sandbox that this call just created.
+        try:
+            ready = wait_for_sandbox_ready(
+                info.sandbox_url,
+                timeout=60,
+                api_key=info.sandbox_api_key,
+            )
+        except Exception:
+            self._destroy_backend_or_restore(sandbox_id, info)
+            raise
+        if not ready:
+            self._destroy_backend_or_restore(sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+
+        info.status = "Running"
+        info.ready = True
 
         return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
 
@@ -888,12 +1106,51 @@ class AioSandboxProvider(SandboxProvider):
             evicted = await asyncio.to_thread(self._evict_oldest_warm)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
-        info = await asyncio.to_thread(self._backend.create, thread_id, sandbox_id, extra_mounts=extra_mounts or None, user_id=effective_user_id)
+        create_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._backend.create,
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+            )
+        )
+        try:
+            info = await asyncio.shield(create_task)
+        except asyncio.CancelledError as cancel_exc:
+            try:
+                info = await _await_task_through_repeated_cancellation(create_task)
+            except Exception:
+                raise cancel_exc
+            try:
+                await self._destroy_created_sandbox_async(sandbox_id, info)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to compensate cancelled sandbox creation %s: %s",
+                    sandbox_id,
+                    cleanup_error,
+                )
+            raise cancel_exc
+        if not info.sandbox_api_key:
+            await self._destroy_created_sandbox_async(sandbox_id, info)
+            raise RuntimeError(f"Sandbox {sandbox_id} was created without a scoped API key")
 
         # Wait for sandbox to be ready without blocking the event loop.
-        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60):
-            await asyncio.to_thread(self._backend.destroy, info)
+        try:
+            ready = await wait_for_sandbox_ready_async(
+                info.sandbox_url,
+                timeout=60,
+                api_key=info.sandbox_api_key,
+            )
+        except BaseException:
+            await self._destroy_created_sandbox_async(sandbox_id, info)
+            raise
+        if not ready:
+            await self._destroy_created_sandbox_async(sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+
+        info.status = "Running"
+        info.ready = True
 
         return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
 
@@ -927,6 +1184,11 @@ class AioSandboxProvider(SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
+        with self._get_sandbox_lock(sandbox_id):
+            self._release_sandbox_locked(sandbox_id)
+
+    def _release_sandbox_locked(self, sandbox_id: str) -> None:
+        """Release one sandbox while its lifecycle lock is held."""
         info = None
         sandbox = None
         thread_keys_to_remove: list[tuple[str, str]] = []
@@ -966,6 +1228,11 @@ class AioSandboxProvider(SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to destroy.
         """
+        with self._get_sandbox_lock(sandbox_id):
+            self._destroy_sandbox_locked(sandbox_id)
+
+    def _destroy_sandbox_locked(self, sandbox_id: str) -> None:
+        """Destroy one sandbox while its lifecycle lock is held."""
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
         if sandbox is not None:
@@ -978,7 +1245,7 @@ class AioSandboxProvider(SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
-            self._backend.destroy(info)
+            self._destroy_backend_or_restore(sandbox_id, info)
             logger.info(f"Destroyed sandbox {sandbox_id}")
 
     def shutdown(self) -> None:

@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -124,6 +126,7 @@ class TestResolveAttachments:
         assert result[0].mime_type == "application/pdf"
         assert result[0].is_image is False
         assert result[0].size == len(b"%PDF-1.4 fake content")
+        result[0].cleanup()
 
     def test_resolves_image_file(self, tmp_path):
         """Images are detected by MIME type."""
@@ -145,6 +148,7 @@ class TestResolveAttachments:
         assert len(result) == 1
         assert result[0].is_image is True
         assert result[0].mime_type == "image/png"
+        result[0].cleanup()
 
     def test_skips_missing_file(self, tmp_path):
         """Missing files are skipped with a warning."""
@@ -247,6 +251,140 @@ class TestResolveAttachments:
 
         assert len(result) == 1
         assert result[0].filename == "data.csv"
+        result[0].cleanup()
+
+    def test_delivery_uses_snapshot_after_outputs_ancestor_symlink_swap(self, tmp_path):
+        from app.channels.manager import _resolve_attachments
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        owner_outputs = paths.sandbox_outputs_dir("thread-1", user_id="owner")
+        other_outputs = paths.sandbox_outputs_dir("thread-1", user_id="other")
+        owner_outputs.mkdir(parents=True)
+        other_outputs.mkdir(parents=True)
+        (owner_outputs / "report.txt").write_bytes(b"owner report")
+        (other_outputs / "report.txt").write_bytes(b"other owner secret")
+
+        with patch("deerflow.config.paths.get_paths", return_value=paths):
+            attachments = _resolve_attachments(
+                "thread-1",
+                ["/mnt/user-data/outputs/report.txt"],
+                user_id="owner",
+            )
+
+        assert len(attachments) == 1
+        delivery_path = attachments[0].actual_path
+        original_outputs = owner_outputs.with_name("outputs-before-swap")
+        owner_outputs.rename(original_outputs)
+        owner_outputs.symlink_to(other_outputs, target_is_directory=True)
+
+        delivered = []
+        bus = MessageBus()
+
+        async def capture(msg):
+            delivered.append(msg.attachments[0].actual_path.read_bytes())
+
+        bus.subscribe_outbound(capture)
+        _run(
+            bus.publish_outbound(
+                OutboundMessage(
+                    channel_name="test",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="report",
+                    attachments=attachments,
+                )
+            )
+        )
+
+        assert delivered == [b"owner report"]
+        assert (original_outputs / "report.txt").read_bytes() == b"owner report"
+        assert not delivery_path.exists()
+
+    @pytest.mark.parametrize("callback_mode", ["success", "error"])
+    def test_outbound_delivery_cleans_snapshot_after_callback(self, tmp_path, callback_mode):
+        from app.channels.manager import _resolve_attachments
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        outputs = paths.sandbox_outputs_dir("thread-1", user_id="owner")
+        outputs.mkdir(parents=True)
+        (outputs / "report.txt").write_bytes(b"report")
+        with patch("deerflow.config.paths.get_paths", return_value=paths):
+            attachments = _resolve_attachments(
+                "thread-1",
+                ["/mnt/user-data/outputs/report.txt"],
+                user_id="owner",
+            )
+        delivery_path = attachments[0].actual_path
+        bus = MessageBus()
+
+        async def callback(_msg):
+            if callback_mode == "error":
+                raise RuntimeError("upload failed")
+
+        bus.subscribe_outbound(callback)
+        _run(
+            bus.publish_outbound(
+                OutboundMessage(
+                    channel_name="test",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="report",
+                    attachments=attachments,
+                )
+            )
+        )
+
+        assert not delivery_path.exists()
+        assert (outputs / "report.txt").read_bytes() == b"report"
+
+    def test_outbound_delivery_cleans_snapshot_after_cancellation(self, tmp_path):
+        from app.channels.manager import _resolve_attachments
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        outputs = paths.sandbox_outputs_dir("thread-1", user_id="owner")
+        outputs.mkdir(parents=True)
+        (outputs / "report.txt").write_bytes(b"report")
+        with patch("deerflow.config.paths.get_paths", return_value=paths):
+            attachments = _resolve_attachments(
+                "thread-1",
+                ["/mnt/user-data/outputs/report.txt"],
+                user_id="owner",
+            )
+        delivery_path = attachments[0].actual_path
+
+        async def go():
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            bus = MessageBus()
+
+            async def blocking_callback(_msg):
+                entered.set()
+                await release.wait()
+
+            bus.subscribe_outbound(blocking_callback)
+            publish_task = asyncio.create_task(
+                bus.publish_outbound(
+                    OutboundMessage(
+                        channel_name="test",
+                        chat_id="chat-1",
+                        thread_id="thread-1",
+                        text="report",
+                        attachments=attachments,
+                    )
+                )
+            )
+            await entered.wait()
+            publish_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await publish_task
+
+        _run(go())
+
+        assert not delivery_path.exists()
+        assert (outputs / "report.txt").read_bytes() == b"report"
 
 
 # ---------------------------------------------------------------------------

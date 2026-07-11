@@ -1,5 +1,5 @@
 import type { Run } from "@langchain/langgraph-sdk";
-import { describe, expect, test } from "@rstest/core";
+import { describe, expect, rs, test } from "@rstest/core";
 import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 
 import {
@@ -23,6 +23,7 @@ import {
   isThreadRecoveringFromStreamError,
   reconcileTaskEventRunHistory,
   reconcileTerminalRunHistory,
+  renameThreadRemote,
   setManualThreadTitleLock,
   shouldKeepStreamErrorRecoveryRun,
   shouldCommitStreamStartFromError,
@@ -941,6 +942,43 @@ describe("manual thread title lock", () => {
 
     expect(getManualThreadTitleLock("manual-title-thread")).toBe(
       "Pinned Title",
+    );
+  });
+
+  test("failed remote rename does not install a manual title lock", async () => {
+    const updateState = rs.fn(async () => {
+      throw new Error("rename failed");
+    });
+
+    await expect(
+      renameThreadRemote({
+        threadId: "failed-rename-thread",
+        title: "Never committed",
+        apiClient: { threads: { updateState } } as never,
+      }),
+    ).rejects.toThrow("rename failed");
+
+    expect(getManualThreadTitleLock("failed-rename-thread")).toBeUndefined();
+  });
+
+  test("successful remote rename installs the lock after the write commits", async () => {
+    const updateState = rs.fn(async () => {
+      expect(
+        getManualThreadTitleLock("committed-rename-thread"),
+      ).toBeUndefined();
+    });
+
+    await renameThreadRemote({
+      threadId: "committed-rename-thread",
+      title: "Committed title",
+      apiClient: { threads: { updateState } } as never,
+    });
+
+    expect(updateState).toHaveBeenCalledWith("committed-rename-thread", {
+      values: { title: "Committed title" },
+    });
+    expect(getManualThreadTitleLock("committed-rename-thread")).toBe(
+      "Committed title",
     );
   });
 });

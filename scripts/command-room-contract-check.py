@@ -104,7 +104,6 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
                     errors.append(f"dispatchPlan[{index}].handoffPacket missing field: {field}")
 
     signals = _as_list(round_record["signals"])
-    has_opposition_signal = False
     blocking_opposition = False
     pass_concrete_evidence = False
     stale_or_self_attested_signal = False
@@ -145,7 +144,6 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
         redline_signal = redline_signal or bool(signal.get("redlineTouched")) or evidence_state == "REDLINE"
 
         if signal.get("role") == "opposition":
-            has_opposition_signal = True
             if _decision(signal.get("recommendedDecision")) in blocking_decisions:
                 blocking_opposition = True
 
@@ -198,13 +196,6 @@ def validate_round(round_record: dict[str, Any], contract: dict[str, Any]) -> li
 
     verdict_refs = _as_list(verdict.get("evidenceRefs"))
     if verdict_decision == "PASS":
-        exemption = round_record.get("oppositionExemption")
-        has_exemption = isinstance(exemption, dict) and not _missing_fields(
-            exemption,
-            contract["required_opposition_exemption_fields"],
-        )
-        if not has_opposition_signal and not has_exemption:
-            errors.append("PASS requires an opposition signal or a complete oppositionExemption")
         if not verdict_refs:
             errors.append("PASS requires verdict.evidenceRefs")
         if not pass_concrete_evidence:

@@ -74,3 +74,43 @@ test("follow-up suggestions clear optional UI on non-auth errors", () => {
     "clear",
   );
 });
+
+test("failed queued drafts restore only into their owning empty composer", async () => {
+  const state = await import("@/components/workspace/input-box-state");
+  const getAction = Reflect.get(state, "getFailedQueuedMessageDraftAction") as
+    | ((input: {
+        failedThreadId: string;
+        currentThreadId: string;
+        failedText: string;
+        currentText: string;
+      }) => "restore" | "acknowledge" | "wait")
+    | undefined;
+
+  expect(typeof getAction).toBe("function");
+  if (!getAction) return;
+
+  expect(
+    getAction({
+      failedThreadId: "thread-a",
+      currentThreadId: "thread-a",
+      failedText: "retry me",
+      currentText: "",
+    }),
+  ).toBe("restore");
+  expect(
+    getAction({
+      failedThreadId: "thread-a",
+      currentThreadId: "thread-a",
+      failedText: "retry me",
+      currentText: "retry me",
+    }),
+  ).toBe("acknowledge");
+  expect(
+    getAction({
+      failedThreadId: "thread-a",
+      currentThreadId: "thread-b",
+      failedText: "retry me",
+      currentText: "",
+    }),
+  ).toBe("wait");
+});

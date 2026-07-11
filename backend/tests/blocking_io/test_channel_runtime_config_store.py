@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -29,6 +30,8 @@ from fastapi import FastAPI, Request
 from app.channels.runtime_config_store import ChannelRuntimeConfigStore
 from app.gateway.routers.channel_connections import (
     ChannelRuntimeConfigRequest,
+    _get_runtime_config_store,
+    _run_completion_safe,
     configure_channel_provider_runtime,
     disconnect_channel_provider_runtime,
 )
@@ -121,6 +124,80 @@ async def test_runtime_config_store_file_is_owner_only(tmp_path) -> None:
     assert mode == 0o600
 
 
+async def test_runtime_config_store_first_access_is_singleton(monkeypatch) -> None:
+    app = FastAPI()
+    request = Request({"type": "http", "app": app, "headers": []})
+    first_started = threading.Event()
+    release_first = threading.Event()
+    constructions = 0
+
+    class SlowStore:
+        def __init__(self):
+            nonlocal constructions
+            constructions += 1
+            if constructions == 1:
+                first_started.set()
+                release_first.wait(timeout=2)
+
+    monkeypatch.setattr("app.gateway.routers.channel_connections.ChannelRuntimeConfigStore", SlowStore)
+
+    first = asyncio.create_task(_get_runtime_config_store(request))
+    assert await asyncio.to_thread(first_started.wait, 2)
+    second = asyncio.create_task(_get_runtime_config_store(request))
+    await asyncio.sleep(0)
+    release_first.set()
+
+    first_store, second_store = await asyncio.gather(first, second)
+    assert first_store is second_store
+    assert constructions == 1
+
+
+async def test_runtime_config_mutation_finishes_after_request_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = False
+
+    async def mutation() -> None:
+        nonlocal completed
+        started.set()
+        await release.wait()
+        completed = True
+
+    request_task = asyncio.create_task(_run_completion_safe(mutation()))
+    await started.wait()
+    request_task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    assert completed is True
+
+
+async def test_runtime_config_mutation_survives_repeated_request_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = False
+
+    async def mutation() -> None:
+        nonlocal completed
+        started.set()
+        await release.wait()
+        completed = True
+
+    request_task = asyncio.create_task(_run_completion_safe(mutation()))
+    await started.wait()
+    request_task.cancel()
+    await asyncio.sleep(0)
+    request_task.cancel()
+    await asyncio.sleep(0)
+
+    assert request_task.done() is False
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    assert completed is True
+
+
 async def test_runtime_config_store_overwrites_loose_existing_file(tmp_path) -> None:
     """A pre-existing world-readable file is tightened to 0o600 after a save.
 
@@ -173,3 +250,14 @@ async def test_runtime_config_store_chmod_failure_is_logged_not_fatal(tmp_path, 
     mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
     assert mode == 0o600
     assert await asyncio.to_thread(store.get_provider_config, "slack") == {"enabled": True, "bot_token": "xoxb-ui"}
+
+
+async def test_runtime_config_store_does_not_publish_failed_save(tmp_path, monkeypatch) -> None:
+    store = await asyncio.to_thread(ChannelRuntimeConfigStore, tmp_path / "channels" / "runtime-config.json")
+    await asyncio.to_thread(store.set_provider_config, "slack", {"enabled": True, "bot_token": "old"})
+    monkeypatch.setattr(store, "_save", mock.Mock(side_effect=OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        await asyncio.to_thread(store.set_provider_config, "slack", {"enabled": True, "bot_token": "new"})
+
+    assert store.get_provider_config("slack") == {"enabled": True, "bot_token": "old"}

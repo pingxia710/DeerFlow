@@ -96,6 +96,67 @@ def test_run_create_request_resumable_accepts_camel_case_and_explicit_disconnect
     assert body.on_disconnect == "cancel"
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("webhook", "https://example.com/callback"),
+        ("after_seconds", 1.0),
+        ("on_completion", "delete"),
+        ("if_not_exists", "reject"),
+        ("feedback_keys", ["quality"]),
+    ],
+)
+def test_run_create_request_rejects_unsupported_non_default_options(option: str, value: object):
+    from pydantic import ValidationError
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    with pytest.raises(ValidationError, match=option):
+        RunCreateRequest.model_validate({option: value})
+
+
+def test_run_create_request_accepts_unsupported_option_defaults():
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(
+        webhook=None,
+        after_seconds=None,
+        on_completion="keep",
+        if_not_exists="create",
+        feedback_keys=None,
+    )
+
+    assert body.webhook is None
+    assert body.after_seconds is None
+    assert body.on_completion == "keep"
+    assert body.if_not_exists == "create"
+    assert body.feedback_keys is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_fragment"),
+    [
+        ({"config": {"context": []}}, "context"),
+        ({"config": {"configurable": "not-a-mapping"}}, "configurable"),
+        ({"config": {"metadata": []}}, "metadata"),
+        ({"assistant_id": "../invalid-agent"}, "assistant_id"),
+    ],
+)
+def test_run_create_request_rejects_invalid_runtime_config_before_start(payload: dict[str, object], error_fragment: str):
+    """Malformed client runtime options must become a 4xx validation error.
+
+    ``RunCreateRequest`` is shared by create, stream, and wait routes.  Keeping
+    this validation at the request boundary prevents ``build_run_config`` from
+    raising an uncaught ``TypeError``/``ValueError`` after request parsing.
+    """
+    from pydantic import ValidationError
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    with pytest.raises(ValidationError, match=error_fragment):
+        RunCreateRequest.model_validate(payload)
+
+
 def test_normalize_input_none():
     from app.gateway.services import normalize_input
 
@@ -780,6 +841,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.runs.store.memory import MemoryRunStore
     from deerflow.runtime.user_context import get_effective_user_id
 
@@ -793,7 +855,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
             run_manager=run_manager,
             checkpointer=InMemorySaver(),
             store=InMemoryStore(),
-            run_event_store=SimpleNamespace(),
+            run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=thread_store,
         )
@@ -994,6 +1056,748 @@ def test_start_run_owner_conflict_during_thread_meta_upsert_aborts(_stub_app_con
     thread_store.create.assert_not_awaited()
     thread_store.update_owner.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_start_run_thread_meta_write_failure_terminalizes_and_releases_lease(_stub_app_config):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import MemoryStreamBridge, RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_store = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        create=AsyncMock(side_effect=RuntimeError("thread metadata unavailable")),
+        update_status=AsyncMock(),
+    )
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=MemoryStreamBridge(),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent") as run_agent,
+        pytest.raises(RuntimeError, match="thread metadata unavailable"),
+    ):
+        await start_run(body, "thread-meta-failure", request)
+
+    failed_runs = await run_manager.list_by_thread("thread-meta-failure")
+    assert len(failed_runs) == 1
+    assert failed_runs[0].status == RunStatus.error
+    assert failed_runs[0].terminal_reason == "failed"
+    run_agent.assert_not_called()
+    replacement = await run_manager.create_or_reject("thread-meta-failure")
+    assert replacement.run_id != failed_runs[0].run_id
+
+
+@pytest.mark.anyio
+async def test_start_run_validates_checkpoint_before_creating_run(_stub_app_config):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import MemoryStreamBridge, RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=MemoryStreamBridge(),
+        run_manager=run_manager,
+        checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id="missing-checkpoint",
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()):
+        with pytest.raises(HTTPException) as exc:
+            await start_run(body, "thread-checkpoint-preflight", request)
+
+    assert exc.value.status_code == 404
+    assert await run_manager.list_by_thread("thread-checkpoint-preflight") == []
+
+
+@pytest.mark.anyio
+async def test_start_run_task_creation_failure_terminalizes_and_releases_lease(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import MemoryStreamBridge, RunManager, RunStatus
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    owner_user_id = "owner-start-failure"
+    backing_store = InMemoryStore()
+    event_store = MemoryRunEventStore()
+    thread_store = MemoryThreadMetaStore(backing_store)
+    run_manager = RunManager(store=MemoryRunStore())
+    bridge = MemoryStreamBridge()
+    state = SimpleNamespace(
+        stream_bridge=bridge,
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=backing_store,
+        run_event_store=event_store,
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id=owner_user_id, system_role="user")),
+        app=SimpleNamespace(state=state),
+    )
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+    create_task = asyncio.create_task
+    create_attempts = 0
+
+    def fail_first_create_task(coroutine):
+        nonlocal create_attempts
+        create_attempts += 1
+        if create_attempts == 1:
+            coroutine.close()
+            raise RuntimeError("task scheduler unavailable")
+        return create_task(coroutine)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", new=AsyncMock()),
+        patch("app.gateway.services.asyncio.create_task", side_effect=fail_first_create_task),
+        pytest.raises(RuntimeError, match="task scheduler unavailable"),
+    ):
+        await start_run(body, "thread-start-failure", request)
+
+    failed_runs = await run_manager.list_by_thread("thread-start-failure")
+    assert len(failed_runs) == 1
+    assert failed_runs[0].status == RunStatus.error
+    assert failed_runs[0].terminal_reason == "failed"
+    terminal_events = await event_store.list_events(
+        "thread-start-failure",
+        failed_runs[0].run_id,
+        event_types=["run.terminal"],
+        user_id=owner_user_id,
+    )
+    assert [event["content"] for event in terminal_events] == [{"status": "error", "terminal_reason": "failed"}]
+    assert (
+        await event_store.list_events(
+            "thread-start-failure",
+            failed_runs[0].run_id,
+            event_types=["run.terminal"],
+            user_id="other-owner",
+        )
+        == []
+    )
+    thread = await thread_store.get("thread-start-failure", user_id=owner_user_id)
+    assert thread is not None
+    assert thread["status"] == "error"
+    replacement = await run_manager.create_or_reject("thread-start-failure", user_id=owner_user_id)
+    assert replacement.run_id != failed_runs[0].run_id
+
+
+@pytest.mark.anyio
+async def test_start_run_worker_startup_exception_terminalizes_and_releases_lease(_stub_app_config):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import MemoryStreamBridge, RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=MemoryStreamBridge(),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+    async def fail_before_worker_ownership(*args, **kwargs):
+        raise RuntimeError("worker startup failed")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fail_before_worker_ownership),
+    ):
+        record = await start_run(body, "thread-worker-start-failure", request)
+        await record.task
+
+    failed = await run_manager.get(record.run_id)
+    assert failed is not None
+    assert failed.status == RunStatus.error
+    assert failed.terminal_reason == "failed"
+    replacement = await run_manager.create_or_reject("thread-worker-start-failure")
+    assert replacement.run_id != record.run_id
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("cancel_during_restore", "expected_terminal_reason"),
+    [(True, "rollback_failed"), (False, "rolled_back")],
+)
+async def test_start_run_repeated_cancel_during_rollback_records_checkpoint_restore_outcome(
+    _stub_app_config,
+    cancel_during_restore,
+    expected_terminal_reason,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    worker_started = asyncio.Event()
+    checkpoint_restore_started = asyncio.Event()
+    checkpoint_restore_completed = asyncio.Event()
+    rollback_committed = asyncio.Event()
+    worker_cleanup_cancelled = asyncio.Event()
+    keep_running = asyncio.Event()
+    allow_checkpoint_restore = asyncio.Event()
+    keep_running_after_restore = asyncio.Event()
+
+    async def cancel_during_checkpoint_restore(_bridge, manager, record, **_kwargs):
+        assert await manager.set_status(record.run_id, RunStatus.running) is True
+        worker_started.set()
+        try:
+            await keep_running.wait()
+        except asyncio.CancelledError:
+            checkpoint_restore_started.set()
+            try:
+                await allow_checkpoint_restore.wait()
+                checkpoint_restore_completed.set()
+                assert (
+                    await manager.set_status(
+                        record.run_id,
+                        RunStatus.error,
+                        error="Rolled back by user",
+                        terminal_reason="rolled_back",
+                    )
+                    is True
+                )
+                rollback_committed.set()
+                await keep_running_after_restore.wait()
+            except asyncio.CancelledError:
+                worker_cleanup_cancelled.set()
+                raise
+
+    backing_store = InMemoryStore()
+    run_manager = RunManager(store=MemoryRunStore())
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    state = SimpleNamespace(
+        stream_bridge=bridge,
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=backing_store,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(backing_store),
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=cancel_during_checkpoint_restore),
+    ):
+        record = await start_run(body, "thread-rollback-cleanup-cancel", request)
+        await worker_started.wait()
+        assert await run_manager.cancel(record.run_id, action="rollback") is True
+        await checkpoint_restore_started.wait()
+        if cancel_during_restore:
+            assert await run_manager.cancel(record.run_id, action="rollback") is True
+        else:
+            allow_checkpoint_restore.set()
+            await rollback_committed.wait()
+            record.task.cancel()
+        await worker_cleanup_cancelled.wait()
+        await record.task
+
+    assert checkpoint_restore_completed.is_set() is not cancel_during_restore
+    terminal = await run_manager.get(record.run_id)
+    assert terminal is not None
+    assert terminal.status == RunStatus.error
+    assert terminal.terminal_reason == expected_terminal_reason
+    if cancel_during_restore:
+        assert "checkpoint restore" in (terminal.error or "").lower()
+    else:
+        assert terminal.error == "Rolled back by user"
+
+
+@pytest.mark.anyio
+async def test_finalize_unstarted_run_closes_stream_when_terminal_cas_fails():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.gateway.services import _finalize_unstarted_run
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class RejectingTerminalStore(MemoryRunStore):
+        async def complete_run(self, *args, **kwargs):
+            return False
+
+    run_manager = RunManager(store=RejectingTerminalStore())
+    record = await run_manager.create_or_reject("thread-unstarted-terminal-cas")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    await _finalize_unstarted_run(
+        bridge,
+        run_manager,
+        record,
+        SimpleNamespace(event_store=None, thread_store=None),
+        status=RunStatus.error,
+        terminal_reason="failed",
+        error="worker did not start",
+    )
+    await asyncio.sleep(0)
+
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "stream_recovery_required",
+        {"reason": "run_status_commit_failed"},
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_start_run_cancel_before_first_task_step_is_terminal_and_publishes_end(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager, RunStatus
+
+    ended = asyncio.Event()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(side_effect=lambda _run_id: ended.set()),
+        cleanup=AsyncMock(),
+    )
+    run_manager = RunManager()
+    state = SimpleNamespace(
+        stream_bridge=bridge,
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+    fake_run_agent = AsyncMock()
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", fake_run_agent),
+    ):
+        record = await start_run(body, "thread-cancel-before-start", request)
+        assert await run_manager.cancel(record.run_id) is True
+        await asyncio.wait_for(ended.wait(), timeout=1)
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.interrupted
+    assert fetched.terminal_reason == "cancelled"
+    assert await run_manager.cancel(record.run_id) is True
+    fake_run_agent.assert_not_awaited()
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_start_run_cancelled_during_thread_upsert_never_starts_worker(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class BlockingThreadStore(MemoryThreadMetaStore):
+        def __init__(self, store):
+            super().__init__(store)
+            self.update_started = asyncio.Event()
+            self.allow_update = asyncio.Event()
+
+        async def update_status(self, thread_id, status, *, user_id=None):
+            self.update_started.set()
+            await self.allow_update.wait()
+            await super().update_status(thread_id, status, user_id=user_id)
+
+    backing_store = InMemoryStore()
+    thread_store = BlockingThreadStore(backing_store)
+    await thread_store.create("thread-cancel-upsert", user_id=None)
+    run_manager = RunManager(store=MemoryRunStore())
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    state = SimpleNamespace(
+        stream_bridge=bridge,
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=backing_store,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+    fake_run_agent = AsyncMock()
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", fake_run_agent),
+    ):
+        start_task = asyncio.create_task(start_run(body, "thread-cancel-upsert", request))
+        await thread_store.update_started.wait()
+        [pending] = await run_manager.list_by_thread("thread-cancel-upsert")
+        assert pending.task is None
+        assert await run_manager.cancel(pending.run_id) is True
+        thread_store.allow_update.set()
+        record = await start_task
+
+    fake_run_agent.assert_not_called()
+    assert record.task is None
+    assert record.status == RunStatus.interrupted
+    assert record.terminal_reason == "cancelled"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_start_run_keeps_checkpoint_writers_blocked_until_task_is_owned(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class PauseAfterCreateManager(RunManager):
+        def __init__(self):
+            super().__init__(store=MemoryRunStore())
+            self.run_created = asyncio.Event()
+            self.allow_return = asyncio.Event()
+
+        async def create_or_reject(self, *args, **kwargs):
+            record = await super().create_or_reject(*args, **kwargs)
+            self.run_created.set()
+            await self.allow_return.wait()
+            return record
+
+    run_manager = PauseAfterCreateManager()
+    backing_store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(backing_store)
+    await thread_store.create("thread-start-gate", user_id=None)
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(),
+            cleanup=AsyncMock(),
+        ),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=backing_store,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", new=AsyncMock()),
+    ):
+        start_task = asyncio.create_task(start_run(body, "thread-start-gate", request))
+        await run_manager.run_created.wait()
+        writer_task = asyncio.create_task(run_manager.begin_thread_write("thread-start-gate"))
+        await asyncio.sleep(0)
+        try:
+            assert not writer_task.done()
+        finally:
+            run_manager.allow_return.set()
+
+        record = await start_task
+        await asyncio.wait_for(writer_task, timeout=1)
+        await run_manager.end_thread_write("thread-start-gate")
+        if record.task is not None:
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_start_run_repeated_request_cancellation_during_gate_release_cancels_owned_worker(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class BlockingReleaseManager(RunManager):
+        def __init__(self):
+            super().__init__(store=MemoryRunStore())
+            self.release_started = asyncio.Event()
+            self.allow_release = asyncio.Event()
+
+        async def release_run_start(self, thread_id):
+            self.release_started.set()
+            await self.allow_release.wait()
+            await super().release_run_start(thread_id)
+
+    run_manager = BlockingReleaseManager()
+    backing_store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(backing_store)
+    await thread_store.create("thread-cancel-gate-release", user_id=None)
+    ended = asyncio.Event()
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(side_effect=lambda _run_id: ended.set()),
+            cleanup=AsyncMock(),
+        ),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=backing_store,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+    body = SimpleNamespace(
+        assistant_id="lead_agent",
+        input={},
+        metadata={},
+        config=None,
+        context=None,
+        checkpoint=None,
+        checkpoint_id=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        command=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+    worker_started = asyncio.Event()
+
+    async def blocking_worker(*_args, **_kwargs):
+        worker_started.set()
+        await asyncio.Event().wait()
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=blocking_worker),
+    ):
+        start_task = asyncio.create_task(start_run(body, "thread-cancel-gate-release", request))
+        await run_manager.release_started.wait()
+        await worker_started.wait()
+        [record] = await run_manager.list_by_thread("thread-cancel-gate-release")
+
+        start_task.cancel()
+        await asyncio.sleep(0)
+        start_task.cancel()
+        run_manager.allow_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        await asyncio.wait_for(ended.wait(), timeout=1)
+
+    assert record.task is not None
+    assert record.task.done()
+    assert record.status == RunStatus.interrupted
+    assert record.terminal_reason == "cancelled"
 
 
 def test_resolve_thread_run_denies_foreign_run_owner():

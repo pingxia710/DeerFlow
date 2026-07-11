@@ -38,6 +38,7 @@ from deerflow.agents.lead_agent.agent import (
     _include_direct_mcp_tools,
     _load_enabled_skills_for_tool_policy,
     _resolve_agent_tool_groups,
+    _resolve_command_room_available_skills,
     build_middlewares,
 )
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
@@ -45,7 +46,7 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
-from deerflow.config.paths import get_paths
+from deerflow.config.paths import UnsafePathError, get_paths, read_file_no_symlinks
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -243,6 +244,7 @@ class DeerFlowClient:
         effective_available_skills = self._available_skills
         if effective_available_skills is None:
             effective_available_skills = _available_skill_names(agent_config, is_bootstrap=False)
+        lead_available_skills = _resolve_command_room_available_skills(self._agent_name, effective_available_skills)
         tool_groups = _resolve_agent_tool_groups(self._agent_name, agent_config)
         model_name = cfg.get("model_name")
         if not model_name and agent_config and agent_config.model:
@@ -271,7 +273,7 @@ class DeerFlowClient:
             include_mcp=_include_direct_mcp_tools(self._agent_name),
         )
         if tools:
-            skills_for_tool_policy = _load_enabled_skills_for_tool_policy(effective_available_skills, app_config=self._app_config)
+            skills_for_tool_policy = _load_enabled_skills_for_tool_policy(lead_available_skills, app_config=self._app_config)
             filtered_tools = filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy)
         else:
             filtered_tools = []
@@ -287,7 +289,7 @@ class DeerFlowClient:
                 config,
                 model_name=model_name,
                 agent_name=self._agent_name,
-                available_skills=effective_available_skills,
+                available_skills=lead_available_skills,
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
@@ -296,7 +298,7 @@ class DeerFlowClient:
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
-                available_skills=effective_available_skills,
+                available_skills=lead_available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
             ),
@@ -313,6 +315,13 @@ class DeerFlowClient:
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
+
+    @staticmethod
+    def _model_provider(model: object) -> str | None:
+        provider = getattr(model, "provider", None)
+        if isinstance(provider, str) and provider.strip():
+            return provider
+        return None
 
     @staticmethod
     def _get_tools(
@@ -942,6 +951,7 @@ class DeerFlowClient:
             "models": [
                 {
                     "name": model.name,
+                    "provider": self._model_provider(model),
                     "model": getattr(model, "model", None),
                     "display_name": getattr(model, "display_name", None),
                     "description": getattr(model, "description", None),
@@ -1013,6 +1023,7 @@ class DeerFlowClient:
             return None
         return {
             "name": model.name,
+            "provider": self._model_provider(model),
             "model": getattr(model, "model", None),
             "display_name": getattr(model, "display_name", None),
             "description": getattr(model, "description", None),
@@ -1398,16 +1409,17 @@ class DeerFlowClient:
         """
         try:
             actual = get_paths().resolve_virtual_path(thread_id, path, user_id=get_effective_user_id())
-        except ValueError as exc:
+        except (UnsafePathError, ValueError) as exc:
             if "traversal" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError
 
                 raise PathTraversalError("Path traversal detected") from exc
             raise
-        if not actual.exists():
-            raise FileNotFoundError(f"Artifact not found: {path}")
-        if not actual.is_file():
-            raise ValueError(f"Path is not a file: {path}")
-
         mime_type, _ = mimetypes.guess_type(actual)
-        return actual.read_bytes(), mime_type or "application/octet-stream"
+        try:
+            content = read_file_no_symlinks(actual)
+        except UnsafePathError as exc:
+            if "not an exclusive regular file" in str(exc):
+                raise ValueError(f"Path is not a file: {path}") from exc
+            raise ValueError(f"Path is not a safe file: {path}") from exc
+        return content, mime_type or "application/octet-stream"

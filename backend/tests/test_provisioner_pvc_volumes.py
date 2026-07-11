@@ -1,5 +1,6 @@
 """Regression tests for provisioner PVC volume support."""
 
+import inspect
 
 # ── _build_volumes ─────────────────────────────────────────────────────
 
@@ -35,6 +36,15 @@ class TestBuildVolumes:
         assert path.endswith("user-data")
         assert userdata_vol.host_path.type == "DirectoryOrCreate"
 
+    def test_hostpath_userdata_is_scoped_by_user_and_thread(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.THREADS_HOST_PATH = "/data/deer-flow"
+        assert "user_id" in inspect.signature(provisioner_module._build_volumes).parameters
+
+        volumes = provisioner_module._build_volumes("thread-42", user_id="user-7")
+
+        assert volumes[1].host_path.path == "/data/deer-flow/users/user-7/threads/thread-42/user-data"
+
     def test_skills_pvc_overrides_hostpath(self, provisioner_module):
         """When SKILLS_PVC_NAME is set, skills volume should use PVC."""
         provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
@@ -62,21 +72,31 @@ class TestBuildVolumes:
         assert volumes[0].persistent_volume_claim is not None
         assert volumes[1].persistent_volume_claim is not None
 
-    def test_returns_two_volumes(self, provisioner_module):
-        """Should always return exactly two volumes."""
+    def test_returns_three_volumes(self, provisioner_module):
+        """Skills, user-data, and ACP workspace must all be mounted."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
-        assert len(provisioner_module._build_volumes("t")) == 2
+        assert len(provisioner_module._build_volumes("t")) == 3
 
         provisioner_module.SKILLS_PVC_NAME = "a"
         provisioner_module.USERDATA_PVC_NAME = "b"
-        assert len(provisioner_module._build_volumes("t")) == 2
+        assert len(provisioner_module._build_volumes("t")) == 3
 
     def test_volume_names_are_stable(self, provisioner_module):
-        """Volume names must stay 'skills' and 'user-data'."""
+        """Volume names must stay stable for pod reconciliation."""
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].name == "skills"
         assert volumes[1].name == "user-data"
+        assert volumes[2].name == "acp-workspace"
+
+    def test_hostpath_acp_workspace_is_user_and_thread_scoped(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.THREADS_HOST_PATH = "/data/deer-flow"
+
+        volumes = provisioner_module._build_volumes("thread-42", user_id="user-7")
+
+        assert volumes[2].host_path.path == "/data/deer-flow/users/user-7/threads/thread-42/acp-workspace"
+        assert volumes[2].host_path.type == "DirectoryOrCreate"
 
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
@@ -128,9 +148,18 @@ class TestBuildVolumeMounts:
         assert mounts[0].name == "skills"
         assert mounts[1].name == "user-data"
 
-    def test_returns_two_mounts(self, provisioner_module):
-        """Should always return exactly two mounts."""
-        assert len(provisioner_module._build_volume_mounts("t")) == 2
+    def test_returns_three_mounts(self, provisioner_module):
+        assert len(provisioner_module._build_volume_mounts("t")) == 3
+
+    def test_acp_workspace_mount_is_read_only_and_user_scoped_for_pvc(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = "my-pvc"
+
+        mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
+
+        assert mounts[2].name == "acp-workspace"
+        assert mounts[2].mount_path == "/mnt/acp-workspace"
+        assert mounts[2].read_only is True
+        assert mounts[2].sub_path == "deer-flow/users/user-7/threads/thread-42/acp-workspace"
 
 
 # ── _build_pod integration ─────────────────────────────────────────────
@@ -140,25 +169,77 @@ class TestBuildPodVolumes:
     """Integration: _build_pod should wire volumes and mounts correctly."""
 
     def test_pod_spec_has_volumes(self, provisioner_module):
-        """Pod spec should contain exactly 2 volumes."""
+        """Pod spec should contain all three standard volumes."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
-        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
-        assert len(pod.spec.volumes) == 2
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1", sandbox_api_key="test-sandbox-key")
+        assert len(pod.spec.volumes) == 3
 
     def test_pod_spec_has_volume_mounts(self, provisioner_module):
-        """Container should have exactly 2 volume mounts."""
+        """Container should have all three standard volume mounts."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
-        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
-        assert len(pod.spec.containers[0].volume_mounts) == 2
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1", sandbox_api_key="test-sandbox-key")
+        assert len(pod.spec.containers[0].volume_mounts) == 3
+
+    def test_pod_hostpath_mode_uses_user_scoped_volume(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.THREADS_HOST_PATH = "/data/deer-flow"
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="user-7",
+            sandbox_api_key="test-sandbox-key",
+        )
+
+        assert pod.spec.volumes[1].host_path.path == "/data/deer-flow/users/user-7/threads/thread-1/user-data"
 
     def test_pod_pvc_mode_uses_user_scoped_subpath(self, provisioner_module):
         """Pod should use a user-scoped subPath for PVC user-data."""
         provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
         provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
-        pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="user-7",
+            sandbox_api_key="test-sandbox-key",
+        )
         assert pod.spec.volumes[0].persistent_volume_claim is not None
         assert pod.spec.volumes[1].persistent_volume_claim is not None
         userdata_mount = pod.spec.containers[0].volume_mounts[1]
         assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/user-data"
+
+    def test_pod_pvc_mode_initializes_fresh_subpaths(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="user-7",
+            sandbox_api_key="test-sandbox-key",
+        )
+
+        assert len(pod.spec.init_containers or []) == 1
+        init = pod.spec.init_containers[0]
+        assert init.image == provisioner_module.PVC_INIT_IMAGE
+        assert init.command == ["sh", "-c"]
+        assert init.volume_mounts[0].name == "user-data"
+        assert init.volume_mounts[0].mount_path == "/deer-flow-data"
+        assert init.volume_mounts[0].sub_path is None
+        assert "/deer-flow-data/deer-flow/users/user-7/threads/thread-1/user-data/workspace" in init.args
+        assert "/deer-flow-data/deer-flow/users/user-7/threads/thread-1/user-data/uploads" in init.args
+        assert "/deer-flow-data/deer-flow/users/user-7/threads/thread-1/user-data/outputs" in init.args
+        assert "/deer-flow-data/deer-flow/users/user-7/threads/thread-1/acp-workspace" in init.args
+
+    def test_pod_hostpath_mode_needs_no_init_container(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = ""
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="user-7",
+            sandbox_api_key="test-sandbox-key",
+        )
+
+        assert not pod.spec.init_containers

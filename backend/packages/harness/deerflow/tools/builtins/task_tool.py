@@ -55,9 +55,13 @@ _SECRET_LIKE_RE = re.compile(
     r"(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*['\"]?[^'\"\s]+)"
 )
 
-# Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
-# write it back to the triggering AIMessage's usage_metadata.
-_subagent_usage_cache: dict[str, dict[str, int]] = {}
+# Scope subagent token usage by run plus tool call so concurrent conversations
+# cannot consume each other's accounting before TokenUsageMiddleware merges it.
+_subagent_usage_cache: dict[tuple[str | None, str], dict[str, int]] = {}
+
+
+async def _record_subagent_handoff_async(**kwargs: Any) -> None:
+    await asyncio.to_thread(record_subagent_handoff, **kwargs)
 
 
 def _call_supports_run_id(func: Any) -> bool:
@@ -109,9 +113,13 @@ def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
     return bool(getattr(getattr(app_config, "token_usage", None), "enabled", False))
 
 
-def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, enabled: bool = True) -> None:
+def _subagent_usage_cache_key(tool_call_id: str, run_id: str | None = None) -> tuple[str | None, str]:
+    return (str(run_id) if run_id else None, tool_call_id)
+
+
+def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, run_id: str | None = None, enabled: bool = True) -> None:
     if enabled and usage:
-        _subagent_usage_cache[tool_call_id] = usage
+        _subagent_usage_cache[_subagent_usage_cache_key(tool_call_id, run_id)] = usage
 
 
 def _iter_runtime_callbacks(runtime: Any) -> list[Any]:
@@ -249,8 +257,32 @@ def _artifact_refs(action_result: Any) -> list[str]:
     return refs
 
 
-def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
-    return _subagent_usage_cache.pop(tool_call_id, None)
+def _runtime_observed_evidence_refs(result: Any) -> list[str]:
+    refs = getattr(result, "evidence_refs", None)
+    if not isinstance(refs, list):
+        return []
+    return list(dict.fromkeys(_redacted_preview(ref) for ref in refs if isinstance(ref, str) and ref.strip()))
+
+
+def _format_task_success(result_text: str, *, observed_evidence_refs: list[str], suggested_receiver: str | None = None) -> str:
+    prefix = "Task Succeeded."
+    if suggested_receiver:
+        prefix = f"Task Succeeded. Suggested next receiver (advisory only): {suggested_receiver}. Chair/main AI decides."
+    if not observed_evidence_refs:
+        return f"{prefix} Result: {result_text}"
+    evidence = "\n".join(f"- {ref}" for ref in observed_evidence_refs)
+    return f"{prefix} Runtime-observed evidence:\n{evidence}\nResult: {result_text}"
+
+
+def pop_cached_subagent_usage(tool_call_id: str, *, run_id: str | None = None) -> dict | None:
+    return _subagent_usage_cache.pop(_subagent_usage_cache_key(tool_call_id, run_id), None)
+
+
+def clear_cached_subagent_usage_for_run(run_id: str) -> None:
+    normalized_run_id = str(run_id)
+    stale_keys = [key for key in _subagent_usage_cache if key[0] == normalized_run_id]
+    for key in stale_keys:
+        _subagent_usage_cache.pop(key, None)
 
 
 def _is_subagent_terminal(result: Any) -> bool:
@@ -425,7 +457,7 @@ def _with_ai_handoff_envelope(prompt: str, *, description: str, subagent_type: s
             f"Handoff File: {packet.get('handoffFile') or 'none'}",
             f"ArtifactRefs: {packet.get('artifactRefs') or 'none'}",
             f"Boundary Status: {packet.get('boundaryStatus') or packet.get('boundary') or 'unknown'}",
-            f"Recommended Next Decision: {packet.get('recommendedNextDecision') or 'NEEDS_MORE'}",
+            f"Recommended Next Decision: {packet.get('recommendedNextDecision') or 'none'}",
             "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement.",
         ]
     )
@@ -448,7 +480,7 @@ def _suggested_handoff_receiver(result: str | None) -> str | None:
     return target_role or None
 
 
-def _record_output_pending_handoff(
+async def _record_output_pending_handoff(
     *,
     thread_id: str | None,
     run_id: str | None,
@@ -476,7 +508,7 @@ def _record_output_pending_handoff(
             task_id=task_id,
             envelope=envelope,
         )
-        record_pending_handoff(pending, user_id=user_id)
+        await asyncio.to_thread(record_pending_handoff, pending, user_id=user_id)
     except Exception:
         logger.debug("Failed to record pending Command Room handoff", exc_info=True)
 
@@ -588,6 +620,8 @@ async def task_tool(
     round_id = round_context.get("round_id")
 
     parent_available_skills = metadata.get("available_skills")
+    if config.skills is not None and "subagent_available_skills" in metadata:
+        parent_available_skills = metadata.get("subagent_available_skills")
     if parent_available_skills is not None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
 
@@ -645,7 +679,7 @@ async def task_tool(
     task_id = executor.execute_async(handoff_prompt, task_id=tool_call_id)
     started_at = _utc_now_iso()
     started_monotonic = time.monotonic()
-    record_subagent_handoff(
+    await _record_subagent_handoff_async(
         thread_id=thread_id,
         run_id=run_id,
         task_id=task_id,
@@ -745,10 +779,17 @@ async def task_tool(
             # Check if task completed, failed, or timed out
             usage = _summarize_usage(getattr(result, "token_usage_records", None))
             if result.status == SubagentStatus.COMPLETED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                action_result = task_action_result_from_terminal_event(task_id=task_id, status="completed", description=description, result=result.result)
-                record_subagent_handoff(
+                observed_evidence_refs = _runtime_observed_evidence_refs(result)
+                action_result = task_action_result_from_terminal_event(
+                    task_id=task_id,
+                    status="completed",
+                    description=description,
+                    result=result.result,
+                    observed_evidence_refs=observed_evidence_refs,
+                )
+                await _record_subagent_handoff_async(
                     thread_id=thread_id,
                     run_id=run_id,
                     task_id=task_id,
@@ -789,7 +830,7 @@ async def task_tool(
                 suggested_receiver = _suggested_handoff_receiver(result.result)
                 if suggested_receiver:
                     # Target Role is advisory metadata for the Chair/main AI. Do not redispatch here.
-                    _record_output_pending_handoff(
+                    await _record_output_pending_handoff(
                         thread_id=thread_id if isinstance(thread_id, str) else None,
                         run_id=run_id if isinstance(run_id, str) else None,
                         round_id=round_id if isinstance(round_id, str) else None,
@@ -798,13 +839,13 @@ async def task_tool(
                         subagent_type=subagent_type,
                         result=result.result,
                     )
-                    return f"Task Succeeded. Suggested next receiver (advisory only): {suggested_receiver}. Chair/main AI decides. Result: {result_text}"
-                return f"Task Succeeded. Result: {result_text}"
+                    return _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs, suggested_receiver=suggested_receiver)
+                return _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs)
             elif result.status == SubagentStatus.FAILED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 action_result = task_action_result_from_terminal_event(task_id=task_id, status="failed", description=description, error=result.error, terminal_reason="failed")
-                record_subagent_handoff(
+                await _record_subagent_handoff_async(
                     thread_id=thread_id,
                     run_id=run_id,
                     task_id=task_id,
@@ -844,7 +885,7 @@ async def task_tool(
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return f"Task failed. Error: {error_text}"
             elif result.status == SubagentStatus.CANCELLED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 action_result = task_action_result_from_terminal_event(
                     task_id=task_id,
@@ -853,7 +894,7 @@ async def task_tool(
                     error=result.error,
                     terminal_reason="user_cancelled",
                 )
-                record_subagent_handoff(
+                await _record_subagent_handoff_async(
                     thread_id=thread_id,
                     run_id=run_id,
                     task_id=task_id,
@@ -892,7 +933,7 @@ async def task_tool(
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 action_result = task_action_result_from_terminal_event(
                     task_id=task_id,
@@ -901,7 +942,7 @@ async def task_tool(
                     error=result.error,
                     terminal_reason="timed_out",
                 )
-                record_subagent_handoff(
+                await _record_subagent_handoff_async(
                     thread_id=thread_id,
                     run_id=run_id,
                     task_id=task_id,
@@ -954,7 +995,7 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
+                _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 action_result = task_action_result_from_terminal_event(
                     task_id=task_id,
                     status="timed_out",
@@ -962,7 +1003,7 @@ async def task_tool(
                     error=error,
                     terminal_reason="timed_out",
                 )
-                record_subagent_handoff(
+                await _record_subagent_handoff_async(
                     thread_id=thread_id,
                     run_id=run_id,
                     task_id=task_id,
@@ -1028,7 +1069,7 @@ async def task_tool(
             error=getattr(final_result, "error", None) if final_result is not None else "Parent run cancelled",
             terminal_reason="user_cancelled",
         )
-        record_subagent_handoff(
+        await _record_subagent_handoff_async(
             thread_id=thread_id,
             run_id=run_id,
             task_id=task_id,
@@ -1067,8 +1108,8 @@ async def task_tool(
             _scoped_cleanup_background_task(task_id, run_id=run_id)
         else:
             _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count, run_id=run_id)
-        _subagent_usage_cache.pop(tool_call_id, None)
+        _subagent_usage_cache.pop(_subagent_usage_cache_key(tool_call_id, run_id), None)
         raise
     except Exception:
-        _subagent_usage_cache.pop(tool_call_id, None)
+        _subagent_usage_cache.pop(_subagent_usage_cache_key(tool_call_id, run_id), None)
         raise

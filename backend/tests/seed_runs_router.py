@@ -57,6 +57,7 @@ class SeedRun(BaseModel):
     # ISO timestamp; RunManager.list_by_thread sorts newest-first by created_at,
     # so a later created_at must mean a later run for the ordering to be faithful.
     created_at: str
+    completed_at: str | None = None
     messages: list[SeedMessage]
     status: str = "success"
     terminal_reason: str | None = None
@@ -67,6 +68,7 @@ class SeedTaskLane(BaseModel):
     task_id: str
     status: str
     role: str | None = None
+    description: str | None = None
     result_ref: str | None = None
     evidence_ref: str | None = None
     error: str | None = None
@@ -91,7 +93,16 @@ async def seed_runs(body: SeedRunsBody, request: Request) -> dict:
     run_store = request.app.state.run_store
     event_store = request.app.state.run_event_store
     round_store = getattr(request.app.state, "round_state_store", None)
+    thread_store = request.app.state.thread_store
     user_id = get_request_storage_user_id(request)
+
+    if await thread_store.get(body.thread_id, user_id=user_id) is None:
+        await thread_store.create(
+            body.thread_id,
+            assistant_id="lead_agent",
+            user_id=user_id,
+            metadata={},
+        )
 
     for run in body.runs:
         # Scope seeded rows to the same storage user that the browser session
@@ -103,6 +114,7 @@ async def seed_runs(body: SeedRunsBody, request: Request) -> dict:
             user_id=user_id,
             status=run.status,
             created_at=run.created_at,
+            metadata={"completed_at": run.completed_at or run.created_at},
         )
         if run.terminal_reason is not None:
             await run_store.update_status(run.run_id, run.status, terminal_reason=run.terminal_reason)
@@ -143,6 +155,7 @@ async def seed_runs(body: SeedRunsBody, request: Request) -> dict:
                     "task_id": lane.task_id,
                     "status": lane.status,
                     "subagent_type": lane.role,
+                    "description": lane.description,
                     "error_preview": lane.error,
                     "action_result": {
                         "output_ref": lane.result_ref,

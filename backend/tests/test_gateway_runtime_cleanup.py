@@ -115,6 +115,13 @@ def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
     assert ".langgraph_api" not in makefile
 
 
+def test_root_makefile_clean_preserves_runtime_data_and_logs():
+    makefile = _read("Makefile")
+
+    assert "rm -rf backend/.deer-flow" not in makefile
+    assert "rm -rf logs/*.log" not in makefile
+
+
 def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
     for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
         content = _read(path)

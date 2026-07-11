@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,149 @@ async def test_put_batch_seqs_are_monotonic():
     assert len(set(seqs)) == 5
 
 
+@pytest.mark.anyio
+async def test_put_batch_failure_rolls_back_partial_records(monkeypatch, tmp_path):
+    store = _make_store(tmp_path)
+    original_write = store._write_record
+    write_count = 0
+
+    def fail_second_write(record):
+        nonlocal write_count
+        write_count += 1
+        if write_count == 2:
+            raise OSError("injected batch write failure")
+        original_write(record)
+
+    monkeypatch.setattr(store, "_write_record", fail_second_write)
+    events = [
+        {
+            "thread_id": "t1",
+            "run_id": "r1",
+            "event_type": "trace",
+            "category": "trace",
+            "content": content,
+        }
+        for content in ("first", "second")
+    ]
+
+    with pytest.raises(OSError, match="injected batch write failure"):
+        await store.put_batch(events)
+
+    assert await store.list_events("t1", "r1") == []
+    monkeypatch.setattr(store, "_write_record", original_write)
+    retried = await store.put_batch(events)
+    assert [row["seq"] for row in retried] == [1, 2]
+    assert [row["content"] for row in await store.list_events("t1", "r1")] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.anyio
+async def test_put_batch_repeated_cancellation_rolls_back_completed_thread_write(monkeypatch, tmp_path):
+    store = _make_store(tmp_path)
+    original_write_batch = store._write_records_atomically
+    write_completed = threading.Event()
+    release_writer = threading.Event()
+    writer_finished = threading.Event()
+
+    def block_after_write(records):
+        try:
+            result = original_write_batch(records)
+            write_completed.set()
+            release_writer.wait(timeout=2)
+            return result
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(store, "_write_records_atomically", block_after_write)
+    events = [
+        {
+            "thread_id": "t1",
+            "run_id": "r1",
+            "event_type": "trace",
+            "category": "trace",
+            "content": content,
+        }
+        for content in ("first", "second")
+    ]
+
+    write_task = asyncio.create_task(store.put_batch(events))
+    assert await asyncio.to_thread(write_completed.wait, 2)
+    write_task.cancel()
+    await asyncio.sleep(0)
+    write_task.cancel()
+    try:
+        await asyncio.sleep(0)
+        assert not write_task.done()
+    finally:
+        release_writer.set()
+    with pytest.raises(asyncio.CancelledError):
+        await write_task
+    assert await asyncio.to_thread(writer_finished.wait, 2)
+
+    assert await store.list_events("t1", "r1") == []
+    retried = await store.put_batch(events)
+    assert [row["seq"] for row in retried] == [1, 2]
+    assert [row["content"] for row in await store.list_events("t1", "r1")] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.anyio
+async def test_put_repeated_cancellation_rolls_back_completed_thread_write(monkeypatch, tmp_path):
+    store = _make_store(tmp_path)
+    original_write = store._write_record
+    write_completed = threading.Event()
+    release_writer = threading.Event()
+    writer_finished = threading.Event()
+
+    def block_after_write(record):
+        try:
+            original_write(record)
+            write_completed.set()
+            release_writer.wait(timeout=2)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(store, "_write_record", block_after_write)
+    write_task = asyncio.create_task(
+        store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="trace",
+            category="trace",
+            content="first",
+        )
+    )
+    assert await asyncio.to_thread(write_completed.wait, 2)
+    write_task.cancel()
+    await asyncio.sleep(0)
+    write_task.cancel()
+    try:
+        await asyncio.sleep(0)
+        assert not write_task.done()
+    finally:
+        release_writer.set()
+    with pytest.raises(asyncio.CancelledError):
+        await write_task
+    assert await asyncio.to_thread(writer_finished.wait, 2)
+
+    assert await store.list_events("t1", "r1") == []
+    retried = await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="trace",
+        category="trace",
+        content="first",
+    )
+    assert retried["seq"] == 1
+    assert [row["content"] for row in await store.list_events("t1", "r1")] == [
+        "first",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _ensure_seq_loaded: recovers max_seq from disk after fresh store init
 # ---------------------------------------------------------------------------
@@ -216,6 +360,39 @@ async def test_ensure_seq_loaded_recovers_from_disk():
         assert record["seq"] == 4, f"Expected seq=4 after recovery, got {record['seq']}"
 
 
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("crash_tail", [b'{"event_type":"partial"', b"\xe4\xb8"])
+async def test_restart_repairs_incomplete_jsonl_tail_before_next_event(tmp_path, crash_tail):
+    store = _make_store(tmp_path)
+    await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="trace",
+        category="trace",
+        content="before",
+    )
+    run_file = tmp_path / "threads" / "t1" / "runs" / "r1.jsonl"
+    with run_file.open("ab") as event_file:
+        event_file.write(crash_tail)
+
+    restarted = _make_store(tmp_path)
+    written = await restarted.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="trace",
+        category="trace",
+        content="after",
+    )
+
+    assert written["seq"] == 2
+    events = await restarted.list_events("t1", "r1")
+    assert [(event["seq"], event["content"]) for event in events] == [
+        (1, "before"),
+        (2, "after"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # asyncio.to_thread regression guard
 # ---------------------------------------------------------------------------
@@ -223,7 +400,7 @@ async def test_ensure_seq_loaded_recovers_from_disk():
 
 @pytest.mark.anyio
 async def test_put_offloads_write_via_to_thread():
-    """Regression guard: put() must call asyncio.to_thread for _write_record."""
+    """Regression guard: put() must offload its atomic file write."""
     original = asyncio.to_thread
     calls: list[str] = []
 
@@ -238,7 +415,7 @@ async def test_put_offloads_write_via_to_thread():
         with patch("asyncio.to_thread", new=spy):
             await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace", content="x")
 
-    assert "_write_record" in calls, f"Expected asyncio.to_thread(_write_record, ...) — got: {calls}"
+    assert "_write_records_atomically" in calls, f"Expected an atomic asyncio.to_thread write — got: {calls}"
 
 
 # ---------------------------------------------------------------------------
@@ -273,13 +450,116 @@ async def test_count_messages_accurate_after_concurrent_writes():
 
 
 @pytest.mark.anyio
-async def test_delete_by_thread_clears_seq_counter_and_lock():
+async def test_delete_by_thread_clears_seq_counter_but_keeps_thread_lock():
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(Path(tmp))
         await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace")
+        lock = store._get_write_lock("t1")
         await store.delete_by_thread("t1")
         assert "t1" not in store._seq_counters
-        assert "t1" not in store._write_locks
+        assert store._get_write_lock("t1") is lock
+
+
+@pytest.mark.anyio
+async def test_cancelled_delete_keeps_thread_lock_until_blocking_delete_finishes(
+    monkeypatch,
+    tmp_path,
+):
+    store = _make_store(tmp_path)
+    await store.put(
+        thread_id="t1",
+        run_id="r1",
+        event_type="trace",
+        category="trace",
+        content="old",
+    )
+    original_delete = store._delete_thread_files
+    delete_started = threading.Event()
+    release_delete = threading.Event()
+
+    def blocking_delete(thread_id):
+        delete_started.set()
+        release_delete.wait(timeout=2)
+        original_delete(thread_id)
+
+    monkeypatch.setattr(store, "_delete_thread_files", blocking_delete)
+    delete_task = asyncio.create_task(store.delete_by_thread("t1"))
+    assert await asyncio.to_thread(delete_started.wait, 2)
+    delete_task.cancel()
+    put_task = asyncio.create_task(
+        store.put(
+            thread_id="t1",
+            run_id="r2",
+            event_type="trace",
+            category="trace",
+            content="new",
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert not put_task.done()
+    finally:
+        release_delete.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await delete_task
+    await put_task
+    assert [event["content"] for event in await store.list_events("t1", "r2")] == ["new"]
+
+
+@pytest.mark.anyio
+async def test_cancelled_claim_keeps_thread_lock_until_blocking_claim_finishes(
+    monkeypatch,
+    tmp_path,
+):
+    store = _make_store(tmp_path)
+    store._write_record(
+        {
+            "thread_id": "t1",
+            "run_id": "r1",
+            "event_type": "trace",
+            "category": "trace",
+            "content": "legacy",
+            "metadata": {},
+            "seq": 1,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    original_claim = store._claim_legacy_thread_events
+    claim_started = threading.Event()
+    release_claim = threading.Event()
+
+    def blocking_claim(thread_id, owner_user_id):
+        claim_started.set()
+        release_claim.wait(timeout=2)
+        return original_claim(thread_id, owner_user_id)
+
+    monkeypatch.setattr(store, "_claim_legacy_thread_events", blocking_claim)
+    claim_task = asyncio.create_task(store.claim_legacy_by_thread("t1", "owner-1"))
+    assert await asyncio.to_thread(claim_started.wait, 2)
+    claim_task.cancel()
+    put_task = asyncio.create_task(
+        store.put(
+            thread_id="t1",
+            run_id="r2",
+            event_type="trace",
+            category="trace",
+            content="new",
+            user_id="owner-1",
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert not put_task.done()
+    finally:
+        release_claim.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+    await put_task
+    assert [event["content"] for event in await store.list_messages("t1", user_id="owner-1")] == []
+    assert [event["content"] for event in await store.list_events("t1", "r1", user_id="owner-1")] == ["legacy"]
+    assert [event["content"] for event in await store.list_events("t1", "r2", user_id="owner-1")] == ["new"]
 
 
 @pytest.mark.anyio

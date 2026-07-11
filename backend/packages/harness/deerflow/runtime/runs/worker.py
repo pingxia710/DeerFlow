@@ -21,12 +21,13 @@ import copy
 import inspect
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.base import empty_checkpoint, uuid6
+from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
@@ -47,6 +48,10 @@ _STREAM_FRAME_CATEGORY = "stream"
 _RUN_NO_PROGRESS_TIMEOUT_SECONDS = 30 * 60.0
 _RUN_HARD_TIMEOUT_SECONDS = 4 * 60 * 60.0
 _STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
+_STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
+_STATUS_COMMIT_FAILED_REASON = "run_status_commit_failed"
+_PUBLIC_INTERNAL_ERROR_MESSAGE = "Run failed due to an internal error."
+_PUBLIC_INTERNAL_ERROR_NAME = "InternalError"
 
 
 class RunStreamTimeoutError(TimeoutError):
@@ -86,6 +91,18 @@ def _build_runtime_context(
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
     return runtime_ctx
+
+
+def _resolve_runtime_agent_name(runtime_context: dict[str, Any], assistant_id: str | None) -> str | None:
+    """Resolve a memory agent name without treating the default lead as custom."""
+    explicit_name = runtime_context.get("agent_name")
+    if isinstance(explicit_name, str) and explicit_name.strip():
+        return explicit_name
+
+    fallback_name = str(assistant_id or "").strip()
+    if not fallback_name or fallback_name == "lead_agent":
+        return None
+    return fallback_name
 
 
 @dataclass(frozen=True)
@@ -136,6 +153,10 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
     except TypeError:
         # Some callable instances are unhashable; fall back to a direct check.
         return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _is_gateway_lead_agent_factory(agent_factory: Any) -> bool:
+    return getattr(agent_factory, "__module__", None) == "deerflow.agents.lead_agent.agent" and getattr(agent_factory, "__name__", None) == "make_lead_agent"
 
 
 async def _publish_stream_frame(
@@ -192,14 +213,22 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+    if record.assistant_id == "command-room":
+        # Command Room does not use TodoListMiddleware. An explicit empty update
+        # prevents todo state from a different assistant leaking across runs.
+        graph_input = {**graph_input, "todos": []}
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
-    snapshot_capture_failed = False
+    # Treat the checkpoint state as unknown until aget_tuple completes.  A
+    # cancellation before/during capture must never be mistaken for a known
+    # empty thread during rollback.
+    snapshot_capture_failed = checkpointer is not None
     llm_error_fallback_message: str | None = None
     latest_command_room_ai_text = ""
     owner_task = asyncio.current_task()
     lease_control_task: asyncio.Task | None = None
+    terminal_committed = False
 
     journal = None
 
@@ -232,7 +261,9 @@ async def run_agent(
             )
 
         # 1. Mark running
-        await run_manager.set_status(run_id, RunStatus.running)
+        if await run_manager.set_status(run_id, RunStatus.running) is False:
+            logger.warning("Run %s did not acquire a committed running state; skipping agent execution", run_id)
+            return
         if owner_task is not None and record.lease_token is not None:
             lease_control_task = asyncio.create_task(_lease_control_loop(run_manager, record, owner_task))
 
@@ -250,8 +281,10 @@ async def run_agent(
                         "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
                         "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
                     }
+                snapshot_capture_failed = False
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                snapshot_capture_failed = True
                 logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
@@ -283,8 +316,9 @@ async def run_agent(
         configurable = config.get("configurable")
         if isinstance(configurable, dict) and isinstance(configurable.get("agent_name"), str) and configurable.get("agent_name", "").strip():
             runtime_ctx.setdefault("agent_name", configurable["agent_name"])
-        if not runtime_ctx.get("agent_name"):
-            runtime_ctx["agent_name"] = record.assistant_id
+        runtime_agent_name = _resolve_runtime_agent_name(runtime_ctx, record.assistant_id)
+        if runtime_agent_name is not None:
+            runtime_ctx["agent_name"] = runtime_agent_name
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -317,8 +351,16 @@ async def run_agent(
         # the agent name that this run will actually execute.
         config["run_name"] = resolve_root_run_name(config, record.assistant_id)
         runnable_config = RunnableConfig(**config)
-        if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
+        supports_app_config = _agent_factory_supports_app_config(agent_factory)
+        if ctx.app_config is not None:
+            if supports_app_config or _is_gateway_lead_agent_factory(agent_factory):
+                from deerflow.agents.lead_agent.prompt import warm_enabled_skills_for_config
+
+                await warm_enabled_skills_for_config(ctx.app_config)
+            if supports_app_config:
+                agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
+            else:
+                agent = agent_factory(config=runnable_config)
         else:
             agent = agent_factory(config=runnable_config)
 
@@ -401,27 +443,25 @@ async def run_agent(
         if record.abort_event.is_set():
             action = record.abort_action
             if action == "rollback":
-                await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
-                try:
-                    await _rollback_to_pre_run_checkpoint(
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        pre_run_checkpoint_id=pre_run_checkpoint_id,
-                        pre_run_snapshot=pre_run_snapshot,
-                        snapshot_capture_failed=snapshot_capture_failed,
-                    )
-                    logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                except Exception:
-                    logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+                terminal_committed = await _finalize_rollback(
+                    run_manager,
+                    journal,
+                    bridge,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    pre_run_checkpoint_id=pre_run_checkpoint_id,
+                    pre_run_snapshot=pre_run_snapshot,
+                    snapshot_capture_failed=snapshot_capture_failed,
+                )
             else:
-                await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
+                terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
+            terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
         else:
             if record.assistant_id == "command-room":
                 await _record_command_room_round_from_worker(
@@ -431,26 +471,24 @@ async def run_agent(
                     final_text=latest_command_room_ai_text,
                     model_name=record.model_name,
                 )
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success", bridge=bridge, thread_id=thread_id)
+            terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success", bridge=bridge, thread_id=thread_id)
 
     except asyncio.CancelledError:
         action = record.abort_action
         if action == "rollback":
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
-            try:
-                await _rollback_to_pre_run_checkpoint(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    pre_run_checkpoint_id=pre_run_checkpoint_id,
-                    pre_run_snapshot=pre_run_snapshot,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                )
-                logger.info("Run %s was cancelled and rolled back", run_id)
-            except Exception:
-                logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
+            terminal_committed = await _finalize_rollback(
+                run_manager,
+                journal,
+                bridge,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                run_id=run_id,
+                pre_run_checkpoint_id=pre_run_checkpoint_id,
+                pre_run_snapshot=pre_run_snapshot,
+                snapshot_capture_failed=snapshot_capture_failed,
+            )
         else:
-            await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
+            terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.interrupted, terminal_reason="cancelled", bridge=bridge, thread_id=thread_id)
             logger.info("Run %s was cancelled", run_id)
 
     except RunStreamTimeoutError as exc:
@@ -458,7 +496,7 @@ async def run_agent(
         logger.warning("Run %s timed out: %s", run_id, error_msg)
         record.abort_action = "interrupt"
         record.abort_event.set()
-        await _set_terminal_status(run_manager, journal, run_id, RunStatus.timeout, terminal_reason="timeout", error=error_msg, bridge=bridge, thread_id=thread_id)
+        terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.timeout, terminal_reason="timeout", error=error_msg, bridge=bridge, thread_id=thread_id)
         await _publish_stream_frame(
             bridge,
             event_store,
@@ -475,7 +513,7 @@ async def run_agent(
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
+        terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
         await _publish_stream_frame(
             bridge,
             event_store,
@@ -484,12 +522,21 @@ async def run_agent(
             user_id=record.user_id,
             event="error",
             data={
-                "message": error_msg,
-                "name": type(exc).__name__,
+                "message": _PUBLIC_INTERNAL_ERROR_MESSAGE,
+                "name": _PUBLIC_INTERNAL_ERROR_NAME,
             },
         )
 
     finally:
+        task_tool_module = sys.modules.get("deerflow.tools.builtins.task_tool")
+        clear_subagent_usage = getattr(
+            task_tool_module,
+            "clear_cached_subagent_usage_for_run",
+            None,
+        )
+        if callable(clear_subagent_usage):
+            clear_subagent_usage(run_id)
+
         if lease_control_task is not None:
             lease_control_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -502,30 +549,46 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
-            try:
-                # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=run_status_value(record.status) or RunStatus.error.value, **completion)
-            except Exception:
-                logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+            if terminal_committed:
+                try:
+                    # Persist token usage + convenience fields to RunStore
+                    completion = journal.get_completion_data()
+                    await run_manager.update_run_completion(run_id, status=run_status_value(record.status) or RunStatus.error.value, **completion)
+                except Exception:
+                    logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        # Sync title from checkpoint to threads_meta.display_name
-        if checkpointer is not None and thread_store is not None:
+        # Sync title only while this run is still the newest run for its owner.
+        if terminal_committed and checkpointer is not None and thread_store is not None:
             try:
-                await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id, user_id=record.user_id)
+
+                async def sync_checkpoint_title() -> None:
+                    await _sync_checkpoint_title_to_thread_store(
+                        checkpointer,
+                        thread_store,
+                        thread_id,
+                        user_id=record.user_id,
+                    )
+
+                await run_manager.execute_thread_action_if_latest(
+                    record,
+                    sync_checkpoint_title,
+                )
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
         # Update threads_meta status based on run outcome
-        if thread_store is not None:
+        if terminal_committed and thread_store is not None:
             try:
                 final_status = "idle" if record.status == RunStatus.success else run_status_value(record.status) or RunStatus.error.value
-                await thread_store.update_status(thread_id, final_status, user_id=record.user_id)
+                await run_manager.update_thread_status_if_latest(record, thread_store, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        if terminal_committed:
+            await bridge.publish_end(run_id)
+            asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        else:
+            await _close_stream_for_recovery(bridge, run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -667,19 +730,60 @@ async def _flush_journal_before_terminal_status(journal: Any | None, run_id: str
 async def _lease_control_loop(run_manager: RunManager, record: RunRecord, owner_task: asyncio.Task) -> None:
     while not owner_task.done():
         await asyncio.sleep(_LEASE_CONTROL_INTERVAL_SECONDS)
-        if owner_task.done():
+        if owner_task.done() or record.lease_terminal_committing or record.lease_terminal_committed:
             return
         if not await run_manager.heartbeat_active_lease(record):
+            if record.lease_terminal_committing or record.lease_terminal_committed:
+                return
             record.abort_action = "interrupt"
             record.abort_event.set()
             owner_task.cancel()
             return
+        if owner_task.done() or record.lease_terminal_committing or record.lease_terminal_committed:
+            return
         intent = await run_manager.consume_cancel_intent(record)
         if intent is not None:
+            if owner_task.done() or record.lease_terminal_committing or record.lease_terminal_committed:
+                return
             record.abort_action = intent.action
             record.abort_event.set()
             owner_task.cancel()
             return
+
+
+async def _finalize_rollback(
+    run_manager: RunManager,
+    journal: Any | None,
+    bridge: StreamBridge,
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    pre_run_checkpoint_id: str | None,
+    pre_run_snapshot: dict[str, Any] | None,
+    snapshot_capture_failed: bool,
+) -> bool:
+    try:
+        await _rollback_to_pre_run_checkpoint(
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            run_id=run_id,
+            pre_run_checkpoint_id=pre_run_checkpoint_id,
+            pre_run_snapshot=pre_run_snapshot,
+            snapshot_capture_failed=snapshot_capture_failed,
+        )
+    except asyncio.CancelledError:
+        error = "Rollback failed: checkpoint restore was cancelled"
+        logger.warning("%s for run %s", error, run_id)
+        return await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rollback_failed", error=error, bridge=bridge, thread_id=thread_id)
+    except Exception as exc:
+        error = f"Rollback failed: {exc}"
+        logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+        return await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rollback_failed", error=error, bridge=bridge, thread_id=thread_id)
+    else:
+        committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
+        logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+        return committed
 
 
 async def _set_terminal_status(
@@ -692,11 +796,14 @@ async def _set_terminal_status(
     error: str | None = None,
     bridge: StreamBridge | None = None,
     thread_id: str | None = None,
-) -> None:
+) -> bool:
+    await _flush_journal_before_terminal_status(journal, run_id)
+    committed = await run_manager.set_status(run_id, status, error=error, terminal_reason=terminal_reason)
+    if committed is False:
+        return False
     if journal is not None:
         journal.record_run_terminal(status=status.value, terminal_reason=terminal_reason)
-    await _flush_journal_before_terminal_status(journal, run_id)
-    await run_manager.set_status(run_id, status, error=error, terminal_reason=terminal_reason)
+        await _flush_journal_before_terminal_status(journal, run_id)
     if bridge is not None and thread_id is not None:
         try:
             await bridge.publish(
@@ -713,6 +820,21 @@ async def _set_terminal_status(
             )
         except Exception:
             logger.warning("Failed to publish terminal event for run %s", run_id, exc_info=True)
+    return True
+
+
+async def _close_stream_for_recovery(bridge: StreamBridge, run_id: str) -> None:
+    """Finish live subscribers without claiming an uncommitted terminal state."""
+    try:
+        await bridge.publish(
+            run_id,
+            _STREAM_RECOVERY_REQUIRED_EVENT,
+            {"reason": _STATUS_COMMIT_FAILED_REASON},
+        )
+    except Exception:
+        logger.warning("Failed to publish stream recovery marker for run %s", run_id, exc_info=True)
+    await bridge.publish_end(run_id)
+    asyncio.create_task(bridge.cleanup(run_id, delay=60))
 
 
 async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:
@@ -728,14 +850,8 @@ async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thr
     record = await thread_store.get(thread_id, user_id=user_id)
     display_name = record.get("display_name") if record else None
     if display_name:
-        if display_name != title:
-            checkpoint = dict(ckpt)
-            checkpoint["channel_values"] = {**channel_values, "title": display_name}
-            checkpoint["id"] = str(uuid6())
-            metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
-            await checkpointer.aput(ckpt_config, checkpoint, metadata, {})
         return
-    await thread_store.update_display_name(thread_id, title, user_id=user_id)
+    await thread_store.update_display_name_if_empty(thread_id, title, user_id=user_id)
 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -764,8 +880,7 @@ async def _rollback_to_pre_run_checkpoint(
         return
 
     if snapshot_capture_failed:
-        logger.warning("Run %s rollback skipped: pre-run checkpoint snapshot capture failed", run_id)
-        return
+        raise RuntimeError(f"Run {run_id} rollback failed: pre-run checkpoint snapshot capture failed")
 
     if pre_run_snapshot is None:
         await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
@@ -777,14 +892,12 @@ async def _rollback_to_pre_run_checkpoint(
     checkpoint_ns = ""
     checkpoint = pre_run_snapshot.get("checkpoint")
     if not isinstance(checkpoint, dict):
-        logger.warning("Run %s rollback skipped: invalid pre-run checkpoint snapshot", run_id)
-        return
+        raise RuntimeError(f"Run {run_id} rollback failed: invalid pre-run checkpoint snapshot")
     checkpoint_to_restore = checkpoint
     if checkpoint_to_restore.get("id") is None and pre_run_checkpoint_id is not None:
         checkpoint_to_restore = {**checkpoint_to_restore, "id": pre_run_checkpoint_id}
     if checkpoint_to_restore.get("id") is None:
-        logger.warning("Run %s rollback skipped: pre-run checkpoint has no checkpoint id", run_id)
-        return
+        raise RuntimeError(f"Run {run_id} rollback failed: pre-run checkpoint has no checkpoint id")
     restore_marker = _new_checkpoint_marker()
     checkpoint_to_restore = {
         **checkpoint_to_restore,
@@ -898,17 +1011,26 @@ async def _record_command_room_round_from_worker(
     try:
         from deerflow.command_room.round_record import record_command_room_round
 
-        await asyncio.to_thread(
-            record_command_room_round,
-            thread_id=thread_id,
-            agent_name="command-room",
-            user_id=get_effective_user_id(),
-            final_text=final_text,
-            user_message=user_message,
-            run_id=run_id,
-            usage=None,
-            source="gateway",
+        record_task = asyncio.create_task(
+            asyncio.to_thread(
+                record_command_room_round,
+                thread_id=thread_id,
+                agent_name="command-room",
+                user_id=get_effective_user_id(),
+                final_text=final_text,
+                user_message=user_message,
+                run_id=run_id,
+                usage=None,
+                source="gateway",
+            )
         )
+        try:
+            await asyncio.shield(record_task)
+        except asyncio.CancelledError:
+            # The agent stream has already produced its final answer. Keep the
+            # RoundRecord and terminal run projection on the same success side
+            # of this post-processing cancellation boundary.
+            await record_task
     except Exception:
         logger.debug(
             "Failed to record command-room RoundRecord for run %s model=%s",

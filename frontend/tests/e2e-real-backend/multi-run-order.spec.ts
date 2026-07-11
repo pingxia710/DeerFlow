@@ -21,6 +21,7 @@ import { expect, test } from "@playwright/test";
  * endpoint mounted only on the replay gateway.
  */
 const GATEWAY = `http://127.0.0.1:${process.env.PLAYWRIGHT_REAL_BACKEND_GATEWAY_PORT ?? "8011"}`;
+const APP = `http://localhost:${process.env.PLAYWRIGHT_REAL_BACKEND_FRONTEND_PORT ?? "3100"}`;
 
 // Distinctive markers so getByText can't collide with UI chrome.
 const ALPHA = "ALPHA-FIRST-QUESTION-7f3a2c";
@@ -33,6 +34,15 @@ const TASK_LANE_DESCRIPTION = "SNAPSHOT-TASK-LANE-DESCRIPTION-1c43";
 const TASK_LANE_PROMPT = "SNAPSHOT-TASK-LANE-PROMPT-7a29";
 
 test.describe("multi-run thread renders chronologically (replay, no API key)", () => {
+  test.beforeEach(async ({ context }) => {
+    const response = await context.request.get(`${APP}/api/capabilities`);
+    expect(response.status(), await response.text()).toBe(200);
+    const snapshot = (await response.json()) as {
+      current_model_route?: { default_model?: string };
+    };
+    expect(snapshot.current_model_route?.default_model).toBe("scenario-model");
+  });
+
   test("first run renders above second run after history rebuild (#3352)", async ({
     page,
     context,
@@ -52,6 +62,7 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
             {
               run_id: `${threadId}-r1`,
               created_at: "2026-01-01T00:00:00+00:00",
+              completed_at: "2026-01-01T00:00:05+00:00",
               messages: [
                 { role: "human", content: ALPHA, id: `${threadId}-a-h` },
                 { role: "ai", content: "ALPHA reply", id: `${threadId}-a-a` },
@@ -60,6 +71,7 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
             {
               run_id: `${threadId}-r2`,
               created_at: "2026-01-01T00:01:00+00:00",
+              completed_at: "2026-01-01T00:01:07+00:00",
               messages: [
                 { role: "human", content: OMEGA, id: `${threadId}-o-h` },
                 { role: "ai", content: "OMEGA reply", id: `${threadId}-o-a` },
@@ -84,6 +96,8 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
     const omega = page.getByText(OMEGA, { exact: false });
     await expect(alpha).toBeVisible({ timeout: 60_000 });
     await expect(omega).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Thought for 5 seconds")).toBeVisible();
+    await expect(page.getByText("Thought for 7 seconds")).toBeVisible();
     // Each marker renders exactly once (guards against accidental duplicate matches).
     expect(await alpha.count(), "ALPHA should render exactly once").toBe(1);
     expect(await omega.count(), "OMEGA should render exactly once").toBe(1);
@@ -264,6 +278,7 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
               run_id: runId,
               task_id: taskId,
               role: "evidence",
+              description: TASK_LANE_DESCRIPTION,
               status: "completed",
               result_ref: "artifact://snapshot-task-result",
             },
@@ -286,5 +301,6 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
     });
     await expect(page.getByText("Subtask completed")).toBeVisible();
     await expect(page.getByText("Running subtask")).toHaveCount(0);
+    await expect(page.getByText(/^\d+:\d{2}$/)).toHaveCount(0);
   });
 });

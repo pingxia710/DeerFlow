@@ -68,7 +68,8 @@ deer-flow/
 
 ### Command Room AI collaboration readiness signals
 
-- Command Room is the main development AI, not a workflow system. The user provides intent, pain, preferences, constraints, and irreversible authorization/refusal; Command Room generates proposed direction, boundaries, evidence standard, execution, validation, and next step. Planner, Boundary, Evidence, Opposition, Recorder, and Chair are long-running AI governance roles with persistent memory/state across rounds; runtime role subagents are `planner`, `boundary`, `evidence`, `opposition`, `recorder`, plus angle roles `project-steward`, `debt-curator`, `freshness-keeper`, `capability-governor`, `learning-curator`, and `conflict-mapper`, while Chair/command-room is the return point, not a subagent. Concrete model calls may be ephemeral, and executor sub-AIs may still be disposable one-round workers. Program logic hosts, records, routes, persists, enforces permissions, exposes fact signals, and carries AI-authored handoffs between roles; `Target Role` is a recommendation returned to Chair by default, not automatic runtime dispatch. Chair-accepted role summaries are owner-scoped `role_state.jsonl` audit records; unresolved next-role suggestions are owner-scoped `pending_handoffs.jsonl` records for Chair review only. Program logic must not choose the next role, rewrite payloads, judge project quality, or trigger governance from its own content judgment. Keep `docs/command-room/core-invariants.md` as the architectural anchor for these boundaries; it is not a checklist, gate, or dashboard.
+- Command Room is the main development AI, not a workflow system. The user provides intent, pain, preferences, constraints, and irreversible authorization/refusal; Command Room generates proposed direction, boundaries, evidence standard, execution, validation, and next step. Planner, Boundary, Evidence, Opposition, Recorder, and Chair are available long-running AI governance identities with persistent memory/state across rounds, not mandatory lanes for every task; runtime role subagents are `planner`, `boundary`, `evidence`, `opposition`, `recorder`, plus angle roles `project-steward`, `debt-curator`, `freshness-keeper`, `capability-governor`, `learning-curator`, and `conflict-mapper`, while Chair/command-room is the return point, not a subagent. Ordinary low-risk development defaults to one implementation lane plus focused acceptance verification. Concrete model calls may be ephemeral, and executor sub-AIs may still be disposable one-round workers. Program logic hosts, records, routes, persists, enforces permissions, exposes fact signals, and carries AI-authored handoffs between roles; `Target Role` is a recommendation returned to Chair by default, not automatic runtime dispatch. Chair-accepted role summaries are owner-scoped `role_state.jsonl` audit records; unresolved next-role suggestions are owner-scoped `pending_handoffs.jsonl` records for Chair review only. Program logic must not choose the next role, rewrite payloads, judge project quality, or trigger governance from its own content judgment. Keep `docs/command-room/core-invariants.md` as the architectural anchor for these boundaries; it is not a checklist, gate, or dashboard.
+- Command Room JSONL access uses `command_room.file_records.append_jsonl_record` and `read_jsonl_text`: lock only the resolved target file so readers see complete append snapshots. Do not hold a module-global lock across file I/O; different owner/thread rooms must remain parallel, while same-file reads/writes stay ordered. Readers skip malformed crash-tail rows, and a later append must start on a fresh line after a truncated tail. Async Gateway, middleware, and tool paths must offload these reads/writes; started mutations must finish before request cancellation escapes.
 - Running sub-AIs do not freeze the lead AI's conversation with the user. The lead AI may keep discussing strategy, constraints, trade-offs, and next steps while workers run; that discussion is advisory context or next-round planning unless the user explicitly asks to cancel, redirect, expand, replace, or otherwise intervene in execution.
 - A Round is the lead AI's high-signal working memory for project quality, not Jira, a user-visible dashboard, fixed gate, form set, or automatic PASS/FAIL engine.
 - Stable subtask/skill interfaces should narrow collaboration to handoff packets: goal, boundary, inherited/current context, required inputs, released capabilities/tools/model/skill, expected outputs, `EvidenceStrength`, handoff file/artifact refs, failure/stop/escalation conditions, and evidence requirements. Audit may retain compact extracted fields (`context`, `requiredInputs`, `expectedOutput`, `evidenceStrength`, `handoffFile`, `artifactRefs`, `releasedCapabilities`, `stopConditions`) but must not store raw prompts. Important handoffs may use files such as `spec.md` or `findings.md` as shared disk state in the current thread workspace, not hidden shared model context; the exact path must come from the AI handoff, not program guessing. Treat a sub-AI result and its handoff as one object; weak results should trigger review of prompt/context/boundary/tool/model/skill choice and evidence request, not simple blame of the worker. Do not translate AI judgment into fixed roles, gates, dashboards, forms, or automatic review loops.
@@ -77,16 +78,16 @@ deer-flow/
 - Chair may read code directly only to sample decisive refs for truth, boundary, or acceptance. Delegate broad exploration to Evidence, Boundary, Capability Governor, or Executor, then return to envelope and Chair decision flow. Keep visible thinking/status short and action-oriented; do not narrate long private deliberation.
 - Governance account changes for Goal, Boundary, Decision, Evidence, Debt, and Learning require an Account Update Proposal. Roles may propose; Chair decides adopt, revise, defer, or reject; Recorder persists only Chair-accepted adopted or revised changes to the named target. Program logic must not auto-update accounts or promote temporary signals into durable decisions.
 - Role/process/loop/round control lives in `docs/command-room/ai-control-protocol.md`: Chair/Command Room is the always-on control surface; role invocations may end after one turn; loops are AI judgment loops, not program gates.
-- For DeerFlow architecture, AI-AI, role, loop, governance, quality, boundary, development execution, or durable-rule work, Chair starts with a Chair Activation Check: Goal, Boundary, Evidence Standard, Capability Release, Default Authorization Boundary, Risk Class, Dispatch Plan, New Task Startup Branch, and Minimum Evidence Action. New Task Startup Branch chooses exactly one of Direct, Clarify, Single Sub-AI, Multi Sub-AI, or Stop. Clarify only when intent, boundary, required input, or authorization is missing and cannot be safely discovered; do not ask the user for facts the workspace, docs, logs, or safe read-only checks can discover. Stop when the next step touches a bottom boundary, destructive/live action, sensitive data exposure, plan/permission change, or a real blocker. Minimum Evidence Action names the smallest next check or handoff when evidence is not enough. Default authorization allows only the named capabilities in `Capability Release` plus the current `Boundary`; expansion to new write surfaces, live/external systems, credentials, customer/payment data, public behavior, paid services, production integrations, or bottom-boundary rules requires Boundary or Capability Governor signal and Chair decision before execution. Capability Governor returns a `Capability Boundary Signal` with requested expansion, current boundary/release, narrower release, risks, stop-before, evidence refs/strength, Chair decision options, recommended decision, and `Target Role: Chair`; it does not authorize work. Chair answers with `Capability Decision`: keep current release, narrow release, ask user, or stop. Program logic must not choose it. Small tasks may use `Dispatch Plan: none` with a reason; this is Chair self-activation, not program-owned scheduling.
+- For high-impact DeerFlow architecture, AI-AI, role, loop, governance, quality, boundary expansion, or durable-rule work, Chair starts with a Chair Activation Check: Goal, Boundary, Evidence Standard, Capability Release, Default Authorization Boundary, Risk Class, Dispatch Plan, New Task Startup Branch, and Minimum Evidence Action. New Task Startup Branch chooses exactly one of Direct, Clarify, Single Sub-AI, Multi Sub-AI, or Stop. Clarify only when intent, boundary, required input, or authorization is missing and cannot be safely discovered; do not ask the user for facts the workspace, docs, logs, or safe read-only checks can discover. Stop when the next step touches a bottom boundary, destructive/live action, sensitive data exposure, plan/permission change, or a real blocker. Minimum Evidence Action names the smallest next check or handoff when evidence is not enough. Default authorization allows only the named capabilities in `Capability Release` plus the current `Boundary`; expansion to new write surfaces, live/external systems, credentials, customer/payment data, public behavior, paid services, production integrations, or bottom-boundary rules requires Boundary or Capability Governor signal and Chair decision before execution. Capability Governor returns a `Capability Boundary Signal` with requested expansion, current boundary/release, narrower release, risks, stop-before, evidence refs/strength, Chair decision options, recommended decision, and `Target Role: Chair`; it does not authorize work. Chair answers with `Capability Decision`: keep current release, narrow release, ask user, or stop. Program logic must not choose it. Small and ordinary low-risk tasks may use Direct or Single Sub-AI without rendering the full check as process output.
 - Evidence Standard labels current evidence as Strong, Weak, or Unverified. Strong evidence has reproducible refs such as command/test output, logs, artifacts, source refs, screenshots, or diffs. Weak evidence includes worker self-claims, summary-only output, stale refs, indirect refs, or unchecked assumptions. Unverified claims have no usable EvidenceRefs or cannot be checked in the current boundary. Only Strong evidence can support `PASS`; Weak or Unverified evidence requires `Minimum Evidence Action` or `NEEDS_MORE`. Evidence/Opposition `findings.md` claims or objections must carry `EvidenceStrength`.
 - Use evidence instead of trust: `tests passed` / `测试通过` alone is not evidence. Bind each claim to reproducible command output, exit code, log, artifact/path, hash, diff, or source reference.
 - Command Room rounds should make the acceptance/evidence standard concrete before execution, then compare action results back to that standard with command/test output, artifact paths, logs, source refs, or other reproducible evidence.
-- `action_result` is runtime/adapter observation from terminal events, tool outputs, commands, files, logs, and artifacts. It is not a sub-AI self-filled format. `output_ref` alone, summary-only output, or worker self-claim is weak evidence until backed by hard refs.
+- `action_result` is runtime/adapter observation from terminal events, paired tool results, commands, files, logs, and artifacts. It is not a sub-AI self-filled format. Runtime-observed commands, exit codes, paths, diffs, and hashes are execution facts; `output_ref` alone, summary-only output, or worker self-claim is weak evidence until backed by hard refs. Later criticism does not erase earlier observed implementation or verification without stronger conflicting evidence.
 - Evidence signals may expose `source_kind` (`command_output`, `artifact`, `hash`, `diff`, `log`, `path`, `self_claim`, `output_ref`, `empty`, or `unknown`) as a mechanical source label only; it is not a PASS/FAIL or auto-rework trigger.
-- Use evidence-checker or opposition only when risk, ambiguity, contradiction, or stale/weak evidence warrants a small check. They provide judgment input and prior-evidence verification for the lead AI; they are not default reviewers, gates, dashboards, PASS/FAIL systems, or automatic rework triggers. Opposition is not a second command room: it does not decide, accept, schedule, or keep long-term accounts.
+- Use evidence-checker or opposition only when risk, ambiguity, contradiction, or stale/weak evidence warrants a small check. They provide judgment input and prior-evidence verification for the lead AI; they are not default reviewers, gates, dashboards, PASS/FAIL systems, or automatic rework triggers. Opposition is not a second command room: it does not decide, accept, schedule, or keep long-term accounts. Stop dispatching once the agreed acceptance evidence is met; do not add review, evidence, opposition, commit, or recorder work merely to complete a role sequence.
 - Command Room skills must stay few, narrow, failure-driven, trigger-routed, evidence-aware, probe-backed, and deletable. Do not mechanically convert README/API docs/project encyclopedias into skills; without repeated failure samples, human confirmation, and passing probes/evals, keep a skill candidate/draft rather than active. Skillopt probes are behavior-regression evals, not runtime gates, task ledgers, adjudicators, or default reviewers.
 - Command Room stable subtask discovery lives in `docs/command-room/subtask-interfaces.md` (executor, fact-finder, evidence-checker, opposition, synthesis-checker) and links to the candidate signal docs.
-- Program helpers may expose mechanical hard gaps/boundary signals only; do not make them judge project quality, change `task()` public returns, auto-trigger rework, dispatch default reviewers/opposition, or modify production/secret config.
+- Program helpers may expose mechanical hard gaps/boundary signals and append redacted runtime-observed evidence to the natural-language `task()` result; do not make them judge project quality, auto-trigger rework, dispatch default reviewers/opposition, or modify production/secret config.
 - Feishu/Lark Doc/Wiki/Base links are private-link handoffs by default: follow `.agent/skills/feishu-cli-boundary/SKILL.md`, use user-mode `HOME=/Users/pingxia /Users/pingxia/.npm-global/lib/node_modules/cli/scripts/run.js ... --as user` before anonymous web access or export requests, hand Feishu CLI work to the sub-AI rooted at `/path/to/feishu-cli-worktree`, and return only desensitized paths, command names, status, and evidence.
 
 ### Documentation Update Policy
@@ -245,7 +246,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 12. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
 13. **SummarizationMiddleware** - *(optional, if enabled)* Context reduction when approaching token limits
 14. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with the `write_todos` tool
-15. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position
+15. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position. Cache subagent usage by `(run_id, tool_call_id)`, never by process-global `tool_call_id` alone, so concurrent conversations cannot consume each other's accounting.
 16. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model
 17. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 18. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects base64 image data before the LLM call
@@ -301,7 +302,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 
 | Router | Endpoints |
 |--------|-----------|
-| **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
+| **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details. Model responses may include `provider`, a non-sensitive display grouping label for UI model selection. |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json); API-managed stdio servers are local/dev/test only, command-allowlisted there, and `@modelcontextprotocol/server-filesystem` cannot expose dangerous host paths such as `/`, home roots, credential dirs, or Docker sockets |
 | **Skills** (`/api/skills`) | authenticated `GET /` and `GET /{name}` return safe summaries; `GET /catalog` and `POST /catalog/preview` read configured skill catalog sources; admin-only `PUT /{name}`, `POST /install`, `POST /catalog/install`, and `/custom/*` manage global custom skills, raw content, history, rollback, and enabled state |
 | **Capabilities** (`/api/capabilities`) | `GET /` and `GET /threads/{thread_id}/capabilities` return masked AI-readable facts about models, tools, skills, MCP, sandbox, permissions, middleware, and harness profiles; these endpoints must not judge next steps or emit PASS/FAIL |
@@ -343,14 +344,13 @@ in these snapshots; raw event inspection already exists via
 `GET /runs/{rid}/events`. Persistent event replay uses the RunEventStore
 `seq` cursor (`GET /threads/{id}/runs/{rid}/events?after_seq=N`); live SSE
 `Last-Event-ID` remains a StreamBridge buffer cursor. When the StreamBridge
-reports an evicted buffer, `sse_consumer` may replay persisted task events as
-`custom` SSE frames so subtask cards recover, but it must not replay arbitrary
-RunEventStore rows as LangGraph `values`/`updates` chunks until the SSE id and
-event-store `seq` cursor spaces are explicitly reconciled. If there are no
-replayable task events for a bridge gap, keep forwarding
-`stream_recovery_required`; silently swallowing the recovery signal hides data
-loss from the frontend. Late reconnects to terminal runs may replay persisted
-task events and `run.terminal` before `end` without subscribing to the cleaned
+reports an evicted buffer, `sse_consumer` must emit
+`stream_recovery_required` once and close that subscription. It must not mix
+durable event-store replay with a retained StreamBridge offset or continue the
+live stream after the gap; the cursor spaces are unrelated and doing both can
+duplicate or reorder projections. The frontend recovers through the runtime
+snapshot. Late reconnects to terminal runs may still replay persisted task
+events and `run.terminal` before `end` without subscribing to the cleaned
 in-memory bridge.
 Every SSE route that creates or joins a run must pass
 the current `RunEventStore` and storage `user_id` into `sse_consumer` so replay
@@ -378,8 +378,8 @@ cancelled runs, and record task lanes plus artifact/evidence refs from
 `GET /api/threads/{id}/rounds/{round_id}/tasks` are the read path for this
 mechanical state. It must not choose the next role, judge quality, auto
 PASS/FAIL, or trigger rework. When a closed round receives a follow-up run,
-create a new child round and inherit only the previous `next_action` summary as
-advisory context, not the old user goal as the current intent.
+create a new child round from the new user intent. Do not treat the prior AI
+answer or an unaccepted `next_action` as accepted continuation context.
 
 **Checkpoint / owner contract**:
 - Checkpoints are keyed by `thread_id + checkpoint_ns + checkpoint_id`; `run_id`
@@ -393,6 +393,10 @@ advisory context, not the old user goal as the current intent.
 - Trusted internal owner-header flows may claim only ownerless or synthetic
   `default` legacy threads; they must not reassign a thread already stamped with
   another real owner.
+- Legacy claims reserve `threads_meta` with status `claiming`; owner checks deny
+  that row until every repository/filesystem surface converges and the claim
+  marker atomically returns it to `idle`. Failed or cancelled claims remain
+  inaccessible and retryable.
 - Legacy NULL-owner thread rows are permissive only for non-strict
   `check_access()` compatibility; `require_existing=True` denies them until
   an explicit migration/claim stamps an owner.
@@ -433,6 +437,22 @@ advisory context, not the old user goal as the current intent.
 - `RunRepository.try_acquire_active_slot()` uses a per-thread Postgres transaction advisory lock before the active-slot CAS; do not remove it unless active slots move to a database-level uniqueness constraint.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
+- Thread deletion must acquire `RunManager.begin_thread_delete()` before writing
+  the durable `deleting` tombstone or scanning runs. A successful delete keeps
+  the gate closed until explicit recreation; a failed/cancelled delete keeps the
+  tombstone but releases only that attempt's gate so an explicit DELETE retry can
+  reacquire it. Legacy claim and metadata-marker writes must reject a deleting
+  row. This closes the stale-authorized request window without making failed
+  cleanup permanently unretryable.
+- A durable terminal run is monotonic truth. Late cancellation requests,
+  consumed cancel intents, stale local abort state, and lease heartbeats must not
+  regress it to an inflight/cancelled status or publish a contradictory terminal
+  frame. Cancellation that cannot persist its intent must not pretend the local
+  worker was stopped.
+- Legacy ownership discovery must consider the complete persistent surface, not
+  only metadata-bearing rows. Metadata-less checkpoints, events, feedback, and
+  artifact records still require the same exclusive claim/delete gate, owner
+  convergence, and symlink-safe path validation.
 - Runtime recovery reasons such as `boundary_stopped` and `worker_lost` are terminal statuses for store predicates and frontend recovery; store-only hydrated `RunRecord.status` may be a string, so response/serialization code should use `run_status_value()` instead of direct `.value`.
 - Inflight run checks should use `is_inflight_status()` so `pending`, `running`, `cancelling`, and `rolling_back` stay consistent across memory and store-only records.
 - Default `create_or_reject(..., multitask_strategy="reject")` must acquire the
@@ -479,6 +499,12 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - `sandbox.unrestricted_host_access` is a local-only escape hatch for fully trusted single-user workflows: when true, LocalSandboxProvider tools may use direct host paths, bypass virtual path limits, and keep host paths visible in tool output. Keep the default false in shared, production, or untrusted contexts; staging/shared/production gateway startup fails fast if it is enabled.
 - Custom `sandbox.mounts` default to read-only and reject clearly dangerous host paths such as `/`, home roots, credential directories, and Docker sockets unless `sandbox.allow_dangerous_host_mounts: true` is set. That override is local-debug only and is blocked during staging/shared/production gateway startup.
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation. Active-cache and warm-pool entries are checked with the backend during acquire/reuse; definitively dead containers are dropped from all in-process maps so the thread can discover or create a fresh sandbox instead of reusing a stale client. Backend health-check failures are treated as unknown, not dead; local discovery likewise treats an unverifiable container as not adoptable and falls through to create rather than failing acquire. `get()` remains an in-memory lookup for event-loop-safe tool paths. Docker seccomp stays enabled by default; `sandbox.seccomp_unconfined: true` is an explicit dangerous compatibility override only and is blocked during staging/shared/production gateway startup.
+- Remote/provisioner sandbox lifecycle is serialized per sandbox id. Kubernetes
+  errors other than a definitive 404 are propagated as unknown/failure, never
+  translated into absence; failed create/delete must retain or compensate the
+  Service/Pod bookkeeping needed for retry. Readiness requires both a successful
+  scoped-key probe and a rejected invalid-key probe so a custom image that
+  ignores `SANDBOX_API_KEY` is never accepted.
 
 **Virtual Path System**:
 - Agent sees: `/path/to/deer-flow/backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`, `/path/to/deer-flow/backend/.deer-flow/users/{user_id}/threads/{thread_id}/acp-workspace`, `/mnt/skills`, and configured custom mounts
@@ -896,6 +922,22 @@ Multi-file upload with automatic document conversion:
 - Reuses one conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
+- The complete request reserves explicit filenames before generating OCR or
+  Markdown companions, so an explicit upload always wins independent of request
+  order. Replacing a source removes stale companions when no new derivative is
+  produced.
+- Uploads are transactional across host and remote sandbox storage: overwritten
+  host files are snapshotted for rollback, cancellation removes partial files,
+  and remote sync/delete is completion-safe with compensation (discarding an
+  inconsistent sandbox if compensation itself fails).
+- OCR/MarkItDown reads from a private streamed snapshot, and derived host writes
+  use no-follow destination checks. Never process a mutable user-visible path or
+  follow a symlink that can escape the owner-scoped upload directory.
+- Upload listing scans and enrichment are blocking filesystem work; keep the
+  combined operation off the Gateway event loop with `asyncio.to_thread`.
+- Serialize upload and delete transactions plus listing snapshots per
+  owner/thread; their backup, derivative, host, remote compensation, and read
+  state must not overlap. Different owner/thread keys must remain parallel.
 - Upload chmod broadening is provider-gated: local per-thread sandboxes keep owner-only upload permissions; only providers with `needs_upload_permission_adjustment=true` may add group/other read/write bits for container user compatibility.
 - Agent receives uploaded file list via `UploadsMiddleware`
 

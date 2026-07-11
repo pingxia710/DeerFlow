@@ -51,7 +51,11 @@ def _patch_paths(tmp_path, monkeypatch) -> None:
 def _app(user_id: UUID):
     app = make_authed_test_app(user_factory=lambda: _user(user_id))
     app.include_router(thread_runs.router)
-    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=_run_record()))
+    app.state.run_manager = SimpleNamespace(
+        get=AsyncMock(return_value=_run_record()),
+        begin_thread_write=AsyncMock(),
+        end_thread_write=AsyncMock(),
+    )
     return app
 
 
@@ -87,6 +91,8 @@ def test_role_state_api_creates_lists_and_stays_advisory(tmp_path, monkeypatch) 
     assert len(rows) == 1
     assert rows[0]["state_id"] == created_body["state_id"]
     assert "auto_rework" not in rows[0]
+    app.state.run_manager.begin_thread_write.assert_awaited_once_with("thread-1")
+    app.state.run_manager.end_thread_write.assert_awaited_once_with("thread-1")
 
 
 def test_pending_handoff_api_lists_and_resolves_without_dispatch(tmp_path, monkeypatch) -> None:

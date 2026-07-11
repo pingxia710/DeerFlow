@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next_action", "dispatch_roles", "ask_user", "rationale"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "stop-after-observed-implementation",
+              "small-fact-minimal-path",
+              "bottom-boundary-confirmation"
+            ]
+          },
+          "next_action": {
+            "type": "string",
+            "enum": [
+              "finish",
+              "direct",
+              "single_subagent",
+              "multi_subagent",
+              "clarify",
+              "stop_confirm"
+            ]
+          },
+          "dispatch_roles": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "ask_user": { "type": "boolean" },
+          "rationale": { "type": "string" }
+        }
+      }
+    }
+  }
+}

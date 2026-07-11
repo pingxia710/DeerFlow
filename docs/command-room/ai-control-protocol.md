@@ -52,8 +52,8 @@ actually runs.
 The upstream AI's raw output remains the next role's input; extracted fields
 are index hints, not a replacement or scoring checklist.
 
-Before acting on DeerFlow architecture, AI-AI, roles, loops, governance,
-quality, boundary, development execution, or durable-rule work, Chair performs
+Before acting on high-impact DeerFlow architecture, AI-AI, roles, loops,
+governance, quality, boundary expansion, or durable-rule work, Chair performs
 a Chair Activation Check: Goal, Boundary, Evidence Standard, Capability
 Release, Default Authorization Boundary, Risk Class, Dispatch Plan, New Task
 Startup Branch, and Minimum Evidence Action. The startup branch must be one of
@@ -97,7 +97,8 @@ judges:
   task into bounded envelopes. The split is recorded in `spec.md` or a named
   handoff file.
 - Development small loop: an executor produces a worktree/git diff, command
-  output, logs, or artifacts; Evidence and Opposition check those refs.
+  output, logs, or artifacts; Chair performs focused acceptance verification.
+  Evidence or Opposition joins only for a concrete gap, conflict, or risk.
 - Evidence small loop: Evidence and Opposition update or challenge
   `findings.md` with `EvidenceStrength` until the gap, conflict, or proof
   standard is visible.
@@ -135,7 +136,7 @@ do not force six lanes unless independent audit angles buy real signal.
 | --- | --- | --- | --- |
 | Plan Loop | Direction, task split, or tradeoff is unclear. | Planner -> Boundary -> Evidence -> Opposition -> Chair | Chair has an executable `spec.md` or asks/stops. |
 | Capability Loop | Tools, paths, writes, models, external access, or data scope may be too broad. | Capability Governor returns `Capability Boundary Signal` -> Boundary -> Chair returns `Capability Decision` | Chair keeps current release, narrows release, asks user, or stops. |
-| Execution Loop | A bounded implementation/research/check must happen. | Chair -> Executor -> Evidence -> Opposition -> Chair | Evidence is strong enough, or Chair revises/stops. |
+| Execution Loop | A bounded implementation/research/check must happen. | Chair -> Executor -> focused verification -> Chair; add Evidence/Opposition only for a concrete gap or conflict. | Acceptance evidence is met, or Chair revises/stops. |
 | Conflict Loop | Role outputs disagree. | Conflict Mapper -> relevant role(s) -> Chair | Chair resolves, revises, or asks. |
 | Freshness Loop | A relied-on rule, fact, dependency, or decision may be stale. | Freshness Keeper -> Evidence -> Chair | Fact is refreshed or marked Unknown/Stale. |
 | Debt Loop | A known gap should not disappear. | Debt Curator -> Chair -> Recorder | Debt is fixed, deferred, or rejected as noise. |

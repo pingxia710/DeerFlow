@@ -1,4 +1,7 @@
 import asyncio
+import threading
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 from uuid import uuid4
@@ -19,6 +22,8 @@ from deerflow.runtime.runs.worker import (
     _build_runtime_context,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
+    _lease_control_loop,
+    _resolve_runtime_agent_name,
     _rollback_to_pre_run_checkpoint,
     _sync_checkpoint_title_to_thread_store,
     _try_extract_from_message,
@@ -51,6 +56,18 @@ def test_build_runtime_context_includes_app_config_when_present():
     assert context["app_config"] is app_config
 
 
+def test_resolve_runtime_agent_name_omits_default_lead_agent():
+    assert _resolve_runtime_agent_name({}, "lead_agent") is None
+
+
+def test_resolve_runtime_agent_name_uses_custom_assistant_id():
+    assert _resolve_runtime_agent_name({}, "command-room") == "command-room"
+
+
+def test_resolve_runtime_agent_name_prefers_explicit_context():
+    assert _resolve_runtime_agent_name({"agent_name": "finalis"}, "lead_agent") == "finalis"
+
+
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
     app_config = object()
     config = {"context": {"thread_id": "caller-thread"}}
@@ -78,12 +95,14 @@ async def test_sync_checkpoint_title_fills_empty_display_name():
     thread_store = SimpleNamespace(
         get=AsyncMock(return_value={"thread_id": "thread-1", "display_name": None}),
         update_display_name=AsyncMock(),
+        update_display_name_if_empty=AsyncMock(return_value=True),
     )
 
     await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1", user_id="owner-1")
 
     thread_store.get.assert_awaited_once_with("thread-1", user_id="owner-1")
-    thread_store.update_display_name.assert_awaited_once_with("thread-1", "Auto Title", user_id="owner-1")
+    thread_store.update_display_name_if_empty.assert_awaited_once_with("thread-1", "Auto Title", user_id="owner-1")
+    thread_store.update_display_name.assert_not_awaited()
     checkpointer.aput.assert_not_awaited()
 
 
@@ -101,15 +120,226 @@ async def test_sync_checkpoint_title_does_not_overwrite_existing_display_name():
     thread_store = SimpleNamespace(
         get=AsyncMock(return_value={"thread_id": "thread-1", "display_name": "Manual Title"}),
         update_display_name=AsyncMock(),
+        update_display_name_if_empty=AsyncMock(return_value=False),
     )
 
     await _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, "thread-1", user_id="owner-1")
 
     thread_store.get.assert_awaited_once_with("thread-1", user_id="owner-1")
     thread_store.update_display_name.assert_not_awaited()
-    checkpointer.aput.assert_awaited_once()
-    written_checkpoint = checkpointer.aput.await_args.args[1]
-    assert written_checkpoint["channel_values"]["title"] == "Manual Title"
+    thread_store.update_display_name_if_empty.assert_not_awaited()
+    checkpointer.aput.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_sync_checkpoint_title_uses_atomic_fill_if_empty_after_stale_read():
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={"channel_values": {"title": "Auto Title"}})),
+    )
+    display_name = None
+    stale_read_finished = asyncio.Event()
+    allow_auto_write = asyncio.Event()
+
+    class RacingThreadStore:
+        async def get(self, thread_id, *, user_id=None):
+            stale_read_finished.set()
+            return {"thread_id": thread_id, "display_name": display_name}
+
+        async def update_display_name(self, thread_id, title, *, user_id=None):
+            nonlocal display_name
+            await allow_auto_write.wait()
+            display_name = title
+
+        async def update_display_name_if_empty(self, thread_id, title, *, user_id=None):
+            nonlocal display_name
+            await allow_auto_write.wait()
+            if display_name:
+                return False
+            display_name = title
+            return True
+
+    store = RacingThreadStore()
+    sync_task = asyncio.create_task(_sync_checkpoint_title_to_thread_store(checkpointer, store, "thread-1", user_id="owner-1"))
+    await stale_read_finished.wait()
+    display_name = "Manual Title"
+    allow_auto_write.set()
+    await sync_task
+
+    assert display_name == "Manual Title"
+
+
+@pytest.mark.anyio
+async def test_terminal_lease_control_does_not_cancel_slow_terminal_projection(monkeypatch):
+    class BlockingTerminalRoundStore(MemoryRoundStateStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_written = asyncio.Event()
+            self.allow_terminal_return = asyncio.Event()
+
+        async def set_run_state(self, *args, **kwargs):
+            result = await super().set_run_state(*args, **kwargs)
+            if kwargs.get("state") in {"closed", "blocked"}:
+                self.terminal_written.set()
+                await self.allow_terminal_return.wait()
+            return result
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._LEASE_CONTROL_INTERVAL_SECONDS",
+        0.01,
+    )
+    store = MemoryRunStore()
+    round_store = BlockingTerminalRoundStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-slow-terminal")
+    assert await manager.set_status(record.run_id, RunStatus.running) is True
+
+    owner_task = asyncio.create_task(manager.set_status(record.run_id, RunStatus.success, terminal_reason="success"))
+    control_task = asyncio.create_task(_lease_control_loop(manager, record, owner_task))
+    await round_store.terminal_written.wait()
+    try:
+        await asyncio.sleep(0.05)
+        assert not owner_task.done()
+    finally:
+        round_store.allow_terminal_return.set()
+
+    assert await owner_task is True
+    await control_task
+    [round_info] = await round_store.list_by_thread("thread-slow-terminal")
+    assert round_info["state"] == "closed"
+
+
+@pytest.mark.anyio
+async def test_repeated_cancel_does_not_interrupt_post_terminal_projection(monkeypatch):
+    agent_started = asyncio.Event()
+    terminal_flush_started = asyncio.Event()
+    allow_terminal_flush = asyncio.Event()
+
+    class ControlledJournal:
+        def __init__(self, *args, **kwargs):
+            self.flush_count = 0
+            self.had_llm_error_fallback = False
+            self.llm_error_fallback_message = None
+
+        async def flush(self):
+            self.flush_count += 1
+            if self.flush_count == 2:
+                terminal_flush_started.set()
+                await allow_terminal_flush.wait()
+
+        def record_run_terminal(self, **kwargs):
+            return None
+
+        def get_completion_data(self):
+            return {
+                "total_input_tokens": 1,
+                "total_output_tokens": 1,
+                "total_tokens": 2,
+                "llm_call_count": 1,
+                "lead_agent_tokens": 2,
+                "subagent_tokens": 0,
+                "middleware_tokens": 0,
+                "token_usage_by_model": {},
+                "message_count": 0,
+                "last_ai_message": None,
+                "first_human_message": None,
+            }
+
+    class BlockingAgent:
+        async def astream(self, *args, **kwargs):
+            agent_started.set()
+            await asyncio.Event().wait()
+            yield {}
+
+    monkeypatch.setattr("deerflow.runtime.journal.RunJournal", ControlledJournal)
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-double-cancel", user_id="owner-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(update_status=AsyncMock())
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(),
+                thread_store=thread_store,
+            ),
+            agent_factory=lambda *, config: BlockingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = worker
+
+    await asyncio.wait_for(agent_started.wait(), timeout=2)
+    assert await run_manager.cancel(record.run_id) is True
+    await asyncio.wait_for(terminal_flush_started.wait(), timeout=2)
+    try:
+        assert await run_manager.cancel(record.run_id) is True
+    finally:
+        allow_terminal_flush.set()
+    await asyncio.wait_for(worker, timeout=2)
+
+    durable = await store.get(record.run_id)
+    assert durable is not None
+    assert durable["status"] == RunStatus.interrupted.value
+    assert durable["terminal_reason"] == "cancelled"
+    assert durable["total_tokens"] == 2
+    thread_store.update_status.assert_awaited_once_with(
+        record.thread_id,
+        RunStatus.interrupted.value,
+        user_id="owner-1",
+    )
+    terminal_payloads = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "custom" and call.args[2].get("type") == "run.terminal"]
+    assert [payload["terminal_reason"] for payload in terminal_payloads] == ["cancelled"]
+
+
+@pytest.mark.anyio
+async def test_run_agent_gates_checkpoint_title_sync_on_latest_run():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-title-latest", user_id="owner-1")
+    latest_guard = AsyncMock(return_value=False)
+    run_manager.execute_thread_action_if_latest = latest_guard
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=None),
+        aput=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(
+        get=AsyncMock(),
+        update_display_name=AsyncMock(),
+        update_status=AsyncMock(),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, thread_store=thread_store),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    latest_guard.assert_awaited_once()
+    assert checkpointer.aget_tuple.await_count == 1
+    thread_store.get.assert_not_awaited()
+    thread_store.update_display_name.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -151,6 +381,64 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_offloads_explicit_config_skill_scan(monkeypatch):
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.agents.lead_agent import prompt as prompt_module
+
+    event_loop_thread = threading.get_ident()
+    load_threads: list[int] = []
+    app_config = object()
+
+    def load_skills(*, enabled_only):
+        assert enabled_only is True
+        load_threads.append(threading.get_ident())
+        return []
+
+    monkeypatch.setattr(
+        prompt_module,
+        "get_or_new_skill_storage",
+        lambda **kwargs: SimpleNamespace(load_skills=load_skills),
+    )
+    with prompt_module._enabled_skills_lock:
+        prompt_module._enabled_skills_by_config_cache.clear()
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-skill-scan")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, *args, **kwargs):
+            yield {"messages": []}
+
+    def make_agent(config, *, app_config):
+        prompt_module.get_enabled_skills_for_config(app_config)
+        return DummyAgent()
+
+    monkeypatch.setattr(lead_agent_module, "_make_lead_agent", make_agent)
+
+    try:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, app_config=app_config),
+            agent_factory=lead_agent_module.make_lead_agent,
+            graph_input={},
+            config={},
+        )
+
+        assert load_threads
+        assert event_loop_thread not in load_threads
+    finally:
+        with prompt_module._enabled_skills_lock:
+            prompt_module._enabled_skills_by_config_cache.clear()
 
 
 @pytest.mark.anyio
@@ -278,7 +566,8 @@ async def test_run_agent_success_path_persists_terminal_runtime_state_without_sn
 
     rounds = await round_store.list_by_thread("thread-main-path", user_id="owner-1")
     assert rounds[0]["round_id"] == record.round_id
-    assert rounds[0]["state"] == "awaiting_chair_decision"
+    assert rounds[0]["state"] == "closed"
+    assert rounds[0]["next_action"] is None
     lanes = await round_store.list_task_lanes_by_round(
         thread_id="thread-main-path",
         round_id=record.round_id,
@@ -337,6 +626,92 @@ async def test_command_room_round_record_is_written_before_stream_end():
 
 
 @pytest.mark.anyio
+async def test_command_room_round_record_cancellation_does_not_regress_completed_run():
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-round-record-cancel",
+        assistant_id="command-room",
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    record_started = threading.Event()
+    release_record = threading.Event()
+    persisted_run_ids: list[str] = []
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="final command room answer")]}
+
+    def blocking_record_command_room_round(**kwargs):
+        persisted_run_ids.append(kwargs["run_id"])
+        record_started.set()
+        release_record.wait(timeout=2)
+
+    with patch(
+        "deerflow.command_room.round_record.record_command_room_round",
+        side_effect=blocking_record_command_room_round,
+    ):
+        worker_task = asyncio.create_task(
+            run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=None),
+                agent_factory=lambda *, config: DummyAgent(),
+                graph_input={"messages": []},
+                config={},
+            )
+        )
+        assert await asyncio.to_thread(record_started.wait, 2)
+        worker_task.cancel()
+        await asyncio.sleep(0.05)
+        release_record.set()
+        await worker_task
+
+    fetched = await run_manager.get(record.run_id)
+    assert persisted_run_ids == [record.run_id]
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert fetched.terminal_reason == "success"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_command_room_run_clears_todos_inherited_from_another_assistant():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-command-room-todos", assistant_id="command-room")
+    captured_input = {}
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured_input.update(graph_input)
+            yield {"messages": [AIMessage(content="done")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={
+            "messages": [],
+            "todos": [{"content": "stale lead-agent task", "status": "in_progress"}],
+        },
+        config={},
+    )
+
+    assert captured_input["todos"] == []
+
+
+@pytest.mark.anyio
 async def test_run_agent_marks_llm_error_fallback_as_error_status():
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
@@ -380,6 +755,92 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_keeps_internal_exception_but_redacts_stream_error():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-private-error")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class FailingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise RuntimeError("failed at /Users/private/secrets.txt token=abc")
+            yield  # pragma: no cover
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: FailingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "failed at /Users/private/secrets.txt token=abc"
+    bridge.publish.assert_any_await(
+        record.run_id,
+        "error",
+        {
+            "message": "Run failed due to an internal error.",
+            "name": "InternalError",
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_lease_loop_does_not_cancel_terminal_commit_after_slot_release(monkeypatch):
+    class CommitThenPauseStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.committed = asyncio.Event()
+            self.allow_return = asyncio.Event()
+
+        async def complete_run(self, *args, **kwargs):
+            committed = await super().complete_run(*args, **kwargs)
+            self.committed.set()
+            await self.allow_return.wait()
+            return committed
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._LEASE_CONTROL_INTERVAL_SECONDS",
+        0,
+    )
+    store = CommitThenPauseStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-terminal-commit-window")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    terminal_task = asyncio.create_task(
+        manager.set_status(
+            record.run_id,
+            RunStatus.success,
+            terminal_reason="success",
+        )
+    )
+    lease_task = asyncio.create_task(_lease_control_loop(manager, record, terminal_task))
+
+    try:
+        await store.committed.wait()
+        await asyncio.sleep(0)
+        assert not terminal_task.cancelled()
+        store.allow_return.set()
+        assert await terminal_task is True
+        await lease_task
+    finally:
+        store.allow_return.set()
+        if not terminal_task.done():
+            terminal_task.cancel()
+        if not lease_task.done():
+            lease_task.cancel()
+
+    assert record.status == RunStatus.success
+    assert record.run_id in manager._runs
 
 
 @pytest.mark.anyio
@@ -538,6 +999,395 @@ async def test_run_agent_hard_timeout_finalizes_and_releases_active_slot():
     replacement = await run_manager.create_or_reject("thread-hard-timeout", user_id="owner-1")
     assert replacement.run_id != record.run_id
     await run_manager.set_status(replacement.run_id, RunStatus.interrupted, terminal_reason="test_cleanup")
+
+
+@pytest.mark.anyio
+async def test_run_agent_closes_live_stream_truthfully_when_lease_completion_fails():
+    class RejectingTerminalStore(MemoryRunStore):
+        async def complete_run(self, *args, **kwargs):
+            return False
+
+    event_store = MemoryRunEventStore()
+    run_manager = RunManager(store=RejectingTerminalStore())
+    record = await run_manager.create_or_reject("thread-terminal-cas", user_id="owner-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert record.status == RunStatus.running
+    terminal_payloads = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "custom" and call.args[2].get("type") == "run.terminal"]
+    assert terminal_payloads == []
+    bridge.publish.assert_any_await(
+        record.run_id,
+        "stream_recovery_required",
+        {"reason": "run_status_commit_failed"},
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    terminal_events = await event_store.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.terminal"],
+        user_id=record.user_id,
+    )
+    assert terminal_events == []
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_overwrite_competing_terminal_status_after_lease_cas_failure():
+    class CompetingTerminalStore(MemoryRunStore):
+        async def complete_run(self, run_id, *args, **kwargs):
+            run = self._runs[run_id]
+            run["status"] = RunStatus.error.value
+            run["terminal_reason"] = "lease_expired_recovered"
+            self._active_slots.pop(run["thread_id"], None)
+            return False
+
+    store = CompetingTerminalStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-terminal-owner-race")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["terminal_reason"] == "lease_expired_recovered"
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_write_checkpoint_or_thread_meta_after_terminal_cas_failure():
+    class CompetingTerminalStore(MemoryRunStore):
+        async def complete_run(self, run_id, *args, **kwargs):
+            run = self._runs[run_id]
+            run["status"] = RunStatus.error.value
+            run["terminal_reason"] = "lease_expired_recovered"
+            self._active_slots.pop(run["thread_id"], None)
+            return False
+
+    checkpoint = SimpleNamespace(
+        config={"configurable": {"checkpoint_id": "checkpoint-before-run"}},
+        checkpoint={"channel_values": {"title": "stale worker title"}},
+        metadata={},
+        pending_writes=[],
+    )
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=checkpoint),
+        aput=AsyncMock(),
+    )
+    thread_store = SimpleNamespace(
+        get=AsyncMock(return_value={"display_name": "new owner title"}),
+        update_display_name=AsyncMock(),
+        update_status=AsyncMock(),
+    )
+    store = CompetingTerminalStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-terminal-side-effect-race")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            event_store=MemoryRunEventStore(),
+            thread_store=thread_store,
+        ),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert checkpointer.aget_tuple.await_count == 1
+    checkpointer.aput.assert_not_awaited()
+    thread_store.get.assert_not_awaited()
+    thread_store.update_display_name.assert_not_awaited()
+    thread_store.update_status.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_terminal_thread_status_update_serializes_with_replacement_run():
+    class BlockingThreadStore:
+        def __init__(self):
+            self.status = "running"
+            self.update_started = asyncio.Event()
+            self.allow_update = asyncio.Event()
+
+        async def update_status(self, thread_id, status, *, user_id=None):
+            self.update_started.set()
+            await self.allow_update.wait()
+            self.status = status
+
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject(
+        "thread-terminal-replacement-race",
+        user_id="owner-a",
+    )
+    thread_store = BlockingThreadStore()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, thread_store=thread_store),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await thread_store.update_started.wait()
+    replacement_task = asyncio.create_task(
+        run_manager.create_or_reject(
+            "thread-terminal-replacement-race",
+            user_id="owner-a",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not replacement_task.done()
+
+    thread_store.allow_update.set()
+    await worker
+    replacement = await replacement_task
+    await thread_store.update_status(
+        "thread-terminal-replacement-race",
+        "running",
+        user_id="owner-a",
+    )
+
+    assert replacement.run_id != record.run_id
+    assert thread_store.status == "running"
+
+
+@pytest.mark.anyio
+async def test_run_agent_stops_before_agent_factory_when_running_transition_is_rejected():
+    class RejectRunningManager(RunManager):
+        async def set_status(self, run_id, status, **kwargs):
+            if status == RunStatus.running:
+                return False
+            return await super().set_status(run_id, status, **kwargs)
+
+    run_manager = RejectRunningManager()
+    record = await run_manager.create("thread-rejected-start")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    def agent_factory(*, config):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("agent factory must not run without a committed running transition")
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert factory_called is False
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "stream_recovery_required",
+        {"reason": "run_status_commit_failed"},
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_revive_run_after_active_lease_recovery():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-lease-recovered-before-start")
+    lease = store._active_slots[record.thread_id]
+    now = datetime.now(UTC)
+    store._active_slots[record.thread_id] = replace(lease, lease_expires_at=now - timedelta(seconds=1))
+    assert await store.recover_expired_lease(
+        record.run_id,
+        generation=lease.generation,
+        now=now,
+        error="worker lease expired before start",
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="must not execute")]}
+
+    def agent_factory(*, config):
+        nonlocal factory_called
+        factory_called = True
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["terminal_reason"] == "lease_expired_recovered"
+    assert record.status == RunStatus.pending
+    assert factory_called is False
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "stream_recovery_required",
+        {"reason": "run_status_commit_failed"},
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_start_with_expired_unrecovered_lease():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-lease-expired-before-start")
+    lease = store._active_slots[record.thread_id]
+    store._active_slots[record.thread_id] = replace(
+        lease,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    def agent_factory(*, config):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("expired lease must prevent agent startup")
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert record.status == RunStatus.pending
+    assert factory_called is False
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "stream_recovery_required",
+        {"reason": "run_status_commit_failed"},
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_rollback_cancelled_during_snapshot_capture_fails_without_deleting_thread():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-rollback-capture")
+    record.abort_action = "rollback"
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(side_effect=[asyncio.CancelledError(), None]),
+        adelete_thread=AsyncMock(),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=lambda *, config: None,
+        graph_input={},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.terminal_reason == "rollback_failed"
+    assert "snapshot capture failed" in (fetched.error or "")
+    checkpointer.adelete_thread.assert_not_awaited()
+    terminal_payloads = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "custom" and call.args[2].get("type") == "run.terminal"]
+    assert [payload["terminal_reason"] for payload in terminal_payloads] == ["rollback_failed"]
 
 
 @pytest.mark.anyio

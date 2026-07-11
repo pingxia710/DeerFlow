@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.artifact_provenance.model import ArtifactProvenanceRow
@@ -129,6 +129,35 @@ class ArtifactProvenanceRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def list_by_thread(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 500,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> list[dict[str, Any]]:
+        """List provenance rows for thread-level ownership/migration probes."""
+        resolved_user_id = resolve_user_id(
+            user_id,
+            method_name="ArtifactProvenanceRepository.list_by_thread",
+        )
+        stmt = select(ArtifactProvenanceRow).where(ArtifactProvenanceRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(ArtifactProvenanceRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(
+            ArtifactProvenanceRow.source_event_seq.asc(),
+            ArtifactProvenanceRow.id.asc(),
+        ).limit(limit)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        """Return every owner present on this thread without pagination."""
+        stmt = select(ArtifactProvenanceRow.user_id).where(ArtifactProvenanceRow.thread_id == thread_id).distinct()
+        async with self._sf() as session:
+            return set((await session.execute(stmt)).scalars())
+
     async def delete_by_thread(
         self,
         thread_id: str,
@@ -167,16 +196,46 @@ class ArtifactProvenanceRepository:
 # Backwards-compatible method attached outside the class body for older imports.
 async def _claim_legacy_by_thread(self: ArtifactProvenanceRepository, thread_id: str, owner_user_id: str) -> int:
     async with self._sf() as session:
-        result = await session.execute(
-            update(ArtifactProvenanceRow)
-            .where(
-                ArtifactProvenanceRow.thread_id == thread_id,
-                ArtifactProvenanceRow.user_id.is_(None) | (ArtifactProvenanceRow.user_id == DEFAULT_USER_ID),
-            )
-            .values(user_id=owner_user_id, updated_at=datetime.now(UTC))
+        legacy_owner_filter = ArtifactProvenanceRow.user_id.is_(None)
+        if owner_user_id != DEFAULT_USER_ID:
+            legacy_owner_filter = legacy_owner_filter | (ArtifactProvenanceRow.user_id == DEFAULT_USER_ID)
+        legacy_rows = list(
+            (
+                await session.execute(
+                    select(ArtifactProvenanceRow)
+                    .where(
+                        ArtifactProvenanceRow.thread_id == thread_id,
+                        legacy_owner_filter,
+                    )
+                    .order_by(ArtifactProvenanceRow.updated_at.desc(), ArtifactProvenanceRow.id.desc())
+                )
+            ).scalars()
         )
+        if not legacy_rows:
+            return 0
+
+        owner_rows = list(
+            (
+                await session.execute(
+                    select(ArtifactProvenanceRow).where(
+                        ArtifactProvenanceRow.thread_id == thread_id,
+                        ArtifactProvenanceRow.user_id == owner_user_id,
+                    )
+                )
+            ).scalars()
+        )
+        owner_keys = {(row.run_id, row.virtual_path) for row in owner_rows}
+        now = datetime.now(UTC)
+        for row in legacy_rows:
+            key = (row.run_id, row.virtual_path)
+            if key in owner_keys:
+                await session.delete(row)
+            else:
+                row.user_id = owner_user_id
+                row.updated_at = now
+                owner_keys.add(key)
         await session.commit()
-        return result.rowcount or 0
+        return len(legacy_rows)
 
 
 ArtifactProvenanceRepository.claim_legacy_by_thread = _claim_legacy_by_thread

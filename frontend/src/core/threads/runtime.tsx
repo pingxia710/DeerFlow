@@ -48,13 +48,20 @@ type ThreadRuntimeSlotConfig = {
   isMock?: boolean;
 };
 
+type PendingRuntimeInvocation = {
+  invoke: (snapshot: ThreadRuntimeSnapshot) => void;
+  reject: (error: Error) => void;
+};
+
 type ThreadRuntimeEntry = ThreadRuntimeSlotConfig & {
   keys: Set<string>;
   callbacks: ThreadRuntimeCallbacks;
+  registrations: Map<number, ThreadRuntimeCallbacks>;
+  activeRegistrationId: number | null;
   snapshot: ThreadRuntimeSnapshot | null;
   idleSnapshot: ThreadRuntimeSnapshot | null;
   subscribers: number;
-  pendingInvocations: Array<(snapshot: ThreadRuntimeSnapshot) => void>;
+  pendingInvocations: PendingRuntimeInvocation[];
   createdAt: number;
   lastUsedAt: number;
 };
@@ -80,6 +87,7 @@ const THREAD_RUNTIME_IDLE_GC_DELAY_MS = 60_000;
 const DEFAULT_THREAD_RUNTIME_SCOPE = "chat";
 
 let nextSlotIndex = 1;
+let nextRegistrationId = 1;
 let slotsSnapshot: ThreadRuntimeSlotConfig[] = emptySlots;
 let runtimeChangeScheduled = false;
 const runtimeGcTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -227,20 +235,62 @@ function resolveSlotId(...keys: Array<string | null | undefined>) {
   return resolveThreadRuntimeSlotId(slotIdByKey, ...keys);
 }
 
+function canReplaceRuntimeAlias(
+  existingEntry: ThreadRuntimeEntry,
+  nextEntry: ThreadRuntimeEntry,
+) {
+  return (
+    existingEntry.slotId === nextEntry.slotId ||
+    shouldCollectThreadRuntimeSlot(runtimeSlotGcState(existingEntry))
+  );
+}
+
+function canAssignRuntimeAlias(
+  entry: ThreadRuntimeEntry,
+  key: string | null | undefined,
+) {
+  const normalized = normalizeThreadRuntimeKey(key);
+  if (!normalized) {
+    return true;
+  }
+  const existingSlotId = slotIdByKey.get(normalized);
+  if (!existingSlotId || existingSlotId === entry.slotId) {
+    return true;
+  }
+  const existingEntry = entriesBySlotId.get(existingSlotId);
+  return !existingEntry || canReplaceRuntimeAlias(existingEntry, entry);
+}
+
 function addRuntimeKey(
   entry: ThreadRuntimeEntry,
   key: string | null | undefined,
 ) {
   const normalized = normalizeThreadRuntimeKey(key);
   if (!normalized) {
-    return;
+    return false;
   }
   const existingSlotId = slotIdByKey.get(normalized);
   if (existingSlotId && existingSlotId !== entry.slotId) {
-    entriesBySlotId.get(existingSlotId)?.keys.delete(normalized);
+    const existingEntry = entriesBySlotId.get(existingSlotId);
+    if (existingEntry && !canReplaceRuntimeAlias(existingEntry, entry)) {
+      return false;
+    }
+    existingEntry?.keys.delete(normalized);
   }
   entry.keys.add(normalized);
   slotIdByKey.set(normalized, entry.slotId);
+  return true;
+}
+
+function rejectPendingRuntimeInvocations(
+  entry: ThreadRuntimeEntry,
+  error: Error,
+) {
+  const pending = entry.pendingInvocations;
+  entry.pendingInvocations = [];
+  for (const invocation of pending) {
+    invocation.reject(error);
+  }
 }
 
 function deleteRuntimeEntry(slotId: string) {
@@ -249,6 +299,10 @@ function deleteRuntimeEntry(slotId: string) {
     return;
   }
   cancelRuntimeSlotGc(slotId);
+  rejectPendingRuntimeInvocations(
+    entry,
+    new Error("Thread runtime was deleted before it became ready."),
+  );
   entriesBySlotId.delete(slotId);
   for (const key of entry.keys) {
     if (slotIdByKey.get(key) === slotId) {
@@ -281,6 +335,8 @@ function ensureRuntimeEntry(
       isMock: registration.isMock,
       keys: new Set(),
       callbacks: {},
+      registrations: new Map(),
+      activeRegistrationId: null,
       snapshot: null,
       idleSnapshot: null,
       subscribers: 0,
@@ -296,13 +352,29 @@ function ensureRuntimeEntry(
     entry.runtimeScope = runtimeScope;
     changed = true;
   }
-  if (entry.threadId !== registration.threadId) {
-    entry.threadId = registration.threadId;
+  const requestedThreadKey = scopedThreadRuntimeOwnerKey(
+    "thread",
+    runtimeScope,
+    registration.threadId,
+  );
+  const nextThreadId = canAssignRuntimeAlias(entry, requestedThreadKey)
+    ? registration.threadId
+    : entry.threadId;
+  if (entry.threadId !== nextThreadId) {
+    entry.threadId = nextThreadId;
     entry.idleSnapshot = null;
     changed = true;
   }
-  if (entry.displayThreadId !== registration.displayThreadId) {
-    entry.displayThreadId = registration.displayThreadId;
+  const requestedDisplayKey = scopedThreadRuntimeOwnerKey(
+    "display",
+    runtimeScope,
+    registration.displayThreadId,
+  );
+  const nextDisplayThreadId = canAssignRuntimeAlias(entry, requestedDisplayKey)
+    ? registration.displayThreadId
+    : entry.displayThreadId;
+  if (entry.displayThreadId !== nextDisplayThreadId) {
+    entry.displayThreadId = nextDisplayThreadId;
     changed = true;
   }
   if (entry.context !== registration.context) {
@@ -317,6 +389,8 @@ function ensureRuntimeEntry(
   for (const key of getThreadRuntimeSlotKeys({
     ...registration,
     runtimeScope,
+    threadId: nextThreadId,
+    displayThreadId: nextDisplayThreadId,
   })) {
     addRuntimeKey(entry, key);
   }
@@ -364,24 +438,37 @@ function scheduleRuntimeSlotGc(slotId: string) {
 
 function registerThreadRuntime(registration: ThreadRuntimeRegistration) {
   const entry = ensureRuntimeEntry(registration);
-  cancelRuntimeSlotGc(entry.slotId);
-  entry.callbacks = {
+  const registrationId = nextRegistrationId++;
+  const callbacks = {
     onSend: registration.onSend,
     onStart: registration.onStart,
     onFinish: registration.onFinish,
     onToolEnd: registration.onToolEnd,
   };
-  entry.subscribers += 1;
+  cancelRuntimeSlotGc(entry.slotId);
+  entry.registrations.set(registrationId, callbacks);
+  entry.activeRegistrationId = registrationId;
+  entry.callbacks = callbacks;
+  entry.subscribers = entry.registrations.size;
   emitRuntimeChange();
   return () => {
     const current = entriesBySlotId.get(entry.slotId);
-    if (!current) {
+    if (!current || !current.registrations.delete(registrationId)) {
       return;
     }
-    current.subscribers = Math.max(0, current.subscribers - 1);
+    current.subscribers = current.registrations.size;
     current.lastUsedAt = Date.now();
+    if (current.activeRegistrationId === registrationId) {
+      const activeRegistration = [...current.registrations.entries()].pop();
+      if (activeRegistration) {
+        current.activeRegistrationId = activeRegistration[0];
+        current.callbacks = activeRegistration[1];
+      } else {
+        current.activeRegistrationId = null;
+        current.callbacks = {};
+      }
+    }
     if (current.subscribers === 0) {
-      current.callbacks = {};
       scheduleRuntimeSlotGc(current.slotId);
     }
     emitRuntimeChange();
@@ -402,9 +489,20 @@ function claimRuntimeThreadId(slotId: string, threadId: string) {
     ? slotIdByKey.get(threadSlotKey)
     : undefined;
   if (existingSlotId && existingSlotId !== slotId) {
-    deleteRuntimeEntry(existingSlotId);
+    const existingEntry = entriesBySlotId.get(existingSlotId);
+    if (existingEntry && !canReplaceRuntimeAlias(existingEntry, entry)) {
+      return;
+    }
+    if (existingEntry) {
+      deleteRuntimeEntry(existingSlotId);
+    } else if (threadSlotKey) {
+      slotIdByKey.delete(threadSlotKey);
+    }
   }
-  entry.threadId = threadId;
+  if (entry.threadId !== threadId) {
+    entry.threadId = threadId;
+    entry.idleSnapshot = null;
+  }
   addRuntimeKey(entry, threadSlotKey);
   emitRuntimeChange();
 }
@@ -421,8 +519,8 @@ function publishRuntimeSnapshot(
   entry.snapshot = snapshot;
   const pending = entry.pendingInvocations;
   entry.pendingInvocations = [];
-  for (const invoke of pending) {
-    invoke(snapshot);
+  for (const invocation of pending) {
+    invocation.invoke(snapshot);
   }
   if (shouldCollectThreadRuntimeSlot(runtimeSlotGcState(entry))) {
     scheduleRuntimeSlotGc(slotId);
@@ -588,6 +686,12 @@ export function clearThreadRuntime(threadId: string) {
   }
 }
 
+export function clearAllThreadRuntimes() {
+  for (const slotId of [...entriesBySlotId.keys()]) {
+    deleteRuntimeEntry(slotId);
+  }
+}
+
 export function resetThreadRuntimeSlot(runtimeKey: string) {
   const slotId = resolveSlotId(scopedThreadRuntimeKey("runtime", runtimeKey));
   if (!slotId) {
@@ -681,10 +785,15 @@ function invokeRuntime<K extends "sendMessage" | "regenerateMessage">(
     ).then(() => undefined);
   }
   return new Promise<void>((resolve, reject) => {
-    entry.pendingInvocations.push((snapshot) => {
-      Promise.resolve(
-        (snapshot[method] as (...methodArgs: typeof args) => unknown)(...args),
-      ).then(() => resolve(), reject);
+    entry.pendingInvocations.push({
+      invoke(snapshot) {
+        Promise.resolve(
+          (snapshot[method] as (...methodArgs: typeof args) => unknown)(
+            ...args,
+          ),
+        ).then(() => resolve(), reject);
+      },
+      reject,
     });
   });
 }
@@ -711,6 +820,7 @@ export const __threadRuntimeTestUtils = {
     slotsSnapshot = emptySlots;
     runtimeChangeScheduled = false;
     nextSlotIndex = 1;
+    nextRegistrationId = 1;
   },
   register(registration: ThreadRuntimeRegistration) {
     const cleanup = registerThreadRuntime(registration);
@@ -722,6 +832,14 @@ export const __threadRuntimeTestUtils = {
     return { slotId, cleanup };
   },
   claim: claimRuntimeThreadId,
+  delete: deleteRuntimeEntry,
+  invoke(runtimeKey: string) {
+    return invokeRuntime(
+      runtimeKey,
+      "sendMessage",
+      [] as unknown as SendMessageArgs,
+    );
+  },
   setSnapshot(slotId: string, snapshot: unknown) {
     const entry = entriesBySlotId.get(slotId);
     if (entry) {
@@ -743,6 +861,9 @@ export const __threadRuntimeTestUtils = {
       snapshot: entry.snapshot,
       keys: [...entry.keys].sort(),
       subscribers: entry.subscribers,
+      pendingInvocationCount: entry.pendingInvocations.length,
+      registrationCount: entry.registrations.size,
+      activeRegistrationId: entry.activeRegistrationId,
     };
   },
 };
@@ -799,11 +920,13 @@ export function ThreadRuntimeProvider({
       }
     };
     window.addEventListener(THREAD_RUNTIME_DELETED_EVENT, handleDeletedThread);
-    return () =>
+    return () => {
       window.removeEventListener(
         THREAD_RUNTIME_DELETED_EVENT,
         handleDeletedThread,
       );
+      clearAllThreadRuntimes();
+    };
   }, []);
 
   return (

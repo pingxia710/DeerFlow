@@ -153,6 +153,28 @@ test("resolveAssistantId falls back to the default lead agent", async () => {
   expect(resolveAssistantId(undefined)).toBe("lead_agent");
 });
 
+test("workspace teardown clears process-local thread ownership state", async () => {
+  const hooks = await import("@/core/threads/hooks");
+  const clearAllThreadSingletonState = (hooks as Record<string, unknown>)
+    .clearAllThreadSingletonState;
+
+  hooks.setManualThreadTitleLock("locked-thread", "Private title");
+  hooks.clearThreadSingletonState("deleted-thread");
+  hooks.markThreadFinished("finished-thread");
+
+  expect(typeof clearAllThreadSingletonState).toBe("function");
+  if (typeof clearAllThreadSingletonState !== "function") return;
+
+  clearAllThreadSingletonState();
+
+  expect(hooks.getManualThreadTitleLock("locked-thread")).toBeUndefined();
+  expect(hooks.isDeletedThreadTombstoned("deleted-thread")).toBe(false);
+  expect(hooks.getThreadActivitySnapshot()).toEqual({
+    running: new Set(),
+    finished: new Set(),
+  });
+});
+
 test("createOptimisticMessageId uses randomUUID when available", async () => {
   const randomUUID = rs.fn(() => "uuid-1");
   rs.stubGlobal("crypto", { randomUUID });
@@ -249,7 +271,8 @@ test("/new attachment upload resolves a backend thread before upload", async () 
         filename: "note.txt",
         size: 4,
         path: "/tmp/note.txt",
-        virtual_path: "/mnt/user-data/uploads/note.txt",
+        virtual_path:
+          "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/5a484122-3cb4-41ff-b9e5-1dff92a6af50/user-data/uploads/note.txt",
         artifact_url: "/api/artifacts/note.txt",
       },
     ],
@@ -279,6 +302,34 @@ test("/new attachment upload resolves a backend thread before upload", async () 
   expect(result?.threadId).toBe("backend-thread");
 });
 
+test("partial attachment upload failure aborts the send flow", async () => {
+  const { uploadPromptFilesForThreadSend } =
+    await import("@/core/threads/hooks");
+
+  await expect(
+    uploadPromptFilesForThreadSend({
+      threadId: "thread-a",
+      backendThreadId: "thread-a",
+      fileParts: [
+        {
+          type: "file",
+          filename: "unsafe.txt",
+          mediaType: "text/plain",
+          url: "",
+          file: new File(["demo"], "unsafe.txt", { type: "text/plain" }),
+        },
+      ],
+      createThread: rs.fn(async () => "unexpected-thread"),
+      upload: rs.fn(async () => ({
+        success: false,
+        message: "Successfully uploaded 0 file(s); skipped 1 unsafe file(s)",
+        skipped_files: ["unsafe.txt"],
+        files: [],
+      })),
+    }),
+  ).rejects.toThrow("skipped 1 unsafe file(s)");
+});
+
 test("stale upload continuation is ignored after request ownership changes", async () => {
   const { uploadPromptFilesForThreadSend } =
     await import("@/core/threads/hooks");
@@ -294,7 +345,8 @@ test("stale upload continuation is ignored after request ownership changes", asy
           filename: "note.txt",
           size: 4,
           path: "/tmp/note.txt",
-          virtual_path: "/mnt/user-data/uploads/note.txt",
+          virtual_path:
+            "/Users/pingxia/projects/deer-flow/backend/.deer-flow/users/963870b2-72d1-4f61-b0bc-5a46617b16b7/threads/5a484122-3cb4-41ff-b9e5-1dff92a6af50/user-data/uploads/note.txt",
           artifact_url: "/api/artifacts/note.txt",
         },
       ],
@@ -606,6 +658,48 @@ test("getThreadMessagesWithLiveSnapshot ignores snapshots from another thread", 
       pendingSupersededMessageIds: new Set(),
     }),
   ).toEqual(currentMessages);
+});
+
+test("getThreadMessagesWithLiveSnapshot drops partial live state after authoritative terminal settlement", async () => {
+  const {
+    buildVisibleHistoryMessages,
+    getThreadMessagesWithLiveSnapshot,
+    mergeMessages,
+  } = await import("@/core/threads/hooks");
+  const partialMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "partial answer",
+    additional_kwargs: { run_id: "run-1" },
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      makeRunMessage("run-1", 1, {
+        id: "ai-1",
+        type: "ai",
+        content: "complete answer",
+      } as Message),
+    ],
+    new Set(),
+    [],
+  );
+  const persistedMessages = getThreadMessagesWithLiveSnapshot({
+    viewThreadId: "thread-1",
+    threadMessages: [partialMessage],
+    liveSnapshot: {
+      threadId: "thread-1",
+      runId: "run-1",
+      messages: [partialMessage],
+    },
+    pendingSupersededMessageIds: new Set(),
+    liveRunSettled: true,
+  });
+
+  expect(
+    mergeMessages(history, persistedMessages, []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["complete answer"]);
 });
 
 test("run status helpers classify terminal and inflight statuses", async () => {
@@ -938,6 +1032,32 @@ test("resolveThreadStreamFinishMeta returns onFinish thread and run metadata", a
   ).toEqual({ threadId: "thread-from-owner", runId: "run-from-owner" });
 });
 
+test("terminal stream fallback commits a missing start exactly once", async () => {
+  const { shouldCommitStreamStart } = await import("@/core/threads/hooks");
+
+  expect(
+    shouldCommitStreamStart({
+      started: false,
+      threadId: "created-thread",
+      runId: "created-run",
+    }),
+  ).toBe(true);
+  expect(
+    shouldCommitStreamStart({
+      started: true,
+      threadId: "created-thread",
+      runId: "created-run",
+    }),
+  ).toBe(false);
+  expect(
+    shouldCommitStreamStart({
+      started: false,
+      threadId: "created-thread",
+      runId: null,
+    }),
+  ).toBe(false);
+});
+
 test("resolveVisibleTaskRunningThreadId uses event or stream owner, not current route fallback", async () => {
   const { resolveVisibleTaskRunningThreadId } =
     await import("@/core/threads/hooks");
@@ -1011,6 +1131,45 @@ test("shouldReleaseQueuedThreadMessage releases visible queued thread after term
       currentViewThreadId: "thread-b",
     }),
   ).toBe(true);
+});
+
+test("failed queued send pauses automatic release without losing the message", async () => {
+  const hooks = await import("@/core/threads/hooks");
+  const settleAttempt = Reflect.get(
+    hooks,
+    "settleQueuedThreadMessageAttempt",
+  ) as
+    | (<T>(
+        queue: readonly T[],
+        attempted: T,
+        succeeded: boolean,
+      ) => { queue: T[]; failed: T | null; paused: boolean })
+    | undefined;
+  const attempted = { id: "queued-1", text: "retry me" };
+  const later = { id: "queued-2", text: "send later" };
+
+  expect(typeof settleAttempt).toBe("function");
+  if (!settleAttempt) return;
+
+  expect(settleAttempt([attempted, later], attempted, false)).toEqual({
+    queue: [later],
+    failed: attempted,
+    paused: true,
+  });
+  expect(
+    hooks.shouldReleaseQueuedThreadMessage({
+      streamFinished: true,
+      sendInFlight: false,
+      recovering: false,
+      queuedOwnerId: "owner-a",
+      currentOwnerId: "owner-a",
+      queuedThreadId: "thread-a",
+      currentViewThreadId: "thread-a",
+      paused: true,
+    } as Parameters<typeof hooks.shouldReleaseQueuedThreadMessage>[0] & {
+      paused: boolean;
+    }),
+  ).toBe(false);
 });
 
 test("shouldQueueThreadMessage queues during the pre-loading send window", async () => {
@@ -2231,6 +2390,106 @@ test("readRunMessagesPageResponse preserves HTTP status on history load errors",
   expect(getThreadHistoryLoadErrorKind(new Error("network"))).toBe("failed");
 });
 
+test("fallback history continues from a control-only latest run to older visible messages", async () => {
+  const {
+    buildVisibleHistoryMessages,
+    findLatestUnloadedRunIndex,
+    isVisibleHistoryRunMessage,
+    shouldAutoContinueRunHistory,
+  } = await import("@/core/threads/hooks");
+  const runs = [
+    { run_id: "latest-control-only" },
+    { run_id: "older-visible" },
+  ] as unknown as Run[];
+  const pages = new Map<string, RunMessage[]>([
+    [
+      "latest-control-only",
+      [
+        {
+          run_id: "latest-control-only",
+          seq: 1,
+          created_at: "2026-07-11T00:00:01Z",
+          metadata: { caller: "lead_agent" },
+          display: { visible_in_chat: false, reason: "task_event" },
+          content: {
+            schema_version: "deerflow.task-event/v1",
+            event_type: "task_completed",
+            task_id: "task-1",
+            thread_id: "thread-1",
+            run_id: "latest-control-only",
+          },
+        },
+      ],
+    ],
+    [
+      "older-visible",
+      [
+        makeRunMessage("older-visible", 1, {
+          type: "ai",
+          id: "older-answer",
+          content: "restored older answer",
+        } as Message),
+      ],
+    ],
+  ]);
+  const loadedRunIds = new Set<string>();
+  const loadedRows: RunMessage[] = [];
+  const visitedRunIds: string[] = [];
+  let consecutiveEmptyLoads = 0;
+
+  while (true) {
+    const run = runs[findLatestUnloadedRunIndex(runs, loadedRunIds)];
+    if (!run) {
+      break;
+    }
+    visitedRunIds.push(run.run_id);
+    const page = pages.get(run.run_id) ?? [];
+    loadedRows.push(...page);
+    loadedRunIds.add(run.run_id);
+    const visibleMessageCount = page.filter(isVisibleHistoryRunMessage).length;
+    if (
+      !shouldAutoContinueRunHistory({
+        hasMoreUnloadedRuns:
+          findLatestUnloadedRunIndex(runs, loadedRunIds) !== -1,
+        visibleMessageCount,
+        consecutiveEmptyLoads,
+      })
+    ) {
+      break;
+    }
+    consecutiveEmptyLoads =
+      visibleMessageCount === 0 ? consecutiveEmptyLoads + 1 : 0;
+  }
+
+  expect(visitedRunIds).toEqual(["latest-control-only", "older-visible"]);
+  expect(
+    buildVisibleHistoryMessages(loadedRows, new Set(), [], runs).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["restored older answer"]);
+
+  const hooksSource = readFileSync(
+    resolve(__dirname, "../../../../src/core/threads/hooks.ts"),
+    "utf-8",
+  );
+  const loadMessagesStart = hooksSource.indexOf(
+    "const loadMessages = useCallback",
+  );
+  const loadMessagesEnd = hooksSource.indexOf(
+    "\n\n  useEffect(() => {",
+    loadMessagesStart,
+  );
+  const loadMessagesSource = hooksSource.slice(
+    loadMessagesStart,
+    loadMessagesEnd,
+  );
+
+  expect(loadMessagesSource).toMatch(
+    /result\.data\.filter\(\s*isVisibleHistoryRunMessage,?\s*\)\.length/,
+  );
+  expect(loadMessagesSource).toContain("shouldAutoContinueRunHistory({");
+});
+
 test("clearDeletedThreadClientState removes deleted thread scoped caches and thread model", async () => {
   const storage = stubBrowserWindow();
   const client = new QueryClient();
@@ -2250,7 +2509,12 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   const { getThreadModelSnapshot, updateThreadSettings } =
     await import("@/core/settings/store");
 
-  updateThreadSettings(threadId, "context", { model_name: "model-a" });
+  updateThreadSettings("chat", threadId, "context", {
+    model_name: "model-a",
+  });
+  updateThreadSettings("agent:command-room", threadId, "context", {
+    model_name: "model-b",
+  });
   setManualThreadTitleLock(threadId, "Locked title");
   client.setQueryData(["threads", "search"], ["global-search"]);
   client.setQueryData(threadRunsQueryKey(threadId), ["stale-runs"]);
@@ -2326,7 +2590,10 @@ test("clearDeletedThreadClientState removes deleted thread scoped caches and thr
   ).toEqual({ content: "other" });
   expect(getManualThreadTitleLock(threadId)).toBeUndefined();
   expect(storage.getItem(`${THREAD_MODEL_KEY_PREFIX}${threadId}`)).toBeNull();
-  expect(getThreadModelSnapshot(threadId)).toBeUndefined();
+  expect(getThreadModelSnapshot("chat", threadId)).toBeUndefined();
+  expect(
+    getThreadModelSnapshot("agent:command-room", threadId),
+  ).toBeUndefined();
   expect(clearSubtasksForThread).toHaveBeenCalledWith(threadId);
 });
 
@@ -3747,6 +4014,38 @@ test("taskLaneSubtaskUpdate maps completed lane result and duration_ms safely", 
   ).not.toHaveProperty("durationMs");
 });
 
+test("terminal task recovery ignores record timestamps without task timing", async () => {
+  const { applyTaskEventToSubtask, taskLaneSubtaskUpdate } =
+    await import("@/core/threads/hooks");
+  const laneUpdate = taskLaneSubtaskUpdate({
+    thread_id: "thread-lane",
+    run_id: "run-lane",
+    task_id: "task-lane",
+    role: "researcher",
+    status: "completed",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-07-11T00:00:00.000Z",
+  });
+  expect(laneUpdate).not.toHaveProperty("startedAt");
+  expect(laneUpdate).not.toHaveProperty("finishedAt");
+
+  const updates: unknown[] = [];
+  applyTaskEventToSubtask(
+    {
+      schema_version: "deerflow.task-event/v1",
+      event_type: "task_completed",
+      task_id: "task-event",
+      thread_id: "thread-event",
+      run_id: "run-event",
+      status: "completed",
+    },
+    (task) => updates.push(task),
+    undefined,
+    Date.parse("2026-07-11T00:00:00.000Z"),
+  );
+  expect(updates[0]).not.toHaveProperty("finishedAt");
+});
+
 test("applyTaskEventToSubtask maps valid duration_ms and ignores invalid duration_ms", async () => {
   const { applyTaskEventToSubtask } = await import("@/core/threads/hooks");
   const updates: unknown[] = [];
@@ -3776,4 +4075,81 @@ test("applyTaskEventToSubtask maps valid duration_ms and ignores invalid duratio
     ).toBe(true);
     expect(updates[0]).not.toHaveProperty("durationMs");
   }
+});
+
+test("taskLaneSubtaskUpdate preserves lane metadata over fallbacks", async () => {
+  const { taskLaneSubtaskUpdate } = await import("@/core/threads/hooks");
+
+  const update = taskLaneSubtaskUpdate({
+    thread_id: "thread-1",
+    run_id: "run-1",
+    round_id: "round-1",
+    task_id: "task-1",
+    role: "researcher",
+    status: "completed",
+    description: "Search the docs",
+    prompt: "Find runtime replay behavior",
+    subagent_type: "browser",
+    result: "done",
+  });
+
+  expect(update.description).toBe("Search the docs");
+  expect(update.prompt).toBe("Find runtime replay behavior");
+  expect(update.subagent_type).toBe("browser");
+  expect(update.result).toBe("done");
+});
+
+test("mergeSubtaskUpdate keeps tool metadata while accepting lane terminal result", async () => {
+  const { mergeSubtaskUpdate } = await import("@/core/tasks/context");
+
+  const previous = mergeSubtaskUpdate(undefined, {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "in_progress",
+    subagent_type: "browser",
+    description: "Tool description",
+    prompt: "Tool prompt",
+  });
+
+  const merged = mergeSubtaskUpdate(previous, {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "completed",
+    subagent_type: "researcher",
+    description: "researcher task",
+    prompt: "researcher task",
+    result: "lane result",
+  });
+
+  expect(merged.status).toBe("completed");
+  expect(merged.result).toBe("lane result");
+  expect(merged.description).toBe("Tool description");
+  expect(merged.prompt).toBe("Tool prompt");
+  expect(merged.subagent_type).toBe("browser");
+});
+
+test("mergeSubtaskUpdate does not let stale replay reopen terminal subtasks", async () => {
+  const { mergeSubtaskUpdate } = await import("@/core/tasks/context");
+
+  const previous = mergeSubtaskUpdate(undefined, {
+    id: "task-1",
+    status: "completed",
+    subagent_type: "browser",
+    description: "Tool description",
+    prompt: "Tool prompt",
+    result: "final result",
+  });
+
+  const merged = mergeSubtaskUpdate(previous, {
+    id: "task-1",
+    status: "in_progress",
+    subagent_type: "browser",
+    description: "Tool description",
+    prompt: "Tool prompt",
+  });
+
+  expect(merged.status).toBe("completed");
+  expect(merged.result).toBe("final result");
 });

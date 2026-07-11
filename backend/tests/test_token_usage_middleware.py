@@ -265,7 +265,7 @@ class TestTokenUsageMiddleware:
         monkeypatch.setattr(
             task_tool_module,
             "pop_cached_subagent_usage",
-            lambda tool_call_id: cached_usage.pop(tool_call_id, None),
+            lambda tool_call_id, **_kwargs: cached_usage.pop(tool_call_id, None),
         )
 
         result = middleware.after_model({"messages": messages}, _make_runtime())

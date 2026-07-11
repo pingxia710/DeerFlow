@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0008_task_lane_ref_lists"
+HEAD = "0009_task_lane_display_metadata"
 
 
 def _url(tmp_path: Path) -> str:

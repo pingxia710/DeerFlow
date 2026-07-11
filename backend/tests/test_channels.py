@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import threading
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,6 +264,12 @@ class TestChannelStore:
         assert entries[0]["created_at"] == created_at
         assert entries[0]["thread_id"] == "t2"
         assert entries[0]["updated_at"] >= created_at
+
+    def test_failed_save_does_not_publish_new_thread_mapping(self, store):
+        store.set_thread_id("slack", "ch1", "t1")
+        with patch.object(store, "_save", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
+            store.set_thread_id("slack", "ch1", "t2")
+        assert store.get_thread_id("slack", "ch1") == "t1"
 
     def test_corrupt_file_handled(self, tmp_path):
         path = tmp_path / "store.json"
@@ -638,6 +645,49 @@ class TestChannelManager:
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
 
+    def test_stop_cancels_inflight_message_tasks(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def blocking_handle(_msg):
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            manager._handle_message = blocking_handle
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="hi",
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=1)
+
+            try:
+                await manager.stop()
+                assert cancelled.is_set()
+                assert not manager._message_tasks
+            finally:
+                # Let the pre-fix implementation's untracked task finish so the
+                # regression test itself does not leave an asyncio task behind.
+                release.set()
+                await asyncio.sleep(0)
+
+        _run(go())
+
     def test_concurrent_inbound_for_same_chat_reuses_single_thread(self):
         # Each inbound message is dispatched on its own task, so two messages
         # arriving close together for the same chat can both look up a missing
@@ -686,6 +736,87 @@ class TestChannelManager:
             assert created1 is True
             assert created2 is False
             assert store.get_thread_id("slack", "C1") == "thread-1"
+
+        _run(go())
+
+    def test_failed_first_create_keeps_same_conversation_waiters_serialized(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            first_started = asyncio.Event()
+            release_first = asyncio.Event()
+            second_started = asyncio.Event()
+            release_second = asyncio.Event()
+            attempts = 0
+
+            async def create(*, metadata=None, headers=None):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    first_started.set()
+                    await release_first.wait()
+                    raise RuntimeError("first create failed")
+                if attempts == 2:
+                    second_started.set()
+                    await release_second.wait()
+                return {"thread_id": f"thread-{attempts}"}
+
+            client = MagicMock()
+            client.threads.create = create
+            msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi")
+
+            first = asyncio.create_task(manager._get_or_create_thread(client, msg))
+            await first_started.wait()
+            second = asyncio.create_task(manager._get_or_create_thread(client, msg))
+            release_first.set()
+            with pytest.raises(RuntimeError, match="first create failed"):
+                await first
+            await second_started.wait()
+
+            third = asyncio.create_task(manager._get_or_create_thread(client, msg))
+            await asyncio.sleep(0.05)
+            assert attempts == 2
+            release_second.set()
+
+            (second_id, second_created), (third_id, third_created) = await asyncio.gather(second, third)
+            assert second_id == third_id == "thread-2"
+            assert second_created is True
+            assert third_created is False
+
+        _run(go())
+
+    def test_different_conversations_create_threads_in_parallel(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            both_started = asyncio.Event()
+            release = asyncio.Event()
+            started = 0
+
+            async def create(*, metadata=None, headers=None):
+                nonlocal started
+                started += 1
+                attempt = started
+                if started == 2:
+                    both_started.set()
+                await release.wait()
+                return {"thread_id": f"thread-{attempt}"}
+
+            client = MagicMock()
+            client.threads.create = create
+            first = asyncio.create_task(manager._get_or_create_thread(client, InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="one")))
+            second = asyncio.create_task(manager._get_or_create_thread(client, InboundMessage(channel_name="slack", chat_id="C2", user_id="U2", text="two")))
+
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            release.set()
+            first_result, second_result = await asyncio.gather(first, second)
+            assert first_result[0] != second_result[0]
 
         _run(go())
 
@@ -3623,6 +3754,57 @@ class TestFormatArtifactText:
 
 
 class TestHandleChatWithArtifacts:
+    @pytest.mark.parametrize("streaming", [False, True], ids=["wait", "stream"])
+    def test_artifact_preparation_runs_off_event_loop(self, monkeypatch, streaming):
+        import app.channels.manager as manager_module
+        from app.channels.manager import ChannelManager
+
+        prepare_threads = []
+
+        def prepare_spy(thread_id, response_text, artifacts, *, user_id=None):
+            prepare_threads.append(threading.get_ident())
+            return response_text, []
+
+        monkeypatch.setattr(manager_module, "_prepare_artifact_delivery", prepare_spy)
+
+        async def go():
+            event_loop_thread = threading.get_ident()
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            result = {
+                "messages": [
+                    {"type": "human", "content": "generate report"},
+                    {"type": "ai", "content": "done"},
+                ]
+            }
+            mock_client = _make_mock_langgraph_client(run_result=result)
+            if streaming:
+                mock_client.runs.stream = MagicMock(return_value=_make_async_iterator([_make_stream_part("values", result)]))
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu" if streaming else "slack",
+                    chat_id="chat-1",
+                    user_id="user-1",
+                    text="generate report",
+                )
+            )
+            await _wait_for(lambda: any(msg.is_final for msg in outbound_received))
+            await manager.stop()
+
+            assert prepare_threads
+            assert all(worker_thread != event_loop_thread for worker_thread in prepare_threads)
+
+        _run(go())
+
     def test_bound_owner_artifacts_resolve_from_owner_outputs_bucket(self, tmp_path, monkeypatch):
         from app.channels.manager import ChannelManager
         from deerflow.config.paths import Paths
@@ -3673,7 +3855,11 @@ class TestHandleChatWithArtifacts:
 
             assert len(outbound_received) == 1
             assert len(outbound_received[0].attachments) == 1
-            assert outbound_received[0].attachments[0].actual_path == outputs_dir / "report.md"
+            attachment = outbound_received[0].attachments[0]
+            assert attachment.filename == "report.md"
+            assert attachment.virtual_path == "/mnt/user-data/outputs/report.md"
+            assert not attachment.actual_path.exists()
+            assert (outputs_dir / "report.md").read_text(encoding="utf-8") == "owner report"
 
         _run(go())
 
@@ -4441,6 +4627,178 @@ class TestChannelService:
             assert results == [True, True]
             assert start_calls == ["telegram"]
             await service.stop()
+
+        _run(go())
+
+    def test_remove_channel_serializes_with_inflight_readiness(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            service._running = True
+            start_entered = asyncio.Event()
+            release_start = asyncio.Event()
+            instances = []
+
+            class SlowChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__("telegram", bus, config)
+                    instances.append(self)
+
+                async def start(self):
+                    start_entered.set()
+                    await release_start.wait()
+                    self._running = True
+
+                async def stop(self):
+                    self._running = False
+
+                async def send(self, msg):
+                    pass
+
+            with patch("deerflow.reflection.resolve_class", return_value=SlowChannel):
+                ensure_task = asyncio.create_task(service.ensure_channel_ready("telegram"))
+                await start_entered.wait()
+                remove_task = asyncio.create_task(service.remove_channel("telegram"))
+                await asyncio.sleep(0)
+                release_start.set()
+                ensured, removed = await asyncio.gather(ensure_task, remove_task)
+
+            assert ensured is True
+            assert removed is True
+            assert "telegram" not in service._config
+            assert "telegram" not in service._channels
+            assert instances[0].is_running is False
+
+        _run(go())
+
+    def test_inflight_remove_rejects_stale_readiness_config(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            service._running = True
+            stop_entered = asyncio.Event()
+            release_stop = asyncio.Event()
+            channel = SimpleNamespace(is_running=True)
+
+            async def stop():
+                stop_entered.set()
+                await release_stop.wait()
+                channel.is_running = False
+
+            channel.stop = stop
+            service._channels["telegram"] = channel
+            service._start_channel = AsyncMock(return_value=True)
+
+            remove_task = asyncio.create_task(service.remove_channel("telegram"))
+            await stop_entered.wait()
+            ensure_task = asyncio.create_task(
+                service.ensure_channel_ready(
+                    "telegram",
+                    {"enabled": True, "bot_token": "stale-token"},
+                )
+            )
+            await asyncio.sleep(0)
+            release_stop.set()
+            removed, ensured = await asyncio.gather(remove_task, ensure_task)
+
+            assert removed is True
+            assert ensured is False
+            assert "telegram" not in service._config
+            assert "telegram" not in service._channels
+            service._start_channel.assert_not_awaited()
+
+        _run(go())
+
+    def test_remove_channel_preserves_worker_when_stop_fails(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            config = {"enabled": True, "bot_token": "tg-token"}
+            service = ChannelService(channels_config={"telegram": config})
+            channel = SimpleNamespace(
+                is_running=True,
+                stop=AsyncMock(side_effect=RuntimeError("still alive")),
+            )
+            service._channels["telegram"] = channel
+
+            assert await service.remove_channel("telegram") is False
+            assert service._config["telegram"] == config
+            assert service._channels["telegram"] is channel
+
+        _run(go())
+
+    def test_service_stop_serializes_with_inflight_readiness(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            service._running = True
+            service.manager.stop = AsyncMock()
+            start_entered = asyncio.Event()
+            release_start = asyncio.Event()
+            instances = []
+
+            class SlowChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__("telegram", bus, config)
+                    instances.append(self)
+
+                async def start(self):
+                    start_entered.set()
+                    await release_start.wait()
+                    self._running = True
+
+                async def stop(self):
+                    self._running = False
+
+                async def send(self, msg):
+                    pass
+
+            with patch("deerflow.reflection.resolve_class", return_value=SlowChannel):
+                ensure_task = asyncio.create_task(service.ensure_channel_ready("telegram"))
+                await start_entered.wait()
+                stop_task = asyncio.create_task(service.stop())
+                await asyncio.sleep(0)
+                release_start.set()
+                await asyncio.gather(ensure_task, stop_task)
+
+            assert instances[0].is_running is False
+            assert "telegram" not in service._channels
+            assert service._running is False
+
+        _run(go())
+
+    def test_service_stop_preserves_worker_when_channel_stop_fails(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={})
+            service._running = True
+            service.manager.stop = AsyncMock()
+            channel = SimpleNamespace(
+                is_running=True,
+                stop=AsyncMock(side_effect=RuntimeError("still alive")),
+            )
+            service._channels["telegram"] = channel
+
+            await service.stop()
+
+            assert service._channels["telegram"] is channel
+            assert service._running is False
 
         _run(go())
 

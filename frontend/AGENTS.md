@@ -11,7 +11,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 ### Core dependencies
 
 - **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
+- **LangChain Core** (`@langchain/core` ^1.2.2) — Fundamental AI building blocks
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
@@ -77,8 +77,33 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Interaction Ownership
 
+- Runtime ownership uses three separate identities: route/UI `ViewScope`, live
+  `ExecutionOwner` (`runtimeKey`/`runtimeOwnerId`/thread/run), and persisted
+  `RecordIdentity` (thread/run/optional round). Do not collapse them into one
+  universal owner or add a second global runtime store beside LangGraph state
+  and TanStack Query.
+- Keep thread orchestration in `core/threads/hooks.ts`; put reusable pure logic
+  in `message-history.ts`, `run-recovery.ts`, `task-events.ts`,
+  `effect-policy.ts`, and `command-room-read-model.ts`. Preserve LangGraph SSE
+  wire compatibility and normalize/project only at the frontend boundary.
+- Artifact UI state belongs to the mounted chat subtree. The prompt-input
+  controller stays workspace-scoped because page-level chat-mode hooks consume
+  it, while its active scope lives in React context and is keyed by Composer.
+  A background owner may update its own caches/activity, but toast, routing,
+  scroll, panel, and composer effects must pass the visible-view policy.
+- Build thread/run/snapshot/artifact/upload cache keys through
+  `core/threads/query-keys.ts`; thread deletion must remove every matching
+  thread-scoped key and reject late callbacks via the existing tombstone path.
+- Command Room UI projects authoritative Gateway `runs`/`rounds`/`task_lanes`.
+  Legacy records without `round_id` are compatibility-only and must not
+  overwrite strong thread/run/round state or implement governance decisions in
+  frontend code.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- The composer model picker keeps `context.model_name` as the persisted value
+  and groups `/api/models` entries by their public `provider` display label.
+- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission;
+  upload responses with `success: false` or any `skipped_files` must abort the
+  message submit instead of silently dropping attachments.
 - Thread hooks must only render live stream state/history when the source thread
   id matches the visible thread id; switching chats must not display stale
   messages from the previous stream target.
@@ -116,6 +141,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Per-run pagination should still fetch one run-message page at a time; do not
   recursively drain every `has_more` page while switching chats or scrolling
   history.
+- Run-list history pagination should request one older 100-run page through the
+  Gateway `before` cursor only after known runs are exhausted. Ignore stale
+  page results after thread or history-generation changes.
 - Explicit run refresh requests that arrive before the run list contains that
   run should stay pending until the run list catches up; do not fall back to
   broad thread polling.
@@ -130,7 +158,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   refreshes can resolve. Do not turn them into task cards or visible chat
   messages.
 - A terminal latest run with no visible AI row, including `success`, should show
-  the non-message terminal notice instead of leaving the chat silently blank.
+  the non-message terminal notice instead of leaving the chat silently blank;
+  suppress terminal/recovery notices once that user turn has a visible assistant
+  answer.
 - Background completion recovery may probe only known `thread_id` + `run_id`
   pairs that the current frontend session started or resumed; do not add broad
   thread-list polling to compensate for missing run lifecycle events.
@@ -151,11 +181,15 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   from disconnected streams.
 - Thread list and auth refreshes should also avoid interval or focus polling;
   prefer explicit user actions, route changes, or recovery probes.
-- Generic API fetch helpers should throw on 401 instead of performing global
-  browser redirects; route guards and AuthProvider own login navigation.
+- Browser auth URLs must honor `getBackendBaseURL()`, and the LangGraph SDK must
+  use the authenticated fetcher so ordinary/SSE requests include credentials.
+  Generic API fetch helpers should throw and dispatch the shared unauthorized
+  event on 401; route guards and AuthProvider own login navigation.
 - Optional background UI requests must not swallow 401 as ordinary empty data;
   use the fetcher's `UnauthorizedError`/`isUnauthorizedError()` path and let
   AuthProvider or the query caller refresh user state.
+- Artifact skill-install actions must use `canManageSkills` for both visibility
+  and handler authorization; only non-static administrators may invoke them.
 - Queued follow-up messages while a stream is active are thread-local UI state
   owned by the per-thread runtime slot. They may survive chat-thread switches,
   but they may only auto-release through the queued message's owning thread

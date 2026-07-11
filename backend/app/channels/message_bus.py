@@ -89,6 +89,18 @@ class ResolvedAttachment:
     mime_type: str
     size: int
     is_image: bool
+    _cleanup_path: Path | None = field(default=None, repr=False, compare=False)
+
+    def cleanup(self) -> None:
+        """Remove an owned delivery snapshot without touching source files."""
+        path = self._cleanup_path
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+            self._cleanup_path = None
+        except OSError:
+            logger.warning("Failed to clean outbound attachment snapshot: %s", path, exc_info=True)
 
 
 @dataclass
@@ -122,6 +134,10 @@ class OutboundMessage:
     owner_user_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+
+    def cleanup_attachments(self) -> None:
+        for attachment in self.attachments:
+            attachment.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +199,11 @@ class MessageBus:
             len(self._outbound_listeners),
             len(msg.text),
         )
-        for callback in self._outbound_listeners:
-            try:
-                await callback(msg)
-            except Exception:
-                logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+        try:
+            for callback in self._outbound_listeners:
+                try:
+                    await callback(msg)
+                except Exception:
+                    logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+        finally:
+            msg.cleanup_attachments()

@@ -37,9 +37,10 @@ already held by a non-DeerFlow process and no override is set, it auto-selects a
 free `6001+` frontend port and renders the local nginx config to match.
 Local and Docker entry points bind the public nginx/Gateway edge to `127.0.0.1`
 by default; use `DEER_FLOW_BIND_HOST=0.0.0.0` or `DEER_FLOW_GATEWAY_HOST` only
-for intentional non-local exposure. Docker nginx keeps `/docs`, `/redoc`,
-`/openapi.json`, and `/api/sandboxes` closed by default; expose them only with
-`DEER_FLOW_EXPOSE_API_DOCS=true` or `DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+for intentional non-local exposure. Docker nginx keeps `/docs`, `/redoc`, and
+`/openapi.json` closed by default; expose them only with
+`DEER_FLOW_EXPOSE_API_DOCS=true`. The sandbox provisioner API is internal-only
+and is never proxied by nginx.
 Production and development Compose files include healthchecks for nginx,
 frontend, Gateway, and provisioner; CI smoke workflows validate Compose config,
 container builds, a minimal Compose runtime `/health` probe, Postgres run-lease
@@ -152,9 +153,9 @@ These apply repo-wide; module guides own the module-specific detail.
   production/customer-visible effects, secrets or customer/payment data, destructive
   cleanup or history/evidence deletion, real provider cost or external side effects,
   deploy/public exposure, changed architecture commitments, or bottom-boundary changes.
-  For serious rounds, keep standing planning, boundary, evidence, and opposition
-  roles separate from the Chair decision so Command Room does not approve its own
-  first draft. These are long-running AI governance roles with persistent
+  For serious high-impact rounds, keep planning, boundary, evidence, and opposition
+  signals separate from the Chair decision so Command Room does not approve its own
+  first draft. These are available long-running AI governance identities with persistent
   memory/state across rounds; concrete model calls may be ephemeral. Program logic
   may host, record, route, persist, enforce permissions, expose fact signals, and
   carry AI-authored handoffs between roles, but must not choose the next role,
@@ -169,7 +170,8 @@ These apply repo-wide; module guides own the module-specific detail.
   `freshness-keeper`, `capability-governor`, `learning-curator`, and
   `conflict-mapper`; Chair/command-room is the return point, not a subagent.
   Risk classes and role activation live in `docs/command-room/run-protocol.md`:
-  small tasks stay small; high-impact tasks require separated Planner, Boundary,
+  small tasks stay small; ordinary local development defaults to one implementation
+  lane plus focused acceptance verification; high-impact tasks require separated Planner, Boundary,
   Evidence, Opposition, Chair, Recorder, and SkillOpt when rules or safety
   workflows changed. The same protocol defines the thin AI-to-AI handoff runtime:
   AI output becomes the next AI input while program logic only preserves the
@@ -198,8 +200,8 @@ These apply repo-wide; module guides own the module-specific detail.
   Role/process/loop/round control lives in `docs/command-room/ai-control-protocol.md`:
   Chair/Command Room is the always-on control surface; role invocations may end
   after one turn; loops are AI judgment loops, not program gates.
-  For DeerFlow architecture, AI-AI, role, loop, governance, quality, boundary,
-  development execution, or durable-rule work, Chair must start with a Chair
+  For high-impact DeerFlow architecture, AI-AI, role, loop, governance, quality,
+  boundary expansion, or durable-rule work, Chair must start with a Chair
   Activation Check: Goal, Boundary, Evidence Standard, Capability Release, Risk
   Class, Dispatch Plan, New Task Startup Branch, Minimum Evidence Action, and
   Default Authorization Boundary.
@@ -233,6 +235,12 @@ These apply repo-wide; module guides own the module-specific detail.
   `PASS`; Weak or Unverified evidence requires `Minimum Evidence Action` or
   `NEEDS_MORE`. Evidence/Opposition `findings.md` claims or objections must
   carry `EvidenceStrength`.
+  Runtime-observed paired tool results, commands, exit codes, paths, diffs, and
+  hashes are execution facts; worker prose remains a claim. Later criticism does
+  not erase earlier observed implementation or verification without stronger
+  conflicting evidence. Stop dispatching once the agreed acceptance evidence is
+  met; do not add review, evidence, opposition, commit, or recorder work merely
+  to complete a process sequence.
   Each round should make the acceptance/evidence standard concrete before execution and
   check action results back against that standard with reproducible evidence.
   Keep `docs/command-room/core-invariants.md` as the anchor for this definition.

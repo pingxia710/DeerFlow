@@ -11,9 +11,13 @@ import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
+  isThreadFinishForVisibleChat,
+  markThreadChatNavigationIntent,
+  pendingNavigationAllowsThreadStart,
   shouldShowWelcomeMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { CommandRoomCapabilities } from "@/components/workspace/command-room-capabilities";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -29,7 +33,11 @@ import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import {
+  migrateThreadModelName,
+  useLocalSettings,
+  useThreadSettings,
+} from "@/core/settings";
 import type { AgentThreadState } from "@/core/threads";
 import {
   type ThreadStreamFinishMeta,
@@ -82,7 +90,8 @@ export default function AgentChatPage() {
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const [settings, setSettings] = useThreadSettings(threadId);
+  const runtimeScope = `agent:${agent_name}` as const;
+  const [settings, setSettings] = useThreadSettings(runtimeScope, threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
@@ -114,7 +123,7 @@ export default function AgentChatPage() {
             mode: "ultra" as const,
             model_name:
               settings.context.model_name ?? COMMAND_ROOM_DEFAULT_MODEL,
-            reasoning_effort: settings.context.reasoning_effort ?? "xhigh",
+            reasoning_effort: settings.context.reasoning_effort ?? "max",
           }
         : {}),
     }),
@@ -122,7 +131,6 @@ export default function AgentChatPage() {
   );
 
   const runtimeKey = getAgentChatRuntimeKey(agent_name, threadId, isNewThread);
-  const runtimeScope = `agent:${agent_name}`;
 
   const runtimeRegistration = useMemo(
     () => ({
@@ -141,13 +149,16 @@ export default function AgentChatPage() {
         const visibleThreadId = visibleThreadIdRef.current;
         const currentPathname = window.location.pathname;
         const streamStillOwnsVisibleChat =
-          visibleThreadId === createdThreadId ||
-          (pendingThreadId !== null &&
-            visibleThreadId === pendingThreadId &&
-            currentPathname.endsWith("/new"));
+          pendingNavigationAllowsThreadStart(createdThreadId) &&
+          (visibleThreadId === createdThreadId ||
+            (pendingThreadId !== null &&
+              visibleThreadId === pendingThreadId &&
+              currentPathname.endsWith("/new")));
         if (!streamStillOwnsVisibleChat) {
           return;
         }
+        migrateThreadModelName(runtimeScope, visibleThreadId, createdThreadId);
+        visibleThreadIdRef.current = createdThreadId;
         pendingStartThreadIdRef.current = null;
         // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
         history.replaceState(
@@ -161,7 +172,13 @@ export default function AgentChatPage() {
       onFinish: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => {
         // Finish side effects are scoped to the visible chat; background thread
         // completion should not rewrite the current chat UI or notification text.
-        if (meta.threadId !== visibleThreadIdRef.current) {
+        if (
+          !isThreadFinishForVisibleChat({
+            finishThreadId: meta.threadId,
+            visibleThreadId: visibleThreadIdRef.current,
+            committedPathname: window.location.pathname,
+          })
+        ) {
           return;
         }
         if (document.hidden || !document.hasFocus()) {
@@ -247,11 +264,7 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      const sendPromise = sendMessage(threadId, message);
-      if (message.files.length > 0) {
-        return sendPromise;
-      }
-      void sendPromise;
+      return sendMessage(threadId, message);
     },
     [sendMessage, threadId],
   );
@@ -298,6 +311,15 @@ export default function AgentChatPage() {
               />
             </div>
             <div className="flex shrink-0 items-center sm:mr-4">
+              {isCommandRoom && (
+                <CommandRoomCapabilities
+                  threadId={isNewThread ? undefined : threadId}
+                  modelName={threadContext.model_name}
+                  enabled={
+                    !isMock && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true"
+                  }
+                />
+              )}
               <Tooltip content={t.agents.newChat}>
                 <Button
                   className="px-2 sm:px-3"
@@ -305,6 +327,7 @@ export default function AgentChatPage() {
                   variant="secondary"
                   onClick={() => {
                     const nextPath = `/workspace/agents/${agent_name}/chats/new`;
+                    markThreadChatNavigationIntent(nextPath);
                     resetThreadRuntimeSlot(runtimeKey);
                     resetToNewThread();
                     router.push(nextPath);

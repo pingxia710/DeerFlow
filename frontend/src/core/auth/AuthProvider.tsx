@@ -7,10 +7,16 @@ import {
   useState,
   useCallback,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
 
-import { fetch as fetcher, isUnauthorizedError } from "../api/fetcher";
+import {
+  fetch as fetcher,
+  isUnauthorizedError,
+  UNAUTHORIZED_EVENT,
+} from "../api/fetcher";
+import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { type User, buildLoginUrl } from "./types";
@@ -32,18 +38,21 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-function clearStreamReconnectKeys(
-  storage: Storage | undefined = typeof window !== "undefined"
-    ? window.sessionStorage
-    : undefined,
-): void {
-  if (!storage) return;
-  const keys: string[] = [];
-  for (let i = 0; i < storage.length; i += 1) {
-    const key = storage.key(i);
-    if (key?.startsWith("lg:stream:")) keys.push(key);
+export function clearStreamReconnectKeys(storage?: Storage): void {
+  try {
+    const target =
+      storage ??
+      (typeof window !== "undefined" ? window.sessionStorage : undefined);
+    if (!target) return;
+    const keys: string[] = [];
+    for (let i = 0; i < target.length; i += 1) {
+      const key = target.key(i);
+      if (key?.startsWith("lg:stream:")) keys.push(key);
+    }
+    for (const key of keys) target.removeItem(key);
+  } catch {
+    // Authentication state changes must not depend on storage availability.
   }
-  for (const key of keys) storage.removeItem(key);
 }
 
 interface AuthProviderProps {
@@ -65,6 +74,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
+  const handlingUnauthorizedRef = useRef(false);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
 
   const isAuthenticated = user !== null;
 
@@ -74,6 +85,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * so consumers don't reach into React internals.
    */
   const applyUser = useCallback((next: User | null) => {
+    if (next) handlingUnauthorizedRef.current = false;
     setUser((prev) => {
       if (prev?.id !== next?.id || prev?.email !== next?.email) {
         clearStreamReconnectKeys();
@@ -82,42 +94,83 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     });
   }, []);
 
+  const handleUnauthorized = useCallback(() => {
+    if (handlingUnauthorizedRef.current) return;
+    handlingUnauthorizedRef.current = true;
+    clearStreamReconnectKeys();
+    setUser(null);
+    if (pathname?.startsWith("/workspace")) {
+      router.push(buildLoginUrl(pathname));
+    }
+  }, [pathname, router]);
+
+  useEffect(() => {
+    window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
+    return () =>
+      window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
+  }, [handleUnauthorized]);
+
   /**
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
   const refreshUser = useCallback(async () => {
     if (staticMode) return;
-
-    try {
-      setIsLoading(true);
-      const res = await fetcher("/api/v1/auth/me");
-
-      if (res.ok) {
-        const data = await res.json();
-        setUser(data);
-      } else if (res.status === 401) {
-        // Session expired or invalid
-        setUser(null);
-        // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
-        }
-      }
-    } catch (err) {
-      if (isUnauthorizedError(err)) {
-        setUser(null);
-        if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
-        }
-        return;
-      }
-      console.error("Failed to refresh user:", err);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
+    if (refreshInFlightRef.current) {
+      await refreshInFlightRef.current;
+      return;
     }
-  }, [staticMode, pathname, router]);
+
+    const request = (async () => {
+      try {
+        setIsLoading(true);
+        const res = await fetcher(`${getBackendBaseURL()}/api/v1/auth/me`);
+
+        if (res.ok) {
+          const data = await res.json();
+          handlingUnauthorizedRef.current = false;
+          applyUser(data);
+        } else if (res.status === 401) {
+          // Session expired or invalid
+          applyUser(null);
+          // Redirect to login if on a protected route
+          if (pathname?.startsWith("/workspace")) {
+            router.push(buildLoginUrl(pathname));
+          }
+        }
+      } catch (err) {
+        if (isUnauthorizedError(err)) {
+          return;
+        }
+        console.error("Failed to refresh user:", err);
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+    refreshInFlightRef.current = request;
+    try {
+      await request;
+    } finally {
+      if (refreshInFlightRef.current === request) {
+        refreshInFlightRef.current = null;
+      }
+    }
+  }, [applyUser, staticMode, pathname, router]);
+
+  useEffect(() => {
+    if (staticMode) return;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUser();
+      }
+    };
+    window.addEventListener("focus", refreshIfVisible);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.removeEventListener("focus", refreshIfVisible);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshUser, staticMode]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state.
@@ -134,7 +187,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     }
 
     try {
-      await fetcher("/api/v1/auth/logout", {
+      await fetcher(`${getBackendBaseURL()}/api/v1/auth/logout`, {
         method: "POST",
       });
     } catch (err) {

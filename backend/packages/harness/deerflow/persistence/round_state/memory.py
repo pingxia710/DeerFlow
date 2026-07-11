@@ -12,7 +12,10 @@ from deerflow.persistence.round_state.sql import (
     MAX_NEXT_ACTION_CHARS,
     ROUND_STATES,
     TERMINAL_ROUND_STATES,
+    _explicit_round_id,
+    _validate_explicit_round,
 )
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 
 def _now_iso() -> str:
@@ -156,16 +159,28 @@ class MemoryRoundStateStore:
     ) -> dict[str, Any]:
         metadata = metadata or {}
         latest = self._latest_round(thread_id, user_id)
-        explicit_round_id = metadata.get("round_id")
-        row = self.rounds.get(str(explicit_round_id)) if explicit_round_id else None
-        accepted_next_action = latest.get("next_action") if latest and latest["state"] in TERMINAL_ROUND_STATES else None
-        if row is None and latest is not None and latest["state"] not in TERMINAL_ROUND_STATES:
+        explicit_round_id = _explicit_round_id(metadata)
+        row = self.rounds.get(explicit_round_id) if explicit_round_id else None
+        if explicit_round_id is not None:
+            _validate_explicit_round(
+                round_id=explicit_round_id,
+                row_thread_id=row.get("thread_id") if row is not None else None,
+                row_user_id=row.get("user_id") if row is not None else None,
+                row_state=row.get("state") if row is not None else None,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+        accepted_next_action = None
+        if explicit_round_id is None and row is None and latest is not None and latest["state"] not in TERMINAL_ROUND_STATES:
             row = latest
+        previous_run_id = row.get("current_run_id") if row is not None else None
+        previous_intent = row.get("current_intent") if row is not None else None
+        previous_updated_at = row.get("updated_at") if row is not None else None
         created = False
         if row is None:
             now = _now_iso()
             row = {
-                "round_id": str(explicit_round_id or uuid.uuid4()),
+                "round_id": str(uuid.uuid4()),
                 "thread_id": thread_id,
                 "user_id": user_id,
                 "parent_round_id": latest.get("round_id") if latest else None,
@@ -173,7 +188,7 @@ class MemoryRoundStateStore:
                 "source_goal_run_id": run_id,
                 "current_intent": _clip(current_intent, MAX_INTENT_CHARS),
                 "state": "open",
-                "next_action": accepted_next_action,
+                "next_action": None,
                 "created_at": now,
                 "updated_at": now,
                 "closed_at": None,
@@ -186,8 +201,81 @@ class MemoryRoundStateStore:
         if current_intent:
             row["current_intent"] = _clip(current_intent, MAX_INTENT_CHARS)
             self._append_event(row["round_id"], thread_id=thread_id, run_id=run_id, user_id=user_id, event_type="user.input", content={"current_intent": row["current_intent"]})
-        self._append_event(row["round_id"], thread_id=thread_id, run_id=run_id, user_id=user_id, event_type="run.attached", content={"created_round": created})
+        self._append_event(
+            row["round_id"],
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user_id,
+            event_type="run.attached",
+            content={
+                "created_round": created,
+                "previous_run_id": previous_run_id,
+                "previous_intent": previous_intent,
+                "previous_updated_at": previous_updated_at,
+            },
+        )
         return {**row, "accepted_next_action": accepted_next_action}
+
+    async def rollback_run_binding(self, run_id: str) -> bool:
+        attachment = next(
+            (event for events in self.events.values() for event in reversed(events) if event.get("run_id") == run_id and event.get("event_type") == "run.attached"),
+            None,
+        )
+        if attachment is None:
+            return False
+        round_id = attachment["round_id"]
+        row = self.rounds.get(round_id)
+        if row is None or row.get("current_run_id") != run_id:
+            return False
+        content = attachment.get("content") or {}
+        if content.get("created_round") is True:
+            self.rounds.pop(round_id, None)
+            self.events.pop(round_id, None)
+            for key, lane in list(self.task_lanes.items()):
+                if lane.get("round_id") == round_id:
+                    self.task_lanes.pop(key, None)
+            return True
+        row["current_run_id"] = content.get("previous_run_id")
+        row["current_intent"] = content.get("previous_intent")
+        row["updated_at"] = content.get("previous_updated_at") or _now_iso()
+        self.events[round_id] = [event for event in self.events.get(round_id, []) if event.get("run_id") != run_id]
+        for key, lane in list(self.task_lanes.items()):
+            if lane.get("round_id") == round_id and lane.get("run_id") == run_id:
+                self.task_lanes.pop(key, None)
+        return True
+
+    async def delete_by_thread(self, thread_id: str, *, user_id: str | None = None) -> None:
+        round_ids = {round_id for round_id, row in self.rounds.items() if row.get("thread_id") == thread_id and row.get("user_id") == user_id}
+        for key, lane in list(self.task_lanes.items()):
+            if lane.get("thread_id") == thread_id and lane.get("user_id") == user_id:
+                self.task_lanes.pop(key, None)
+        for round_id in round_ids:
+            self.events.pop(round_id, None)
+            self.rounds.pop(round_id, None)
+
+    async def delete_legacy_by_thread(self, thread_id: str) -> None:
+        await self.delete_by_thread(thread_id, user_id=None)
+
+    async def claim_legacy_by_thread(
+        self,
+        thread_id: str,
+        owner_user_id: str,
+    ) -> int:
+        round_ids = {round_id for round_id, row in self.rounds.items() if row.get("thread_id") == thread_id and row.get("user_id") in {None, DEFAULT_USER_ID}}
+        for round_id in round_ids:
+            self.rounds[round_id]["user_id"] = owner_user_id
+            for event in self.events.get(round_id, []):
+                event["user_id"] = owner_user_id
+        for lane in self.task_lanes.values():
+            if lane.get("round_id") in round_ids:
+                lane["user_id"] = owner_user_id
+        return len(round_ids)
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        owners = {row.get("user_id") for row in self.rounds.values() if row.get("thread_id") == thread_id}
+        owners.update(event.get("user_id") for events in self.events.values() for event in events if event.get("thread_id") == thread_id)
+        owners.update(lane.get("user_id") for lane in self.task_lanes.values() if lane.get("thread_id") == thread_id)
+        return owners
 
     async def set_run_state(
         self,
@@ -202,14 +290,43 @@ class MemoryRoundStateStore:
         if row is None:
             return None
         previous = row["state"]
+        if previous == state:
+            return {**row, **self._round_refs(row["round_id"])}
         _assert_allowed_transition(previous, state)
         row["state"] = state
         row["updated_at"] = _now_iso()
         if state in TERMINAL_ROUND_STATES and row.get("closed_at") is None:
             row["closed_at"] = row["updated_at"]
-        if next_action:
+        if state == "closed" and next_action is None:
+            row["next_action"] = None
+        elif next_action:
             row["next_action"] = _clip(next_action, MAX_NEXT_ACTION_CHARS)
         self._append_event(row["round_id"], thread_id=row["thread_id"], run_id=run_id, user_id=row.get("user_id"), event_type=event_type, content={**(content or {}), "from_state": previous, "to_state": state})
+        return {**row, **self._round_refs(row["round_id"])}
+
+    async def rollback_terminal_projection(
+        self,
+        run_id: str,
+        *,
+        expected_state: str,
+        restore_state: str,
+    ) -> dict[str, Any] | None:
+        row = next((item for item in self.rounds.values() if item.get("current_run_id") == run_id), None)
+        if row is None or row.get("state") != expected_state:
+            return None
+        if restore_state not in ROUND_STATES - TERMINAL_ROUND_STATES:
+            raise ValueError(f"Invalid round rollback state: {restore_state}")
+        row["state"] = restore_state
+        row["closed_at"] = None
+        row["updated_at"] = _now_iso()
+        self._append_event(
+            row["round_id"],
+            thread_id=row["thread_id"],
+            run_id=run_id,
+            user_id=row.get("user_id"),
+            event_type="run.status_commit_failed",
+            content={"from_state": expected_state, "to_state": restore_state},
+        )
         return {**row, **self._round_refs(row["round_id"])}
 
     async def record_task_events(self, events: list[dict[str, Any]]) -> None:
@@ -235,6 +352,14 @@ class MemoryRoundStateStore:
             )
             lane["status"] = str(event.get("status") or lane.get("status") or "in_progress")
             lane["role"] = event.get("subagent_type") or lane.get("role")
+            lane["subagent_type"] = lane.get("role")
+            lane["description"] = _clip(event.get("description"), 1000) or lane.get("description")
+            lane["result"] = _clip(event.get("result_preview"), 4000) or lane.get("result")
+            lane["started_at"] = event.get("started_at") or lane.get("started_at")
+            lane["finished_at"] = event.get("finished_at") or event.get("completed_at") or lane.get("finished_at")
+            duration_ms = event.get("duration_ms")
+            if isinstance(duration_ms, int) and duration_ms >= 0:
+                lane["duration_ms"] = duration_ms
             ref_lists = _task_ref_lists(event)
             lane["result_ref"] = _task_result_ref(event) or (ref_lists["output_refs"][0] if ref_lists["output_refs"] else None) or lane.get("result_ref")
             lane["evidence_ref"] = _task_evidence_ref(event) or (", ".join(ref_lists["evidence_refs"]) if ref_lists["evidence_refs"] else None) or lane.get("evidence_ref")
@@ -254,6 +379,11 @@ class MemoryRoundStateStore:
                 content={
                     "status": lane["status"],
                     "role": lane.get("role"),
+                    "description": lane.get("description"),
+                    "result": lane.get("result"),
+                    "started_at": lane.get("started_at"),
+                    "finished_at": lane.get("finished_at"),
+                    "duration_ms": lane.get("duration_ms"),
                     "result_ref": lane.get("result_ref"),
                     "evidence_ref": lane.get("evidence_ref"),
                     "evidence_refs": lane.get("evidence_refs") or [],

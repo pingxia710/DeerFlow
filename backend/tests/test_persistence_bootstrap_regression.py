@@ -31,7 +31,7 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.run import RunRepository
 
 pytestmark = pytest.mark.asyncio
-HEAD = "0008_task_lane_ref_lists"
+HEAD = "0009_task_lane_display_metadata"
 
 
 def _seed_pre_3658_database(db_path: Path) -> None:

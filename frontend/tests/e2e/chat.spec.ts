@@ -25,6 +25,69 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("Hello, DeerFlow!");
   });
 
+  test("groups model selection by provider before model", async ({ page }) => {
+    mockLangGraphAPI(page, {
+      models: [
+        {
+          id: "gpt-5-6",
+          name: "gpt-5.6",
+          provider: "Codex CLI",
+          model: "gpt-5.6",
+          display_name: "GPT-5.6",
+          supports_thinking: true,
+          supports_reasoning_effort: true,
+        },
+        {
+          id: "gpt-5",
+          name: "gpt-5",
+          provider: "OpenAI",
+          model: "gpt-5",
+          display_name: "GPT-5",
+          supports_thinking: true,
+        },
+      ],
+    });
+    await page.goto("/workspace/chats/new");
+
+    await page.getByRole("button", { name: /5\.6/i }).click();
+    await expect(
+      page.getByRole("menuitem", { name: /Codex CLI/i }),
+    ).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: /OpenAI/i })).toBeVisible();
+
+    await page.getByRole("menuitem", { name: /OpenAI/i }).hover();
+    await page.getByRole("menuitem", { name: /5\s+gpt-5/i }).click();
+
+    await expect(page.getByRole("button", { name: /^5$/i })).toBeVisible();
+  });
+
+  test("groups response controls before their options", async ({ page }) => {
+    await page.goto("/workspace/chats/new");
+
+    await page.getByRole("button", { name: /mock model/i }).click();
+    await expect(
+      page.getByRole("menuitem", { name: /Reasoning Effort/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: /Thinking Summary/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: /Answer Detail/i }),
+    ).toBeVisible();
+
+    await page.getByRole("menuitem", { name: /Reasoning Effort/i }).hover();
+    await page.getByRole("menuitem", { name: /High \(high\)/i }).click();
+    await expect(page.getByRole("button", { name: /high/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /high/i }).click();
+    await page.getByRole("menuitem", { name: /Thinking Summary/i }).hover();
+    await page.getByRole("menuitem", { name: /Concise/i }).click();
+
+    await page.getByRole("button", { name: /high/i }).click();
+    await page.getByRole("menuitem", { name: /Answer Detail/i }).hover();
+    await page.getByRole("menuitem", { name: /More explanation/i }).click();
+  });
+
   test("suggests matching skills after a leading slash", async ({ page }) => {
     await page.goto("/workspace/chats/new");
 
@@ -275,6 +338,7 @@ test.describe("Chat workspace", () => {
         body: JSON.stringify({
           success: true,
           message: "Uploaded",
+          skipped_files: [],
           files: [
             {
               filename: "report.docx",
@@ -379,6 +443,7 @@ test.describe("Chat workspace", () => {
         body: JSON.stringify({
           success: true,
           message: "Uploaded",
+          skipped_files: [],
           files: [
             {
               filename: "report.docx",

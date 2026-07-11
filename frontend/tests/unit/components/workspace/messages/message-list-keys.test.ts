@@ -2,11 +2,14 @@ import { expect, test } from "@rstest/core";
 
 import {
   getActiveTurnSubtaskScope,
+  findMatchingTerminalSubtaskForTask,
   getMessageGroupKey,
   getSubtaskCardKey,
+  hasMatchingTerminalSubtaskForTask,
   hasTerminalSubtaskForTask,
   isInferredRunningSubtaskVisible,
   isRuntimeOnlySubtaskForActiveTurn,
+  shouldKeepInferredSubtask,
 } from "@/components/workspace/messages/message-list";
 
 type TestMessageGroup = Parameters<typeof getActiveTurnSubtaskScope>[0];
@@ -101,6 +104,86 @@ test("terminal task does not suppress same-run or different-round cards", () => 
       runId: "run-2",
       taskId: "task-1",
       roundId: "round-2",
+    }),
+  ).toBe(false);
+});
+
+test("matching terminal lane keeps its historical task card renderable", () => {
+  const terminal = {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+    status: "completed" as const,
+    subagent_type: "test",
+    description: "done",
+    prompt: "do it",
+  };
+
+  expect(
+    hasMatchingTerminalSubtaskForTask([terminal], {
+      threadId: "thread-1",
+      runId: "run-1",
+      taskId: "task-1",
+      roundId: "round-1",
+    }),
+  ).toBe(true);
+  expect(
+    hasMatchingTerminalSubtaskForTask([terminal], {
+      threadId: "thread-1",
+      runId: "run-2",
+      taskId: "task-1",
+      roundId: "round-1",
+    }),
+  ).toBe(false);
+});
+
+test("missing historical roundId resolves one matching terminal lane without guessing", () => {
+  const terminal = {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+    status: "completed" as const,
+    subagent_type: "evidence",
+    description: "Evidence complete",
+    prompt: "Collect evidence",
+  };
+
+  expect(
+    findMatchingTerminalSubtaskForTask([terminal], {
+      threadId: "thread-1",
+      runId: "run-1",
+      taskId: "task-1",
+    }),
+  ).toEqual(terminal);
+  expect(
+    findMatchingTerminalSubtaskForTask(
+      [terminal, { ...terminal, roundId: "round-2" }],
+      {
+        threadId: "thread-1",
+        runId: "run-1",
+        taskId: "task-1",
+      },
+    ),
+  ).toBeUndefined();
+});
+
+test("inferred task policy keeps matching terminal metadata updates and drops stale replays", () => {
+  expect(
+    shouldKeepInferredSubtask({
+      status: "in_progress",
+      hasMatchingTerminal: true,
+      hasTerminalInOtherRun: false,
+      isVisibleRunning: false,
+    }),
+  ).toBe(true);
+  expect(
+    shouldKeepInferredSubtask({
+      status: "in_progress",
+      hasMatchingTerminal: false,
+      hasTerminalInOtherRun: true,
+      isVisibleRunning: true,
     }),
   ).toBe(false);
 });

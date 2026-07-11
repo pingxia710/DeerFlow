@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { expect, test } from "@rstest/core";
 
 import { getAgentChatRuntimeKey } from "@/app/workspace/agents/[agent_name]/chats/[thread_id]/page";
@@ -15,4 +18,17 @@ test("saved agent chat runtime key is scoped by agent route owner", () => {
   expect(
     getAgentChatRuntimeKey("researcher", "backend-thread-123", false),
   ).toBe("agent-chat:researcher:backend-thread-123");
+});
+
+test("agent chat returns the send promise so a failed submit keeps the draft", () => {
+  const source = readFileSync(
+    resolve(
+      process.cwd(),
+      "src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx",
+    ),
+    "utf-8",
+  );
+
+  expect(source).not.toContain("void sendPromise");
+  expect(source).toContain("return sendMessage(threadId, message);");
 });

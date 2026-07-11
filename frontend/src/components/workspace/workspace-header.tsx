@@ -11,7 +11,10 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { resetThreadChatToNew } from "@/components/workspace/chats/use-thread-chat";
+import {
+  markThreadChatNavigationIntent,
+  resetThreadChatToNew,
+} from "@/components/workspace/chats/use-thread-chat";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -59,7 +62,8 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             <Link
               className="text-muted-foreground"
               href="/workspace/chats/new"
-              onClick={() => {
+              onNavigate={() => {
+                markThreadChatNavigationIntent("/workspace/chats/new");
                 resetThreadChatToNew("/workspace/chats/new");
               }}
             >

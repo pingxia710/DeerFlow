@@ -3,6 +3,7 @@
 import { SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -22,16 +23,21 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
+import { canManageSkills } from "./skill-settings-state";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { skills, isLoading, error } = useSkills();
+  const isStaticWebsite = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const canManage = canManageSkills(user?.system_role, isStaticWebsite);
   return (
     <SettingsSection
       title={t.settings.skills.title}
@@ -42,7 +48,12 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
-        <SkillSettingsList skills={skills} onClose={onClose} />
+        <SkillSettingsList
+          skills={skills}
+          onClose={onClose}
+          canManage={canManage}
+          showAdminRequired={!isStaticWebsite && user?.system_role !== "admin"}
+        />
       )}
     </SettingsSection>
   );
@@ -51,14 +62,18 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
 function SkillSettingsList({
   skills,
   onClose,
+  canManage,
+  showAdminRequired,
 }: {
   skills: Skill[];
   onClose?: () => void;
+  canManage: boolean;
+  showAdminRequired: boolean;
 }) {
   const { t } = useI18n();
   const router = useRouter();
   const [filter, setFilter] = useState<string>("public");
-  const { mutate: enableSkill } = useEnableSkill();
+  const { mutate: enableSkill, isPending } = useEnableSkill();
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
@@ -69,6 +84,11 @@ function SkillSettingsList({
   };
   return (
     <div className="flex w-full flex-col gap-4">
+      {showAdminRequired && (
+        <div className="text-muted-foreground text-sm">
+          {t.settings.skills.adminRequired}
+        </div>
+      )}
       <header className="flex justify-between">
         <div className="flex gap-2">
           <Tabs defaultValue="public" onValueChange={setFilter}>
@@ -79,14 +99,14 @@ function SkillSettingsList({
           </Tabs>
         </div>
         <div>
-          <Button size="sm" onClick={handleCreateSkill}>
+          <Button size="sm" disabled={!canManage} onClick={handleCreateSkill}>
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}
           </Button>
         </div>
       </header>
       {filteredSkills.length === 0 && (
-        <EmptySkill onCreateSkill={handleCreateSkill} />
+        <EmptySkill canManage={canManage} onCreateSkill={handleCreateSkill} />
       )}
       {filteredSkills.length > 0 &&
         filteredSkills.map((skill) => (
@@ -102,9 +122,21 @@ function SkillSettingsList({
             <ItemActions>
               <Switch
                 checked={skill.enabled}
-                disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                disabled={!canManage || isPending}
+                aria-label={skill.name}
                 onCheckedChange={(checked) =>
-                  enableSkill({ skillName: skill.name, enabled: checked })
+                  enableSkill(
+                    { skillName: skill.name, enabled: checked },
+                    {
+                      onError: (error) => {
+                        toast.error(
+                          error instanceof Error
+                            ? error.message
+                            : "Failed to update skill",
+                        );
+                      },
+                    },
+                  )
                 }
               />
             </ItemActions>
@@ -114,7 +146,13 @@ function SkillSettingsList({
   );
 }
 
-function EmptySkill({ onCreateSkill }: { onCreateSkill: () => void }) {
+function EmptySkill({
+  canManage,
+  onCreateSkill,
+}: {
+  canManage: boolean;
+  onCreateSkill: () => void;
+}) {
   const { t } = useI18n();
   return (
     <Empty>
@@ -128,7 +166,9 @@ function EmptySkill({ onCreateSkill }: { onCreateSkill: () => void }) {
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
-        <Button onClick={onCreateSkill}>{t.settings.skills.emptyButton}</Button>
+        <Button disabled={!canManage} onClick={onCreateSkill}>
+          {t.settings.skills.emptyButton}
+        </Button>
       </EmptyContent>
     </Empty>
   );

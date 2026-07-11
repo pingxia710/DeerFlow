@@ -1,5 +1,6 @@
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 
+import { queryKeys } from "./query-keys";
 import type { AgentThread, AgentThreadState } from "./types";
 
 type ThreadsSearchClient = {
@@ -24,7 +25,7 @@ export function buildThreadsSearchQueryOptions(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
 ) {
   return {
-    queryKey: ["threads", "search", params],
+    queryKey: queryKeys.threads.search(params),
     queryFn: async () => {
       const maxResults = params.limit;
       const initialOffset = params.offset ?? 0;

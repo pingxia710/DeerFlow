@@ -30,6 +30,28 @@ export function shouldClearPromptInputForThreadChange(
   return previousThreadId !== nextThreadId;
 }
 
+export type FailedQueuedMessageDraftAction = "restore" | "acknowledge" | "wait";
+
+export function getFailedQueuedMessageDraftAction({
+  failedThreadId,
+  currentThreadId,
+  failedText,
+  currentText,
+}: {
+  failedThreadId: string;
+  currentThreadId: string;
+  failedText: string;
+  currentText: string;
+}): FailedQueuedMessageDraftAction {
+  if (failedThreadId !== currentThreadId || failedText.length === 0) {
+    return "wait";
+  }
+  if (currentText === failedText) {
+    return "acknowledge";
+  }
+  return currentText.length === 0 ? "restore" : "wait";
+}
+
 export type FollowupSuggestionsErrorAction = "clear" | "refresh-auth";
 
 export function getFollowupSuggestionsErrorAction(

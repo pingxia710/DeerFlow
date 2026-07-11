@@ -66,6 +66,7 @@ import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import type { Model } from "@/core/models/types";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
@@ -84,29 +85,31 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
 import {
   getFollowupSuggestionsErrorAction,
   getPromptInputComposerKey,
-  shouldClearPromptInputForThreadChange,
   shouldApplyPromptInputSubmitContinuation,
 } from "./input-box-state";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import { usePromptInputScope } from "./prompt-input-scope";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 type VisibleReasoningEffort = Extract<
   ReasoningEffort,
-  "medium" | "high" | "xhigh"
+  "medium" | "high" | "xhigh" | "max" | "ultra"
 >;
 
 const MAX_SKILL_SUGGESTIONS = 6;
 const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
   /\[(?:主题|来源|topic|source)\]/i;
-let lastPromptInputThreadId: string | null = null;
 
 function getCompactModelLabel(
   displayName: string | undefined,
@@ -119,6 +122,34 @@ function getCompactModelLabel(
     .trim();
 
   return compact || raw;
+}
+
+function getModelProviderLabel(model: Model, fallbackProviderLabel: string) {
+  const provider = model.provider?.trim();
+  if (provider) {
+    return provider;
+  }
+  if (/^gpt-5\.\d+/u.test(model.model)) {
+    return "Codex CLI";
+  }
+  return fallbackProviderLabel;
+}
+
+function groupModelsByProvider(models: Model[], fallbackProviderLabel: string) {
+  const groups = new Map<string, Model[]>();
+  for (const model of models) {
+    const provider = getModelProviderLabel(model, fallbackProviderLabel);
+    const providerModels = groups.get(provider);
+    if (providerModels) {
+      providerModels.push(model);
+    } else {
+      groups.set(provider, [model]);
+    }
+  }
+  return Array.from(groups, ([provider, providerModels]) => ({
+    provider,
+    models: providerModels,
+  }));
 }
 
 function findSuggestionTemplatePlaceholder(text: string) {
@@ -246,9 +277,6 @@ export function InputBox({
   const { thread, isMock } = useThread();
   const { refreshUser } = useAuth();
   const { textInput } = usePromptInputController();
-  const attachments = usePromptInputAttachments();
-  const clearPromptInput = textInput.clear;
-  const clearAttachments = attachments.clear;
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -258,8 +286,7 @@ export function InputBox({
   );
   const composerKeyRef = useRef(composerKey);
   composerKeyRef.current = composerKey;
-  const previousThreadIdRef = useRef(lastPromptInputThreadId ?? threadId);
-  const previousComposerKeyRef = useRef(composerKey);
+  usePromptInputScope(composerKey);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -324,12 +351,18 @@ export function InputBox({
   const visibleReasoningEffort: VisibleReasoningEffort =
     context.reasoning_effort === "medium" ||
     context.reasoning_effort === "high" ||
-    context.reasoning_effort === "xhigh"
+    context.reasoning_effort === "xhigh" ||
+    context.reasoning_effort === "max" ||
+    context.reasoning_effort === "ultra"
       ? context.reasoning_effort
       : "xhigh";
   const compactModelLabel = getCompactModelLabel(
     selectedModel?.display_name,
     selectedModel?.model ?? selectedModel?.name,
+  );
+  const modelProviderGroups = useMemo(
+    () => groupModelsByProvider(models, t.inputBox.model),
+    [models, t.inputBox.model],
   );
 
   const promptHistory = useMemo(() => {
@@ -364,19 +397,7 @@ export function InputBox({
     setFollowupsHidden(false);
     setFollowupsLoading(false);
     setPendingSuggestion(null);
-    const shouldClear =
-      shouldClearPromptInputForThreadChange(
-        previousThreadIdRef.current,
-        threadId,
-      ) || previousComposerKeyRef.current !== composerKey;
-    if (shouldClear) {
-      previousThreadIdRef.current = threadId;
-      previousComposerKeyRef.current = composerKey;
-      clearPromptInput();
-      clearAttachments();
-    }
-    lastPromptInputThreadId = threadId;
-  }, [clearAttachments, clearPromptInput, composerKey, threadId]);
+  }, [composerKey]);
 
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
@@ -472,6 +493,18 @@ export function InputBox({
       compactLabel: t.inputBox.reasoningEffortProShort,
       description: t.inputBox.reasoningEffortProDescription,
     },
+    {
+      value: "max",
+      label: t.inputBox.reasoningEffortMax,
+      compactLabel: t.inputBox.reasoningEffortMaxShort,
+      description: t.inputBox.reasoningEffortMaxDescription,
+    },
+    {
+      value: "ultra",
+      label: t.inputBox.reasoningEffortUltra,
+      compactLabel: t.inputBox.reasoningEffortUltraShort,
+      description: t.inputBox.reasoningEffortUltraDescription,
+    },
   ];
   const compactReasoningEffortLabel =
     reasoningEffortOptions.find(
@@ -519,6 +552,13 @@ export function InputBox({
       description: t.inputBox.textVerbosityHighDescription,
     },
   ];
+  const reasoningSummaryLabel =
+    reasoningSummaryOptions.find(
+      (option) => option.value === reasoningSummaryValue,
+    )?.label ?? t.inputBox.reasoningSummaryDetailed;
+  const textVerbosityLabel =
+    textVerbosityOptions.find((option) => option.value === textVerbosityValue)
+      ?.label ?? t.inputBox.textVerbosityMedium;
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => {
@@ -1261,36 +1301,46 @@ export function InputBox({
               <PromptInputActionMenuContent align="end" className="w-80">
                 {supportReasoningEffort && (
                   <>
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel className="text-muted-foreground text-xs">
-                        {t.inputBox.reasoningEffort}
-                      </DropdownMenuLabel>
-                      {reasoningEffortOptions.map((option) => (
-                        <PromptInputActionMenuItem
-                          key={option.value}
-                          className={cn(
-                            visibleReasoningEffort === option.value
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() =>
-                            handleReasoningEffortSelect(option.value)
-                          }
-                        >
-                          <div className="flex min-w-0 flex-1 flex-col gap-1">
-                            <div className="font-bold">{option.label}</div>
-                            <div className="text-muted-foreground text-xs">
-                              {option.description}
-                            </div>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger className="text-accent-foreground">
+                        <LightbulbIcon className="size-4 shrink-0" />
+                        <div className="flex min-w-0 flex-1 flex-col gap-1">
+                          <div className="truncate font-bold">
+                            {t.inputBox.reasoningEffort}
                           </div>
-                          {visibleReasoningEffort === option.value ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
-                      ))}
-                    </DropdownMenuGroup>
+                          <div className="text-muted-foreground truncate text-xs">
+                            {compactReasoningEffortLabel}
+                          </div>
+                        </div>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="min-w-72">
+                        {reasoningEffortOptions.map((option) => (
+                          <PromptInputActionMenuItem
+                            key={option.value}
+                            className={cn(
+                              visibleReasoningEffort === option.value
+                                ? "text-accent-foreground"
+                                : "text-muted-foreground/65",
+                            )}
+                            onSelect={() =>
+                              handleReasoningEffortSelect(option.value)
+                            }
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col gap-1">
+                              <div className="font-bold">{option.label}</div>
+                              <div className="text-muted-foreground text-xs">
+                                {option.description}
+                              </div>
+                            </div>
+                            {visibleReasoningEffort === option.value ? (
+                              <CheckIcon className="ml-auto size-4" />
+                            ) : (
+                              <div className="ml-auto size-4" />
+                            )}
+                          </PromptInputActionMenuItem>
+                        ))}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
                     <DropdownMenuSeparator />
                   </>
                 )}
@@ -1298,99 +1348,145 @@ export function InputBox({
                   <DropdownMenuLabel className="text-muted-foreground text-xs">
                     {t.inputBox.model}
                   </DropdownMenuLabel>
-                  {models.map((m) => (
-                    <PromptInputActionMenuItem
-                      key={m.name}
-                      className={cn(
-                        m.name === context.model_name
-                          ? "text-accent-foreground"
-                          : "text-muted-foreground/65",
-                      )}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <ZapIcon className="size-4 shrink-0" />
-                      <div className="flex min-w-0 flex-1 flex-col gap-1">
-                        <div className="truncate font-bold">
-                          {getCompactModelLabel(
-                            m.display_name,
-                            m.model ?? m.name,
+                  {modelProviderGroups.map((group) => {
+                    const hasSelectedModel = group.models.some(
+                      (m) => m.name === context.model_name,
+                    );
+                    return (
+                      <DropdownMenuSub key={group.provider}>
+                        <DropdownMenuSubTrigger
+                          className={cn(
+                            hasSelectedModel
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
                           )}
-                        </div>
-                        <div className="text-muted-foreground truncate text-xs">
-                          {m.model}
-                        </div>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </PromptInputActionMenuItem>
-                  ))}
+                        >
+                          <ZapIcon className="size-4 shrink-0" />
+                          <div className="flex min-w-0 flex-1 flex-col gap-1">
+                            <div className="truncate font-bold">
+                              {group.provider}
+                            </div>
+                          </div>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="max-h-80 min-w-72 overflow-y-auto">
+                          {group.models.map((m) => (
+                            <PromptInputActionMenuItem
+                              key={m.name}
+                              className={cn(
+                                m.name === context.model_name
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() => handleModelSelect(m.name)}
+                            >
+                              <ZapIcon className="size-4 shrink-0" />
+                              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                                <div className="truncate font-bold">
+                                  {getCompactModelLabel(
+                                    m.display_name,
+                                    m.model ?? m.name,
+                                  )}
+                                </div>
+                                <div className="text-muted-foreground truncate text-xs">
+                                  {m.model}
+                                </div>
+                              </div>
+                              {m.name === context.model_name ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    );
+                  })}
                 </DropdownMenuGroup>
                 {supportReasoningEffort && (
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuGroup>
-                      <DropdownMenuLabel className="text-muted-foreground text-xs">
-                        {t.inputBox.reasoningSummary}
-                      </DropdownMenuLabel>
-                      {reasoningSummaryOptions.map((option) => (
-                        <PromptInputActionMenuItem
-                          key={option.value}
-                          className={cn(
-                            reasoningSummaryValue === option.value
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() =>
-                            handleReasoningSummarySelect(option.value)
-                          }
-                        >
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className="text-accent-foreground">
+                          <LightbulbIcon className="size-4 shrink-0" />
                           <div className="flex min-w-0 flex-1 flex-col gap-1">
-                            <div className="font-bold">{option.label}</div>
-                            <div className="text-muted-foreground text-xs">
-                              {option.description}
+                            <div className="truncate font-bold">
+                              {t.inputBox.reasoningSummary}
+                            </div>
+                            <div className="text-muted-foreground truncate text-xs">
+                              {reasoningSummaryLabel}
                             </div>
                           </div>
-                          {reasoningSummaryValue === option.value ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
-                      ))}
-                    </DropdownMenuGroup>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel className="text-muted-foreground text-xs">
-                        {t.inputBox.textVerbosity}
-                      </DropdownMenuLabel>
-                      {textVerbosityOptions.map((option) => (
-                        <PromptInputActionMenuItem
-                          key={option.value}
-                          className={cn(
-                            textVerbosityValue === option.value
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() =>
-                            handleTextVerbositySelect(option.value)
-                          }
-                        >
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="min-w-72">
+                          {reasoningSummaryOptions.map((option) => (
+                            <PromptInputActionMenuItem
+                              key={option.value}
+                              className={cn(
+                                reasoningSummaryValue === option.value
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() =>
+                                handleReasoningSummarySelect(option.value)
+                              }
+                            >
+                              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                                <div className="font-bold">{option.label}</div>
+                                <div className="text-muted-foreground text-xs">
+                                  {option.description}
+                                </div>
+                              </div>
+                              {reasoningSummaryValue === option.value ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className="text-accent-foreground">
+                          <SparklesIcon className="size-4 shrink-0" />
                           <div className="flex min-w-0 flex-1 flex-col gap-1">
-                            <div className="font-bold">{option.label}</div>
-                            <div className="text-muted-foreground text-xs">
-                              {option.description}
+                            <div className="truncate font-bold">
+                              {t.inputBox.textVerbosity}
+                            </div>
+                            <div className="text-muted-foreground truncate text-xs">
+                              {textVerbosityLabel}
                             </div>
                           </div>
-                          {textVerbosityValue === option.value ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
-                      ))}
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="min-w-72">
+                          {textVerbosityOptions.map((option) => (
+                            <PromptInputActionMenuItem
+                              key={option.value}
+                              className={cn(
+                                textVerbosityValue === option.value
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() =>
+                                handleTextVerbositySelect(option.value)
+                              }
+                            >
+                              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                                <div className="font-bold">{option.label}</div>
+                                <div className="text-muted-foreground text-xs">
+                                  {option.description}
+                                </div>
+                              </div>
+                              {textVerbosityValue === option.value ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
                     </DropdownMenuGroup>
                   </>
                 )}

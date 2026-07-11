@@ -4,6 +4,7 @@ import {
   DEFAULT_LOCAL_SETTINGS,
   applyThreadModelOverride,
   type LocalSettings,
+  type SettingsScope,
 } from "./local";
 import {
   getBaseSettingsSnapshot,
@@ -29,6 +30,7 @@ export function useLocalSettings(): [LocalSettings, LocalSettingsSetter] {
 }
 
 export function useThreadSettings(
+  scope: SettingsScope,
   threadId: string,
 ): [LocalSettings, LocalSettingsSetter] {
   const baseSettings = useSyncExternalStore(
@@ -39,7 +41,7 @@ export function useThreadSettings(
 
   const threadModelName = useSyncExternalStore(
     subscribe,
-    () => getThreadModelSnapshot(threadId),
+    () => getThreadModelSnapshot(scope, threadId),
     () => undefined,
   );
 
@@ -50,9 +52,9 @@ export function useThreadSettings(
 
   const setSettings = useCallback<LocalSettingsSetter>(
     (key, value) => {
-      updateThreadSettings(threadId, key, value);
+      updateThreadSettings(scope, threadId, key, value);
     },
-    [threadId],
+    [scope, threadId],
   );
 
   return [settings, setSettings];

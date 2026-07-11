@@ -18,6 +18,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 // are stored for and sent to the frontend port — the gateway is reached via the
 // next.config rewrite, never cross-origin from the browser.
 const APP = `http://localhost:${process.env.PLAYWRIGHT_REAL_BACKEND_FRONTEND_PORT ?? "3100"}`;
+const AUTH_BASE = (process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? APP).replace(
+  /\/+$/,
+  "",
+);
 const fixture = JSON.parse(
   readFileSync(
     join(
@@ -28,7 +32,10 @@ const fixture = JSON.parse(
   ),
 ) as {
   prompt: string;
-  turns: Array<{ output: { data: { content?: unknown } } }>;
+  turns: Array<{
+    caller?: string;
+    output: { data: { content?: unknown } };
+  }>;
 };
 
 const PROMPT = fixture.prompt;
@@ -53,6 +60,14 @@ const EXPECTED_SUGGESTION = ((): string => {
   }
 })();
 const EXPECTED_TITLE = textTurns.find((c) => !c.trim().startsWith("[")) ?? "";
+const EXPECTED_FINAL_ANSWER =
+  fixture.turns
+    .filter((turn) => turn.caller === "lead_agent")
+    .map((turn) => turn.output?.data?.content)
+    .find(
+      (content): content is string =>
+        typeof content === "string" && content.trim().length > 0,
+    ) ?? "";
 
 test.describe("real backend render (replay, no API key)", () => {
   test.beforeEach(async ({ context }) => {
@@ -60,9 +75,12 @@ test.describe("real backend render (replay, no API key)", () => {
     // the browser context (host-scoped to localhost, shared across ports), so
     // the frontend's SDK (credentials:include + X-CSRF-Token) authenticates.
     const email = `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
-    const resp = await context.request.post(`${APP}/api/v1/auth/register`, {
-      data: { email, password: "very-strong-password-123" },
-    });
+    const resp = await context.request.post(
+      `${AUTH_BASE}/api/v1/auth/register`,
+      {
+        data: { email, password: "very-strong-password-123" },
+      },
+    );
     expect(resp.status(), await resp.text()).toBe(201);
   });
 
@@ -122,5 +140,54 @@ test.describe("real backend render (replay, no API key)", () => {
         fullPage: true,
       });
     }
+  });
+
+  test("keeps concurrent streams isolated across two pages", async ({
+    page,
+    context,
+  }) => {
+    expect(
+      EXPECTED_FINAL_ANSWER,
+      "fixture should contain a final lead-agent answer",
+    ).not.toBe("");
+
+    const secondPage = await context.newPage();
+    for (const currentPage of [page, secondPage]) {
+      await currentPage.addInitScript(() => {
+        window.localStorage.setItem(
+          "deerflow.local-settings",
+          JSON.stringify({ context: { mode: "ultra" } }),
+        );
+      });
+      await currentPage.goto("/workspace/chats/new");
+      await expect(
+        currentPage.getByPlaceholder(/how can i assist you/i),
+      ).toBeVisible({ timeout: 30_000 });
+    }
+
+    await Promise.all(
+      [page, secondPage].map(async (currentPage) => {
+        const textarea = currentPage.getByPlaceholder(/how can i assist you/i);
+        await textarea.fill(PROMPT);
+        await textarea.press("Enter");
+      }),
+    );
+
+    await Promise.all(
+      [page, secondPage].map(async (currentPage) => {
+        const chat = currentPage.locator("#chat");
+        await expect(chat.getByText(EXPECTED_FINAL_ANSWER)).toBeVisible({
+          timeout: 60_000,
+        });
+        await expect(chat.getByText(EXPECTED_FINAL_ANSWER)).toHaveCount(1);
+        await expect(currentPage).toHaveURL(
+          /\/workspace\/chats\/(?!new(?:[/?#]|$))[^/?#]+/,
+        );
+      }),
+    );
+
+    expect(new URL(page.url()).pathname).not.toBe(
+      new URL(secondPage.url()).pathname,
+    );
   });
 });

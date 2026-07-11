@@ -325,6 +325,18 @@ export function mergeSubtaskUpdate(
   const isTerminalCompleted = previousStatus === "completed";
   const shouldKeepTerminalStatus =
     task.status === "in_progress" && (isTerminalCompleted || isTerminalFailure);
+  const shouldKeepExistingMetadata =
+    previous !== undefined &&
+    (task.description === undefined ||
+      task.description === previous.description ||
+      task.description === `${previous.subagent_type} task` ||
+      task.description === `${task.subagent_type} task` ||
+      task.description === task.id);
+  if (shouldKeepExistingMetadata) {
+    delete taskPatch.description;
+    delete taskPatch.prompt;
+    delete taskPatch.subagent_type;
+  }
   return {
     ...previous,
     ...taskPatch,

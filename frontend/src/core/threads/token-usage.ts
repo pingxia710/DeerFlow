@@ -1,5 +1,6 @@
 import type { TokenUsage } from "@/core/messages/usage";
 
+import { queryKeys } from "./query-keys";
 import type { ThreadTokenUsageResponse } from "./types";
 
 export function getCallerTokenUsageRows(
@@ -23,11 +24,11 @@ export function getLeadAgentTokenUsage(
 }
 
 export function threadTokenUsageQueryKey(threadId?: string | null) {
-  return ["thread-token-usage", threadId] as const;
+  return queryKeys.thread.tokenUsage(threadId);
 }
 
 export function threadContextUsageQueryKey(threadId?: string | null) {
-  return ["thread-context-usage", threadId] as const;
+  return queryKeys.thread.contextUsage(threadId);
 }
 
 export function threadTokenUsageToTokenUsage(

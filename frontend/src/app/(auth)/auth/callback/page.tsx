@@ -3,6 +3,8 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useCallback, useRef } from "react";
 
+import { getBackendBaseURL } from "@/core/config";
+
 /**
  * Validates the next parameter — only allows relative paths starting with /.
  */
@@ -30,7 +32,9 @@ export default function AuthCallbackPage() {
     const next = validateNextParam(searchParams.get("next"));
 
     try {
-      const res = await fetch("/api/v1/auth/me", { credentials: "include" });
+      const res = await fetch(`${getBackendBaseURL()}/api/v1/auth/me`, {
+        credentials: "include",
+      });
 
       if (res.ok) {
         setStatus("success");

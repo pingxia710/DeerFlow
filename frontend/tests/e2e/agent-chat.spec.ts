@@ -209,7 +209,7 @@ test.describe("Agent chat", () => {
     await expect(textarea).toBeVisible({ timeout: 15_000 });
     await textarea.fill(delayedMarker);
     await textarea.press("Enter");
-    await expect(page.getByText(delayedMarker)).toBeVisible();
+    await expect(page.getByText(delayedMarker, { exact: true })).toBeVisible();
 
     await page.getByText("Destination agent conversation").click();
     await page.waitForURL(

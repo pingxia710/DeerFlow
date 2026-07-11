@@ -43,7 +43,10 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
+import {
+  markThreadChatNavigationIntent,
+  resetThreadChatAfterDelete,
+} from "@/components/workspace/chats/use-thread-chat";
 import { getAPIClient } from "@/core/api";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
@@ -117,7 +120,8 @@ export function RecentChatList() {
   }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
   const { mutate: deleteThread } = useDeleteThread();
-  const { mutate: renameThread } = useRenameThread();
+  const { mutateAsync: renameThread, isPending: isRenaming } =
+    useRenameThread();
 
   // Rename dialog state
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -171,14 +175,20 @@ export function RecentChatList() {
     [],
   );
 
-  const handleRenameSubmit = useCallback(() => {
-    if (renameThreadId && renameValue.trim()) {
-      renameThread({ threadId: renameThreadId, title: renameValue.trim() });
+  const handleRenameSubmit = useCallback(async () => {
+    const title = renameValue.trim();
+    if (renameThreadId && title && !isRenaming) {
+      try {
+        await renameThread({ threadId: renameThreadId, title });
+      } catch {
+        toast.error(t.common.renameFailed);
+        return;
+      }
       setRenameDialogOpen(false);
       setRenameThreadId(null);
       setRenameValue("");
     }
-  }, [renameThread, renameThreadId, renameValue]);
+  }, [isRenaming, renameThread, renameThreadId, renameValue, t]);
 
   const handleShare = useCallback(
     async (thread: AgentThread) => {
@@ -273,6 +283,9 @@ export function RecentChatList() {
                         }
                         className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                         href={pathOfThread(thread)}
+                        onNavigate={() =>
+                          markThreadChatNavigationIntent(pathOfThread(thread))
+                        }
                         title={
                           activityLabel
                             ? `${threadTitle} - ${activityLabel}`
@@ -421,7 +434,7 @@ export function RecentChatList() {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !isIMEComposing(e)) {
                   e.preventDefault();
-                  handleRenameSubmit();
+                  void handleRenameSubmit();
                 }
               }}
             />
@@ -433,7 +446,12 @@ export function RecentChatList() {
             >
               {t.common.cancel}
             </Button>
-            <Button onClick={handleRenameSubmit}>{t.common.save}</Button>
+            <Button
+              disabled={isRenaming}
+              onClick={() => void handleRenameSubmit()}
+            >
+              {t.common.save}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

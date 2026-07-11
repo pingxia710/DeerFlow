@@ -6,6 +6,7 @@ export const STATE_CHANGING_METHODS: ReadonlySet<StateChangingMethod> = new Set(
 );
 
 export const DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS = 15_000;
+export const UNAUTHORIZED_EVENT = "deer-flow:unauthorized";
 
 type FetchInit = RequestInit & {
   /**
@@ -140,6 +141,9 @@ export async function fetch(
   });
 
   if (res.status === 401) {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
     throw new UnauthorizedError();
   }
 

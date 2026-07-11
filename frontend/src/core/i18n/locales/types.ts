@@ -13,6 +13,7 @@ export interface Translations {
     delete: string;
     edit: string;
     rename: string;
+    renameFailed: string;
     share: string;
     openInNewWindow: string;
     close: string;
@@ -92,6 +93,12 @@ export interface Translations {
     reasoningEffortPro: string;
     reasoningEffortProDescription: string;
     reasoningEffortProShort: string;
+    reasoningEffortMax: string;
+    reasoningEffortMaxDescription: string;
+    reasoningEffortMaxShort: string;
+    reasoningEffortUltra: string;
+    reasoningEffortUltraDescription: string;
+    reasoningEffortUltraShort: string;
     reasoningSummary: string;
     reasoningSummaryAuto: string;
     reasoningSummaryAutoDescription: string;
@@ -181,6 +188,27 @@ export interface Translations {
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
+  };
+
+  capabilities: {
+    title: string;
+    ready: string;
+    attention: string;
+    model: string;
+    directTools: string;
+    delegatedTools: string;
+    tools: string;
+    skills: string;
+    missingSkills: string;
+    mcp: string;
+    mcpAccess: string;
+    direct: string;
+    delegatedOnly: string;
+    notConfigured: string;
+    configuredNotLoaded: string;
+    loadFailed: string;
+    unavailable: string;
+    none: string;
   };
 
   // Breadcrumb
@@ -468,6 +496,7 @@ export interface Translations {
       title: string;
       description: string;
       createSkill: string;
+      adminRequired: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;

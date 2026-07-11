@@ -9,6 +9,8 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
+  isThreadFinishForVisibleChat,
+  pendingNavigationAllowsThreadStart,
   shouldShowWelcomeMode,
   useSpecificChatMode,
   useThreadChat,
@@ -27,7 +29,11 @@ import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import {
+  migrateThreadModelName,
+  useLocalSettings,
+  useThreadSettings,
+} from "@/core/settings";
 import type { AgentThreadState } from "@/core/threads";
 import {
   getThreadHistoryLoadErrorKind,
@@ -57,7 +63,7 @@ export default function ChatPage() {
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const [settings, setSettings] = useThreadSettings(threadId);
+  const [settings, setSettings] = useThreadSettings("chat", threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
@@ -123,13 +129,16 @@ export default function ChatPage() {
         const visibleThreadId = visibleThreadIdRef.current;
         const currentPathname = window.location.pathname;
         const streamStillOwnsVisibleChat =
-          visibleThreadId === createdThreadId ||
-          (pendingThreadId !== null &&
-            visibleThreadId === pendingThreadId &&
-            currentPathname.endsWith("/new"));
+          pendingNavigationAllowsThreadStart(createdThreadId) &&
+          (visibleThreadId === createdThreadId ||
+            (pendingThreadId !== null &&
+              visibleThreadId === pendingThreadId &&
+              currentPathname.endsWith("/new")));
         if (!streamStillOwnsVisibleChat) {
           return;
         }
+        migrateThreadModelName("chat", visibleThreadId, createdThreadId);
+        visibleThreadIdRef.current = createdThreadId;
         pendingStartThreadIdRef.current = null;
         // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
         history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
@@ -139,7 +148,13 @@ export default function ChatPage() {
       onFinish: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => {
         // Finish side effects are scoped to the visible chat; background thread
         // completion should not rewrite the current chat UI or notification text.
-        if (meta.threadId !== visibleThreadIdRef.current) {
+        if (
+          !isThreadFinishForVisibleChat({
+            finishThreadId: meta.threadId,
+            visibleThreadId: visibleThreadIdRef.current,
+            committedPathname: window.location.pathname,
+          })
+        ) {
           return;
         }
         if (document.hidden || !document.hasFocus()) {
@@ -226,11 +241,7 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      const sendPromise = sendMessage(threadId, message);
-      if (message.files.length > 0) {
-        return sendPromise;
-      }
-      void sendPromise;
+      return sendMessage(threadId, message);
     },
     [sendMessage, threadId],
   );

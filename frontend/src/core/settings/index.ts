@@ -1,2 +1,3 @@
 export { useLocalSettings, useThreadSettings } from "./hooks";
-export type { LocalSettings } from "./local";
+export { migrateThreadModelName } from "./store";
+export type { LocalSettings, SettingsScope } from "./local";

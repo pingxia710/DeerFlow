@@ -134,6 +134,21 @@ function getMessageRunId(message: Message) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function isMessageActivelyStreaming(
+  message: Message,
+  groupIsLoading: boolean,
+  activeRunIds: ReadonlySet<string>,
+) {
+  if (!groupIsLoading) {
+    return false;
+  }
+  if (getMessageHistoryTime(message) === undefined) {
+    return true;
+  }
+  const runId = getMessageRunId(message);
+  return runId !== undefined && activeRunIds.has(runId);
+}
+
 function getMessageRoundId(message: Message) {
   const value =
     message.additional_kwargs?.deerflow_round_id ??
@@ -146,29 +161,82 @@ function isTerminalSubtask(task: Subtask) {
   return task.status === "completed" || task.status === "failed";
 }
 
+type SubtaskTaskLookup = {
+  threadId: string;
+  runId?: string | null;
+  taskId: string;
+  roundId?: string | null;
+};
+
+function matchesRequestedRound(
+  task: Subtask,
+  roundId: string | null | undefined,
+) {
+  return (
+    !roundId ||
+    normalizeSubtaskRoundId(task.roundId) === normalizeSubtaskRoundId(roundId)
+  );
+}
+
 export function hasTerminalSubtaskForTask(
   subtasks: Subtask[],
-  {
-    threadId,
-    runId,
-    taskId,
-    roundId,
-  }: {
-    threadId: string;
-    runId?: string | null;
-    taskId: string;
-    roundId?: string | null;
-  },
+  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
 ) {
-  const normalizedRoundId = normalizeSubtaskRoundId(roundId);
   return subtasks.some(
     (task) =>
       task.threadId === threadId &&
       task.id === taskId &&
       task.runId !== runId &&
-      normalizeSubtaskRoundId(task.roundId) === normalizedRoundId &&
+      matchesRequestedRound(task, roundId) &&
       isTerminalSubtask(task),
   );
+}
+
+export function findMatchingTerminalSubtaskForTask(
+  subtasks: Subtask[],
+  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
+) {
+  const candidates = subtasks.filter(
+    (task) =>
+      task.threadId === threadId &&
+      task.id === taskId &&
+      task.runId === runId &&
+      isTerminalSubtask(task),
+  );
+  if (roundId) {
+    return candidates.find((task) => matchesRequestedRound(task, roundId));
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+export function hasMatchingTerminalSubtaskForTask(
+  subtasks: Subtask[],
+  lookup: SubtaskTaskLookup,
+) {
+  return Boolean(findMatchingTerminalSubtaskForTask(subtasks, lookup));
+}
+
+export function shouldKeepInferredSubtask({
+  status,
+  hasMatchingTerminal,
+  hasTerminalInOtherRun,
+  isVisibleRunning,
+}: {
+  status: Subtask["status"];
+  hasMatchingTerminal: boolean;
+  hasTerminalInOtherRun: boolean;
+  isVisibleRunning: boolean;
+}) {
+  if (status !== "in_progress") {
+    return true;
+  }
+  if (hasMatchingTerminal) {
+    return true;
+  }
+  if (hasTerminalInOtherRun) {
+    return false;
+  }
+  return isVisibleRunning;
 }
 
 export function isRuntimeOnlySubtaskForActiveTurn(
@@ -505,8 +573,16 @@ export function MessageList({
       .slice(lastHumanIndex)
       .some((g) => g.type === "assistant");
   }, [groupedMessages]);
+  const hasTerminalRunMessages = Boolean(
+    terminalNotice &&
+    messages.some(
+      (message) => getMessageRunId(message) === terminalNotice.runId,
+    ),
+  );
   const shouldShowTerminalNotice = Boolean(
-    terminalNotice && !thread.isLoading && !hasActiveAssistantText,
+    terminalNotice &&
+    !thread.isLoading &&
+    (!hasActiveAssistantText || hasTerminalRunMessages),
   );
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
@@ -549,32 +625,43 @@ export function MessageList({
               continue;
             }
             const roundId = getMessageRoundId(message);
+            const matchingTerminal = findMatchingTerminalSubtaskForTask(
+              contextSubtasks,
+              {
+                threadId,
+                runId,
+                taskId: toolCall.id,
+                roundId,
+              },
+            );
+            const effectiveRoundId = roundId ?? matchingTerminal?.roundId;
             const status = derivePendingSubtaskStatus(
               toolCall.id,
               group.messages,
               groupIsLoading &&
                 messages.some((message) => getMessageRunId(message) === runId),
             );
-            if (
-              status === "in_progress" &&
-              hasTerminalSubtaskForTask(contextSubtasks, {
-                threadId,
-                runId,
-                taskId: toolCall.id,
-                roundId,
-              })
-            ) {
-              continue;
-            }
             const startedAt = getMessageHistoryTime(message);
             if (
-              status === "in_progress" &&
-              !isInferredRunningSubtaskVisible({
-                runId,
-                startedAt,
-                groupIsLoading,
-                activeRunIds: activeHistoryRunIds,
-                turnStartTime: activeTurnStartTime,
+              !shouldKeepInferredSubtask({
+                status,
+                hasMatchingTerminal: Boolean(matchingTerminal),
+                hasTerminalInOtherRun: hasTerminalSubtaskForTask(
+                  contextSubtasks,
+                  {
+                    threadId,
+                    runId,
+                    taskId: toolCall.id,
+                    roundId: effectiveRoundId,
+                  },
+                ),
+                isVisibleRunning: isInferredRunningSubtaskVisible({
+                  runId,
+                  startedAt,
+                  groupIsLoading,
+                  activeRunIds: activeHistoryRunIds,
+                  turnStartTime: activeTurnStartTime,
+                }),
               })
             ) {
               continue;
@@ -583,7 +670,7 @@ export function MessageList({
               id: toolCall.id,
               threadId,
               runId,
-              roundId,
+              roundId: effectiveRoundId,
               subagent_type: toolCall.args.subagent_type,
               description: toolCall.args.description,
               prompt: toolCall.args.prompt,
@@ -913,21 +1000,21 @@ export function MessageList({
                 )}
               >
                 {group.messages.map((msg) => {
+                  const messageIsLoading = isMessageActivelyStreaming(
+                    msg,
+                    groupIsLoading,
+                    activeHistoryRunIds,
+                  );
                   return (
                     <MessageListItem
                       key={`${group.id}/${msg.id}`}
                       message={msg}
-                      isLoading={
-                        thread.isLoading &&
-                        groupIndex === groupedMessages.length - 1
-                      }
+                      isLoading={messageIsLoading}
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
                       hideThinkingUi={hideThinkingUi}
                       turnStartTime={
-                        groupIndex === groupedMessages.length - 1
-                          ? activeTurnStartTime
-                          : null
+                        messageIsLoading ? activeTurnStartTime : null
                       }
                     />
                   );
@@ -1008,31 +1095,43 @@ export function MessageList({
                       continue;
                     }
                     const roundId = getMessageRoundId(message);
+                    const matchingTerminal = findMatchingTerminalSubtaskForTask(
+                      contextSubtasks,
+                      {
+                        threadId,
+                        runId,
+                        taskId,
+                        roundId,
+                      },
+                    );
+                    const effectiveRoundId =
+                      roundId ?? matchingTerminal?.roundId;
                     const status = derivePendingSubtaskStatus(
                       taskId,
                       group.messages,
                       groupIsLoading,
                     );
-                    if (
-                      status === "in_progress" &&
-                      hasTerminalSubtaskForTask(contextSubtasks, {
-                        threadId,
-                        runId,
-                        taskId,
-                        roundId,
-                      })
-                    ) {
-                      continue;
-                    }
                     const startedAt = getMessageHistoryTime(message);
                     if (
-                      status === "in_progress" &&
-                      !isInferredRunningSubtaskVisible({
-                        runId,
-                        startedAt,
-                        groupIsLoading,
-                        activeRunIds: activeHistoryRunIds,
-                        turnStartTime: activeTurnStartTime,
+                      !shouldKeepInferredSubtask({
+                        status,
+                        hasMatchingTerminal: Boolean(matchingTerminal),
+                        hasTerminalInOtherRun: hasTerminalSubtaskForTask(
+                          contextSubtasks,
+                          {
+                            threadId,
+                            runId,
+                            taskId,
+                            roundId: effectiveRoundId,
+                          },
+                        ),
+                        isVisibleRunning: isInferredRunningSubtaskVisible({
+                          runId,
+                          startedAt,
+                          groupIsLoading,
+                          activeRunIds: activeHistoryRunIds,
+                          turnStartTime: activeTurnStartTime,
+                        }),
                       })
                     ) {
                       continue;
@@ -1041,7 +1140,7 @@ export function MessageList({
                       id: taskId,
                       threadId,
                       runId,
-                      roundId,
+                      roundId: effectiveRoundId,
                       subagent_type: toolCall.args.subagent_type,
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
@@ -1096,6 +1195,16 @@ export function MessageList({
               const roundId = getMessageRoundId(message);
               if (runId) {
                 for (const taskId of taskIds ?? []) {
+                  const matchingTerminal = findMatchingTerminalSubtaskForTask(
+                    contextSubtasks,
+                    {
+                      threadId,
+                      runId,
+                      taskId,
+                      roundId,
+                    },
+                  );
+                  const effectiveRoundId = roundId ?? matchingTerminal?.roundId;
                   const status = derivePendingSubtaskStatus(
                     taskId,
                     group.messages,
@@ -1103,32 +1212,34 @@ export function MessageList({
                   );
                   const startedAt = getMessageHistoryTime(message);
                   if (
-                    status === "in_progress" &&
-                    !isInferredRunningSubtaskVisible({
-                      runId,
-                      startedAt,
-                      groupIsLoading,
-                      activeRunIds: activeHistoryRunIds,
-                      turnStartTime: activeTurnStartTime,
-                    })
-                  ) {
-                    continue;
-                  }
-                  if (
-                    hasTerminalSubtaskForTask(contextSubtasks, {
-                      threadId,
-                      runId,
-                      taskId,
-                      roundId,
+                    !shouldKeepInferredSubtask({
+                      status,
+                      hasMatchingTerminal: Boolean(matchingTerminal),
+                      hasTerminalInOtherRun: hasTerminalSubtaskForTask(
+                        contextSubtasks,
+                        {
+                          threadId,
+                          runId,
+                          taskId,
+                          roundId: effectiveRoundId,
+                        },
+                      ),
+                      isVisibleRunning: isInferredRunningSubtaskVisible({
+                        runId,
+                        startedAt,
+                        groupIsLoading,
+                        activeRunIds: activeHistoryRunIds,
+                        turnStartTime: activeTurnStartTime,
+                      }),
                     })
                   ) {
                     continue;
                   }
                   results.push(
                     <SubtaskCard
-                      key={getSubtaskCardKey(taskId, runId, roundId)}
+                      key={getSubtaskCardKey(taskId, runId, effectiveRoundId)}
                       runId={runId}
-                      roundId={roundId}
+                      roundId={effectiveRoundId}
                       taskId={taskId}
                       threadId={threadId}
                       isLoading={
@@ -1142,16 +1253,21 @@ export function MessageList({
                 }
               }
               if (hasContent(message)) {
+                const messageIsLoading = isMessageActivelyStreaming(
+                  message,
+                  groupIsLoading,
+                  activeHistoryRunIds,
+                );
                 results.push(
                   <MessageListItem
                     key={`subagent-final-${message.id}`}
                     message={message}
-                    isLoading={groupIsLoading}
+                    isLoading={messageIsLoading}
                     threadId={threadId}
                     showCopyButton={false}
                     hideThinkingUi={hideThinkingUi}
                     turnStartTime={
-                      groupIndex === lastGroupIndex ? activeTurnStartTime : null
+                      messageIsLoading ? activeTurnStartTime : null
                     }
                   />,
                 );
@@ -1221,12 +1337,13 @@ export function MessageList({
               </Reasoning>
             </div>
           )}
-        {recoveryStatus && (
-          <RunRecoveryNotice
-            status={recoveryStatus}
-            onRetry={onRetryRecovery}
-          />
-        )}
+        {recoveryStatus &&
+          (recoveryStatus.state !== "terminal" || shouldShowTerminalNotice) && (
+            <RunRecoveryNotice
+              status={recoveryStatus}
+              onRetry={onRetryRecovery}
+            />
+          )}
         {!recoveryStatus && shouldShowTerminalNotice && terminalNotice && (
           <RunTerminalNotice notice={terminalNotice} />
         )}

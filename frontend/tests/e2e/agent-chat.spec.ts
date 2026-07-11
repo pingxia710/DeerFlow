@@ -38,6 +38,75 @@ test.describe("Agent chat", () => {
     await expect(textarea).toBeVisible({ timeout: 15_000 });
   });
 
+  test("deleting a Command Room chat stops capability requests", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      agents: [{ name: "command-room", model: "mock-model" }],
+    });
+    await page.route(/\/api\/threads\/([^/]+)\/capabilities$/, (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ command_room_runtime: null }),
+      });
+    });
+
+    let localDeleteStarted = false;
+    let releaseLocalDelete: () => void = () => undefined;
+    const localDeletePending = new Promise<void>((resolve) => {
+      releaseLocalDelete = resolve;
+    });
+    const staleRequests: string[] = [];
+
+    page.on("request", (request) => {
+      if (
+        localDeleteStarted &&
+        request.url().includes(`/api/threads/${MOCK_THREAD_ID}/`)
+      ) {
+        staleRequests.push(`${request.method()} ${request.url()}`);
+      }
+    });
+
+    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
+      if (route.request().method() !== "DELETE") {
+        return route.fallback();
+      }
+      localDeleteStarted = true;
+      await localDeletePending;
+      return route.fulfill({ status: 204 });
+    });
+
+    await page.goto("/workspace/agents/command-room/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Delete this Command Room chat");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const recentThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "New Chat",
+      })
+      .first();
+    await recentThreadItem.hover();
+    await recentThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+
+    try {
+      await expect.poll(() => localDeleteStarted).toBe(true);
+      await page.waitForTimeout(300);
+      expect(staleRequests).toEqual([]);
+    } finally {
+      releaseLocalDelete();
+    }
+  });
+
   test("agent model beats the globally saved model until this thread chooses", async ({
     page,
   }) => {

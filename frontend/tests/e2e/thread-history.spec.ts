@@ -1455,6 +1455,66 @@ test.describe("Thread history", () => {
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });
 
+  test("deleting a thread clears its client requests before local cleanup finishes", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    let localDeleteStarted = false;
+    let releaseLocalDelete: () => void = () => undefined;
+    const localDeletePending = new Promise<void>((resolve) => {
+      releaseLocalDelete = resolve;
+    });
+    const staleRequests: string[] = [];
+
+    page.on("request", (request) => {
+      if (
+        localDeleteStarted &&
+        request.url().includes(`/api/threads/${MOCK_THREAD_ID}/`)
+      ) {
+        staleRequests.push(`${request.method()} ${request.url()}`);
+      }
+    });
+
+    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
+      if (route.request().method() !== "DELETE") {
+        return route.fallback();
+      }
+      localDeleteStarted = true;
+      await localDeletePending;
+      return route.fulfill({ status: 204 });
+    });
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Delete this conversation");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const recentThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "New Chat",
+      })
+      .first();
+    await recentThreadItem.hover();
+    await recentThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+
+    try {
+      await expect.poll(() => localDeleteStarted).toBe(true);
+      await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+      await page.waitForTimeout(300);
+      expect(staleRequests).toEqual([]);
+    } finally {
+      releaseLocalDelete();
+    }
+  });
+
   test("mock thread does not load real backend run history", async ({
     page,
   }) => {

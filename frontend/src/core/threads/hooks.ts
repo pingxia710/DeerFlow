@@ -57,6 +57,11 @@ import {
   type TaskLaneSnapshot,
 } from "./command-room-read-model";
 import {
+  clearDeletedThreadTombstones,
+  isDeletedThreadTombstoned,
+  tombstoneDeletedThread,
+} from "./deleted-thread-tombstones";
+import {
   resolveStreamErrorRecoveryRuntimeOwnerId,
   shouldApplyStreamTitleUpdate,
   shouldRunCurrentStreamFinishSideEffects,
@@ -287,11 +292,8 @@ let threadActivitySnapshot: ThreadActivitySnapshot = {
 const LEGACY_THREAD_ACTIVITY_OWNER = "thread";
 const threadActivityOwnersByThread = new Map<string, Set<string>>();
 const manualThreadTitleLocks = new Map<string, string>();
-const deletedThreadTombstones = new Set<string>();
 
-export function isDeletedThreadTombstoned(threadId: string | null | undefined) {
-  return Boolean(threadId && deletedThreadTombstones.has(threadId));
-}
+export { isDeletedThreadTombstoned } from "./deleted-thread-tombstones";
 
 function emitThreadActivity() {
   for (const listener of threadActivityListeners) {
@@ -3714,7 +3716,8 @@ function useThreadRuntimeSnapshot(
         timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
       }).then(readThreadRuntimeSnapshotResponse);
     },
-    enabled: enabled && Boolean(threadId),
+    enabled:
+      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
@@ -4412,7 +4415,7 @@ export function filterInfiniteThreadsCache(
 }
 
 export function clearThreadSingletonState(threadId: string) {
-  deletedThreadTombstones.add(threadId);
+  tombstoneDeletedThread(threadId);
   clearThreadActivity(threadId);
   manualThreadTitleLocks.delete(threadId);
   stopBackgroundRunProbesForThread(threadId);
@@ -4428,7 +4431,7 @@ export function clearAllThreadSingletonState() {
   backgroundRunProbeAttempts.clear();
   threadActivityOwnersByThread.clear();
   manualThreadTitleLocks.clear();
-  deletedThreadTombstones.clear();
+  clearDeletedThreadTombstones();
   threadActivitySnapshot = { running: new Set(), finished: new Set() };
   emitThreadActivity();
 }
@@ -4518,7 +4521,8 @@ export function useThreadRuns(
         ? lastPage.at(-1)?.run_id
         : undefined,
     select: (data) => data.pages.flat(),
-    enabled: enabled && Boolean(threadId),
+    enabled:
+      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
@@ -4549,7 +4553,8 @@ export function useThreadMetadata(
         throw error;
       }
     },
-    enabled: enabled && Boolean(threadId),
+    enabled:
+      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4567,7 +4572,8 @@ export function useThreadTokenUsage(
       }
       return fetchThreadTokenUsage(threadId);
     },
-    enabled: enabled && Boolean(threadId),
+    enabled:
+      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4585,7 +4591,8 @@ export function useThreadContextUsage(
       }
       return fetchThreadContextUsage(threadId);
     },
-    enabled: enabled && Boolean(threadId),
+    enabled:
+      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4615,12 +4622,18 @@ export function useDeleteThread() {
       threadId: string;
       onRemoteDeleted?: () => void;
     }) => {
-      await deleteThreadRemote({ threadId, apiClient, onRemoteDeleted });
+      await deleteThreadRemote({
+        threadId,
+        apiClient,
+        onRemoteDeleted: () => {
+          clearDeletedThreadClientState(queryClient, threadId, {
+            clearSubtasksForThread,
+          });
+          onRemoteDeleted?.();
+        },
+      });
     },
     onSuccess(_, { threadId }) {
-      clearDeletedThreadClientState(queryClient, threadId, {
-        clearSubtasksForThread,
-      });
       queryClient.setQueriesData(
         {
           queryKey: queryKeys.threads.search(),

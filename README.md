@@ -168,7 +168,16 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    ```yaml
    models:
+     - name: gpt-5.6
+       provider: Codex CLI
+       display_name: GPT-5.6 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.6
+       supports_thinking: true
+       supports_reasoning_effort: true
+
      - name: gpt-5.4
+       provider: Codex CLI
        display_name: GPT-5.4 (Codex CLI)
        use: deerflow.models.openai_codex_provider:CodexChatModel
        model: gpt-5.4
@@ -251,11 +260,11 @@ Access: http://localhost:2026
 Docker production and Docker development stacks bind nginx to `127.0.0.1` by
 default. Set `DEER_FLOW_BIND_HOST=0.0.0.0` only when you intentionally expose
 DeerFlow beyond the local machine. API docs (`/docs`, `/redoc`,
-`/openapi.json`) and the sandbox provisioner API (`/api/sandboxes`) are also
-closed at nginx by default; opt in with `DEER_FLOW_EXPOSE_API_DOCS=true` and
-`DEER_FLOW_EXPOSE_SANDBOX_API=true`.
+`/openapi.json`) are closed at nginx by default; opt in with
+`DEER_FLOW_EXPOSE_API_DOCS=true`. The sandbox provisioner API is internal-only
+and is never exposed by nginx.
 
-The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
+The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks. Browser auth and LangGraph requests honor the configured public Gateway URLs with credentials. The current double-submit CSRF flow supports same-host cross-port setups; a different frontend/Gateway hostname needs an explicit cookie/CSRF deployment design.
 
 > [!IMPORTANT]
 > The Gateway holds run state (RunManager and the stream bridge) in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Raising the worker count without a shared cross-worker stream bridge — which is not yet available — breaks run cancellation, SSE reconnects, request de-duplication, and IM channels, because nginx uses no sticky sessions and each worker keeps its own run state. Non-development startups fail fast when `GATEWAY_WORKERS`, `WEB_CONCURRENCY`, or `UVICORN_WORKERS` is greater than 1. Scale a single worker up with more CPU/RAM (or move the database and sandbox onto dedicated tiers) instead of raising `GATEWAY_WORKERS`.
@@ -270,7 +279,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Local service ports default to Gateway `8001`, Frontend `3000`, and Nginx `2026`; override them with `DEER_FLOW_GATEWAY_PORT`, `DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. Local services bind to `127.0.0.1` by default; set `DEER_FLOW_BIND_HOST` or `DEER_FLOW_GATEWAY_HOST` only when you intentionally need a broader bind. If frontend port `3000` is already occupied by a non-DeerFlow process and no override is set, `make dev` chooses a free `6001+` frontend port and renders nginx to match. Run `make doctor` to verify your setup before starting; when local nginx is already listening, it also warns if nginx points at a frontend port that is not listening.
+Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. In this source checkout, runtime state defaults to `backend/.deer-flow`; standalone harness projects default to `.deer-flow` under their project root. Both can be moved with `DEER_FLOW_HOME`. Skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Local service ports default to Gateway `8001`, Frontend `3000`, and Nginx `2026`; override them with `DEER_FLOW_GATEWAY_PORT`, `DEER_FLOW_FRONTEND_PORT`, and `DEER_FLOW_NGINX_PORT`. Local services bind to `127.0.0.1` by default; set `DEER_FLOW_BIND_HOST` or `DEER_FLOW_GATEWAY_HOST` only when you intentionally need a broader bind. If frontend port `3000` is already occupied by a non-DeerFlow process and no override is set, `make dev` chooses a free `6001+` frontend port and renders nginx to match. Run `make doctor` to verify your setup before starting; it reports split runtime roots and, when local nginx is already listening, warns if nginx points at a frontend port that is not listening.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
@@ -671,9 +680,10 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
 
 For `command-room` runs, DeerFlow can keep compact internal audit records under the thread audit directory without exposing them in the chat UI.
-The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output.
+Audit JSONL reads and appends share a lock per resolved file path: readers receive complete snapshots, records for one owner/thread retain single-file order, and different command rooms do not share a filesystem I/O lock.
+The command-room lead is an LLM coordinator: it dispatches one or more worker lanes through `task`, and each worker returns processed AI output for synthesis rather than raw MCP/tool output. Paired tool results also produce redacted runtime-observed evidence refs such as command, exit code, path, status, and output hash, so completed implementation is not reduced to an unverifiable worker claim.
 Sub-agent task progress is also persisted into run history, so switching conversations can restore task status without relying only on the live stream.
-DeerFlow also records native round state (`open`, `executing`, `validating`, `waiting_user`, `closed`, `blocked`) and task lanes for lifecycle visibility; this state machine only tracks run/task associations, artifact/evidence refs, and current intent, and does not make quality or PASS/FAIL decisions.
+DeerFlow also records native round state (`open`, `executing`, `validating`, `waiting_user`, `closed`, `blocked`) and task lanes for lifecycle visibility; this state machine only tracks run/task associations, artifact/evidence refs, and current intent, and does not make quality or PASS/FAIL decisions. A successful run closes its round without implying a program-side PASS. A follow-up starts a child round from the new user intent and does not treat the previous AI answer or an unaccepted `next_action` as accepted work.
 Run evidence is exposed through `GET /api/threads/{thread_id}/runs/{run_id}/evidence` as redacted `EvidenceRef` records derived from run events, artifacts, logs, and command-output summaries; the API labels source kind and mechanical strength only.
 The AI quality loop data plane exposes `GET /api/threads/{thread_id}/runs/{run_id}/quality-context` for handoffs, evidence, capability facts, round state, and existing AI-authored quality signals, plus `POST /api/threads/{thread_id}/runs/{run_id}/quality-signals` to store recommendations such as `needs_more_evidence` or `needs_revision` for Chair/lead AI review; it does not create a program-side reviewer, verdict, or rework trigger.
 AI review invocation records are stored separately through `GET/POST /api/threads/{thread_id}/runs/{run_id}/review-invocations` and `POST /api/threads/{thread_id}/runs/{run_id}/review-invocations/{invocation_id}/complete`; they record why the lead AI asked `evidence_checker`, `opposition`, `synthesis_checker`, or `reviewer` to inspect a focused question, plus the returned short summary and evidence refs.
@@ -749,6 +759,8 @@ skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
 ```
+
+Gateway upload listings run filesystem scanning outside the asyncio event loop, so large per-thread upload directories do not stall unrelated requests. Upload, delete, and listing snapshots share a per-owner/thread lock to keep request-level rollback, replacement, and reads atomic while different threads remain parallel.
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 

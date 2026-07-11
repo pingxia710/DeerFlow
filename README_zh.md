@@ -191,7 +191,7 @@ make down   # 停止并移除容器
 
 如果你更希望直接在本地启动各个服务：
 
-前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。
+前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。本源码仓库的运行期状态默认写到 `backend/.deer-flow`；独立嵌入项目默认写到项目根目录下的 `.deer-flow`。两者都可用 `DEER_FLOW_HOME` 覆盖。`make doctor` 会报告运行数据是否分裂在多个根目录。skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。
 在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
@@ -477,6 +477,8 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 复杂任务通常不可能一次完成，DeerFlow 会先拆解，再执行。
 
 lead agent 可以按需动态拉起 sub-agents。每个 sub-agent 都有自己独立的上下文、工具和终止条件。只要条件允许，它们就会并行运行，返回结构化结果，最后再由 lead agent 汇总成一份完整输出。
+
+在 `command-room` 运行中，sub-agent 的自然语言结果仍交给 lead agent 综合；同时，运行时会从实际配对的工具结果生成脱敏证据引用，例如命令、退出码、文件路径、状态和输出哈希，避免已完成的实现只剩下无法核验的 worker 自述。成功运行会关闭当前轮次，但不会由程序自动判定 PASS；后续用户消息会基于新的用户意图创建子轮次，不会把上一条 AI 回答或未接受的 `next_action` 当成既定任务继续执行。
 
 这也是 DeerFlow 能处理从几分钟到几小时任务的原因。比如一个研究任务，可以拆成十几个 sub-agents，分别探索不同方向，最后合并成一份报告，或者一个网站，或者一套带生成视觉内容的演示文稿。一个 harness，多路并行。
 

@@ -6,6 +6,7 @@ import { expect, test } from "@rstest/core";
 import {
   clearThreadChatNavigationIntent,
   isThreadFinishForVisibleChat,
+  isNewThreadRoute,
   markThreadChatNavigationIntent,
   pendingNavigationAllowsThreadStart,
   resolveThreadChatRouteSync,
@@ -30,6 +31,16 @@ test("useThreadChat route sync trusts the committed browser thread URL over stal
     isNewThread: false,
     newThreadId: null,
   });
+});
+
+test("pending /new navigation wins over a stale browser pathname", () => {
+  expect(
+    isNewThreadRoute({
+      threadIdFromPath: "new",
+      actualPathname: "/workspace/chats/existing-thread",
+      pendingPathname: "/workspace/chats/new",
+    }),
+  ).toBe(true);
 });
 
 test("useThreadChat route sync parses committed agent chat thread URLs when params are stale", () => {

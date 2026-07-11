@@ -71,6 +71,22 @@ export function threadIdFromCommittedPathname(pathname: string) {
   }
 }
 
+export function isNewThreadRoute({
+  threadIdFromPath,
+  actualPathname,
+  pendingPathname,
+}: {
+  threadIdFromPath: string;
+  actualPathname: string;
+  pendingPathname: string | null;
+}) {
+  return (
+    threadIdFromPath === "new" &&
+    (actualPathname.endsWith("/new") ||
+      pendingPathname?.endsWith("/new") === true)
+  );
+}
+
 export function isThreadFinishForVisibleChat({
   finishThreadId,
   visibleThreadId,
@@ -136,7 +152,11 @@ export function useThreadChat() {
   // schedules a reset when window.location is stale during render.
   const actualPathname =
     typeof window === "undefined" ? pathname : window.location.pathname;
-  const isNewPath = actualPathname.endsWith("/new");
+  const isNewPath = isNewThreadRoute({
+    threadIdFromPath,
+    actualPathname,
+    pendingPathname: pendingThreadChatPathname,
+  });
   const newThreadIdRef = useRef<string | null>(
     threadIdFromPath === "new" ? uuid() : null,
   );

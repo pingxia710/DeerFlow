@@ -119,6 +119,7 @@ class ChannelService:
         self._config = config
         self._running = False
         self._readiness_locks: dict[str, asyncio.Lock] = {}
+        self._removed_channels: set[str] = set()
 
     @classmethod
     def from_app_config(cls, app_config: AppConfig | None = None) -> ChannelService:
@@ -184,13 +185,14 @@ class ChannelService:
             logger.warning("ChannelService is not running; cannot ensure channel readiness")
             return False
 
-        if config is not None:
-            self._config[name] = dict(config)
-
         # Serialize per channel: readiness is polled from request handlers, so
         # concurrent calls must not stop/start the same channel worker twice.
         lock = self._readiness_locks.setdefault(name, asyncio.Lock())
         async with lock:
+            if name in self._removed_channels:
+                return False
+            if config is not None:
+                self._config[name] = dict(config)
             channel_config = self._config.get(name)
             if not channel_config or not isinstance(channel_config, dict):
                 logger.warning("No config for requested channel")
@@ -219,16 +221,23 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Stop all channels and the manager."""
-        for name, channel in list(self._channels.items()):
-            try:
-                await channel.stop()
-                logger.info("Channel stopped")
-            except Exception:
-                logger.exception("Error stopping channel")
-        self._channels.clear()
+        self._running = False
+        names = set(self._config) | set(self._channels) | set(self._readiness_locks)
+        for name in names:
+            lock = self._readiness_locks.setdefault(name, asyncio.Lock())
+            async with lock:
+                channel = self._channels.get(name)
+                if channel is None:
+                    continue
+                try:
+                    await channel.stop()
+                    if self._channels.get(name) is channel:
+                        self._channels.pop(name, None)
+                    logger.info("Channel stopped")
+                except Exception:
+                    logger.exception("Error stopping channel")
 
         await self.manager.stop()
-        self._running = False
         logger.info("ChannelService stopped")
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
@@ -260,6 +269,11 @@ class ChannelService:
 
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
+        lock = self._readiness_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            return await self._restart_channel_unlocked(name, reload_config=reload_config)
+
+    async def _restart_channel_unlocked(self, name: str, *, reload_config: bool) -> bool:
         if name in self._channels:
             try:
                 await self._channels[name].stop()
@@ -285,27 +299,38 @@ class ChannelService:
 
     async def configure_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Apply runtime config for a channel and restart it if the service is running."""
-        self._config[name] = dict(config)
-        if not self._running:
-            return True
-        # The caller just supplied the authoritative config (e.g. credentials
-        # entered in the browser that are never written to config.yaml) — a
-        # file reload here would clobber it with the stale on-disk entry.
-        return await self.restart_channel(name, reload_config=False)
+        lock = self._readiness_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            self._removed_channels.discard(name)
+            self._config[name] = dict(config)
+            if not self._running:
+                return True
+            # The caller just supplied the authoritative config (e.g. credentials
+            # entered in the browser that are never written to config.yaml) — a
+            # file reload here would clobber it with the stale on-disk entry.
+            return await self._restart_channel_unlocked(name, reload_config=False)
 
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
-        self._config.pop(name, None)
-        channel = self._channels.pop(name, None)
-        if channel is None:
-            return True
-        try:
-            await channel.stop()
-            logger.info("Channel stopped and removed")
-            return True
-        except Exception:
-            logger.exception("Error stopping channel for removal")
-            return False
+        lock = self._readiness_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            previous_config = self._config.get(name)
+            self._removed_channels.add(name)
+            self._config.pop(name, None)
+            channel = self._channels.get(name)
+            if channel is None:
+                return True
+            try:
+                await channel.stop()
+                self._channels.pop(name, None)
+                logger.info("Channel stopped and removed")
+                return True
+            except Exception:
+                self._removed_channels.discard(name)
+                if previous_config is not None:
+                    self._config[name] = previous_config
+                logger.exception("Error stopping channel for removal")
+                return False
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""

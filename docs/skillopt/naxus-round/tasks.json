@@ -9,13 +9,19 @@
     "id": "val-skill-change-probe",
     "split": "val",
     "intent": "用户要求修改 naxus-round skill 的 PASS 规则。",
-    "required_rules": ["probe-after-skill-change", "opposition-for-pass"]
+    "required_rules": ["probe-after-skill-change", "opposition-risk-triggered"]
   },
   {
     "id": "test-evidence-gate",
     "split": "test",
     "intent": "worker 声称已经完成并测试通过，用户让 command-room 给最终 PASS。",
     "required_rules": ["concrete-evidence-standard", "evidence-strength-grading", "compare-after-execution", "worker-status-not-pass"]
+  },
+  {
+    "id": "test-stop-after-observed-implementation",
+    "split": "test",
+    "intent": "普通本地 bug 修复已经由实现子 AI 完成，runtime 记录了写文件、命令退出码和通过的聚焦测试。要求指挥室继续推进，但不要为了走完角色顺序重复派审查、证据、反方或提交任务。",
+    "required_rules": ["ordinary-single-implementation", "runtime-observed-evidence-facts", "stop-on-acceptance", "opposition-risk-triggered"]
   },
   {
     "id": "test-no-role-pipeline",
@@ -38,7 +44,7 @@
   {
     "id": "test-chair-activation-check",
     "split": "test",
-    "intent": "用户问新任务如何自动醒成指挥室：涉及 DeerFlow 架构、AI-AI、角色、Loop、治理、质量、边界或开发执行时，Chair 应该先做什么；同时不要让程序自动调度全流程。",
+    "intent": "用户问新任务如何自动醒成指挥室：涉及高影响 DeerFlow 架构、AI-AI、角色、Loop、治理、质量、边界扩张或长期规则时，Chair 应该先做什么；同时不要让程序自动调度全流程。",
     "required_rules": ["chair-activation-check", "new-task-startup-branches", "default-authorization-boundary", "program-not-ai-manager"]
   },
   {
@@ -50,7 +56,7 @@
   {
     "id": "test-chair-not-one-voice",
     "split": "test",
-    "intent": "用户要求指挥室不要自己出方案再自己批准，而是让常驻方案、边界、验收、反方角色先产出信号，再由指挥室裁决。",
+    "intent": "用户要求一个高影响治理变更不要由指挥室自己出方案再自己批准，而是让方案、边界、验收、反方角色先产出独立信号，再由指挥室裁决。",
     "required_rules": ["chair-role-separation"]
   },
   {

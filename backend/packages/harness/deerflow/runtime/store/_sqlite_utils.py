@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 
-from deerflow.config.paths import resolve_path
+from deerflow.config.runtime_paths import resolve_runtime_path
 
 
 def resolve_sqlite_conn_str(raw: str) -> str:
@@ -12,11 +12,11 @@ def resolve_sqlite_conn_str(raw: str) -> str:
 
     SQLite special strings (``":memory:"`` and ``file:`` URIs) are returned
     unchanged.  Plain filesystem paths — relative or absolute — are resolved
-    to an absolute string via :func:`resolve_path`.
+    to an absolute string under the configured runtime home.
     """
     if raw == ":memory:" or raw.startswith("file:"):
         return raw
-    return str(resolve_path(raw))
+    return str(resolve_runtime_path(raw))
 
 
 def ensure_sqlite_parent_dir(conn_str: str) -> None:

@@ -335,6 +335,60 @@ class TestBufferFlush:
         events = await store.list_events("t1", "r1")
         assert any(e["event_type"] == "llm.ai.response" for e in events)
 
+    @pytest.mark.anyio
+    async def test_cancelled_flush_returns_batch_to_buffer_for_retry(self):
+        class CancelOnceStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                if self.calls == 1:
+                    raise asyncio.CancelledError
+                return await super().put_batch(events)
+
+        store = CancelOnceStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="trace", category="trace", content="once")
+
+        with pytest.raises(asyncio.CancelledError):
+            await journal.flush()
+
+        assert [event["content"] for event in journal._buffer] == ["once"]
+        await journal.flush()
+        events = await store.list_events("t1", "r1")
+        assert [event["content"] for event in events] == ["once"]
+
+    @pytest.mark.anyio
+    async def test_cancelled_background_flush_returns_batch_to_buffer_for_retry(self):
+        class BlockOnceStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.started = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.calls += 1
+                if self.calls == 1:
+                    self.started.set()
+                    await asyncio.Future()
+                return await super().put_batch(events)
+
+        store = BlockOnceStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=1)
+        journal._put(event_type="trace", category="trace", content="once")
+        await asyncio.wait_for(store.started.wait(), timeout=1)
+        [flush_task] = journal._pending_flush_tasks
+
+        flush_task.cancel()
+        await asyncio.gather(flush_task, return_exceptions=True)
+        assert [event["content"] for event in journal._buffer] == ["once"]
+
+        await journal.flush()
+        events = await store.list_events("t1", "r1")
+        assert [event["content"] for event in events] == ["once"]
+
 
 class TestIdentifyCaller:
     def test_lead_agent_tag(self, journal_setup):

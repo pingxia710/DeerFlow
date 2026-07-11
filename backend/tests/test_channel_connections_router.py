@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
@@ -1102,6 +1102,125 @@ def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tm
     anyio.run(repo.close)
 
 
+def test_same_provider_disconnect_then_configure_serializes_full_transaction(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "slack": {"enabled": True}})
+    old_config = {"enabled": True, "bot_token": "old-bot", "app_token": "old-app"}
+    new_config = {"enabled": True, "bot_token": "new-bot", "app_token": "new-app"}
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    runtime_config_store.set_provider_config("slack", old_config)
+    app = _make_app(config, repo, {"slack": dict(old_config)}, runtime_config_store=runtime_config_store)
+    runtime_running = {"slack": True}
+    disconnect_store_entered = threading.Event()
+    persist_barrier = threading.Barrier(2)
+    original_set_provider_config = runtime_config_store.set_provider_config
+    original_set_provider_disconnected = runtime_config_store.set_provider_disconnected
+
+    def wait_at_persist_barrier():
+        try:
+            persist_barrier.wait(timeout=1)
+        except threading.BrokenBarrierError:
+            pass
+
+    def set_provider_config(provider, value):
+        original_set_provider_config(provider, value)
+        wait_at_persist_barrier()
+
+    def set_provider_disconnected(provider):
+        disconnect_store_entered.set()
+        wait_at_persist_barrier()
+        original_set_provider_disconnected(provider)
+
+    async def remove_channel(provider):
+        runtime_running[provider] = False
+        return True
+
+    async def configure_channel(provider, runtime_config):
+        runtime_running[provider] = True
+        return True
+
+    service = SimpleNamespace(remove_channel=remove_channel, configure_channel=configure_channel)
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+    monkeypatch.setattr(runtime_config_store, "set_provider_config", set_provider_config)
+    monkeypatch.setattr(runtime_config_store, "set_provider_disconnected", set_provider_disconnected)
+
+    async def run_concurrently():
+        request = SimpleNamespace(app=app, state=SimpleNamespace(user=_user()))
+        disconnect_task = asyncio.create_task(channel_connections.disconnect_channel_provider_runtime("slack", request))
+        assert await asyncio.wait_for(asyncio.to_thread(disconnect_store_entered.wait), timeout=2)
+        configure_task = asyncio.create_task(
+            channel_connections.configure_channel_provider_runtime(
+                "slack",
+                channel_connections.ChannelRuntimeConfigRequest(values={"bot_token": "new-bot", "app_token": "new-app"}),
+                request,
+            )
+        )
+        await asyncio.gather(disconnect_task, configure_task)
+
+    anyio.run(run_concurrently)
+
+    assert runtime_running["slack"] is True
+    assert runtime_config_store.get_provider_config("slack") == new_config
+    assert app.state.channels_config["slack"] == new_config
+    anyio.run(repo.close)
+
+
+def test_different_provider_runtime_configurations_remain_parallel(tmp_path, monkeypatch):
+    import asyncio
+
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+            "discord": {"enabled": True},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(config, repo, {}, runtime_config_store=runtime_config_store)
+    configure_barrier = asyncio.Barrier(2)
+    configured_providers = []
+
+    async def configure_channel(provider, runtime_config):
+        configured_providers.append(provider)
+        await configure_barrier.wait()
+        return True
+
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: SimpleNamespace(configure_channel=configure_channel))
+
+    async def run_concurrently():
+        request = SimpleNamespace(app=app, state=SimpleNamespace(user=_user()))
+        await asyncio.wait_for(
+            asyncio.gather(
+                channel_connections.configure_channel_provider_runtime(
+                    "slack",
+                    channel_connections.ChannelRuntimeConfigRequest(values={"bot_token": "slack-bot", "app_token": "slack-app"}),
+                    request,
+                ),
+                channel_connections.configure_channel_provider_runtime(
+                    "discord",
+                    channel_connections.ChannelRuntimeConfigRequest(values={"bot_token": "discord-bot"}),
+                    request,
+                ),
+            ),
+            timeout=2,
+        )
+
+    anyio.run(run_concurrently)
+
+    assert set(configured_providers) == {"slack", "discord"}
+    assert runtime_config_store.get_provider_config("slack")["bot_token"] == "slack-bot"
+    assert runtime_config_store.get_provider_config("discord")["bot_token"] == "discord-bot"
+    anyio.run(repo.close)
+
+
 def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tmp_path):
     import anyio
 
@@ -1138,6 +1257,75 @@ def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tm
         "app_token": "xapp-ui",
     }
 
+    anyio.run(repo.close)
+
+
+def test_configure_provider_runtime_restores_service_when_store_save_fails(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "slack": {"enabled": True}})
+    old_config = {"enabled": True, "bot_token": "old-bot", "app_token": "old-app"}
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    runtime_config_store.set_provider_config("slack", old_config)
+    app = _make_app(config, repo, {"slack": dict(old_config)}, runtime_config_store=runtime_config_store)
+    calls = []
+
+    async def configure_channel(provider, runtime_config):
+        calls.append((provider, dict(runtime_config)))
+        return True
+
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: SimpleNamespace(configure_channel=configure_channel))
+    monkeypatch.setattr(runtime_config_store, "_save", Mock(side_effect=OSError("disk full")))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "new-bot", "app_token": "new-app"}},
+        )
+
+    assert response.status_code == 500
+    assert calls == [
+        ("slack", {"enabled": True, "bot_token": "new-bot", "app_token": "new-app"}),
+        ("slack", old_config),
+    ]
+    assert runtime_config_store.get_provider_config("slack") == old_config
+    assert app.state.channels_config["slack"] == old_config
+    anyio.run(repo.close)
+
+
+def test_disconnect_provider_runtime_does_not_revoke_db_when_store_save_fails(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    repo.disconnect_provider_connections = AsyncMock()
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "slack": {"enabled": True}})
+    old_config = {"enabled": True, "bot_token": "old-bot", "app_token": "old-app"}
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    runtime_config_store.set_provider_config("slack", old_config)
+    app = _make_app(config, repo, {"slack": dict(old_config)}, runtime_config_store=runtime_config_store)
+    calls = []
+
+    async def remove_channel(provider):
+        calls.append(("remove", provider))
+        return True
+
+    async def configure_channel(provider, runtime_config):
+        calls.append(("configure", provider, dict(runtime_config)))
+        return True
+
+    service = SimpleNamespace(remove_channel=remove_channel, configure_channel=configure_channel)
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+    monkeypatch.setattr(runtime_config_store, "_save", Mock(side_effect=OSError("disk full")))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.delete("/api/channels/slack/runtime-config")
+
+    assert response.status_code == 500
+    repo.disconnect_provider_connections.assert_not_awaited()
+    assert calls == [("remove", "slack"), ("configure", "slack", old_config)]
+    assert runtime_config_store.get_provider_config("slack") == old_config
+    assert app.state.channels_config["slack"] == old_config
     anyio.run(repo.close)
 
 

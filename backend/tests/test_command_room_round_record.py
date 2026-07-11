@@ -7,6 +7,7 @@ from pathlib import Path
 from deerflow.command_room.evidence import analyze_evidence_ref
 from deerflow.command_room.round_record import (
     evaluate_decision_signals,
+    latest_command_room_round,
     record_command_room_round,
     signals_from_handoffs,
 )
@@ -553,3 +554,80 @@ def test_handoff_target_role_and_needs_more_are_advisory_not_auto_dispatch_or_ga
     assert packet["targetRole"] == "Evidence"
     assert packet["recommendedNextDecision"] == "NEEDS_MORE"
     assert record["decisionSignals"]["decision"] == "PASS"
+
+
+def test_latest_round_skips_truncated_crash_tail(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-crash-tail",
+        agent_name="command-room",
+        user_id="user-1",
+        final_text="Verdict: PASS",
+        run_id="run-complete",
+        base_dir=tmp_path,
+    )
+    assert path is not None
+    with path.open("a", encoding="utf-8") as file:
+        file.write('{"runId":"run-truncated"')
+
+    latest = latest_command_room_round(
+        thread_id="thread-crash-tail",
+        user_id="user-1",
+        base_dir=tmp_path,
+    )
+
+    assert latest is not None
+    assert latest["runId"] == "run-complete"
+
+
+def test_new_round_recovers_after_truncated_crash_tail(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-crash-recovery",
+        agent_name="command-room",
+        user_id="user-1",
+        final_text="Verdict: NEEDS_MORE",
+        run_id="run-before-crash",
+        base_dir=tmp_path,
+    )
+    assert path is not None
+    with path.open("a", encoding="utf-8") as file:
+        file.write('{"runId":"run-truncated"')
+
+    record_command_room_round(
+        thread_id="thread-crash-recovery",
+        agent_name="command-room",
+        user_id="user-1",
+        final_text="Verdict: PASS",
+        run_id="run-after-crash",
+        base_dir=tmp_path,
+    )
+
+    latest = latest_command_room_round(
+        thread_id="thread-crash-recovery",
+        user_id="user-1",
+        base_dir=tmp_path,
+    )
+    assert latest is not None
+    assert latest["runId"] == "run-after-crash"
+
+
+def test_latest_round_skips_truncated_utf8_crash_tail(tmp_path):
+    path = record_command_room_round(
+        thread_id="thread-utf8-tail",
+        agent_name="command-room",
+        user_id="user-1",
+        final_text="Verdict: PASS",
+        run_id="run-valid-utf8",
+        base_dir=tmp_path,
+    )
+    assert path is not None
+    with path.open("ab") as file:
+        file.write(b'{"summary":"\xe4\xb8')
+
+    latest = latest_command_room_round(
+        thread_id="thread-utf8-tail",
+        user_id="user-1",
+        base_dir=tmp_path,
+    )
+
+    assert latest is not None
+    assert latest["runId"] == "run-valid-utf8"

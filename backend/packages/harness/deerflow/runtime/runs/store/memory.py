@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from deerflow.runtime.runs.schemas import is_active_status, is_inflight_status, is_terminal_status
 from deerflow.runtime.runs.store.base import CancelIntent, CancelRequestResult, RunLease, RunStore
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 _DEFAULT_LEASE_TTL = timedelta(seconds=30)
 
@@ -116,16 +117,23 @@ class MemoryRunStore(RunStore):
             return None
         return run
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100, before=None):
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run. ``self._runs.get`` is defense-in-depth: it drops a
         # stale id still in the index but already gone from ``_runs``.
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
             return []
-        tie_rank = {run_id: index for index, run_id in enumerate(run_ids)}
         results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id)]
-        results.sort(key=lambda r: (r["created_at"], r["updated_at"], tie_rank.get(r["run_id"], -1), r["run_id"]), reverse=True)
+        results.sort(key=lambda r: (r["created_at"], r["run_id"]), reverse=True)
+        if before is not None:
+            cursor_index = next(
+                (index for index, row in enumerate(results) if row["run_id"] == before),
+                None,
+            )
+            if cursor_index is None:
+                return []
+            results = results[cursor_index + 1 :]
         return results[:limit]
 
     async def update_status(self, run_id, status, *, error=None, terminal_reason=None):
@@ -146,6 +154,9 @@ class MemoryRunStore(RunStore):
     async def delete(self, run_id):
         run = self._runs.pop(run_id, None)
         if run is not None:
+            lease = self._active_slots.get(run["thread_id"])
+            if lease is not None and lease.run_id == run_id:
+                self._active_slots.pop(run["thread_id"], None)
             self._unindex_run(run_id, run["thread_id"])
 
     async def delete_by_thread(self, thread_id, *, user_id=None):
@@ -158,6 +169,31 @@ class MemoryRunStore(RunStore):
             await self.delete(run_id)
             deleted += 1
         return deleted
+
+    async def delete_legacy_by_thread(self, thread_id: str) -> int:
+        run_ids = list(self._runs_by_thread.get(thread_id, {}))
+        deleted = 0
+        for run_id in run_ids:
+            run = self._runs.get(run_id)
+            if run is None or run.get("user_id") is not None:
+                continue
+            await self.delete(run_id)
+            deleted += 1
+        return deleted
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        claimed = 0
+        for run_id in self._runs_by_thread.get(thread_id, {}):
+            run = self._runs.get(run_id)
+            if run is None or run.get("user_id") not in {None, DEFAULT_USER_ID}:
+                continue
+            run["user_id"] = owner_user_id
+            run["updated_at"] = datetime.now(UTC).isoformat()
+            claimed += 1
+        return claimed
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        return {run.get("user_id") for run_id in self._runs_by_thread.get(thread_id, {}) if (run := self._runs.get(run_id)) is not None}
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         if run_id in self._runs:
@@ -226,6 +262,7 @@ class MemoryRunStore(RunStore):
         lease_token: str,
         generation: int,
         lease_expires_at: datetime | None = None,
+        metadata_updates: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> bool:
         now_dt = self._now(now)
@@ -248,6 +285,17 @@ class MemoryRunStore(RunStore):
             if run := self._runs.get(run_id):
                 run["lease_expires_at"] = expires_at.isoformat()
                 run["lease_heartbeat_at"] = now_dt.isoformat()
+                if metadata_updates:
+                    protected = {
+                        "owner_worker_id",
+                        "lease_token",
+                        "generation",
+                        "lease_expires_at",
+                        "lease_heartbeat_at",
+                    }
+                    metadata = dict(run.get("metadata") or {})
+                    metadata.update({key: value for key, value in metadata_updates.items() if key not in protected})
+                    run["metadata"] = metadata
                 run["updated_at"] = now_dt.isoformat()
             return True
         return False
@@ -299,7 +347,8 @@ class MemoryRunStore(RunStore):
         if run is None:
             return None
         lease = self._active_slots.get(run["thread_id"])
-        if lease is None or lease.run_id != run_id or lease.lease_token != lease_token or lease.generation != generation:
+        now_dt = self._now(now)
+        if not is_active_status(run.get("status")) or lease is None or lease.run_id != run_id or lease.lease_token != lease_token or lease.generation != generation or lease.lease_expires_at < now_dt:
             return None
         action = run.get("cancel_action")
         requested_at = run.get("cancellation_requested_at")
@@ -309,14 +358,23 @@ class MemoryRunStore(RunStore):
             run["status"] = "rolling_back"
         elif run.get("status") != "rolling_back":
             run["status"] = "cancelling"
-        run["updated_at"] = self._now(now).isoformat()
+        run["updated_at"] = now_dt.isoformat()
         return CancelIntent(run_id=run_id, action=action, requested_at=requested_at, requested_by=run.get("cancel_requested_by"))
 
-    def _matching_active_lease(self, run: dict[str, Any], lease_token: str, generation: int) -> RunLease | None:
+    def _matching_active_lease(
+        self,
+        run: dict[str, Any],
+        lease_token: str,
+        generation: int,
+        *,
+        now: datetime | None = None,
+    ) -> RunLease | None:
         lease = self._active_slots.get(run["thread_id"])
         if lease is None:
             return None
         if lease.run_id != run["run_id"] or lease.lease_token != lease_token or lease.generation != generation:
+            return None
+        if lease.lease_expires_at < self._now(now):
             return None
         return lease
 
@@ -335,7 +393,7 @@ class MemoryRunStore(RunStore):
         run = self._runs.get(run_id)
         if run is None or run.get("status") not in set(from_statuses):
             return False
-        if self._matching_active_lease(run, lease_token, generation) is None:
+        if self._matching_active_lease(run, lease_token, generation, now=now) is None:
             return False
         run["status"] = to_status
         self._set_terminal_reason(run, terminal_reason)
@@ -364,7 +422,7 @@ class MemoryRunStore(RunStore):
             return run.get("status") == terminal_status and run.get("lease_token") == lease_token and run.get("generation") == generation and self._terminal_reason(run) == terminal_reason
         if run.get("status") not in set(from_statuses):
             return False
-        if self._matching_active_lease(run, lease_token, generation) is None:
+        if self._matching_active_lease(run, lease_token, generation, now=now) is None:
             return False
         now_iso = self._now(now).isoformat()
         run["status"] = terminal_status

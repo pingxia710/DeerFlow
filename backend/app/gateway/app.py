@@ -6,12 +6,16 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from uuid import uuid4
 
 from fastapi import FastAPI, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import JSONResponse
 
-from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+from app.gateway.auth_disabled import is_auth_disabled_requested, warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
@@ -97,12 +101,9 @@ def _assert_single_gateway_worker() -> None:
         raise RuntimeError("DeerFlow gateway runtime is process-local; production/non-development deployments must run exactly one gateway worker until shared runtime is enabled.")
 
 
-def _assert_safe_sandbox_config_for_environment(config: AppConfig) -> None:
-    if not _is_shared_environment():
-        return
-
+def _unsafe_sandbox_settings(config: AppConfig) -> list[str]:
     sandbox = config.sandbox
-    unsafe = [
+    return [
         name
         for name in (
             "allow_host_bash",
@@ -112,8 +113,42 @@ def _assert_safe_sandbox_config_for_environment(config: AppConfig) -> None:
         )
         if bool(getattr(sandbox, name, False))
     ]
+
+
+def _assert_safe_sandbox_config_for_environment(config: AppConfig) -> None:
+    if not _is_shared_environment():
+        return
+
+    unsafe = _unsafe_sandbox_settings(config)
     if unsafe:
         raise RuntimeError(f"Unsafe sandbox configuration is forbidden in staging/shared/production: sandbox.{', sandbox.'.join(unsafe)}")
+
+
+def _assert_safe_local_exposure_config(config: AppConfig) -> None:
+    bind_hosts = [
+        value.strip()
+        for key in (
+            "DEER_FLOW_PUBLIC_BIND_HOST",
+            "DEER_FLOW_BIND_HOST",
+            "DEER_FLOW_GATEWAY_HOST",
+            "GATEWAY_HOST",
+        )
+        if (value := os.getenv(key)) and value.strip()
+    ] or ["127.0.0.1"]
+
+    def is_loopback(host: str) -> bool:
+        try:
+            return ip_address(host.strip("[]")).is_loopback
+        except ValueError:
+            return host.lower() == "localhost"
+
+    remote_hosts = [host for host in bind_hosts if not is_loopback(host)]
+    if remote_hosts and is_auth_disabled_requested():
+        raise RuntimeError(f"Remote bind {', '.join(repr(host) for host in remote_hosts)} is incompatible with DEER_FLOW_AUTH_DISABLED=1 because authentication would be bypassed.")
+
+    unsafe = _unsafe_sandbox_settings(config)
+    if remote_hosts and unsafe:
+        raise RuntimeError(f"Remote bind {', '.join(repr(host) for host in remote_hosts)} is incompatible with trusted host sandbox access: sandbox.{', sandbox.'.join(unsafe)}")
 
 
 def _assert_run_event_store_config_for_environment(config: AppConfig) -> None:
@@ -136,7 +171,7 @@ def _metric_label(value: str) -> str:
 def _route_template(request) -> str:
     route = request.scope.get("route")
     path = getattr(route, "path", None)
-    return str(path or request.url.path)
+    return str(path) if path else "<unmatched>"
 
 
 def _record_request_metric(request, *, status_code: int, duration_seconds: float) -> None:
@@ -294,6 +329,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
         _assert_safe_sandbox_config_for_environment(startup_config)
+        _assert_safe_local_exposure_config(startup_config)
         _assert_run_event_store_config_for_environment(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
@@ -464,6 +500,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             },
         ],
     )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def sanitize_http_exception(request, exc: StarletteHTTPException):
+        if exc.status_code >= 500:
+            return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"}, headers=exc.headers)
+        return await http_exception_handler(request, exc)
 
     @app.middleware("http")
     async def request_id_middleware(request, call_next):

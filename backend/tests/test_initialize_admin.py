@@ -100,6 +100,89 @@ def test_initialize_rejected_when_admin_exists(client):
     assert body["detail"]["code"] == "system_already_initialized"
 
 
+@pytest.mark.asyncio
+async def test_initialize_serializes_concurrent_first_admin_requests(monkeypatch):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException, Response
+    from starlette.requests import Request
+
+    import app.gateway.routers.auth as auth_router
+
+    class RacingProvider:
+        def __init__(self):
+            self.users = []
+            self.count_calls = 0
+            self.first_count_started = asyncio.Event()
+            self.release_first_count = asyncio.Event()
+
+        async def count_admin_users(self):
+            snapshot = len(self.users)
+            self.count_calls += 1
+            if self.count_calls == 1:
+                self.first_count_started.set()
+                await self.release_first_count.wait()
+            return snapshot
+
+        async def create_user(self, *, email, password, system_role, needs_setup):
+            user = SimpleNamespace(
+                id=f"user-{len(self.users) + 1}",
+                email=str(email),
+                system_role=system_role,
+                oauth_provider=None,
+                token_version=0,
+            )
+            self.users.append(user)
+            return user
+
+    def request() -> Request:
+        path = "/api/v1/auth/initialize"
+        return Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "scheme": "http",
+                "path": path,
+                "raw_path": path.encode(),
+                "query_string": b"",
+                "headers": [(b"host", b"localhost")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 8000),
+            }
+        )
+
+    provider = RacingProvider()
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: provider)
+    monkeypatch.setattr(auth_router, "create_access_token", lambda *args, **kwargs: "token")
+    monkeypatch.setattr(auth_router, "_set_session_cookie", lambda *args, **kwargs: None)
+
+    first = asyncio.create_task(
+        auth_router.initialize_admin(
+            request(),
+            Response(),
+            auth_router.InitializeAdminRequest(email="first@example.com", password="Strong!Pass91"),
+        )
+    )
+    await provider.first_count_started.wait()
+    second = asyncio.create_task(
+        auth_router.initialize_admin(
+            request(),
+            Response(),
+            auth_router.InitializeAdminRequest(email="second@example.com", password="Strong!Pass92"),
+        )
+    )
+    await asyncio.sleep(0)
+    provider.release_first_count.set()
+
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert len(provider.users) == 1
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    conflicts = [result for result in results if isinstance(result, HTTPException)]
+    assert len(conflicts) == 1
+    assert conflicts[0].status_code == 409
+
+
 def test_initialize_register_does_not_block_initialization(client):
     """/register creating a user before /initialize doesn't block admin creation."""
     # Register a regular user first

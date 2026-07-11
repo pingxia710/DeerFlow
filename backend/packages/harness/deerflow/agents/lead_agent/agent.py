@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
 _COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
+_COMMAND_ROOM_CHAIR_SKILL = "command-room-chair"
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -112,6 +113,26 @@ def _uses_todo_list(agent_name: str | None, is_plan_mode: bool) -> bool:
     if _is_coordinator_only_agent(agent_name):
         return False
     return is_plan_mode
+
+
+def _resolve_subagent_available_skills(agent_name: str | None, available_skills: set[str] | None) -> set[str] | None:
+    """Extend a non-empty Command Room allowlist with trusted built-in role skills."""
+
+    if available_skills is None or not available_skills or not _is_coordinator_only_agent(agent_name):
+        return available_skills
+    from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
+
+    delegated = set(available_skills)
+    for role_config in COMMAND_ROOM_ROLE_CONFIGS.values():
+        delegated.update(role_config.skills or [])
+    return delegated
+
+
+def _resolve_command_room_available_skills(agent_name: str | None, available_skills: set[str] | None) -> set[str] | None:
+    """Add the Chair operating skill to a non-empty Command Room allowlist."""
+    if available_skills is None or not available_skills or not _is_coordinator_only_agent(agent_name):
+        return available_skills
+    return {*available_skills, _COMMAND_ROOM_CHAIR_SKILL}
 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
@@ -484,6 +505,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    lead_available_skills = _resolve_command_room_available_skills(agent_name, available_skills)
+    subagent_available_skills = _resolve_subagent_available_skills(agent_name, available_skills)
     tool_groups = _resolve_agent_tool_groups(agent_name, agent_config)
     subagent_tool_groups = _resolve_subagent_tool_groups(agent_name, agent_config)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
@@ -530,6 +553,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "tool_groups": tool_groups,
             "subagent_tool_groups": subagent_tool_groups,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
+            "lead_available_skills": sorted(lead_available_skills) if lead_available_skills is not None else None,
+            "subagent_available_skills": sorted(subagent_available_skills) if subagent_available_skills is not None else None,
         }
     )
 
@@ -546,7 +571,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(lead_available_skills, app_config=resolved_app_config)
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
@@ -607,7 +632,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             config,
             model_name=model_name,
             agent_name=agent_name,
-            available_skills=available_skills,
+            available_skills=lead_available_skills,
             app_config=resolved_app_config,
             deferred_setup=setup,
         ),
@@ -615,7 +640,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            available_skills=available_skills,
+            available_skills=lead_available_skills,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
         ),

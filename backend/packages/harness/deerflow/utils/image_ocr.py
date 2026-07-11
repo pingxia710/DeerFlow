@@ -70,16 +70,16 @@ def _run_tesseract(path: Path, timeout_seconds: int) -> str | None:
 def _run_macos_vision(path: Path, timeout_seconds: int) -> str | None:
     if platform.system() != "Darwin" or not shutil.which("swift"):
         return None
-    script_path = Path(tempfile.gettempdir()) / "deerflow-image-ocr.swift"
-    if not script_path.exists() or script_path.read_text(encoding="utf-8") != _SWIFT_OCR_SOURCE:
-        script_path.write_text(_SWIFT_OCR_SOURCE, encoding="utf-8")
-    result = subprocess.run(
-        ["swift", str(script_path), str(path)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-    )
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".swift") as script_file:
+        script_file.write(_SWIFT_OCR_SOURCE)
+        script_file.flush()
+        result = subprocess.run(
+            ["swift", script_file.name, str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
     return _clean_text(result.stdout) if result.returncode == 0 else None
 
 

@@ -72,7 +72,11 @@ def _app(tmp_path, monkeypatch):
     monkeypatch.setattr("deerflow.command_room.quality.get_paths", lambda: _Paths(tmp_path))
     app = make_authed_test_app(user_factory=_user)
     app.include_router(thread_runs.router)
-    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=_run_record()))
+    app.state.run_manager = SimpleNamespace(
+        get=AsyncMock(return_value=_run_record()),
+        begin_thread_write=AsyncMock(),
+        end_thread_write=AsyncMock(),
+    )
     app.state.run_event_store = SimpleNamespace(list_events=AsyncMock(return_value=[]))
     app.state.round_state_store = _RoundStore()
     return app

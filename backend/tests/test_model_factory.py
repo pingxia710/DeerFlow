@@ -768,7 +768,7 @@ def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
 
 
-@pytest.mark.parametrize("reasoning_effort", ["minimal", "high", "xhigh"])
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "high", "xhigh", "max", "ultra"])
 def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch, reasoning_effort):
     cfg = _make_app_config(
         [

@@ -5,13 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import os
 import re
+import shutil
+import stat
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -579,6 +585,41 @@ def _resolve_slash_skill_command(
         raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
 
 
+def _snapshot_attachment(path: Path) -> tuple[Path, int]:
+    """Copy one securely opened output into a private delivery snapshot."""
+    from deerflow.config.paths import UnsafePathError, open_file_no_symlinks
+
+    flags = os.O_RDONLY | (os.O_NONBLOCK if hasattr(os, "O_NONBLOCK") else 0)
+    source_fd = open_file_no_symlinks(path, flags)
+    snapshot_fd = -1
+    snapshot_path: Path | None = None
+    try:
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
+            raise UnsafePathError(f"Path is not an exclusive regular file: {path}")
+
+        snapshot_fd, snapshot_name = tempfile.mkstemp(
+            prefix="deerflow-channel-attachment-",
+            suffix=path.suffix,
+        )
+        snapshot_path = Path(snapshot_name)
+        with os.fdopen(source_fd, "rb") as source:
+            source_fd = -1
+            with os.fdopen(snapshot_fd, "wb") as target:
+                snapshot_fd = -1
+                shutil.copyfileobj(source, target)
+        return snapshot_path, snapshot_path.stat().st_size
+    except BaseException:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if snapshot_fd >= 0:
+            os.close(snapshot_fd)
+
+
 def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str | None = None) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
@@ -594,7 +635,7 @@ def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str |
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
     effective_user_id = user_id or get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id).resolve()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
@@ -602,26 +643,26 @@ def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str |
             continue
         try:
             actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=effective_user_id)
-            # Verify the resolved path is actually under the outputs directory
-            # (guards against path-traversal even after prefix check)
+            # Verify the lexical path is under outputs without following any
+            # owner-controlled symlink. The secure descriptor walk below pins
+            # every ancestor before the snapshot is copied.
             try:
-                actual.resolve().relative_to(outputs_dir)
+                actual.relative_to(outputs_dir)
             except ValueError:
                 logger.warning("[Manager] artifact path escapes outputs dir: %s -> %s", virtual_path, actual)
                 continue
-            if not actual.is_file():
-                logger.warning("[Manager] artifact not found on disk: %s -> %s", virtual_path, actual)
-                continue
             mime, _ = mimetypes.guess_type(str(actual))
             mime = mime or "application/octet-stream"
+            snapshot_path, snapshot_size = _snapshot_attachment(actual)
             attachments.append(
                 ResolvedAttachment(
                     virtual_path=virtual_path,
-                    actual_path=actual,
+                    actual_path=snapshot_path,
                     filename=actual.name,
                     mime_type=mime,
-                    size=actual.stat().st_size,
+                    size=snapshot_size,
                     is_image=mime.startswith("image/"),
+                    _cleanup_path=snapshot_path,
                 )
             )
         except (ValueError, OSError) as exc:
@@ -808,12 +849,14 @@ class ChannelManager:
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
         # chat don't race to create duplicate threads (see _get_or_create_thread).
-        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        self._thread_create_locks: WeakValueDictionary[tuple[str, str, str | None], asyncio.Lock] = WeakValueDictionary()
+        self._artifact_delivery_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        self._message_tasks: set[asyncio.Task] = set()
         # Insertion order == chronological (keys are never re-inserted), so an
         # OrderedDict lets us evict expired/overflow entries from the front in
         # O(k) instead of scanning all entries on every inbound message.
@@ -950,6 +993,12 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        message_tasks = tuple(self._message_tasks)
+        for task in message_tasks:
+            task.cancel()
+        if message_tasks:
+            await asyncio.gather(*message_tasks, return_exceptions=True)
+        self._message_tasks.clear()
         logger.info("ChannelManager stopped")
 
     # -- dispatch loop -----------------------------------------------------
@@ -981,6 +1030,8 @@ class ChannelManager:
                 len(msg.files),
             )
             task = asyncio.create_task(self._handle_message(msg))
+            self._message_tasks.add(task)
+            task.add_done_callback(self._message_tasks.discard)
             task.add_done_callback(self._log_task_error)
 
     @staticmethod
@@ -1193,7 +1244,8 @@ class ChannelManager:
             )
             return
 
-        self.store.set_thread_id(
+        await asyncio.to_thread(
+            self.store.set_thread_id,
             msg.channel_name,
             msg.chat_id,
             thread_id,
@@ -1230,19 +1282,14 @@ class ChannelManager:
 
         key = (msg.channel_name, msg.chat_id, msg.topic_id)
         lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
-        try:
-            async with lock:
-                # A concurrent message for the same chat may have created the
-                # thread while we were waiting on the lock.
-                thread_id = await self._lookup_thread_id(msg)
-                if thread_id:
-                    return thread_id, False
-                return await self._create_thread(client, msg), True
-        finally:
-            # Once the thread is stored, later messages short-circuit on the
-            # lookup above and never reach this lock, so it's safe to drop the
-            # entry and keep the registry bounded to in-flight conversations.
-            self._thread_create_locks.pop(key, None)
+        async with lock:
+            # A concurrent message for the same chat may have created the
+            # thread while we were waiting on the lock. Weak values keep this
+            # lock alive while waiters hold it and remove it once no task does.
+            thread_id = await self._lookup_thread_id(msg)
+            if thread_id:
+                return thread_id, False
+            return await self._create_thread(client, msg), True
 
     async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
         """Best-effort source metadata backfill for existing IM-created threads."""
@@ -1362,7 +1409,12 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await self._prepare_artifact_delivery_async(
+            thread_id,
+            response_text,
+            artifacts,
+            user_id=storage_user_id,
+        )
 
         if not response_text:
             if attachments:
@@ -1384,6 +1436,27 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+    async def _prepare_artifact_delivery_async(
+        self,
+        thread_id: str,
+        response_text: str,
+        artifacts: list[str],
+        *,
+        user_id: str | None,
+    ) -> tuple[str, list[ResolvedAttachment]]:
+        key = (user_id or "", thread_id)
+        lock = self._artifact_delivery_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await asyncio.to_thread(
+                partial(
+                    _prepare_artifact_delivery,
+                    thread_id,
+                    response_text,
+                    artifacts,
+                    user_id=user_id,
+                )
+            )
 
     async def _handle_streaming_chat(
         self,
@@ -1470,7 +1543,12 @@ class ChannelManager:
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await self._prepare_artifact_delivery_async(
+                thread_id,
+                response_text,
+                artifacts,
+                user_id=storage_user_id,
+            )
 
             if not response_text:
                 if attachments:

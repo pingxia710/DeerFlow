@@ -1,8 +1,10 @@
+import errno
 import hashlib
 import logging
 import os
 import re
 import shutil
+import stat
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
@@ -10,12 +12,179 @@ from deerflow.config.runtime_paths import runtime_home
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
-_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
-_SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_THREAD_ID_RE = re.compile(r"[A-Za-z0-9_\-]+")
+_SAFE_USER_ID_RE = re.compile(r"[A-Za-z0-9_\-]+")
 _UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
 _SAFE_USER_ID_DIGEST_HEX_LEN = 16
+_MAX_PATH_COMPONENT_UTF8_BYTES = 255
 
 logger = logging.getLogger(__name__)
+
+
+class UnsafePathError(ValueError):
+    """Raised when a filesystem path contains a symlink or unsafe component."""
+
+
+def _absolute_lexical_path(path: str | os.PathLike[str]) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate = Path(os.path.abspath(candidate))
+
+    # macOS exposes system-owned aliases such as /var -> /private/var and
+    # /tmp -> /private/tmp.  Canonicalize only that top-level component: doing
+    # the same for a deeper component would follow an owner/thread-controlled
+    # symlink and defeat the checks below.
+    parts = candidate.parts[1:] if candidate.anchor else candidate.parts
+    if parts:
+        top_level = Path(candidate.anchor) / parts[0]
+        try:
+            if top_level.is_symlink():
+                candidate = top_level.resolve(strict=True).joinpath(*parts[1:])
+        except OSError:
+            pass
+    return candidate
+
+
+def validate_no_symlink_components(
+    path: str | os.PathLike[str],
+    *,
+    allow_missing: bool = False,
+) -> Path:
+    """Validate existing path components without resolving symlinks."""
+    absolute = _absolute_lexical_path(path)
+    current = Path(absolute.anchor)
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current /= part
+        try:
+            current_stat = os.lstat(current)
+        except FileNotFoundError:
+            if allow_missing:
+                return absolute
+            raise
+        if stat.S_ISLNK(current_stat.st_mode):
+            raise UnsafePathError(f"Refusing symlinked path component: {current}")
+    return absolute
+
+
+def _supports_secure_dir_fd() -> bool:
+    return bool(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd)
+
+
+def open_directory_no_symlinks(
+    path: str | os.PathLike[str],
+    *,
+    create: bool = False,
+    mode: int = 0o755,
+) -> int:
+    """Open a directory by walking every component with ``O_NOFOLLOW``."""
+    absolute = _absolute_lexical_path(path)
+    if not _supports_secure_dir_fd():
+        validate_no_symlink_components(
+            absolute,
+            allow_missing=create,
+        )
+        if create:
+            absolute.mkdir(parents=True, exist_ok=True, mode=mode)
+        return os.open(absolute, os.O_RDONLY)
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(absolute.anchor or os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+        for part in parts:
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode, dir_fd=fd)
+                except FileExistsError:
+                    # Another caller won the create race. The descriptor open
+                    # below still verifies the winner is a real directory and
+                    # refuses symlinks.
+                    pass
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in {
+                    errno.ELOOP,
+                    errno.ENOTDIR,
+                    errno.ENXIO,
+                    errno.EAGAIN,
+                }:
+                    raise UnsafePathError(f"Refusing unsafe directory component in {absolute}") from exc
+                raise
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def ensure_directory_no_symlinks(
+    path: str | os.PathLike[str],
+    *,
+    mode: int = 0o755,
+) -> Path:
+    """Create a directory tree without following any symlink component."""
+    absolute = _absolute_lexical_path(path)
+    fd = open_directory_no_symlinks(absolute, create=True, mode=mode)
+    os.close(fd)
+    return absolute
+
+
+def open_file_no_symlinks(
+    path: str | os.PathLike[str],
+    flags: int,
+    mode: int = 0o600,
+) -> int:
+    """Open one file while pinning every ancestor directory by descriptor."""
+    absolute = _absolute_lexical_path(path)
+    if not _supports_secure_dir_fd():
+        validate_no_symlink_components(absolute.parent)
+        final_flags = flags | (os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0)
+        return os.open(absolute, final_flags, mode)
+
+    parent_fd = open_directory_no_symlinks(absolute.parent)
+    try:
+        try:
+            return os.open(
+                absolute.name,
+                flags | os.O_NOFOLLOW,
+                mode,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno in {
+                errno.ELOOP,
+                errno.EISDIR,
+                errno.ENOTDIR,
+                errno.ENXIO,
+                errno.EAGAIN,
+            }:
+                raise UnsafePathError(f"Refusing unsafe file path: {absolute}") from exc
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def read_file_no_symlinks(path: str | os.PathLike[str]) -> bytes:
+    """Read an exclusive regular file without following symlink components."""
+    flags = os.O_RDONLY | (os.O_NONBLOCK if hasattr(os, "O_NONBLOCK") else 0)
+    fd = open_file_no_symlinks(path, flags)
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise UnsafePathError(f"Path is not an exclusive regular file: {path}")
+        with os.fdopen(fd, "rb") as file:
+            fd = -1
+            return file.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _default_local_base_dir() -> Path:
@@ -23,18 +192,28 @@ def _default_local_base_dir() -> Path:
     return runtime_home()
 
 
-def _validate_thread_id(thread_id: str) -> str:
+def validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
-    if not _SAFE_THREAD_ID_RE.match(thread_id):
+    if not isinstance(thread_id, str) or _SAFE_THREAD_ID_RE.fullmatch(thread_id) is None:
         raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    if len(thread_id.encode("utf-8")) > _MAX_PATH_COMPONENT_UTF8_BYTES:
+        raise ValueError(f"Invalid thread_id {thread_id!r}: maximum length is {_MAX_PATH_COMPONENT_UTF8_BYTES} UTF-8 bytes.")
     return thread_id
 
 
-def _validate_user_id(user_id: str) -> str:
+def validate_user_id(user_id: str) -> str:
     """Validate a user ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(user_id):
+    if not isinstance(user_id, str) or _SAFE_USER_ID_RE.fullmatch(user_id) is None:
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    if len(user_id.encode("utf-8")) > _MAX_PATH_COMPONENT_UTF8_BYTES:
+        raise ValueError(f"Invalid user_id {user_id!r}: maximum length is {_MAX_PATH_COMPONENT_UTF8_BYTES} UTF-8 bytes.")
     return user_id
+
+
+# Private aliases preserve older imports while API and persistence layers share
+# one full-string validation contract.
+_validate_thread_id = validate_thread_id
+_validate_user_id = validate_user_id
 
 
 def make_safe_user_id(raw: str) -> str:
@@ -48,16 +227,19 @@ def make_safe_user_id(raw: str) -> str:
     if not raw:
         raise ValueError("user_id must be a non-empty string.")
     sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw)
-    if sanitized == raw:
+    if sanitized == raw and len(raw.encode("utf-8")) <= _MAX_PATH_COMPONENT_UTF8_BYTES:
         return raw
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
-    return f"{sanitized}-{digest}"
+    suffix = f"-{digest}"
+    safe_user_id = f"{sanitized[: _MAX_PATH_COMPONENT_UTF8_BYTES - len(suffix)]}{suffix}"
+    return validate_user_id(safe_user_id)
 
 
 def _legacy_safe_user_id(raw: str, sanitized: str) -> str:
     """Bucket name produced by the previous (SHA-1) digest revision for ``raw``."""
     digest = hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
-    return f"{sanitized}-{digest}"
+    suffix = f"-{digest}"
+    return f"{sanitized[: _MAX_PATH_COMPONENT_UTF8_BYTES - len(suffix)]}{suffix}"
 
 
 def _join_host_path(base: str, *parts: str) -> str:
@@ -111,7 +293,8 @@ class Paths:
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
         2. DEER_FLOW_HOME environment variable
-        3. Caller project fallback: `{project_root}/.deer-flow`
+        3. Source checkout fallback: `{project_root}/backend/.deer-flow`
+        4. Standalone project fallback: `{project_root}/.deer-flow`
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
@@ -331,8 +514,15 @@ class Paths:
             self.sandbox_outputs_dir(thread_id, user_id=user_id),
             self.acp_workspace_dir(thread_id, user_id=user_id),
         ]:
-            d.mkdir(parents=True, exist_ok=True)
-            d.chmod(0o777)
+            fd = open_directory_no_symlinks(d, create=True, mode=0o777)
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, 0o777)
+                else:
+                    validate_no_symlink_components(d)
+                    d.chmod(0o777)
+            finally:
+                os.close(fd)
 
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
@@ -342,6 +532,80 @@ class Paths:
         thread_dir = self.thread_dir(thread_id, user_id=user_id)
         if thread_dir.exists():
             shutil.rmtree(thread_dir)
+
+    def claim_legacy_thread_dirs(
+        self,
+        thread_id: str,
+        owner_user_id: str,
+    ) -> int:
+        """Move legacy/default thread files into the concrete owner bucket.
+
+        The copy-then-delete path is retryable. Existing conflicting files are
+        rejected before mutation so ownership repair never overwrites either
+        side silently.
+        """
+        target = self.thread_dir(thread_id, user_id=owner_user_id)
+        sources = [
+            self.thread_dir(thread_id),
+            self.thread_dir(thread_id, user_id="default"),
+        ]
+
+        def assert_tree_has_no_symlinks(candidate: Path) -> None:
+            if not os.path.lexists(candidate):
+                parent = candidate.parent
+                while not os.path.lexists(parent) and parent != parent.parent:
+                    parent = parent.parent
+                validate_no_symlink_components(parent)
+                return
+            validate_no_symlink_components(candidate)
+            if not candidate.is_dir():
+                raise ValueError(f"Refusing non-directory thread root: {candidate}")
+            for root, directories, files in os.walk(candidate, followlinks=False):
+                root_path = Path(root)
+                for name in (*directories, *files):
+                    nested = root_path / name
+                    if stat.S_ISLNK(os.lstat(nested).st_mode):
+                        raise ValueError(f"Refusing symlink inside legacy thread tree: {nested}")
+
+        for candidate in {target, *sources}:
+            try:
+                assert_tree_has_no_symlinks(candidate)
+            except UnsafePathError as exc:
+                raise ValueError(str(exc)) from exc
+
+        def assert_compatible(source: Path, destination: Path) -> None:
+            if not destination.exists():
+                return
+            for source_path in source.rglob("*"):
+                relative = source_path.relative_to(source)
+                destination_path = destination / relative
+                if not destination_path.exists() and not destination_path.is_symlink():
+                    continue
+                if source_path.is_dir() and destination_path.is_dir():
+                    continue
+                if source_path.is_symlink() and destination_path.is_symlink():
+                    if os.readlink(source_path) == os.readlink(destination_path):
+                        continue
+                elif source_path.is_file() and destination_path.is_file():
+                    if source_path.read_bytes() == destination_path.read_bytes():
+                        continue
+                raise FileExistsError(f"Conflicting thread migration path: {relative}")
+
+        existing_sources = [source for source in sources if source != target and source.exists()]
+        for index, source in enumerate(existing_sources):
+            assert_compatible(source, target)
+            for previous_source in existing_sources[:index]:
+                assert_compatible(source, previous_source)
+        for source in existing_sources:
+            ensure_directory_no_symlinks(target.parent)
+            if not target.exists():
+                source.rename(target)
+                assert_tree_has_no_symlinks(target)
+                continue
+            shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+            assert_tree_has_no_symlinks(target)
+            shutil.rmtree(source)
+        return len(existing_sources)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
@@ -369,14 +633,18 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
-        actual = (base / relative).resolve()
+        relative_parts = Path(relative).parts
+        if any(part == ".." for part in relative_parts):
+            raise ValueError("Access denied: path traversal detected")
+        base = self.sandbox_user_data_dir(thread_id, user_id=user_id)
+        actual = base.joinpath(*relative_parts)
 
         try:
             actual.relative_to(base)
         except ValueError:
             raise ValueError("Access denied: path traversal detected")
 
+        validate_no_symlink_components(actual, allow_missing=True)
         return actual
 
 

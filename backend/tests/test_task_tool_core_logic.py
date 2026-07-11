@@ -61,6 +61,7 @@ def _make_result(
     result: str | None = None,
     error: str | None = None,
     token_usage_records: list[dict] | None = None,
+    evidence_refs: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
@@ -68,6 +69,7 @@ def _make_result(
         result=result,
         error=error,
         token_usage_records=token_usage_records or [],
+        evidence_refs=evidence_refs or [],
         usage_reported=False,
     )
 
@@ -284,6 +286,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
                 FakeSubagentStatus.COMPLETED,
                 ai_messages=[{"id": "m1", "content": "phase-1"}, {"id": "m2", "content": "phase-2"}],
                 result="all done",
+                evidence_refs=["command: pytest backend/tests/test_example.py -q; exit code: 0"],
             ),
         ]
     )
@@ -307,7 +310,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         tool_call_id="tc-123",
     )
 
-    assert output == "Task Succeeded. Result: all done"
+    assert output == ("Task Succeeded. Runtime-observed evidence:\n- command: pytest backend/tests/test_example.py -q; exit code: 0\nResult: all done")
     assert captured["prompt"].startswith("AI Handoff Envelope\n")
     assert "Target Role: general-purpose" in captured["prompt"]
     assert "Task/Question: 运行子任务" in captured["prompt"]
@@ -350,7 +353,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         "description": "运行子任务",
         "status": "completed",
         "terminal_reason": None,
-        "evidence_refs": [],
+        "evidence_refs": ["command: pytest backend/tests/test_example.py -q; exit code: 0"],
         "output_ref": None,
         "risks": [],
         "conflicts": [],
@@ -361,6 +364,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     }
     assert [record["status"] for record in handoff_records] == ["started", "completed"]
     assert all(record["prompt"] == captured["prompt"] for record in handoff_records)
+    assert handoff_records[-1]["action_result"]["evidence_refs"] == ["command: pytest backend/tests/test_example.py -q; exit code: 0"]
     packet = task_tool_module.extract_handoff_packet(
         handoff_records[0]["prompt"],
         description="运行子任务",
@@ -1024,6 +1028,90 @@ def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
 
     assert output == "Task Succeeded. Result: done"
     assert captured["config"].skills == ["safe-skill"]
+
+
+def test_task_tool_uses_delegated_role_skill_allowlist_separate_from_parent_prompt_skills(monkeypatch):
+    config = SubagentConfig(
+        name="planner",
+        description="Planner",
+        system_prompt="Plan",
+        skills=["command-room-planner"],
+        timeout_seconds=10,
+    )
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["naxus-round"]
+    runtime.config["metadata"]["subagent_available_skills"] = ["naxus-round", "command-room-planner"]
+    captured = {}
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="plan",
+        prompt="plan the work",
+        subagent_type="planner",
+        tool_call_id="tc-role-skill",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == ["command-room-planner"]
+
+
+def test_task_tool_does_not_load_role_skills_into_general_implementation_agent(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["naxus-round"]
+    runtime.config["metadata"]["subagent_available_skills"] = ["naxus-round", "command-room-planner"]
+    captured = {}
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="implement",
+        prompt="fix the bug",
+        subagent_type="general-purpose",
+        tool_call_id="tc-general-skill-isolation",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == ["naxus-round"]
 
 
 def test_task_tool_no_tool_groups_passes_none(monkeypatch):
@@ -1902,7 +1990,7 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
     app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=True))
     runtime = _make_runtime(app_config=app_config)
 
-    task_tool_module._subagent_usage_cache["tc-error"] = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    task_tool_module._subagent_usage_cache[("run-1", "tc-error")] = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
@@ -1924,7 +2012,7 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
             tool_call_id="tc-error",
         )
 
-    assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+    assert task_tool_module.pop_cached_subagent_usage("tc-error", run_id="run-1") is None
 
 
 def test_scoped_background_task_wrappers_support_old_signature(monkeypatch):

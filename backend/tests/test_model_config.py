@@ -13,12 +13,14 @@ def _make_model(**overrides) -> ModelConfig:
 
 
 def test_responses_api_fields_are_declared_in_model_schema():
+    assert "provider" in ModelConfig.model_fields
     assert "use_responses_api" in ModelConfig.model_fields
     assert "output_version" in ModelConfig.model_fields
 
 
 def test_responses_api_fields_round_trip_in_model_dump():
     config = _make_model(
+        provider="OpenAI",
         api_key="$OPENAI_API_KEY",
         use_responses_api=True,
         output_version="responses/v1",
@@ -26,5 +28,6 @@ def test_responses_api_fields_round_trip_in_model_dump():
 
     dumped = config.model_dump(exclude_none=True)
 
+    assert dumped["provider"] == "OpenAI"
     assert dumped["use_responses_api"] is True
     assert dumped["output_version"] == "responses/v1"

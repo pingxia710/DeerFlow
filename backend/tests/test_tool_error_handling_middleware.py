@@ -2,9 +2,11 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
@@ -12,6 +14,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
+from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -30,7 +33,7 @@ def _module(name: str, **attrs):
     return module
 
 
-def _make_app_config(*, supports_vision: bool = False) -> AppConfig:
+def _make_app_config(*, supports_vision: bool = False, loop_detection_enabled: bool = True) -> AppConfig:
     return AppConfig(
         models=[
             ModelConfig(
@@ -45,6 +48,7 @@ def _make_app_config(*, supports_vision: bool = False) -> AppConfig:
         sandbox=SandboxConfig(use="test"),
         guardrails=GuardrailsConfig(enabled=False),
         circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        loop_detection=LoopDetectionConfig(enabled=loop_detection_enabled),
     )
 
 
@@ -141,15 +145,38 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert captured["app_config"] is app_config
     # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
     # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    # + 1 LoopDetectionMiddleware + 1 SafetyFinishReasonMiddleware
+    # (both enabled by default).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 9
+    assert len(middlewares) == 10
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
+    assert any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+
+
+def test_subagent_runtime_middlewares_enforce_model_turn_budget(monkeypatch: pytest.MonkeyPatch):
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, max_model_calls=7)
+
+    limits = [middleware for middleware in middlewares if isinstance(middleware, ModelCallLimitMiddleware)]
+    assert len(limits) == 1
+    assert limits[0].run_limit == 7
+    assert limits[0].exit_behavior == "end"
+
+
+def test_subagent_runtime_middlewares_respect_disabled_loop_detection(monkeypatch: pytest.MonkeyPatch):
+    app_config = _make_app_config(loop_detection_enabled=False)
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config)
+
+    assert not any(isinstance(middleware, LoopDetectionMiddleware) for middleware in middlewares)
 
 
 def test_wrap_tool_call_passthrough_on_success():

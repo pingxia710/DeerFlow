@@ -112,6 +112,8 @@ enum UserScope:
 
 登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
 
+Docker 自带 nginx 若直接面向客户端，会用连接源地址覆盖 `X-Real-IP`。若它位于另一层反向代理之后，必须显式设置 `DEER_FLOW_TRUSTED_OUTER_PROXIES` 为直接可信代理的逗号分隔 CIDR；nginx 才会递归解析该可信链中的 `X-Forwarded-For`，再把解析后的客户端地址写入 `X-Real-IP`。该配置默认留空，不能填客户端网段，也不能为了方便填写全部私网；外层代理必须覆盖或追加 `X-Forwarded-For`。`AUTH_TRUSTED_PROXIES` 是 Gateway 对其直接代理 peer 的独立信任边界，不应拿来替代 nginx 的外层代理配置。
+
 ### 注册
 
 `POST /api/v1/auth/register` 创建普通 `user`，并自动登录。

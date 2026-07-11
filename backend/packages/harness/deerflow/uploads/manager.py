@@ -6,12 +6,21 @@ Both Gateway and Client delegate to these functions.
 
 import errno
 import os
-import re
 import stat
 from pathlib import Path
 from urllib.parse import quote
 
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import (
+    VIRTUAL_PATH_PREFIX,
+    UnsafePathError,
+    ensure_directory_no_symlinks,
+    get_paths,
+    open_directory_no_symlinks,
+    open_file_no_symlinks,
+)
+from deerflow.config.paths import (
+    validate_thread_id as validate_runtime_thread_id,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.image_ocr import is_ocr_sidecar, ocr_sidecar_path
 
@@ -24,18 +33,13 @@ class UnsafeUploadPathError(ValueError):
     """Raised when an upload destination is not a safe regular file path."""
 
 
-# thread_id must be alphanumeric, hyphens, underscores, or dots only.
-_SAFE_THREAD_ID = re.compile(r"^[a-zA-Z0-9._-]+$")
-
-
 def validate_thread_id(thread_id: str) -> None:
     """Reject thread IDs containing characters unsafe for filesystem paths.
 
     Raises:
         ValueError: If thread_id is empty or contains unsafe characters.
     """
-    if not thread_id or not _SAFE_THREAD_ID.match(thread_id):
-        raise ValueError(f"Invalid thread_id: {thread_id!r}")
+    validate_runtime_thread_id(thread_id)
 
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
@@ -47,8 +51,10 @@ def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
 def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
     base = get_uploads_dir(thread_id, user_id=user_id)
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    try:
+        return ensure_directory_no_symlinks(base)
+    except UnsafePathError as exc:
+        raise UnsafeUploadPathError(str(exc)) from exc
 
 
 def normalize_filename(filename: str) -> str:
@@ -116,7 +122,12 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
-def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
+def open_upload_file_no_symlink(
+    base_dir: Path,
+    filename: str,
+    *,
+    directory_fd: int | None = None,
+) -> tuple[Path, object]:
     """Open an upload destination for safe streaming writes.
 
     Upload directories may be mounted into local sandboxes. A sandbox process can
@@ -132,25 +143,43 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     dest = base_dir / safe_name
 
     try:
-        st = os.lstat(dest)
+        if directory_fd is None:
+            st = os.lstat(dest)
+        else:
+            st = os.stat(
+                safe_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
     except FileNotFoundError:
         st = None
 
     if st is not None and not stat.S_ISREG(st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
 
-    validate_path_traversal(dest, base_dir)
+    if directory_fd is None:
+        validate_path_traversal(dest, base_dir)
 
-    has_nofollow = hasattr(os, "O_NOFOLLOW")
-
-    if has_nofollow:
-        # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
+    if hasattr(os, "O_NOFOLLOW"):
+        # POSIX: walk every ancestor by descriptor, then open the final name
+        # with O_NOFOLLOW. A sandbox cannot redirect the operation by swapping
+        # an intermediate directory after validation.
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
 
         try:
-            fd = os.open(dest, flags, 0o600)
+            if directory_fd is None:
+                fd = open_file_no_symlinks(dest, flags, 0o600)
+            else:
+                fd = os.open(
+                    safe_name,
+                    flags,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+        except UnsafePathError as exc:
+            raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
         except OSError as exc:
             if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
                 raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
@@ -210,9 +239,19 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     return dest, fh
 
 
-def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+def write_upload_file_no_symlink(
+    base_dir: Path,
+    filename: str,
+    data: bytes,
+    *,
+    directory_fd: int | None = None,
+) -> Path:
     """Write upload bytes without following a pre-existing destination symlink."""
-    dest, fh = open_upload_file_no_symlink(base_dir, filename)
+    dest, fh = open_upload_file_no_symlink(
+        base_dir,
+        filename,
+        directory_fd=directory_fd,
+    )
     with fh:
         fh.write(data)
     return dest
@@ -252,7 +291,13 @@ def list_files_in_dir(directory: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
-def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: set[str] | None = None) -> dict:
+def delete_file_safe(
+    base_dir: Path,
+    filename: str,
+    *,
+    convertible_extensions: set[str] | None = None,
+    directory_fd: int | None = None,
+) -> dict:
     """Delete a file inside *base_dir* after path-traversal validation.
 
     If *convertible_extensions* is provided and the file's extension matches,
@@ -271,11 +316,50 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
-    file_path = (base_dir / filename).resolve()
-    validate_path_traversal(file_path, base_dir)
+    # Preserve the public traversal-error contract before reducing the input to
+    # the single upload filename used for descriptor-relative deletion.
+    validate_path_traversal(base_dir / filename, base_dir)
+    safe_name = normalize_filename(filename)
+    file_path = base_dir / safe_name
+
+    if hasattr(os, "O_NOFOLLOW") and os.unlink in os.supports_dir_fd:
+        if directory_fd is None:
+            try:
+                operation_fd = open_directory_no_symlinks(base_dir)
+            except UnsafePathError as exc:
+                raise UnsafeUploadPathError(str(exc)) from exc
+        else:
+            operation_fd = os.dup(directory_fd)
+        try:
+            try:
+                file_stat = os.stat(
+                    safe_name,
+                    dir_fd=operation_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                raise FileNotFoundError(f"File not found: {safe_name}") from None
+            if stat.S_ISLNK(file_stat.st_mode):
+                raise PathTraversalError("Path traversal detected")
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise UnsafeUploadPathError(f"Upload target is not an exclusive regular file: {safe_name}")
+            os.unlink(safe_name, dir_fd=operation_fd)
+
+            companion_names: list[str] = []
+            if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
+                companion_names.append(file_path.with_suffix(".md").name)
+            companion_names.append(ocr_sidecar_path(file_path).name)
+            for companion_name in companion_names:
+                try:
+                    os.unlink(companion_name, dir_fd=operation_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(operation_fd)
+        return {"success": True, "message": f"Deleted {safe_name}"}
 
     if not file_path.is_file():
-        raise FileNotFoundError(f"File not found: {filename}")
+        raise FileNotFoundError(f"File not found: {safe_name}")
 
     file_path.unlink()
 
@@ -284,7 +368,7 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         file_path.with_suffix(".md").unlink(missing_ok=True)
     ocr_sidecar_path(file_path).unlink(missing_ok=True)
 
-    return {"success": True, "message": f"Deleted {filename}"}
+    return {"success": True, "message": f"Deleted {safe_name}"}
 
 
 def upload_artifact_url(thread_id: str, filename: str) -> str:

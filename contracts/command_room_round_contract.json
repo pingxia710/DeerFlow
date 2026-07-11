@@ -50,13 +50,6 @@
     "needsUserConfirmation",
     "userConfirmationNeeded"
   ],
-  "required_opposition_exemption_fields": [
-    "notDispatchedBecause",
-    "riskClass",
-    "evidenceBasis",
-    "noPermissionExpansion",
-    "noPassFromWorkerSelfClaim"
-  ],
   "prohibited_signal_fields": [
     "rawOutput",
     "stdout",
@@ -347,11 +340,11 @@
       }
     },
     {
-      "name": "invalid_pass_without_opposition_or_exemption",
-      "expected_valid": false,
+      "name": "pass_with_runtime_evidence_without_opposition",
+      "expected_valid": true,
       "round": {
         "roundId": "round-invalid-pass",
-        "intentSeed": "用户想直接 PASS。",
+        "intentSeed": "普通本地修复已有运行时命令与聚焦测试证据，用户要求完成本轮。",
         "goalHypothesis": "Confirm completion.",
         "boundary": {
           "mode": "read-only",
@@ -387,26 +380,28 @@
           {
             "laneId": "lane-worker-1",
             "role": "fact-finder",
-            "claim": "Worker says it is done.",
-            "evidenceRefs": [],
-            "unknownStale": ["no refs"],
+            "claim": "Focused acceptance command completed successfully.",
+            "evidenceRefs": ["command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"],
+            "evidenceState": "SUPPORTED",
+            "selfAttestationOnly": false,
+            "unknownStale": [],
             "conflicts": [],
             "redlineTouched": false,
             "recommendedDecision": "PASS",
-            "nextAction": "Proceed."
+            "nextAction": "Return the observed result to Chair and stop dispatching."
           }
         ],
         "decisionSignals": {
           "decision": "PASS",
-          "reason": "Worker says done.",
-          "evidenceRefs": [],
+          "reason": "Runtime-observed acceptance evidence is complete.",
+          "evidenceRefs": ["command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"],
           "gated": false
         },
         "roundBrief": {
           "goal": "Confirm completion.",
-          "evidence_status": "weak evidence signal(s); treat worker self-claims as untrusted",
-          "next_safe_action": "Collect concrete refs before execution.",
-          "summary": "Weak evidence only."
+          "evidence_status": "strong runtime command evidence",
+          "next_safe_action": "Close this round without another role dispatch.",
+          "summary": "Acceptance evidence complete; no conflict or permission expansion."
         },
         "roundContextAvailable": false,
         "compatibilityAliases": {
@@ -416,15 +411,15 @@
         },
         "verdict": {
           "decision": "PASS",
-          "reason": "Worker says done.",
-          "evidenceRefs": [],
+          "reason": "Runtime-observed acceptance evidence is complete.",
+          "evidenceRefs": ["command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"],
           "gated": false
         },
         "nextRoundContract": {
-          "nextGoal": "Real execution.",
+          "nextGoal": "No automatic continuation; wait for new user intent.",
           "inheritedBoundary": "read-only",
-          "evidenceSignals": [],
-          "requiredEvidence": [],
+          "evidenceSignals": ["command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"],
+          "requiredEvidence": ["command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"],
           "allowedDispatch": [],
           "stopBefore": [],
           "needsUserConfirmation": false,

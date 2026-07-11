@@ -18,15 +18,27 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 
 import requests
 
 from deerflow.runtime.user_context import get_effective_user_id
 
-from .backend import SandboxBackend
+from .backend import SandboxBackend, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+_INTERNAL_AUTH_HEADER = "X-DeerFlow-Internal-Token"
+_ACTIVE_POD_PHASES = frozenset({"Pending", "Running"})
+_PROVISIONER_STANDARD_MOUNT_PATHS = frozenset(
+    {
+        "/mnt/skills",
+        "/mnt/user-data/workspace",
+        "/mnt/user-data/uploads",
+        "/mnt/user-data/outputs",
+        "/mnt/acp-workspace",
+    }
+)
 
 
 class RemoteSandboxBackend(SandboxBackend):
@@ -50,6 +62,13 @@ class RemoteSandboxBackend(SandboxBackend):
                              (e.g., ``http://provisioner:8002``).
         """
         self._provisioner_url = provisioner_url.rstrip("/")
+        token = os.getenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("DEER_FLOW_INTERNAL_AUTH_TOKEN is required when sandbox.provisioner_url is configured")
+        self._auth_headers = {_INTERNAL_AUTH_HEADER: token}
+
+    def _auth_kwargs(self) -> dict[str, dict[str, str]]:
+        return {"headers": self._auth_headers} if self._auth_headers else {}
 
     @property
     def provisioner_url(self) -> str:
@@ -77,8 +96,14 @@ class RemoteSandboxBackend(SandboxBackend):
         self._provisioner_destroy(info.sandbox_id)
 
     def is_alive(self, info: SandboxInfo) -> bool:
-        """Check whether the sandbox Pod is running."""
-        return self._provisioner_is_alive(info.sandbox_id)
+        """Check whether the sandbox Pod still exists in an active phase."""
+        state = self._provisioner_state(info.sandbox_id)
+        if state is None:
+            info.status = "NotFound"
+            info.ready = False
+            return False
+        info.status, info.ready = state
+        return info.status in _ACTIVE_POD_PHASES
 
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Discover an existing sandbox via the provisioner.
@@ -102,10 +127,20 @@ class RemoteSandboxBackend(SandboxBackend):
 
     # ── Provisioner API calls ─────────────────────────────────────────────
 
+    @staticmethod
+    def _payload_state(data: dict) -> tuple[str | None, bool | None]:
+        status = data.get("status")
+        if not isinstance(status, str) or not status:
+            status = None
+        ready = data.get("ready")
+        if not isinstance(ready, bool):
+            ready = status == "Running" if status is not None else None
+        return status, ready
+
     def _provisioner_list(self) -> list[SandboxInfo]:
         """GET /api/sandboxes → list all running sandboxes."""
         try:
-            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10)
+            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10, **self._auth_kwargs())
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
@@ -126,13 +161,21 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_id = sandbox.get("sandbox_id")
                 sandbox_url = sandbox.get("sandbox_url")
                 if isinstance(sandbox_id, str) and sandbox_id and isinstance(sandbox_url, str) and sandbox_url:
-                    infos.append(SandboxInfo(sandbox_id=sandbox_id, sandbox_url=sandbox_url))
+                    status, ready = self._payload_state(sandbox)
+                    infos.append(
+                        SandboxInfo(
+                            sandbox_id=sandbox_id,
+                            sandbox_url=sandbox_url,
+                            sandbox_api_key=sandbox.get("sandbox_api_key"),
+                            status=status,
+                            ready=ready,
+                        )
+                    )
 
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
         except requests.RequestException as exc:
-            logger.warning("Provisioner list_running failed: %s", exc)
-            return []
+            raise RuntimeError(f"Provisioner list failed: {exc}") from exc
 
     def _provisioner_create(
         self,
@@ -143,7 +186,11 @@ class RemoteSandboxBackend(SandboxBackend):
         user_id: str | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
-        del extra_mounts
+        if thread_id is None:
+            raise ValueError("thread_id is required in provisioner mode")
+        unsupported_mounts = [container_path for _, container_path, _ in (extra_mounts or []) if container_path not in _PROVISIONER_STANDARD_MOUNT_PATHS]
+        if unsupported_mounts:
+            raise ValueError("Provisioner mode received unsupported mount path(s): " + ", ".join(sorted(unsupported_mounts)))
         effective_user_id = user_id or get_effective_user_id()
         try:
             resp = requests.post(
@@ -154,13 +201,18 @@ class RemoteSandboxBackend(SandboxBackend):
                     "user_id": effective_user_id,
                 },
                 timeout=30,
+                **self._auth_kwargs(),
             )
             resp.raise_for_status()
             data = resp.json()
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
+            status, ready = self._payload_state(data)
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                sandbox_api_key=data.get("sandbox_api_key"),
+                status=status,
+                ready=ready,
             )
         except requests.RequestException as exc:
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
@@ -172,31 +224,38 @@ class RemoteSandboxBackend(SandboxBackend):
             resp = requests.delete(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
                 timeout=15,
+                **self._auth_kwargs(),
             )
             if resp.ok:
                 logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
             else:
-                logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
+                raise RuntimeError(f"Provisioner destroy failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
         except requests.RequestException as exc:
-            logger.warning(f"Provisioner destroy failed for {sandbox_id}: {exc}")
+            raise RuntimeError(f"Provisioner destroy failed for {sandbox_id}: {exc}") from exc
 
-    def _provisioner_is_alive(self, sandbox_id: str) -> bool:
-        """GET /api/sandboxes/{sandbox_id} → check Pod phase."""
+    def _provisioner_state(self, sandbox_id: str) -> tuple[str, bool] | None:
+        """GET a Pod's phase/readiness; return None only when it is absent."""
         try:
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
                 timeout=10,
+                **self._auth_kwargs(),
             )
         except requests.RequestException as exc:
             raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: {exc}") from exc
 
         if resp.status_code == 404:
-            return False
+            return None
         if not resp.ok:
             raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
 
-        data = resp.json()
-        return data.get("status") == "Running"
+        status, ready = self._payload_state(resp.json())
+        return status or "Unknown", bool(ready)
+
+    def _provisioner_is_alive(self, sandbox_id: str) -> bool:
+        """GET /api/sandboxes/{sandbox_id} → check for an active Pod phase."""
+        state = self._provisioner_state(sandbox_id)
+        return state is not None and state[0] in _ACTIVE_POD_PHASES
 
     def _provisioner_discover(self, sandbox_id: str) -> SandboxInfo | None:
         """GET /api/sandboxes/{sandbox_id} → discover existing sandbox."""
@@ -204,15 +263,31 @@ class RemoteSandboxBackend(SandboxBackend):
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
                 timeout=10,
-            )
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-            return SandboxInfo(
-                sandbox_id=sandbox_id,
-                sandbox_url=data["sandbox_url"],
+                **self._auth_kwargs(),
             )
         except requests.RequestException as exc:
-            logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")
+            raise RuntimeError(f"Provisioner discover failed for {sandbox_id}: {exc}") from exc
+
+        if resp.status_code == 404:
             return None
+        if not resp.ok:
+            raise RuntimeError(f"Provisioner discover failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        status, ready = self._payload_state(data)
+        if ready is not True:
+            return None
+        sandbox_api_key = data.get("sandbox_api_key")
+        if sandbox_api_key and not wait_for_sandbox_ready(
+            data["sandbox_url"],
+            timeout=5,
+            api_key=sandbox_api_key,
+        ):
+            return None
+        return SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url=data["sandbox_url"],
+            sandbox_api_key=sandbox_api_key,
+            status=status,
+            ready=ready,
+        )

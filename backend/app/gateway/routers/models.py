@@ -11,6 +11,7 @@ class ModelResponse(BaseModel):
     """Response model for model information."""
 
     name: str = Field(..., description="Unique identifier for the model")
+    provider: str | None = Field(None, description="Display provider/group label")
     model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
@@ -29,6 +30,13 @@ class ModelsListResponse(BaseModel):
 
     models: list[ModelResponse]
     token_usage: TokenUsageResponse
+
+
+def _model_provider(model: object) -> str | None:
+    provider = getattr(model, "provider", None)
+    if isinstance(provider, str) and provider.strip():
+        return provider
+    return None
 
 
 @router.get(
@@ -52,6 +60,7 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
             "models": [
                 {
                     "name": "gpt-4",
+                    "provider": "OpenAI",
                     "model": "gpt-4",
                     "display_name": "GPT-4",
                     "description": "OpenAI GPT-4 model",
@@ -76,6 +85,7 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
     models = [
         ModelResponse(
             name=model.name,
+            provider=_model_provider(model),
             model=model.model,
             display_name=model.display_name,
             description=model.description,
@@ -124,6 +134,7 @@ async def get_model(model_name: str, config: AppConfig = Depends(get_config)) ->
 
     return ModelResponse(
         name=model.name,
+        provider=_model_provider(model),
         model=model.model,
         display_name=model.display_name,
         description=model.description,

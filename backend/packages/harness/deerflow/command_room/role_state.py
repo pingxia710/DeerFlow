@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import json
-import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from deerflow.command_room.file_records import append_jsonl_record, read_jsonl_text
 from deerflow.config.paths import get_paths
 
 _TEXT_LIMIT = 2000
 _COMPACT_TEXT_LIMIT = 240
 _REF_LIMIT = 20
-_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -145,11 +144,7 @@ def _role_state_file(thread_id: str, user_id: str | None, base_dir: Path | None 
 
 def record_role_state(state: RoleState, *, user_id: str | None = None, base_dir: Path | None = None) -> Path:
     path = _role_state_file(state.thread_id, user_id, base_dir=base_dir)
-    with _WRITE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(state.as_dict(), ensure_ascii=False, sort_keys=True) + "\n")
-    return path
+    return append_jsonl_record(path, state.as_dict())
 
 
 def list_role_states(
@@ -161,12 +156,13 @@ def list_role_states(
     base_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     path = _role_state_file(thread_id, user_id, base_dir=base_dir)
-    if not path.exists():
+    text = read_jsonl_text(path)
+    if text is None:
         return []
     latest: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     expected_role = _clip(role_name, 64).lower() if role_name else None
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:

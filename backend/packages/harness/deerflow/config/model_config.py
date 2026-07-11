@@ -5,6 +5,7 @@ class ModelConfig(BaseModel):
     """Config section for a model"""
 
     name: str = Field(..., description="Unique name for the model")
+    provider: str | None = Field(default=None, description="Display provider/group label for model selection")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(

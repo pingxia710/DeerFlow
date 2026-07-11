@@ -13,6 +13,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -192,6 +193,44 @@ def test_gateway_metrics_endpoint_records_requests():
         assert "deerflow_gateway_uptime_seconds" in body
         assert 'deerflow_gateway_http_requests_total{method="GET",route="/health",status_class="2xx"}' in body
         assert "deerflow_gateway_http_request_duration_seconds_sum" in body
+
+
+def test_gateway_metrics_use_one_bounded_label_for_unmatched_routes():
+    with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false", "DEER_FLOW_AUTH_DISABLED": "1", "ENVIRONMENT": "test"}):
+        _reset_gateway_config()
+        from app.gateway.app import _REQUEST_COUNTS, _REQUEST_DURATION_SECONDS, create_app
+
+        _REQUEST_COUNTS.clear()
+        _REQUEST_DURATION_SECONDS.clear()
+        client = TestClient(create_app())
+
+        assert client.get("/missing-route-one").status_code == 404
+        assert client.get("/missing-route-two").status_code == 404
+        body = client.get("/metrics").text
+
+        assert 'route="<unmatched>",status_class="4xx"} 2' in body
+        assert "/missing-route-one" not in body
+        assert "/missing-route-two" not in body
+
+
+def test_gateway_sanitizes_server_errors_but_preserves_client_errors():
+    with patch.dict(os.environ, {"DEER_FLOW_AUTH_DISABLED": "1", "ENVIRONMENT": "test"}):
+        _reset_gateway_config()
+        from app.gateway.app import create_app
+
+        app = create_app()
+
+        @app.get("/_test/server-error")
+        async def server_error():
+            raise HTTPException(status_code=500, detail="failed at /Users/private/secret.txt")
+
+        @app.get("/_test/client-error")
+        async def client_error():
+            raise HTTPException(status_code=409, detail="conflict")
+
+        client = TestClient(app)
+        assert client.get("/_test/server-error").json() == {"detail": "Internal server error"}
+        assert client.get("/_test/client-error").json() == {"detail": "conflict"}
 
 
 # ---------------------------------------------------------------------------

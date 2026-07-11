@@ -106,6 +106,23 @@ class RunEventStore(abc.ABC):
         """Claim ownerless/default-owned events for a legacy thread when supported."""
         return 0
 
+    async def delete_legacy_by_thread(self, thread_id: str) -> int:
+        """Delete ownerless events for a globally unique deleted thread."""
+        return 0
+
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        """Return every persisted owner marker for *thread_id*."""
+        raise NotImplementedError
+
+    async def has_events(self, thread_id: str, *, user_id: str | None = None) -> bool:
+        """Return whether any event category exists for a thread and owner.
+
+        The default preserves compatibility for older custom stores that only
+        implement the messages projection. Built-in stores override this with
+        a true all-category, short-circuiting existence probe.
+        """
+        return bool(await self.count_messages(thread_id, user_id=user_id))
+
     @abc.abstractmethod
     async def count_messages(self, thread_id: str, *, user_id: str | None = None) -> int:
         """Count displayable messages (category=message) in a thread."""

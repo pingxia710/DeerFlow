@@ -13,9 +13,42 @@ import requests
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+_AUTH_REJECTION_STATUS_CODES = frozenset({401, 403})
 
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
+class SandboxAuthProbeError(RuntimeError):
+    """The sandbox auth probe could not determine whether auth is enforced."""
+
+
+def _invalid_api_key(api_key: str) -> str:
+    return f"{api_key}-invalid"
+
+
+def _sandbox_auth_is_enforced(sandbox_url: str, api_key: str) -> bool:
+    probes = (
+        None,
+        {"X-AIO-API-Key": _invalid_api_key(api_key)},
+    )
+    for headers in probes:
+        try:
+            response = requests.get(
+                f"{sandbox_url}/v1/sandbox",
+                timeout=5,
+                headers=headers,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise SandboxAuthProbeError(f"Sandbox authentication probe failed for {sandbox_url}: {exc}") from exc
+        if response.status_code not in _AUTH_REJECTION_STATUS_CODES:
+            logger.error(
+                "Sandbox %s did not reject an unauthorized readiness probe (status=%s)",
+                sandbox_url,
+                response.status_code,
+            )
+            return False
+    return True
+
+
+def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30, *, api_key: str | None = None) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
     Args:
@@ -28,16 +61,23 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+            headers = {"X-AIO-API-Key": api_key} if api_key else None
+            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5, headers=headers)
             if response.status_code == 200:
-                return True
+                return api_key is None or _sandbox_auth_is_enforced(sandbox_url, api_key)
         except requests.exceptions.RequestException:
             pass
         time.sleep(1)
     return False
 
 
-async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+async def wait_for_sandbox_ready_async(
+    sandbox_url: str,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    *,
+    api_key: str | None = None,
+) -> bool:
     """Async variant of sandbox readiness polling.
 
     Use this from async runtime paths so sandbox startup waits do not block the
@@ -47,15 +87,46 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
+    async def auth_is_enforced(client: httpx.AsyncClient) -> bool:
+        probes = (
+            None,
+            {"X-AIO-API-Key": _invalid_api_key(api_key or "")},
+        )
+        for headers in probes:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                response = await client.get(
+                    f"{sandbox_url}/v1/sandbox",
+                    timeout=min(5.0, remaining),
+                    headers=headers,
+                )
+            except httpx.RequestError as exc:
+                raise SandboxAuthProbeError(f"Sandbox authentication probe failed for {sandbox_url}: {exc}") from exc
+            if response.status_code not in _AUTH_REJECTION_STATUS_CODES:
+                logger.error(
+                    "Sandbox %s did not reject an unauthorized readiness probe (status=%s)",
+                    sandbox_url,
+                    response.status_code,
+                )
+                return False
+        return True
+
     async with httpx.AsyncClient(timeout=5) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             try:
-                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
+                headers = {"X-AIO-API-Key": api_key} if api_key else None
+                response = await client.get(
+                    f"{sandbox_url}/v1/sandbox",
+                    timeout=min(5.0, remaining),
+                    headers=headers,
+                )
                 if response.status_code == 200:
-                    return True
+                    return api_key is None or await auth_is_enforced(client)
             except httpx.RequestError:
                 pass
             remaining = deadline - loop.time()

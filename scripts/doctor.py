@@ -708,6 +708,59 @@ def check_env_file(project_root: Path) -> CheckResult:
     )
 
 
+def _runtime_dir_has_state(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    try:
+        return any(path.iterdir())
+    except OSError:
+        return True
+
+
+def check_runtime_home(project_root: Path) -> CheckResult:
+    """Report the active state root and detect split local runtime state."""
+    from deerflow.config.runtime_paths import default_runtime_home, runtime_home
+
+    configured_home = os.getenv("DEER_FLOW_HOME")
+    canonical_home = default_runtime_home(project_root)
+    active_home = Path(configured_home).resolve() if configured_home else runtime_home(project_root)
+    candidates = [active_home, project_root / ".deer-flow", project_root / "backend" / ".deer-flow"]
+    state_homes: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen and _runtime_dir_has_state(resolved):
+            seen.add(resolved)
+            state_homes.append(resolved)
+
+    inactive_state_homes = [path for path in state_homes if path != active_home]
+    if inactive_state_homes:
+        homes = ", ".join(str(path) for path in state_homes)
+        return CheckResult(
+            "runtime state root",
+            "warn",
+            f"active: {active_home}; state found in: {homes}",
+            fix=(
+                f"Pin DEER_FLOW_HOME={active_home} for every launch method. "
+                "Review inactive runtime directories before migration; do not merge or delete them blindly."
+            ),
+        )
+
+    if not configured_home and active_home != canonical_home:
+        return CheckResult(
+            "runtime state root",
+            "warn",
+            f"active: {active_home} (legacy fallback); canonical: {canonical_home}",
+            fix=(
+                f"Pin DEER_FLOW_HOME={active_home} until the legacy state has been reviewed and migrated "
+                f"to {canonical_home}. Do not merge or delete runtime directories blindly."
+            ),
+        )
+
+    source = "DEER_FLOW_HOME" if configured_home else "default"
+    return CheckResult("runtime state root", "ok", f"{active_home} ({source})")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -771,7 +824,7 @@ def main() -> int:
     sections.append(("Sandbox", sandbox_checks))
 
     # ── Local Runtime ────────────────────────────────────────────────────────
-    runtime_checks = [check_local_nginx_frontend_proxy(project_root)]
+    runtime_checks = [check_runtime_home(project_root), check_local_nginx_frontend_proxy(project_root)]
     sections.append(("Local Runtime", runtime_checks))
 
     # ── Render ────────────────────────────────────────────────────────────────

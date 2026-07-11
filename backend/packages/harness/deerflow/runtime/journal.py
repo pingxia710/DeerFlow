@@ -509,6 +509,9 @@ class RunJournal(BaseCallbackHandler):
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
             await self._store.put_batch(batch)
+        except asyncio.CancelledError:
+            self._buffer = batch + self._buffer
+            raise
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -792,6 +795,9 @@ class RunJournal(BaseCallbackHandler):
             del self._buffer[: self._flush_threshold]
             try:
                 await self._store.put_batch(batch)
+            except asyncio.CancelledError:
+                self._buffer = batch + self._buffer
+                raise
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
@@ -804,6 +810,9 @@ class RunJournal(BaseCallbackHandler):
         self._pending_task_lane_events.clear()
         try:
             await self._round_store.record_task_events(batch)
+        except asyncio.CancelledError:
+            self._pending_task_lane_events = batch + self._pending_task_lane_events
+            raise
         except Exception:
             self._pending_task_lane_events = batch + self._pending_task_lane_events
             raise

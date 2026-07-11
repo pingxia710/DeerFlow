@@ -20,6 +20,11 @@ class SandboxInfo:
     container_name: str | None = None  # Only for local container backend
     container_id: str | None = None  # Only for local container backend
     created_at: float = field(default_factory=time.time)
+    # Per-sandbox execution credential. It is deliberately omitted from
+    # ``to_dict`` and repr so generic metadata/logging paths cannot expose it.
+    sandbox_api_key: str | None = field(default=None, repr=False)
+    status: str | None = None
+    ready: bool | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -28,6 +33,8 @@ class SandboxInfo:
             "container_name": self.container_name,
             "container_id": self.container_id,
             "created_at": self.created_at,
+            "status": self.status,
+            "ready": self.ready,
         }
 
     @classmethod
@@ -38,4 +45,7 @@ class SandboxInfo:
             container_name=data.get("container_name"),
             container_id=data.get("container_id"),
             created_at=data.get("created_at", time.time()),
+            sandbox_api_key=data.get("sandbox_api_key"),
+            status=data.get("status"),
+            ready=data.get("ready"),
         )

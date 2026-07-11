@@ -716,15 +716,15 @@ class WechatChannel(Channel):
             raise RuntimeError("iLink get_bot_qrcode did not return qrcode")
 
         qrcode_img_content = str(qrcode_data.get("qrcode_img_content") or "").strip()
-        logger.warning("[WeChat] QR login required. qrcode=%s", qrcode)
-        if qrcode_img_content:
-            logger.warning("[WeChat] qrcode_img_content=%s", qrcode_img_content)
-
         self._save_auth_state(
             status="pending",
             qrcode=qrcode,
             qrcode_img_content=qrcode_img_content or None,
         )
+        if self._auth_path:
+            logger.warning("[WeChat] QR login required. Pending QR material saved to %s", self._auth_path)
+        else:
+            logger.warning("[WeChat] QR login required. Configure state_dir to retrieve pending QR material securely; credentials are omitted from logs.")
 
         deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
         while time.monotonic() < deadline:

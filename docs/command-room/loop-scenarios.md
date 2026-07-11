@@ -11,7 +11,7 @@ an audit option, not the default shape of every task.
 | --- | --- | --- | --- |
 | New Task Startup Loop | The task may touch DeerFlow architecture, AI-AI, roles, loop rules, governance, boundary, or durable project rules. | Chair Activation Check -> optional Planner/Boundary/Evidence/Opposition/Capability Governor | Branch decision, boundary, capability release, and minimum evidence action. |
 | Plan Loop | Direction, decomposition, tradeoff, or acceptance standard is unclear. | Planner -> Boundary -> Evidence -> Opposition | Adopt/revise `spec.md`, ask, stop, or start execution. |
-| Development Loop | A bounded implementation, local check, or code change must happen. | Executor -> Evidence -> Opposition | Worktree/git diff, command output, artifacts, `EvidenceStrength`, and next decision. |
+| Development Loop | A bounded implementation, local check, or code change must happen. | Executor -> focused verification; optional Evidence/Opposition for a concrete gap or conflict | Worktree/git diff, command output, artifacts, `EvidenceStrength`, and next decision. |
 | Evidence Loop | Claims, test output, logs, artifacts, or refs need proof or challenge. | Evidence -> Opposition | `findings.md`, EvidenceRefs, `EvidenceStrength`, and gap/acceptance signal. |
 | Capability Loop | The round may expand from the current boundary into writes, tools, models, external systems, credentials, customer/payment data, live systems, or bottom-boundary rules. | Capability Governor -> Boundary | `Capability Boundary Signal` and Chair `Capability Decision`. |
 | Conflict Loop | Role outputs disagree or hide incompatible assumptions. | Conflict Mapper -> relevant roles | Conflict map, options, unresolved risk, and recommended Chair decision. |
@@ -22,6 +22,8 @@ an audit option, not the default shape of every task.
 Selection rule: choose the smallest loop that can produce the missing judgment.
 Small factual tasks may be Direct or Single Sub-AI. Large or high-impact tasks
 may use Six-Lane Audit Loop, but only because the independent angles buy signal.
+Stop the loop when the agreed acceptance evidence is met; do not dispatch roles
+only to complete a sequence.
 
 Closure rule: no role, worker, executor, or program loop may self-close. The
 loop must return to Chair before the result can be accepted, revised, stopped,

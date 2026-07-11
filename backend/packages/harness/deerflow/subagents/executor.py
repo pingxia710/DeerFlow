@@ -2,8 +2,10 @@
 
 import asyncio
 import atexit
+import hashlib
 import logging
 import os
+import re
 import threading
 import uuid
 from collections import deque
@@ -18,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -39,6 +41,94 @@ if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
+
+_OBSERVED_EVIDENCE_TOOL_NAMES = frozenset({"bash", "write_file", "str_replace", "read_file", "present_files", "view_image"})
+_BASH_EXIT_CODE_RE = re.compile(r"\bexit\s+code\s*:\s*(-?\d+)\b", re.IGNORECASE)
+_SENSITIVE_COMMAND_RE = re.compile(
+    r"\b(?:authorization|bearer|api[_-]?key|access[_-]?token|refresh[_-]?token|token|"
+    r"client[_-]?secret|secret|password|passwd|private[_-]?key)\b|sk-[a-z0-9_-]{12,}",
+    re.IGNORECASE,
+)
+_MAX_OBSERVED_EVIDENCE_REFS = 20
+_GRAPH_STEPS_PER_MODEL_CALL = 32
+_GRAPH_SHUTDOWN_STEP_BUFFER = 64
+
+
+def _subagent_recursion_limit(max_model_calls: int) -> int:
+    """Reserve graph supersteps without using them as the model-turn limit."""
+    return max(100, max_model_calls * _GRAPH_STEPS_PER_MODEL_CALL + _GRAPH_SHUTDOWN_STEP_BUFFER)
+
+
+def _tool_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _collect_observed_tool_evidence_refs(messages: list[Any]) -> list[str]:
+    """Build redacted evidence refs only from paired runtime tool results."""
+
+    from deerflow.command_room.evidence import redact_evidence_text
+
+    calls: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for call in message.tool_calls or []:
+            call_id = call.get("id")
+            if isinstance(call_id, str) and call_id:
+                calls[call_id] = call
+
+    refs: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        call = calls.get(str(message.tool_call_id or ""))
+        if not call:
+            continue
+        name = str(call.get("name") or message.name or "").strip()
+        if name not in _OBSERVED_EVIDENCE_TOOL_NAMES:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        output = _tool_message_text(message.content)
+        output_sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
+        explicit_error = str(getattr(message, "status", "") or "").lower() == "error" or output.lstrip().lower().startswith(("error:", "command blocked:"))
+
+        if name == "bash":
+            command = args.get("command")
+            if not isinstance(command, str) or not command.strip():
+                continue
+            command = command.strip()
+            exit_match = _BASH_EXIT_CODE_RE.search(output)
+            exit_code = exit_match.group(1) if exit_match else ("error" if explicit_error else "0")
+            if _SENSITIVE_COMMAND_RE.search(command):
+                command_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
+                command_ref = f"[redacted sensitive command]; command_sha256: {command_sha256}"
+            else:
+                command_ref = command
+            raw_ref = f"command: {command_ref}; exit code: {exit_code}; output_sha256: {output_sha256}"
+        else:
+            path = args.get("path")
+            status = "error" if explicit_error else "success"
+            path_part = f"; path: {path.strip()}" if isinstance(path, str) and path.strip() else ""
+            raw_ref = f"tool: {name}{path_part}; status: {status}; output_sha256: {output_sha256}"
+
+        ref = redact_evidence_text(raw_ref)
+        if ref and ref not in seen:
+            refs.append(ref)
+            seen.add(ref)
+        if len(refs) >= _MAX_OBSERVED_EVIDENCE_REFS:
+            break
+    return refs
 
 
 def _build_subagent_runtime_environment_section(app_config: AppConfig | None = None) -> str:
@@ -146,6 +236,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    evidence_refs: list[str] = field(default_factory=list)
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -165,6 +256,7 @@ class SubagentResult:
         error: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
+        evidence_refs: list[str] | None = None,
         token_usage_records: list[dict[str, int | str | None]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
@@ -186,6 +278,8 @@ class SubagentResult:
                 self.error = error
             if ai_messages is not None:
                 self.ai_messages = ai_messages
+            if evidence_refs is not None:
+                self.evidence_refs = evidence_refs
             if token_usage_records is not None:
                 self.token_usage_records = token_usage_records
             self.completed_at = completed_at or datetime.now()
@@ -591,7 +685,13 @@ class SubagentExecutor:
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
+        middlewares = build_subagent_runtime_middlewares(
+            app_config=app_config,
+            model_name=self.model_name,
+            lazy_init=True,
+            deferred_setup=deferred_setup,
+            max_model_calls=self.config.max_turns,
+        )
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -780,9 +880,11 @@ class SubagentExecutor:
             collector_caller = f"subagent:{self.config.name}"
             collector = SubagentTokenCollector(caller=collector_caller)
 
-            # Build config with thread_id for sandbox access and recursion limit
+            # ModelCallLimitMiddleware enforces max_turns. LangGraph's recursion
+            # limit counts internal middleware/tool supersteps, so it needs a
+            # separate structural budget that cannot stop healthy runs early.
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                "recursion_limit": _subagent_recursion_limit(self.config.max_turns),
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
@@ -891,6 +993,7 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
             final_result: str | None = None
+            final_messages: list[Any] = []
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -898,6 +1001,7 @@ class SubagentExecutor:
             else:
                 # Extract the final message - find the last AIMessage
                 messages = final_state.get("messages", [])
+                final_messages = list(messages)
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} final messages count: {len(messages)}")
 
                 # Find the last AIMessage in the conversation
@@ -968,6 +1072,7 @@ class SubagentExecutor:
             result.try_set_terminal(
                 SubagentStatus.COMPLETED,
                 result=final_result,
+                evidence_refs=_collect_observed_tool_evidence_refs(final_messages),
                 token_usage_records=token_usage_records,
             )
 

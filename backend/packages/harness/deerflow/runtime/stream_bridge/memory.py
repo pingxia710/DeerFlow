@@ -56,15 +56,16 @@ class MemoryStreamBridge(StreamBridge):
 
         ``seq`` (assigned by :meth:`_next_id`) increases by one per published
         event, so it equals the event's absolute offset within the run. Returns
-        ``None`` for ids that do not match the expected format.
+        ``-1`` for the SDK's initial-cursor sentinel and ``None`` for ids that
+        do not match the expected format.
         """
-        _, sep, seq_text = event_id.rpartition("-")
-        if not sep:
+        if event_id == "-1":
+            return -1
+
+        timestamp_text, sep, seq_text = event_id.rpartition("-")
+        if not sep or not timestamp_text.isdigit() or not seq_text.isdigit():
             return None
-        try:
-            return int(seq_text)
-        except ValueError:
-            return None
+        return int(seq_text)
 
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> tuple[int, bool]:
         if last_event_id is None:
@@ -76,6 +77,11 @@ class MemoryStreamBridge(StreamBridge):
         # computed index, so a stale/evicted/foreign/malformed id still falls back
         # to replay-from-earliest — identical to the previous linear scan.
         seq = self._parse_event_seq(last_event_id)
+        if seq == -1:
+            # The LangGraph SDK sends -1 before it has consumed any event. Any
+            # trimmed prefix therefore requires durable recovery; a complete
+            # in-memory history can be replayed directly without a warning.
+            return stream.start_offset, stream.start_offset > 0
         if seq is not None:
             local_index = seq - stream.start_offset
             if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
@@ -125,6 +131,7 @@ class MemoryStreamBridge(StreamBridge):
             yield StreamEvent(id="", event=RECOVERY_REQUIRED_EVENT, data={"reason": "last_event_id_not_retained"})
 
         while True:
+            lag_recovery: StreamEvent | None = None
             async with stream.condition:
                 if next_offset < stream.start_offset:
                     logger.warning(
@@ -133,22 +140,30 @@ class MemoryStreamBridge(StreamBridge):
                         stream.start_offset,
                     )
                     next_offset = stream.start_offset
-                    yield StreamEvent(id="", event=RECOVERY_REQUIRED_EVENT, data={"reason": "subscriber_lagged_retention"})
+                    lag_recovery = StreamEvent(
+                        id="",
+                        event=RECOVERY_REQUIRED_EVENT,
+                        data={"reason": "subscriber_lagged_retention"},
+                    )
 
-                local_index = next_offset - stream.start_offset
-                if 0 <= local_index < len(stream.events):
-                    entry = stream.events[local_index]
-                    next_offset += 1
-                elif stream.ended:
-                    entry = END_SENTINEL
-                else:
-                    try:
-                        await asyncio.wait_for(stream.condition.wait(), timeout=heartbeat_interval)
-                    except TimeoutError:
-                        entry = HEARTBEAT_SENTINEL
+                if lag_recovery is None:
+                    local_index = next_offset - stream.start_offset
+                    if 0 <= local_index < len(stream.events):
+                        entry = stream.events[local_index]
+                        next_offset += 1
+                    elif stream.ended:
+                        entry = END_SENTINEL
                     else:
-                        continue
+                        try:
+                            await asyncio.wait_for(stream.condition.wait(), timeout=heartbeat_interval)
+                        except TimeoutError:
+                            entry = HEARTBEAT_SENTINEL
+                        else:
+                            continue
 
+            if lag_recovery is not None:
+                yield lag_recovery
+                continue
             if entry is END_SENTINEL:
                 yield END_SENTINEL
                 return

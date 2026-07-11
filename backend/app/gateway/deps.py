@@ -31,6 +31,7 @@ from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,11 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     try:
         await asyncio.shield(drain)
     except asyncio.CancelledError:
-        # Re-shield so this second wait does not abandon the in-flight drain;
-        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+        # Keep re-shielding through repeated cancellation so the in-flight drain
+        # is not abandoned. It is bounded, so this cannot hang; then re-raise to
+        # honour shutdown.
         try:
-            await asyncio.shield(drain)
+            await await_task_through_repeated_cancellation(drain)
         except Exception:
             logger.exception("In-flight run drain failed after shutdown cancellation")
         raise

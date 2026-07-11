@@ -55,6 +55,7 @@ class TestProviders:
         assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+        assert "gpt-5.6" in providers["codex"].models
 
     def test_minimax_vision_is_per_model(self):
         """M3 supports vision; M2.7 variants are text-only.
@@ -132,6 +133,7 @@ class TestBuildMinimalConfig:
         assert len(data["models"]) == 1
         model = data["models"][0]
         assert model["name"] == "gpt-4o"
+        assert model["provider"] == "OpenAI / gpt-4o"
         assert model["use"] == "langchain_openai:ChatOpenAI"
         assert model["model"] == "gpt-4o"
         assert model["api_key"] == "$OPENAI_API_KEY"

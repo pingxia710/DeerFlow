@@ -163,6 +163,18 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
     )
 
 
+def _assert_registration_allowed() -> None:
+    configured = os.getenv("DEER_FLOW_ALLOW_REGISTRATION")
+    if configured is None:
+        environments = {os.getenv(key, "").strip().lower() for key in ("DEER_FLOW_ENV", "ENVIRONMENT", "APP_ENV", "NODE_ENV")}
+        bind_hosts = _configured_bind_hosts()
+        allowed = not bool(environments & {"prod", "production", "staging", "stage", "shared"}) and all(_is_loopback_host(host) for host in bind_hosts)
+    else:
+        allowed = configured.strip().lower() in {"1", "true", "yes"}
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Self-registration is disabled")
+
+
 # ── Rate Limiting ────────────────────────────────────────────────────────
 # In-process dict — not shared across workers.
 #
@@ -326,6 +338,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
     """
+    _assert_registration_allowed()
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
@@ -425,6 +438,7 @@ _SETUP_STATUS_CACHE_TTL_SECONDS = 60
 _MAX_TRACKED_SETUP_STATUS_IPS = 10000
 _SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[dict]] = {}
 _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
+_INITIALIZE_ADMIN_LOCK = asyncio.Lock()
 
 
 @router.get("/setup-status")
@@ -494,12 +508,43 @@ class InitializeAdminRequest(BaseModel):
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
 
-def _is_loopback_request(request: Request) -> bool:
-    host = request.client.host if request.client else ""
+def _is_loopback_host(host: str) -> bool:
     try:
-        return ip_address(host).is_loopback
+        return ip_address(host.strip("[]")).is_loopback
     except ValueError:
-        return host in {"localhost", "testclient"}
+        return host.lower() in {"localhost", "testclient", "testserver"}
+
+
+def _configured_bind_hosts() -> list[str]:
+    return [
+        value.strip()
+        for key in (
+            "DEER_FLOW_PUBLIC_BIND_HOST",
+            "DEER_FLOW_BIND_HOST",
+            "DEER_FLOW_GATEWAY_HOST",
+            "GATEWAY_HOST",
+        )
+        if (value := os.getenv(key)) and value.strip()
+    ] or ["127.0.0.1"]
+
+
+def _is_loopback_request(request: Request) -> bool:
+    peer_host = request.client.host if request.client else ""
+    if any(not _is_loopback_host(host) for host in _configured_bind_hosts()):
+        return False
+
+    request_host = urllib.parse.urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
+    if request_host and not _is_loopback_host(request_host):
+        return False
+
+    if _is_loopback_host(peer_host):
+        return True
+
+    try:
+        peer_ip = ip_address(peer_host)
+    except ValueError:
+        return False
+    return peer_ip.is_private and any(peer_ip in network for network in _trusted_proxies())
 
 
 def _validate_first_boot_setup_access(request: Request, body: InitializeAdminRequest) -> None:
@@ -531,21 +576,23 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     """
     _validate_first_boot_setup_access(request, body)
 
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+    async with _INITIALIZE_ADMIN_LOCK:
+        provider = get_local_provider()
+        admin_count = await provider.count_admin_users()
+        if admin_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            )
 
-    try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
-    except ValueError:
-        # DB unique-constraint race: another concurrent request beat us.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+        try:
+            user = await provider.create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        except ValueError:
+            # A concurrent request may have created the same email.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)

@@ -51,6 +51,10 @@ def test_gateway_worker_count_remains_overridable():
     assert "${GATEWAY_WORKERS:-1}" in command, f"worker count must use ${{GATEWAY_WORKERS:-1}} so operators can override it; got: {command}"
 
 
+def test_gateway_worker_override_is_visible_to_runtime_guard():
+    assert "GATEWAY_WORKERS=${GATEWAY_WORKERS:-1}" in _gateway_environment(COMPOSE_PATH)
+
+
 def test_production_compose_marks_gateway_as_production():
     assert "ENVIRONMENT=production" in _gateway_environment(COMPOSE_PATH)
 

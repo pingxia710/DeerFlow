@@ -417,6 +417,26 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
         _set_skills_cache_state()
 
 
+def test_explicit_config_enabled_skills_cache_is_bounded(monkeypatch):
+    configs = [SimpleNamespace(name=f"config-{index}") for index in range(20)]
+    monkeypatch.setattr(
+        prompt_module,
+        "get_or_new_skill_storage",
+        lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+    )
+    _set_skills_cache_state()
+
+    try:
+        for config in configs:
+            prompt_module.get_enabled_skills_for_config(cast(AppConfig, cast(object, config)))
+
+        assert len(prompt_module._enabled_skills_by_config_cache) <= 8
+        assert id(configs[0]) not in prompt_module._enabled_skills_by_config_cache
+        assert id(configs[-1]) in prompt_module._enabled_skills_by_config_cache
+    finally:
+        _set_skills_cache_state()
+
+
 def test_clear_cache_does_not_spawn_parallel_refresh_workers(monkeypatch, tmp_path):
     started = threading.Event()
     release = threading.Event()
@@ -587,7 +607,12 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
     assert "user-only/redline/boundary-changing -> ask or stop" in prompt
     assert "If progress needs facts or ordinary technical execution you can handle with tools or sub-AIs inside the current round, dispatch `task` in this same response" in prompt
     assert "Command Room generates proposed direction, current-round boundaries" in prompt
-    assert "Maintain long-running AI-AI governance roles across rounds" in prompt
+    assert "Governance roles are available, not mandatory standing lanes" in prompt
+    assert "ordinary low-risk local development" in prompt
+    assert "do not dispatch Planner, Boundary, Evidence, Opposition, or Recorder by default" in prompt
+    assert "Runtime-observed evidence returned by `task`" in prompt
+    assert "Later criticism does not erase earlier observed file changes or passing commands" in prompt
+    assert "Stop dispatching when the agreed acceptance evidence is met" in prompt
     assert "Program logic records and routes facts, but must not manage AI flow or judge project quality" in prompt
     assert "Do not stop for routine implementation choices" in prompt
     assert "user-only/redline/boundary-changing -> ask or stop" in prompt

@@ -8,11 +8,13 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from deerflow.config.paths import UnsafePathError, open_file_no_symlinks
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
@@ -149,24 +151,32 @@ class LocalSkillStorage(SkillStorage):
         )
         from deerflow.skills.validation import _validate_skill_frontmatter
 
-        if not path.is_file():
-            if not path.exists():
-                raise FileNotFoundError(f"Skill file not found: {archive_path}")
-            raise ValueError(f"Path is not a file: {archive_path}")
-        if path.suffix != ".skill":
-            raise ValueError("File must have .skill extension")
-
-        custom_dir.mkdir(parents=True, exist_ok=True)
-
+        flags = os.O_RDONLY | (os.O_NONBLOCK if hasattr(os, "O_NONBLOCK") else 0)
         try:
-            zf = zipfile.ZipFile(path, "r")
+            fd = open_file_no_symlinks(path, flags)
         except FileNotFoundError:
             raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
-        except (zipfile.BadZipFile, IsADirectoryError):
-            raise ValueError("File is not a valid ZIP archive") from None
+        try:
+            archive_stat = os.fstat(fd)
+            if not stat.S_ISREG(archive_stat.st_mode):
+                raise ValueError(f"Path is not a file: {archive_path}")
+            if archive_stat.st_nlink != 1:
+                raise UnsafePathError(f"Path is not an exclusive regular file: {archive_path}")
+            if path.suffix != ".skill":
+                raise ValueError("File must have .skill extension")
 
-        with zf:
-            safe_extract_skill_archive(zf, tmp_path)
+            custom_dir.mkdir(parents=True, exist_ok=True)
+
+            with os.fdopen(fd, "rb") as archive_file:
+                fd = -1
+                try:
+                    with zipfile.ZipFile(archive_file, "r") as zf:
+                        safe_extract_skill_archive(zf, tmp_path)
+                except (zipfile.BadZipFile, IsADirectoryError):
+                    raise ValueError("File is not a valid ZIP archive") from None
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)
 

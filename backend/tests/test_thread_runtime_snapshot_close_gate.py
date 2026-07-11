@@ -121,6 +121,8 @@ def test_runtime_snapshot_includes_read_only_close_gate_facts(tmp_path, monkeypa
     app.state.run_manager = SimpleNamespace(
         list_by_thread=AsyncMock(return_value=[record]),
         recover_stale_inflight_runs=AsyncMock(return_value=[]),
+        begin_thread_write=AsyncMock(),
+        end_thread_write=AsyncMock(),
     )
     app.state.run_event_store = event_store
     app.state.round_state_store = round_store
@@ -129,8 +131,11 @@ def test_runtime_snapshot_includes_read_only_close_gate_facts(tmp_path, monkeypa
     before_lanes = len(round_store.task_lanes)
     before_handoff_status = handoff.status
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/runtime-snapshot")
+        default_response = client.get("/api/threads/thread-1/runtime-snapshot")
+        response = client.get("/api/threads/thread-1/runtime-snapshot?include_close_gates=true")
 
+    assert default_response.status_code == 200
+    assert default_response.json()["close_gates"] == []
     assert response.status_code == 200
     body = response.json()
     assert "close_gates" in body
@@ -153,3 +158,5 @@ def test_runtime_snapshot_includes_read_only_close_gate_facts(tmp_path, monkeypa
     assert round_store.set_run_state_calls == []
     assert round_store.record_task_events_calls == []
     assert handoff.status == before_handoff_status
+    assert app.state.run_manager.begin_thread_write.await_count == 2
+    assert app.state.run_manager.end_thread_write.await_count == 2

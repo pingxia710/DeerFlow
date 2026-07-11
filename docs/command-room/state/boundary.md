@@ -28,5 +28,6 @@
 ## Watchpoints
 
 - Do not treat inferred boundaries as user authorization.
-- Do not let autonomous local execution bypass boundary, evidence, or opposition
-  checks; worker self-claims are not enough for PASS.
+- Do not let autonomous local execution bypass boundary or evidence checks;
+  worker self-claims are not enough for PASS. Trigger Opposition only for a
+  concrete conflict, permission expansion, high-impact risk, or evidence gap.

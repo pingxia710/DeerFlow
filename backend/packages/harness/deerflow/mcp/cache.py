@@ -12,6 +12,7 @@ _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
+_last_initialization_error_type: str | None = None
 
 
 def _get_config_mtime() -> float | None:
@@ -61,7 +62,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _last_initialization_error_type
 
     async with _initialization_lock:
         if _cache_initialized:
@@ -71,9 +72,14 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         from deerflow.mcp.tools import get_mcp_tools
 
         logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
+        try:
+            _mcp_tools_cache = await get_mcp_tools()
+        except Exception as exc:
+            _last_initialization_error_type = exc.__class__.__name__
+            raise
         _cache_initialized = True
         _config_mtime = _get_config_mtime()  # Record config file mtime
+        _last_initialization_error_type = None
         logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
 
         return _mcp_tools_cache
@@ -129,6 +135,18 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     return _mcp_tools_cache or []
 
 
+def get_mcp_cache_status() -> dict[str, object]:
+    """Return MCP load state without initializing tools or exposing config."""
+    tools = _mcp_tools_cache or []
+    return {
+        "initialized": _cache_initialized,
+        "stale": _is_cache_stale() if _cache_initialized else False,
+        "tool_count": len(tools),
+        "tool_names": [tool.name for tool in tools],
+        "last_error_type": _last_initialization_error_type,
+    }
+
+
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
@@ -136,10 +154,11 @@ def reset_mcp_tools_cache() -> None:
     Also closes all persistent MCP sessions so they are recreated on
     the next tool load.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _last_initialization_error_type
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+    _last_initialization_error_type = None
 
     # Close persistent sessions – they will be recreated by the next
     # get_mcp_tools() call with the (possibly updated) connection config.

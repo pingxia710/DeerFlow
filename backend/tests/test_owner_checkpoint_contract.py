@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import UniqueConstraint
-from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta import (
+    ThreadMetaConflictError,
+    ThreadMetaRepository,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
@@ -50,7 +52,7 @@ def test_jsonl_run_event_path_is_owner_scoped_when_user_id_is_present(tmp_path) 
 async def test_duplicate_thread_id_conflicts_across_users(thread_repo) -> None:
     await thread_repo.create("same-thread", user_id="user-1")
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ThreadMetaConflictError):
         await thread_repo.create("same-thread", user_id="user-2")
 
 

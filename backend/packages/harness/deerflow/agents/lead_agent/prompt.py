@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CONCURRENT_SUBAGENTS = 6
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
+_ENABLED_SKILLS_BY_CONFIG_CACHE_MAX_SIZE = 8
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
 _enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
@@ -146,12 +147,22 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[S
         if cached is not None:
             cached_config, cached_skills = cached
             if cached_config is app_config:
+                _enabled_skills_by_config_cache.pop(cache_key)
+                _enabled_skills_by_config_cache[cache_key] = cached
                 return list(cached_skills)
 
     skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     with _enabled_skills_lock:
+        _enabled_skills_by_config_cache.pop(cache_key, None)
         _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAX_SIZE:
+            oldest_key = next(iter(_enabled_skills_by_config_cache))
+            _enabled_skills_by_config_cache.pop(oldest_key)
     return list(skills)
+
+
+async def warm_enabled_skills_for_config(app_config: AppConfig) -> None:
+    await asyncio.to_thread(get_enabled_skills_for_config, app_config)
 
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
@@ -384,11 +395,13 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
 - A Round is the command-room execution cadence: one user-authorized, bounded cognitive/execution loop that should make the next state clearer.
   The user provides intent, pain, preferences, constraints, and irreversible authorization/refusal.
   Command Room generates proposed direction, current-round boundaries, evidence standard, execution, validation, and next step.
-- Maintain long-running AI-AI governance roles across rounds: Chair, Planner, Boundary, Evidence, Opposition, and Recorder.
-  Concrete model calls may be ephemeral; executor sub-AIs may be disposable. Program logic records and routes facts, but must not manage AI flow or judge project quality.
+- Governance roles are available, not mandatory standing lanes. Their identity/state may persist across rounds, but activate Planner, Boundary, Evidence,
+  Opposition, or Recorder only when the task's actual risk, ambiguity, conflict, or durable change needs that angle.
+- For ordinary low-risk local development, prefer one implementation/executor sub-AI plus only the focused verification needed by the acceptance standard;
+  do not dispatch Planner, Boundary, Evidence, Opposition, or Recorder by default. Program logic records and routes facts, but must not manage AI flow or judge project quality.
 - Before execution, make the round's acceptance/evidence standard concrete enough for the work at hand: what must be true, how it will be observed,
   and what evidence would be enough. After execution, compare results back to that standard with action_result, command/test output, artifact paths, logs, or source refs.
-- Chair Activation Check: for DeerFlow architecture, AI-AI, roles, loops, governance, quality, boundary, development execution, or durable-rule work,
+- Chair Activation Check: for high-impact DeerFlow architecture, AI-AI, roles, loops, governance, quality, boundary expansion, or durable-rule work,
   start by deciding:
   Goal:
   Boundary:
@@ -414,6 +427,9 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
   redirect, expand, or replace an already-running subtask unless the user explicitly asks for that intervention.
 - When a sub-AI finishes, merge its returned result/action_result with any user discussion that happened during the run. If that reveals a new executable issue
   inside the current boundary, dispatch a fresh `task` with a new handoff; if it changes the goal, boundary, or redlines, ask first.
+- Runtime-observed evidence returned by `task` (paired tool results, commands, exit codes, paths, and hashes) is execution fact, while worker prose remains a claim.
+  Reconcile all results chronologically. Later criticism does not erase earlier observed file changes or passing commands; it must cite stronger conflicting evidence.
+- Stop dispatching when the agreed acceptance evidence is met. Do not add another review, evidence, opposition, commit, or recorder lane merely to complete a process pattern.
 - You may inspect project files directly to ground yourself in the current state before deciding whether delegation is useful.
   Do not stop for routine implementation choices such as function names, test style, commit splitting, or other technical details that stay within the confirmed boundary.
 - Chair Code Reading Policy: sample decisive refs for truth, boundary, or acceptance; delegate broad exploration to Evidence, Boundary, Capability Governor, or Executor; return to envelope and Chair decision flow after reading.
@@ -441,7 +457,9 @@ You are a real lead LLM with the `task` tool. Use your own reasoning to decide w
 Give each sub-AI enough context to act: the goal, current round boundary, forbidden changes, evidence needed, and concrete executable actions.
 Account for sub-AI understanding; do not send vague assignments.
 Feishu/Lark handoff: when a delegation includes feishu.cn, larksuite, doc, wiki, or base links, explicitly state that these are private Feishu/Lark resources and the sub-AI must not try anonymous web access first.
-Prefer the enabled `feishu-cli-boundary` local chain: read the local lark skill/docs, run with `HOME=/Users/pingxia`, use `/Users/pingxia/.npm-global/bin/lark-cli`, and include `--as user`.
+Prefer the project-local `.agent/skills/feishu-cli-boundary/SKILL.md` chain when accessible:
+ask the sub-AI to read the local lark skill/docs, run with `HOME=/Users/pingxia`,
+use `/Users/pingxia/.npm-global/bin/lark-cli`, and include `--as user`.
 If access fails, ask the sub-AI to classify whether the issue is link type, identity, tenant, permission, or command shape; do not jump to asking the user to export.
 Never expose tokens, secrets, chat IDs, webhooks, `.env` contents, or private recipients.
 Ask for concise findings and useful references when they matter. Do not require formal report formats unless the user asked for one.

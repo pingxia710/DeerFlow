@@ -10,6 +10,12 @@ import sys
 
 import doctor
 
+
+def _make_source_checkout(root):
+    (root / "backend" / "packages" / "harness" / "deerflow").mkdir(parents=True)
+    (root / "frontend").mkdir()
+
+
 # ---------------------------------------------------------------------------
 # check_python
 # ---------------------------------------------------------------------------
@@ -20,6 +26,47 @@ class TestCheckPython:
         result = doctor.check_python()
         assert sys.version_info >= (3, 12)
         assert result.status == "ok"
+
+
+class TestCheckRuntimeHome:
+    def test_source_checkout_uses_backend_runtime_home(self, tmp_path, monkeypatch):
+        _make_source_checkout(tmp_path)
+        monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+        backend_home = tmp_path / "backend" / ".deer-flow"
+        (backend_home / "data").mkdir(parents=True)
+
+        result = doctor.check_runtime_home(tmp_path)
+
+        assert result.status == "ok"
+        assert str(backend_home) in result.detail
+
+    def test_warns_and_uses_legacy_runtime_home_when_it_is_the_only_state_root(self, tmp_path, monkeypatch):
+        _make_source_checkout(tmp_path)
+        monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+        legacy_home = tmp_path / ".deer-flow"
+        (legacy_home / "users").mkdir(parents=True)
+
+        result = doctor.check_runtime_home(tmp_path)
+
+        assert result.status == "warn"
+        assert f"active: {legacy_home}" in result.detail
+        assert str(tmp_path / "backend" / ".deer-flow") in result.detail
+        assert result.fix is not None
+        assert "DEER_FLOW_HOME" in result.fix
+
+    def test_warns_when_runtime_state_is_split_between_roots(self, tmp_path, monkeypatch):
+        _make_source_checkout(tmp_path)
+        monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+        (tmp_path / ".deer-flow" / "users").mkdir(parents=True)
+        (tmp_path / "backend" / ".deer-flow" / "data").mkdir(parents=True)
+
+        result = doctor.check_runtime_home(tmp_path)
+
+        assert result.status == "warn"
+        assert str(tmp_path / ".deer-flow") in result.detail
+        assert str(tmp_path / "backend" / ".deer-flow") in result.detail
+        assert result.fix is not None
+        assert "DEER_FLOW_HOME" in result.fix
 
 
 # ---------------------------------------------------------------------------

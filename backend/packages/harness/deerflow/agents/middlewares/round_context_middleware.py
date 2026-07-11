@@ -8,6 +8,7 @@ roundContextSignals to the main model as short internal context.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, override
 
@@ -501,7 +502,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
-        return await handler(self._inject(request))
+        return await handler(await asyncio.to_thread(self._inject, request))
 
 
 __all__ = [

@@ -5,8 +5,9 @@
 # - The default path of this configuration file is `config.yaml` in the project root.
 #   You can set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or use
 #   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
-# - Runtime state defaults to `.deer-flow` under the project root. Override it
-#   with `DEER_FLOW_HOME` when you need a different writable data directory.
+# - Runtime state defaults to `backend/.deer-flow` in this source checkout and
+#   `.deer-flow` under the project root for standalone harness projects. Override
+#   it with `DEER_FLOW_HOME` when you need a different writable data directory.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 

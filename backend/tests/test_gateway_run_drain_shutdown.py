@@ -98,6 +98,62 @@ async def test_shutdown_cancels_and_awaits_inflight_run():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_projects_cancelled_run_into_terminal_round_state():
+    from deerflow.persistence.round_state import MemoryRoundStateStore
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    round_store = MemoryRoundStateStore()
+    manager = RunManager(store=store, round_store=round_store)
+    record = await manager.create_or_reject("thread-shutdown-round")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+
+    await manager.shutdown(timeout=1.0)
+
+    persisted = await store.get(record.run_id)
+    [round_info] = await round_store.list_by_thread(record.thread_id)
+    assert persisted is not None
+    assert persisted["status"] == "interrupted"
+    assert round_info["state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_release_lease_for_task_still_running_after_timeout():
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-stubborn-lease")
+    assert await manager.set_status(record.run_id, RunStatus.running)
+    stop = asyncio.Event()
+
+    async def stubborn() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                if stop.is_set():
+                    raise
+
+    record.task = asyncio.create_task(stubborn())
+    await asyncio.sleep(0)
+    try:
+        await manager.shutdown(timeout=0.05)
+
+        persisted = await store.get(record.run_id)
+        assert persisted is not None
+        assert persisted["status"] == "running"
+        assert record.thread_id in store._active_slots
+    finally:
+        stop.set()
+        record.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.asyncio
 async def test_shutdown_is_bounded_when_run_ignores_cancellation():
     """A run that swallows cancellation must not make shutdown() hang."""
     rm = RunManager()
@@ -204,6 +260,39 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
     assert "checkpointer_closed" in events
     assert events.index("runs_drained") < events.index("checkpointer_closed"), f"runs must be drained before the checkpointer pool is closed; got order {events}"
+
+
+@pytest.mark.asyncio
+async def test_lifespan_drain_survives_repeated_cancellation_until_run_manager_finishes():
+    """Repeated shutdown cancellation must not abandon the in-flight drain."""
+    from app.gateway.deps import _drain_inflight_runs
+
+    drain_started = asyncio.Event()
+    allow_drain_to_finish = asyncio.Event()
+    drain_finished = asyncio.Event()
+
+    async def shutdown(*, timeout: float) -> None:
+        assert timeout > 0
+        drain_started.set()
+        await allow_drain_to_finish.wait()
+        drain_finished.set()
+
+    teardown = asyncio.create_task(_drain_inflight_runs(SimpleNamespace(shutdown=shutdown)))
+    try:
+        await asyncio.wait_for(drain_started.wait(), timeout=1.0)
+
+        teardown.cancel()
+        await asyncio.sleep(0)
+        teardown.cancel()
+        await asyncio.sleep(0)
+
+        assert not teardown.done(), "lifespan drain exited before RunManager shutdown completed"
+        assert not drain_finished.is_set()
+    finally:
+        allow_drain_to_finish.set()
+        with suppress(asyncio.CancelledError):
+            await teardown
+        await asyncio.wait_for(drain_finished.wait(), timeout=1.0)
 
 
 @pytest.mark.asyncio

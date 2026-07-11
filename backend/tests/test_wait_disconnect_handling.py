@@ -175,3 +175,59 @@ class TestWaitForRunCompletion:
             assert record.status == RunStatus.success
 
         asyncio.run(run())
+
+    def test_recovery_marker_is_incomplete_without_cancelling_run(self) -> None:
+        """A failed lifecycle CAS must not look like a normal wait success."""
+        from app.gateway.services import wait_for_run_completion
+
+        async def run() -> None:
+            mgr = RunManager()
+            bridge = MemoryStreamBridge()
+            record = await _create_running_record(
+                mgr,
+                on_disconnect=DisconnectMode.cancel,
+            )
+            request = _FakeRequest()
+            await bridge.publish(
+                record.run_id,
+                "stream_recovery_required",
+                {"reason": "run_status_commit_failed"},
+            )
+            await bridge.publish_end(record.run_id)
+
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, request, mgr),
+                timeout=2.0,
+            )
+
+            assert completed is False
+            assert record.status == RunStatus.running
+
+        asyncio.run(run())
+
+    def test_retention_gap_keeps_waiting_for_terminal_end(self) -> None:
+        """A slow wait consumer does not need every intermediate stream frame."""
+        from app.gateway.services import wait_for_run_completion
+
+        async def run() -> None:
+            mgr = RunManager()
+            bridge = MemoryStreamBridge()
+            record = await _create_running_record(mgr, on_disconnect=DisconnectMode.cancel)
+            request = _FakeRequest()
+            await bridge.publish(
+                record.run_id,
+                "stream_recovery_required",
+                {"reason": "subscriber_lagged_retention"},
+            )
+            await mgr.set_status(record.run_id, RunStatus.success)
+            await bridge.publish_end(record.run_id)
+
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, request, mgr),
+                timeout=2.0,
+            )
+
+            assert completed is True
+            assert record.status == RunStatus.success
+
+        asyncio.run(run())

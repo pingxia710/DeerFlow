@@ -7,6 +7,7 @@ without changing the public ``task() -> str`` tool contract.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
@@ -22,6 +23,7 @@ def task_action_result_from_terminal_event(
     result: Any = None,
     error: Any = None,
     terminal_reason: str | None = None,
+    observed_evidence_refs: Sequence[str] | None = None,
 ) -> ActionResult:
     """Build an ``ActionResult`` from a terminal task-tool outcome.
 
@@ -47,6 +49,7 @@ def task_action_result_from_terminal_event(
                 payload["risks"] = ["untrusted model-text evidence_refs not promoted"]
     else:
         payload = {"summary": "" if result is None else str(result)}
+    payload["evidence_refs"] = list(dict.fromkeys(ref.strip() for ref in observed_evidence_refs or [] if isinstance(ref, str) and ref.strip()))
     payload.setdefault("action_id", task_id)
     payload.setdefault("description", description)
     payload["status"] = status

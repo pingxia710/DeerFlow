@@ -189,8 +189,42 @@ def test_record_subagent_handoff_accepts_natural_worker_output(tmp_path):
     assert signal["missing"] == []
     assert signal["fields"]["Role"] == "opposition"
     assert signal["fields"]["EvidenceRefs"] == "worker-output:task-natural"
-    assert signal["fields"]["RecommendedDecision"] == "STOP_CONFIRM"
+    assert signal["fields"]["RecommendedDecision"] == "NEEDS_MORE"
+    assert signal["fields"]["RedlineTouched"] == "false"
     assert "EvidenceRefs" in signal["derived"]
+
+
+def test_runtime_observed_evidence_validates_natural_implementation_without_false_redline(tmp_path):
+    evidence_ref = "command: pytest backend/tests/test_services.py -q; exit code: 0"
+    path = record_subagent_handoff(
+        thread_id="thread-1",
+        run_id="run-1",
+        task_id="task-implementation",
+        trace_id="trace-1",
+        user_id="user-1",
+        subagent_type="general-purpose",
+        description="implement the scoped fix",
+        prompt="implement and test",
+        status="completed",
+        result="Implemented the scoped fix. No production write or credential access occurred.",
+        action_result={
+            "action_id": "task-implementation",
+            "status": "completed",
+            "evidence_refs": [evidence_ref],
+        },
+        base_dir=tmp_path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    signal = record["signal"]
+
+    assert signal["valid"] is True
+    assert signal["missing"] == []
+    assert signal["fields"]["EvidenceRefs"] == evidence_ref
+    assert signal["fields"]["RedlineTouched"] == "false"
+    assert signal["evidenceState"] == "SUPPORTED"
+    assert signal["selfAttestationOnly"] is False
+    assert "RecommendedDecision" not in signal["fields"]
 
 
 def test_record_subagent_handoff_infers_blocking_decision(tmp_path):

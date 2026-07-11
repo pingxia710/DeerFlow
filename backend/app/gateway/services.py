@@ -32,6 +32,7 @@ from deerflow.runtime import (
     DisconnectMode,
     RunManager,
     RunRecord,
+    RunStatus,
     StreamBridge,
     UnsupportedStrategyError,
     run_agent,
@@ -39,10 +40,12 @@ from deerflow.runtime import (
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
+from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
 logger = logging.getLogger(__name__)
 
 _STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
+_STATUS_COMMIT_FAILED_REASON = "run_status_commit_failed"
 _TASK_EVENT_REPLAY_PAGE_SIZE = 500
 _RUN_TERMINAL_EVENT_TYPE = "run.terminal"
 _TASK_EVENT_REPLAY_TYPES = [
@@ -128,6 +131,12 @@ def _is_task_event_payload(payload: Any, *, thread_id: str, run_id: str) -> bool
         return False
     event_type = payload.get("event_type") or payload.get("type")
     return event_type in _TASK_EVENT_REPLAY_TYPES and payload.get("thread_id") == thread_id and payload.get("run_id") == run_id and isinstance(payload.get("task_id"), str)
+
+
+def _task_event_replay_key(payload: Any, *, thread_id: str, run_id: str) -> str | None:
+    if not _is_task_event_payload(payload, thread_id=thread_id, run_id=run_id):
+        return None
+    return json.dumps(dict(payload), default=str, ensure_ascii=False, sort_keys=True)
 
 
 def _normalize_run_terminal_reason(reason: str) -> str:
@@ -237,13 +246,25 @@ async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, 
     has_stream_projection = any(isinstance(row, Mapping) and row.get("event_type") in _STREAM_REPLAY_TYPES for row in rows)
     frames = []
     has_terminal_frame = False
+    seen_task_events: set[str] = set()
     for row in rows:
         payload = row.get("content") if isinstance(row, Mapping) else None
         if has_stream_projection:
             if isinstance(row, Mapping) and row.get("event_type") in _STREAM_REPLAY_TYPES and isinstance(payload, Mapping):
                 event = payload.get("event")
                 if isinstance(event, str) and event:
-                    frames.append(format_sse(event, payload.get("data")))
+                    data = payload.get("data")
+                    task_key = _task_event_replay_key(data, thread_id=record.thread_id, run_id=record.run_id) if event == "custom" else None
+                    if task_key is None or task_key not in seen_task_events:
+                        frames.append(format_sse(event, data))
+                    if task_key is not None:
+                        seen_task_events.add(task_key)
+                continue
+            task_key = _task_event_replay_key(payload, thread_id=record.thread_id, run_id=record.run_id)
+            if task_key is not None:
+                if task_key not in seen_task_events:
+                    frames.append(format_sse("custom", payload))
+                    seen_task_events.add(task_key)
                 continue
             terminal_frame = _terminal_replay_frame(row, record, payload) if isinstance(row, Mapping) else None
             if terminal_frame is not None:
@@ -255,8 +276,11 @@ async def _durable_replay_frames(event_store: Any | None, record: RunRecord, *, 
             metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
             frames.append(format_sse("messages", [payload, dict(metadata)]))
             continue
-        if _is_task_event_payload(payload, thread_id=record.thread_id, run_id=record.run_id):
-            frames.append(format_sse("custom", payload))
+        task_key = _task_event_replay_key(payload, thread_id=record.thread_id, run_id=record.run_id)
+        if task_key is not None:
+            if task_key not in seen_task_events:
+                frames.append(format_sse("custom", payload))
+                seen_task_events.add(task_key)
             continue
         terminal_frame = _terminal_replay_frame(row, record, payload) if isinstance(row, Mapping) else None
         if terminal_frame is not None:
@@ -561,6 +585,72 @@ async def apply_checkpoint_to_run_config(
 # ---------------------------------------------------------------------------
 
 
+async def _finalize_unstarted_run(
+    bridge: StreamBridge,
+    run_mgr: RunManager,
+    record: RunRecord,
+    run_ctx: Any,
+    *,
+    status: RunStatus,
+    terminal_reason: str,
+    error: str | None = None,
+) -> None:
+    """Settle a persisted run when no worker task could take ownership."""
+    committed = await run_mgr.set_status(record.run_id, status, error=error, terminal_reason=terminal_reason)
+    if committed is False:
+        try:
+            await bridge.publish(
+                record.run_id,
+                _STREAM_RECOVERY_REQUIRED_EVENT,
+                {"reason": "run_status_commit_failed"},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to publish stream recovery marker for unstarted run %s",
+                sanitize_log_param(record.run_id),
+                exc_info=True,
+            )
+        await bridge.publish_end(record.run_id)
+        asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
+        return
+    event_store = getattr(run_ctx, "event_store", None)
+    put_event = getattr(event_store, "put", None)
+    if callable(put_event):
+        try:
+            await put_event(
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                event_type=_RUN_TERMINAL_EVENT_TYPE,
+                category="lifecycle",
+                content={"status": status.value, "terminal_reason": terminal_reason},
+                metadata={"caller": "runtime"},
+                user_id=record.user_id,
+            )
+        except Exception:
+            logger.warning("Failed to persist terminal event for unstarted run %s", sanitize_log_param(record.run_id), exc_info=True)
+    thread_store = getattr(run_ctx, "thread_store", None)
+    if thread_store is not None:
+        try:
+            thread_status = "idle" if status == RunStatus.success else status.value
+            await run_mgr.update_thread_status_if_latest(record, thread_store, thread_status)
+        except Exception:
+            logger.warning("Failed to update thread status for unstarted run %s", sanitize_log_param(record.run_id), exc_info=True)
+    await bridge.publish(
+        record.run_id,
+        "custom",
+        {
+            "type": _RUN_TERMINAL_EVENT_TYPE,
+            "event_type": _RUN_TERMINAL_EVENT_TYPE,
+            "thread_id": record.thread_id,
+            "run_id": record.run_id,
+            "status": status.value,
+            "terminal_reason": terminal_reason,
+        },
+    )
+    await bridge.publish_end(record.run_id)
+    asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
+
+
 async def start_run(
     body: Any,
     thread_id: str,
@@ -601,16 +691,13 @@ async def start_run(
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-    owner_user_id = get_trusted_internal_owner_user_id(request) or _request_user_id(request)
-    # Stateless run endpoints carry thread_id in the request *body*, so the
-    # @require_permission(owner_check=True) decorator -- which resolves ownership
-    # from the path param -- cannot protect them. Enforce thread ownership here,
-    # before any run is created, so one user cannot start runs on (or read /wait
-    # checkpoint state from) another user's thread. Missing rows (auto-created
-    # temp threads) and NULL-owner rows (shared / pre-auth data) stay accessible
-    # via check_access; only a thread already owned by another user is rejected
-    # with 404, matching thread_runs.py's anti-enumeration behaviour. Internal
-    # channel runs act on behalf of the connection owner carried in
+    trusted_owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = trusted_owner_user_id or _request_user_id(request)
+    # Stateless routes strictly validate explicit body thread selectors before
+    # calling here. Keep this shared check permissive for server-generated thread
+    # IDs, while still rejecting a thread already owned by another user before
+    # any run is created. Internal channel runs act on behalf of the connection
+    # owner carried in
     # X-DeerFlow-Owner-User-Id, so they are scoped to that owner instead of
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
@@ -625,6 +712,8 @@ async def start_run(
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    existing_owner_record = None
+    unscoped_existing = None
     try:
         existing_owner_record = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
         if existing_owner_record is None and owner_user_id:
@@ -638,7 +727,49 @@ async def start_run(
     except Exception:
         logger.warning("Could not preflight thread_meta owner for %s (non-fatal)", sanitize_log_param(thread_id))
 
+    durable_thread_record = existing_owner_record or unscoped_existing
+    if trusted_owner_user_id and durable_thread_record is not None:
+        if not await run_ctx.thread_store.is_legacy_claim_complete(
+            thread_id,
+            owner_user_id,
+        ):
+            from app.gateway.routers.threads import (
+                _claim_legacy_thread_related_data,
+            )
+
+            await _claim_legacy_thread_related_data(
+                thread_id,
+                owner_user_id,
+                request,
+            )
+
+    # Finish all request/checkpoint parsing before creating the persistent run
+    # and acquiring its active-slot lease.  Any exception below this point is
+    # therefore an infrastructure/task-start failure, not a client validation
+    # error that can leave an ownerless pending run behind.
+    agent_factory = resolve_agent_factory(body.assistant_id)
+    command = getattr(body, "command", None)
+    if command and command.get("resume") is not None:
+        graph_input = Command(resume=command["resume"])
+    else:
+        graph_input = normalize_input(body.input)
+    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
+    merge_run_context_overrides(config, getattr(body, "context", None))
+    inject_authenticated_user_context(config, request)
+    stream_modes = normalize_stream_modes(body.stream_mode)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
+    record: RunRecord | None = None
+    run_start_gate_held = False
+
+    async def release_run_start_gate() -> None:
+        nonlocal run_start_gate_held
+        if not run_start_gate_held:
+            return
+        await run_mgr.release_run_start(thread_id)
+        run_start_gate_held = False
+
     try:
         try:
             record = await run_mgr.create_or_reject(
@@ -650,60 +781,53 @@ async def start_run(
                 multitask_strategy=body.multitask_strategy,
                 model_name=model_name,
                 user_id=owner_user_id,
+                defer_start_gate_release=True,
             )
+            run_start_gate_held = True
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-        # Upsert thread metadata so the thread appears in /threads/search,
-        # even for threads that were never explicitly created via POST /threads
-        # (e.g. stateless runs).
         try:
+            # Upsert thread metadata so the thread appears in /threads/search,
+            # even for threads that were never explicitly created via POST /threads
+            # (e.g. stateless runs).
             existing = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
-            if existing is None and owner_user_id:
-                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
-                if unscoped_existing is not None:
-                    current_owner = unscoped_existing.get("user_id")
-                    if current_owner not in (None, DEFAULT_USER_ID, owner_user_id):
-                        raise HTTPException(status_code=409, detail="Thread ID is already in use")
-                    if current_owner != owner_user_id:
-                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id, user_id=owner_user_id)
             if existing is None:
-                await run_ctx.thread_store.create(
+                create_result = await run_ctx.thread_store.create(
                     thread_id,
                     assistant_id=body.assistant_id,
                     metadata=body.metadata,
                     user_id=owner_user_id,
                 )
+                if trusted_owner_user_id and owner_user_id is not None and getattr(create_result, "created", True):
+                    await run_ctx.thread_store.mark_legacy_claim_complete(
+                        thread_id,
+                        owner_user_id,
+                    )
             else:
                 await run_ctx.thread_store.update_status(thread_id, "running", user_id=owner_user_id)
-        except HTTPException:
-            raise
-        except Exception:
-            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
-        agent_factory = resolve_agent_factory(body.assistant_id)
-        command = getattr(body, "command", None)
-        if command and command.get("resume") is not None:
-            graph_input = Command(resume=command["resume"])
-        else:
-            graph_input = normalize_input(body.input)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
-        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
+            if record.abort_event.is_set():
+                if record.abort_action == "rollback":
+                    status, terminal_reason, error = RunStatus.error, "rolled_back", "Rolled back by user"
+                else:
+                    status, terminal_reason, error = RunStatus.interrupted, "cancelled", None
+                await release_run_start_gate()
+                await _finalize_unstarted_run(
+                    bridge,
+                    run_mgr,
+                    record,
+                    run_ctx,
+                    status=status,
+                    terminal_reason=terminal_reason,
+                    error=error,
+                )
+                return record
 
-        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-        # The ``context`` field is a custom extension for the langgraph-compat layer
-        # that carries agent configuration (model_name, thinking_enabled, etc.).
-        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        merge_run_context_overrides(config, getattr(body, "context", None))
-        inject_authenticated_user_context(config, request)
-
-        stream_modes = normalize_stream_modes(body.stream_mode)
-
-        task = asyncio.create_task(
-            run_agent(
+            worker_started = False
+            worker = run_agent(
                 bridge,
                 run_mgr,
                 record,
@@ -716,8 +840,105 @@ async def start_run(
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
             )
-        )
+
+            async def run_worker() -> None:
+                nonlocal worker_started
+                worker_started = True
+                try:
+                    await worker
+                except asyncio.CancelledError:
+                    if record.abort_action == "rollback":
+                        if record.terminal_reason == "rolled_back":
+                            status, terminal_reason, error = RunStatus.error, "rolled_back", "Rolled back by user"
+                        else:
+                            status, terminal_reason, error = (
+                                RunStatus.error,
+                                "rollback_failed",
+                                "Rollback failed: checkpoint restore did not complete before worker cancellation",
+                            )
+                    else:
+                        status, terminal_reason, error = RunStatus.interrupted, "cancelled", None
+                    await _finalize_unstarted_run(
+                        bridge,
+                        run_mgr,
+                        record,
+                        run_ctx,
+                        status=status,
+                        terminal_reason=terminal_reason,
+                        error=error,
+                    )
+                except Exception as exc:
+                    logger.exception("Run worker failed before lifecycle finalization for %s", sanitize_log_param(record.run_id))
+                    await _finalize_unstarted_run(
+                        bridge,
+                        run_mgr,
+                        record,
+                        run_ctx,
+                        status=RunStatus.error,
+                        terminal_reason="failed",
+                        error=f"Run worker failed before lifecycle finalization: {type(exc).__name__}",
+                    )
+
+            task_entry = run_worker()
+            task = asyncio.create_task(task_entry)
+        except (asyncio.CancelledError, Exception) as exc:
+            for pending_coroutine in (locals().get("task_entry"), locals().get("worker")):
+                close = getattr(pending_coroutine, "close", None)
+                if callable(close):
+                    close()
+            logger.exception("Failed to start run task for %s", sanitize_log_param(record.run_id))
+            await release_run_start_gate()
+            await _finalize_unstarted_run(
+                bridge,
+                run_mgr,
+                record,
+                run_ctx,
+                status=RunStatus.error,
+                terminal_reason="failed",
+                error=f"Run task failed to start: {type(exc).__name__}",
+            )
+            raise
         record.task = task
+
+        def settle_cancelled_before_start(finished: asyncio.Task) -> None:
+            if not finished.cancelled() or worker_started:
+                return
+            close = getattr(worker, "close", None)
+            if callable(close):
+                close()
+            if record.abort_action == "rollback":
+                status, terminal_reason, error = RunStatus.error, "rolled_back", "Rolled back by user"
+            else:
+                status, terminal_reason, error = RunStatus.interrupted, "cancelled", None
+            asyncio.create_task(
+                _finalize_unstarted_run(
+                    bridge,
+                    run_mgr,
+                    record,
+                    run_ctx,
+                    status=status,
+                    terminal_reason=terminal_reason,
+                    error=error,
+                )
+            )
+
+        task.add_done_callback(settle_cancelled_before_start)
+        try:
+            await release_run_start_gate()
+        except asyncio.CancelledError:
+
+            async def settle_cancelled_start() -> None:
+                await release_run_start_gate()
+                if record.on_disconnect == DisconnectMode.cancel:
+                    await run_mgr.cancel(record.run_id)
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            cleanup_task = asyncio.create_task(settle_cancelled_start())
+            await await_task_through_repeated_cancellation(cleanup_task)
+            raise
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name
@@ -725,6 +946,7 @@ async def start_run(
 
         return record
     finally:
+        await release_run_start_gate()
         if owner_context_token is not None:
             reset_current_user(owner_context_token)
 
@@ -758,6 +980,7 @@ async def sse_consumer(
 
     last_event_id = request.headers.get("Last-Event-ID")
     saw_terminal_frame = False
+    snapshot_recovery_required = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
@@ -776,20 +999,20 @@ async def sse_consumer(
                 return
 
             if entry.event == _STREAM_RECOVERY_REQUIRED_EVENT:
-                replay_frames = await _durable_replay_frames(event_store, record, user_id=user_id)
-                if replay_frames is not None:
-                    saw_terminal_frame = saw_terminal_frame or any(f'"event_type": "{_RUN_TERMINAL_EVENT_TYPE}"' in frame or f'"type": "{_RUN_TERMINAL_EVENT_TYPE}"' in frame for frame in replay_frames)
-                    for frame in replay_frames:
-                        yield frame
+                # Durable event-store seq values and bridge event ids are
+                # different cursor spaces.  Hand the gap to runtime-snapshot
+                # recovery instead of replaying a full durable history and
+                # then continuing from an unrelated retained bridge offset.
+                snapshot_recovery_required = True
                 yield format_sse(entry.event, entry.data, event_id=entry.id or None)
-                continue
+                return
 
             if entry.event == "custom" and _is_record_terminal_payload(entry.data, record):
                 saw_terminal_frame = True
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        if is_inflight_status(record.status):
+        if not snapshot_recovery_required and is_inflight_status(record.status):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -824,6 +1047,7 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
+    recovery_required = False
     try:
         async for entry in bridge.subscribe(record.run_id):
             # END_SENTINEL means the run reached a terminal state; honour it
@@ -832,11 +1056,20 @@ async def wait_for_run_completion(
             if entry is END_SENTINEL:
                 completed = True
                 return True
+            if entry is not HEARTBEAT_SENTINEL and entry.event == _STREAM_RECOVERY_REQUIRED_EVENT:
+                reason = entry.data.get("reason") if isinstance(entry.data, dict) else None
+                if reason == _STATUS_COMMIT_FAILED_REASON:
+                    recovery_required = True
+                    return False
+                # A retention gap only means intermediate frames were evicted.
+                # The non-streaming wait contract depends solely on END, so it
+                # must keep waiting instead of returning a still-running run.
+                continue
             if await request.is_disconnected():
                 break
             # Heartbeats and regular events: keep waiting for END_SENTINEL.
         return completed
     finally:
-        if not completed and is_inflight_status(record.status):
+        if not completed and not recovery_required and is_inflight_status(record.status):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)

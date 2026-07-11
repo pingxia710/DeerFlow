@@ -243,6 +243,99 @@ def _subagent_facts(app_config: AppConfig) -> list[dict[str, Any]]:
     return facts
 
 
+def _command_room_runtime_facts(
+    app_config: AppConfig,
+    *,
+    user_id: str,
+    skills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Describe the Command Room's actual direct/delegated routing contract."""
+    from deerflow.agents.lead_agent.agent import (
+        _resolve_agent_tool_groups,
+        _resolve_command_room_available_skills,
+        _resolve_subagent_available_skills,
+        _resolve_subagent_tool_groups,
+    )
+    from deerflow.config.agents_config import load_agent_config
+    from deerflow.mcp.cache import get_mcp_cache_status
+    from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
+
+    config_status = "loaded"
+    config_error_type: str | None = None
+    try:
+        agent_config = load_agent_config("command-room", user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 - expose only the failure type
+        agent_config = None
+        config_status = "unavailable"
+        config_error_type = exc.__class__.__name__
+
+    default_model = app_config.models[0].name if app_config.models else None
+    requested_model = agent_config.model if agent_config is not None else None
+    resolved_model = requested_model if requested_model and app_config.get_model_config(requested_model) else default_model
+    model_fallback = bool(requested_model and requested_model != resolved_model)
+
+    all_skill_names = {str(item.get("name")) for item in skills if item.get("name")}
+    enabled_skill_names = {str(item.get("name")) for item in skills if item.get("name") and item.get("enabled") is True}
+    configured_skills = agent_config.skills if agent_config is not None else []
+    if configured_skills is None:
+        direct_skill_names = sorted(enabled_skill_names)
+        delegated_allowlist: set[str] | None = None
+    else:
+        lead_allowlist = _resolve_command_room_available_skills("command-room", set(configured_skills)) or set()
+        direct_skill_names = sorted(lead_allowlist & enabled_skill_names)
+        delegated_allowlist = _resolve_subagent_available_skills("command-room", set(configured_skills))
+
+    missing_skills = sorted(set(configured_skills or []) - all_skill_names)
+    disabled_skills = sorted((set(configured_skills or []) & all_skill_names) - enabled_skill_names)
+    role_skill_names = sorted({skill for config in COMMAND_ROOM_ROLE_CONFIGS.values() for skill in (config.skills or [])})
+    delegated_loaded_skills = sorted(enabled_skill_names if delegated_allowlist is None else enabled_skill_names & delegated_allowlist)
+
+    direct_groups = _resolve_agent_tool_groups("command-room", agent_config)
+    delegated_groups = _resolve_subagent_tool_groups("command-room", agent_config)
+    direct_tools = [tool.name for tool in app_config.tools if direct_groups is None or tool.group in direct_groups]
+    direct_tools.extend(["present_files", "ask_clarification", "task"])
+    resolved_model_config = app_config.get_model_config(resolved_model) if resolved_model else None
+    if resolved_model_config is not None and resolved_model_config.supports_vision:
+        direct_tools.append("view_image")
+
+    enabled_mcp_servers = sorted(name for name, server in app_config.extensions.mcp_servers.items() if server.enabled)
+    delegated_tools = [tool.name for tool in app_config.tools]
+    delegated_tools.extend(["present_files", "ask_clarification"])
+    if resolved_model_config is not None and resolved_model_config.supports_vision:
+        delegated_tools.append("view_image")
+
+    return {
+        "agent_config": {
+            "status": config_status,
+            "error_type": config_error_type,
+            "requested_model": requested_model,
+            "resolved_model": resolved_model,
+            "model_fallback": model_fallback,
+        },
+        "skills": {
+            "configured": configured_skills,
+            "loaded": direct_skill_names,
+            "missing": missing_skills,
+            "disabled": disabled_skills,
+            "delegated_loaded": delegated_loaded_skills,
+            "role_skills": role_skill_names,
+        },
+        "direct": {
+            "tool_groups": direct_groups,
+            "configured_tools": sorted(set(direct_tools)),
+            "include_mcp": False,
+            "mcp_access": "delegated_only" if enabled_mcp_servers else "not_configured",
+        },
+        "delegated": {
+            "tool_groups": delegated_groups,
+            "configured_tools": sorted(set(delegated_tools)),
+            "include_mcp": True,
+            "mcp_servers_configured": enabled_mcp_servers,
+            "mcp_cache": get_mcp_cache_status(),
+        },
+    }
+
+
 def _sandbox_facts(app_config: AppConfig) -> dict[str, Any]:
     from deerflow.sandbox.security import is_host_bash_allowed, is_unrestricted_host_access_allowed, uses_local_sandbox_provider
 
@@ -450,12 +543,18 @@ def build_capability_snapshot(
 
     tools = _configured_tools(app_config)
     skills, profile_skills = _skill_facts(app_config)
+    effective_user_id = user_id or DEFAULT_USER_ID
     middleware_stack = _middleware_stack(app_config)
     filesystem_permissions = _filesystem_permissions(app_config)
+    command_room_runtime = _command_room_runtime_facts(
+        app_config,
+        user_id=effective_user_id,
+        skills=skills,
+    )
 
     return {
         "version": 1,
-        "user_id": user_id or DEFAULT_USER_ID,
+        "user_id": effective_user_id,
         "thread_id": thread_id,
         "models": _model_facts(app_config),
         "current_model_route": _current_model_route(app_config),
@@ -488,6 +587,7 @@ def build_capability_snapshot(
             skills=skills,
             filesystem_permissions=filesystem_permissions,
         ),
+        "command_room_runtime": command_room_runtime,
         "risk_notes": _risk_notes(app_config),
         "agent_harness_profiles": [
             _profile(

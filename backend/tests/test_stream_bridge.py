@@ -94,6 +94,29 @@ async def test_history_is_bounded():
 
 
 @pytest.mark.anyio
+async def test_lag_recovery_yield_does_not_hold_publish_lock():
+    """A backpressured lagging subscriber must not block the producer."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-lag-lock"
+    await bridge.publish(run_id, "values", 0)
+    await bridge.publish(run_id, "values", 1)
+
+    subscription = bridge.subscribe(run_id)
+    assert (await anext(subscription)).data == 0
+    await bridge.publish(run_id, "values", 2)
+    await bridge.publish(run_id, "values", 3)
+
+    recovery = await anext(subscription)
+    assert recovery.event == "stream_recovery_required"
+    assert recovery.data == {"reason": "subscriber_lagged_retention"}
+
+    # ``subscription`` is intentionally left suspended at the recovery yield.
+    # Publishing must still acquire the per-run condition immediately.
+    await asyncio.wait_for(bridge.publish(run_id, "values", 4), timeout=0.1)
+    await subscription.aclose()
+
+
+@pytest.mark.anyio
 async def test_multiple_runs(bridge: MemoryStreamBridge):
     """Two different run_ids should not interfere with each other."""
     await bridge.publish("run-a", "event-a", {"a": 1})
@@ -356,8 +379,11 @@ def _linear_resolve(stream, last_event_id):
     [
         ("1718000000000-0", 0),
         ("1718000000000-42", 42),
+        ("-1", -1),  # SDK sentinel: client has not consumed any event yet
         ("garbage", None),  # no separator
+        ("garbage-1", None),  # timestamp must match the bridge id format
         ("1718000000000-x", None),  # non-integer seq
+        ("1718000000000--1", None),  # regular event sequences are non-negative
         ("", None),
     ],
 )
@@ -405,6 +431,35 @@ async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
 
     assert [entry.event for entry in received[:-1]] == ["first", "second"]
     assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_initial_cursor_sentinel_replays_without_recovery_when_history_is_complete():
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-initial-cursor"
+    await bridge.publish(run_id, "first", {})
+    await bridge.publish(run_id, "second", {})
+    await bridge.publish_end(run_id)
+
+    received = [entry async for entry in bridge.subscribe(run_id, last_event_id="-1")]
+
+    assert [entry.event for entry in received[:-1]] == ["first", "second"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_initial_cursor_sentinel_requires_recovery_after_any_eviction():
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    run_id = "run-initial-cursor-evicted"
+    await bridge.publish(run_id, "evicted", {})
+    await bridge.publish(run_id, "retained", {})
+
+    subscription = bridge.subscribe(run_id, last_event_id="-1")
+    first = await anext(subscription)
+
+    assert first.event == "stream_recovery_required"
+    assert first.data == {"reason": "last_event_id_not_retained"}
+    await subscription.aclose()
 
 
 @pytest.mark.asyncio

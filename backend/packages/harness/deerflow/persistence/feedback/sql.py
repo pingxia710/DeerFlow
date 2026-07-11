@@ -8,7 +8,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
@@ -107,6 +108,12 @@ class FeedbackRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_owners_by_thread(self, thread_id: str) -> set[str | None]:
+        """Return every concrete/legacy owner present on this thread."""
+        stmt = select(FeedbackRow.user_id).where(FeedbackRow.thread_id == thread_id).distinct()
+        async with self._sf() as session:
+            return set((await session.execute(stmt)).scalars())
+
     async def delete(
         self,
         feedback_id: str,
@@ -160,7 +167,21 @@ class FeedbackRepository:
                     created_at=datetime.now(UTC),
                 )
                 session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                # Another request may have inserted the same idempotency key
+                # after our SELECT. Re-load its canonical row and apply this
+                # request as the update half of the upsert.
+                await session.rollback()
+                result = await session.execute(stmt)
+                row = result.scalar_one_or_none()
+                if row is None:
+                    raise exc
+                row.rating = rating
+                row.comment = comment
+                row.created_at = datetime.now(UTC)
+                await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
 
@@ -203,11 +224,56 @@ class FeedbackRepository:
             await session.commit()
             return result.rowcount or 0
 
-    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+    async def delete_legacy_by_thread(self, thread_id: str) -> int:
+        """Delete only ownerless feedback left by pre-auth versions."""
+        stmt = delete(FeedbackRow).where(
+            FeedbackRow.thread_id == thread_id,
+            FeedbackRow.user_id.is_(None),
+        )
         async with self._sf() as session:
-            result = await session.execute(update(FeedbackRow).where(FeedbackRow.thread_id == thread_id, FeedbackRow.user_id.is_(None) | (FeedbackRow.user_id == DEFAULT_USER_ID)).values(user_id=owner_user_id))
+            result = await session.execute(stmt)
             await session.commit()
             return result.rowcount or 0
+
+    async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
+        async with self._sf() as session:
+            legacy_owner_filter = FeedbackRow.user_id.is_(None)
+            if owner_user_id != DEFAULT_USER_ID:
+                legacy_owner_filter = legacy_owner_filter | (FeedbackRow.user_id == DEFAULT_USER_ID)
+            legacy_rows = list(
+                (
+                    await session.execute(
+                        select(FeedbackRow)
+                        .where(
+                            FeedbackRow.thread_id == thread_id,
+                            legacy_owner_filter,
+                        )
+                        .order_by(FeedbackRow.created_at.desc(), FeedbackRow.feedback_id.desc())
+                    )
+                ).scalars()
+            )
+            if not legacy_rows:
+                return 0
+
+            owner_rows = list(
+                (
+                    await session.execute(
+                        select(FeedbackRow).where(
+                            FeedbackRow.thread_id == thread_id,
+                            FeedbackRow.user_id == owner_user_id,
+                        )
+                    )
+                ).scalars()
+            )
+            owner_by_run = {row.run_id: row for row in owner_rows}
+            for row in legacy_rows:
+                if row.run_id in owner_by_run:
+                    await session.delete(row)
+                else:
+                    row.user_id = owner_user_id
+                    owner_by_run[row.run_id] = row
+            await session.commit()
+            return len(legacy_rows)
 
     async def list_by_thread_grouped(
         self,

@@ -25,6 +25,7 @@ from app.channels.message_bus import (
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.manager import write_upload_file_no_symlink
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -55,6 +56,9 @@ class FeishuChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="feishu", bus=bus, config=config)
         self._thread: threading.Thread | None = None
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_client = None
+        self._stop_requested = False
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
         self._CreateMessageReactionRequest = None
@@ -158,6 +162,7 @@ class FeishuChannel(Channel):
         logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
 
+        self._stop_requested = False
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -188,6 +193,8 @@ class FeishuChannel(Channel):
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._ws_loop = loop
+        ws_client = None
         try:
             import lark_oapi as lark
             import lark_oapi.ws.client as _ws_client_mod
@@ -205,16 +212,30 @@ class FeishuChannel(Channel):
                 log_level=lark.LogLevel.INFO,
                 domain=domain,
             )
+            self._ws_client = ws_client
             ws_client.start()
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
             self._running = False
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending and not loop.is_running():
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            if not loop.is_closed():
+                loop.close()
+            if self._ws_client is ws_client:
+                self._ws_client = None
+            if self._ws_loop is loop:
+                self._ws_loop = None
 
     def _on_ignored_message_event(self, event) -> None:
         logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
 
     async def stop(self) -> None:
+        self._stop_requested = True
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         for task in list(self._background_tasks):
@@ -223,9 +244,27 @@ class FeishuChannel(Channel):
         for task in list(self._running_card_tasks.values()):
             task.cancel()
         self._running_card_tasks.clear()
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+        thread = self._thread
+        loop = self._ws_loop
+        ws_client = self._ws_client
+        if loop is not None and loop.is_running():
+            if ws_client is not None:
+                ws_client._auto_reconnect = False
+                disconnect = getattr(ws_client, "_disconnect", None)
+                if disconnect is not None:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(disconnect(), loop)
+                        await asyncio.wait_for(asyncio.wrap_future(future), timeout=5)
+                    except Exception:
+                        logger.exception("Failed to disconnect Feishu WebSocket client")
+            if loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            await asyncio.to_thread(thread.join, 5)
+            if thread.is_alive():
+                raise RuntimeError("Feishu WebSocket thread did not stop")
+            if self._thread is thread:
+                self._thread = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -400,10 +439,10 @@ class FeishuChannel(Channel):
         def down_load():
             # use thread_lock to avoid filename conflicts when writing
             with self._thread_lock:
-                resolved_target.write_bytes(content)
+                return write_upload_file_no_symlink(uploads_dir, filename, content)
 
         try:
-            await asyncio.to_thread(down_load)
+            resolved_target = await asyncio.to_thread(down_load)
         except Exception:
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
             return f"Failed to obtain the [{type}]"
@@ -411,14 +450,21 @@ class FeishuChannel(Channel):
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
         try:
-            sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
-            if sandbox_id != "local":
+
+            def sync_to_sandbox() -> bool:
+                sandbox_provider = get_sandbox_provider()
+                sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
+                if sandbox_id == "local":
+                    return True
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is None:
-                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                    return f"Failed to obtain the [{type}]"
+                    return False
                 sandbox.update_file(virtual_path, content)
+                return True
+
+            if not await asyncio.to_thread(sync_to_sandbox):
+                logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                return f"Failed to obtain the [{type}]"
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"
@@ -772,6 +818,9 @@ class FeishuChannel(Channel):
 
     def _on_message(self, event) -> None:
         """Called by lark-oapi when a message is received (runs in lark thread)."""
+        if self._stop_requested:
+            logger.debug("[Feishu] ignoring message after channel stop")
+            return
         try:
             logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
             message = event.event.message

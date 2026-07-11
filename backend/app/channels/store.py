@@ -53,7 +53,7 @@ class ChannelStore:
                 logger.warning("Corrupt channel store at %s, starting fresh", self._path)
         return {}
 
-    def _save(self) -> None:
+    def _save(self, data: dict[str, dict[str, Any]]) -> None:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             dir=self._path.parent,
@@ -61,7 +61,7 @@ class ChannelStore:
             delete=False,
         )
         try:
-            json.dump(self._data, fd, indent=2)
+            json.dump(data, fd, indent=2)
             fd.close()
             Path(fd.name).replace(self._path)
         except BaseException:
@@ -81,8 +81,9 @@ class ChannelStore:
 
     def get_thread_id(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> str | None:
         """Look up the DeerFlow thread_id for a given IM conversation/topic."""
-        entry = self._data.get(self._key(channel_name, chat_id, topic_id))
-        return entry["thread_id"] if entry else None
+        with self._lock:
+            entry = self._data.get(self._key(channel_name, chat_id, topic_id))
+            return entry["thread_id"] if entry else None
 
     def set_thread_id(
         self,
@@ -98,13 +99,17 @@ class ChannelStore:
             key = self._key(channel_name, chat_id, topic_id)
             now = time.time()
             existing = self._data.get(key)
-            self._data[key] = {
-                "thread_id": thread_id,
-                "user_id": user_id,
-                "created_at": existing["created_at"] if existing else now,
-                "updated_at": now,
+            updated = {
+                **self._data,
+                key: {
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "created_at": existing["created_at"] if existing else now,
+                    "updated_at": now,
+                },
             }
-            self._save()
+            self._save(updated)
+            self._data = updated
 
     def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         """Remove a mapping.
@@ -120,8 +125,9 @@ class ChannelStore:
             if topic_id is not None:
                 key = self._key(channel_name, chat_id, topic_id)
                 if key in self._data:
-                    del self._data[key]
-                    self._save()
+                    updated = {item_key: value for item_key, value in self._data.items() if item_key != key}
+                    self._save(updated)
+                    self._data = updated
                     return True
                 return False
 
@@ -131,23 +137,24 @@ class ChannelStore:
             if not keys_to_delete:
                 return False
 
-            for k in keys_to_delete:
-                del self._data[k]
-            self._save()
+            updated = {key: value for key, value in self._data.items() if key not in keys_to_delete}
+            self._save(updated)
+            self._data = updated
             return True
 
     def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
         """List all stored mappings, optionally filtered by channel."""
-        results = []
-        for key, entry in self._data.items():
-            parts = key.split(":", 2)
-            ch = parts[0]
-            chat = parts[1] if len(parts) > 1 else ""
-            topic = parts[2] if len(parts) > 2 else None
-            if channel_name and ch != channel_name:
-                continue
-            item: dict[str, Any] = {"channel_name": ch, "chat_id": chat, **entry}
-            if topic is not None:
-                item["topic_id"] = topic
-            results.append(item)
-        return results
+        with self._lock:
+            results = []
+            for key, entry in self._data.items():
+                parts = key.split(":", 2)
+                ch = parts[0]
+                chat = parts[1] if len(parts) > 1 else ""
+                topic = parts[2] if len(parts) > 2 else None
+                if channel_name and ch != channel_name:
+                    continue
+                item: dict[str, Any] = {"channel_name": ch, "chat_id": chat, **entry}
+                if topic is not None:
+                    item["topic_id"] = topic
+                results.append(item)
+            return results

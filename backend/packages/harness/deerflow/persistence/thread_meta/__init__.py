@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaConflictError, ThreadMetaCreateResult, ThreadMetaStore
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -18,6 +18,8 @@ __all__ = [
     "MemoryThreadMetaStore",
     "ThreadMetaRepository",
     "ThreadMetaRow",
+    "ThreadMetaConflictError",
+    "ThreadMetaCreateResult",
     "ThreadMetaStore",
     "make_thread_store",
 ]

@@ -76,6 +76,24 @@ def test_terminal_action_result_contract_cases_are_preserved():
             assert case["terminal_reason"] in contract["terminal_reasons"]
 
 
+def test_terminal_action_result_promotes_only_runtime_observed_evidence():
+    observed_ref = "command: pytest backend/tests/test_example.py -q; exit code: 0"
+
+    result = task_action_result_from_terminal_event(
+        task_id="task-observed",
+        status="completed",
+        description="implement and verify",
+        result={
+            "summary": "implemented",
+            "evidence_refs": ["worker-claimed:test passed"],
+        },
+        observed_evidence_refs=[observed_ref],
+    )
+
+    assert result.evidence_refs == [observed_ref]
+    assert "untrusted model-text evidence_refs not promoted" in result.risks
+
+
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "contracts" / "fixtures" / "task_events"
 KNOWN_FIXTURES = [
     "started",

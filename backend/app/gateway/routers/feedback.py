@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_feedback_repo, get_run_store
@@ -73,7 +74,7 @@ async def _get_feedback_run(thread_id: str, run_id: str, request: Request, *, us
 
 
 @router.put("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=True)
+@require_permission("threads", "write", owner_check=True, require_existing=True, thread_write_guard=True)
 async def upsert_feedback(
     thread_id: str,
     run_id: str,
@@ -99,7 +100,7 @@ async def upsert_feedback(
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback")
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@require_permission("threads", "delete", owner_check=True, require_existing=True, thread_write_guard=True)
 async def delete_run_feedback(
     thread_id: str,
     run_id: str,
@@ -119,7 +120,7 @@ async def delete_run_feedback(
 
 
 @router.post("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=True)
+@require_permission("threads", "write", owner_check=True, require_existing=True, thread_write_guard=True)
 async def create_feedback(
     thread_id: str,
     run_id: str,
@@ -135,14 +136,17 @@ async def create_feedback(
     await _get_feedback_run(thread_id, run_id, request, user_id=user_id)
 
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.create(
-        run_id=run_id,
-        thread_id=thread_id,
-        rating=body.rating,
-        user_id=user_id,
-        message_id=body.message_id,
-        comment=body.comment,
-    )
+    try:
+        return await feedback_repo.create(
+            run_id=run_id,
+            thread_id=thread_id,
+            rating=body.rating,
+            user_id=user_id,
+            message_id=body.message_id,
+            comment=body.comment,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Feedback already exists for this run") from exc
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback", response_model=list[FeedbackResponse])
@@ -172,7 +176,7 @@ async def feedback_stats(
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback/{feedback_id}")
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@require_permission("threads", "delete", owner_check=True, require_existing=True, thread_write_guard=True)
 async def delete_feedback(
     thread_id: str,
     run_id: str,

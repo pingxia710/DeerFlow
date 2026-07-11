@@ -36,7 +36,7 @@ help:
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
 	@echo "  make stop            - Stop all running services"
-	@echo "  make clean           - Clean up processes and temporary files"
+	@echo "  make clean           - Stop services and preserve runtime data"
 	@echo ""
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
@@ -134,10 +134,7 @@ stop:
 
 # Clean up
 clean: stop
-	@echo "Cleaning up..."
-	@-rm -rf backend/.deer-flow 2>/dev/null || true
-	@-rm -rf logs/*.log 2>/dev/null || true
-	@echo "✓ Cleanup complete"
+	@echo "✓ Services stopped; runtime data and logs preserved"
 
 # ==========================================
 # Docker Development Commands

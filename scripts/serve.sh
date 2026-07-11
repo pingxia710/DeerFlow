@@ -96,6 +96,7 @@ GATEWAY_PORT="${DEER_FLOW_GATEWAY_PORT:-8001}"
 FRONTEND_PORT="${DEER_FLOW_FRONTEND_PORT:-3000}"
 NGINX_PORT="${DEER_FLOW_NGINX_PORT:-2026}"
 GATEWAY_HOST="${DEER_FLOW_BIND_HOST:-${DEER_FLOW_GATEWAY_HOST:-127.0.0.1}}"
+EDGE_BIND_HOST="${DEER_FLOW_BIND_HOST:-127.0.0.1}"
 
 _validate_port_value() {
     local name=$1 value=$2
@@ -284,8 +285,8 @@ render_nginx_config() {
     sed \
         -e "s/127\.0\.0\.1:8001/127.0.0.1:${GATEWAY_PORT}/g" \
         -e "s/127\.0\.0\.1:3000/127.0.0.1:${FRONTEND_PORT}/g" \
-        -e "s/listen 2026;/listen ${NGINX_PORT};/g" \
-        -e "s/listen \[::\]:2026;/listen [::]:${NGINX_PORT};/g" \
+        -e "s/listen 2026;/listen ${EDGE_BIND_HOST}:${NGINX_PORT};/g" \
+        -e "/listen \[::\]:2026;/d" \
         "$NGINX_TEMPLATE_CONFIG" > "$NGINX_RUNTIME_CONFIG"
 }
 
@@ -487,14 +488,15 @@ _resolve_frontend_port
 
 # Frontend command. Next.js honors PORT for both `next dev` and `next start`.
 if $DEV_MODE; then
-    FRONTEND_CMD="env PORT=$FRONTEND_PORT pnpm run dev"
+    FRONTEND_CMD="env PORT=$FRONTEND_PORT pnpm run dev --hostname '$EDGE_BIND_HOST'"
     GATEWAY_ENVIRONMENT="development"
 else
     if ! PYTHON_BIN="$(_pick_python)"; then
         echo "Python is required to generate BETTER_AUTH_SECRET."
         exit 1
     fi
-    FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_SECRET="$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))')"
+    FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$FRONTEND_SECRET pnpm run build && env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$FRONTEND_SECRET pnpm exec next start --hostname '$EDGE_BIND_HOST'"
     GATEWAY_ENVIRONMENT="production"
 fi
 
@@ -613,7 +615,7 @@ render_nginx_config
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && ENVIRONMENT='$GATEWAY_ENVIRONMENT' PYTHONPATH=. uv run uvicorn app.gateway.app:app --host '$GATEWAY_HOST' --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && ENVIRONMENT='$GATEWAY_ENVIRONMENT' DEER_FLOW_PUBLIC_BIND_HOST='$EDGE_BIND_HOST' PYTHONPATH=. uv run uvicorn app.gateway.app:app --host '$GATEWAY_HOST' --port $GATEWAY_PORT $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     "$GATEWAY_PORT" 30
 
 # 2. Frontend

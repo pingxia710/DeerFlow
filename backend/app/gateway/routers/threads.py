@@ -12,9 +12,13 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,14 +26,17 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import get_request_storage_user_id
 from app.gateway.utils import sanitize_log_param
-from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.config.paths import Paths, get_paths, validate_thread_id
+from deerflow.persistence.thread_meta import ThreadMetaConflictError
+from deerflow.persistence.thread_meta.base import LEGACY_CLAIM_COMPLETE_METADATA_KEY, LEGACY_CLAIMING_STATUS
+from deerflow.runtime import ConflictError, serialize_channel_values_for_api
 from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
@@ -42,9 +49,11 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", LEGACY_CLAIM_COMPLETE_METADATA_KEY})
 _ACTIVE_THREAD_SEARCH_STATUSES = frozenset({"busy", "pending", "running", "cancelling", "rolling_back"})
 _WORKER_LOST_TERMINAL_REASONS = frozenset({"worker_lost", "lease_expired_recovered"})
+_DELETE_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+_DELETE_GATE_ACQUIRED_REQUEST_ATTR = "_deerflow_delete_gate_acquired"
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -52,6 +61,37 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not metadata:
         return metadata or {}
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
+
+
+def _release_delete_gate_on_failure(func):
+    """Release only the failed request's delete attempt, keeping its tombstone."""
+
+    @functools.wraps(func)
+    async def wrapper(thread_id: str, request: Request):
+        try:
+            result = await func(thread_id, request)
+        except BaseException:
+            acquired = bool(
+                getattr(
+                    request.state,
+                    _DELETE_GATE_ACQUIRED_REQUEST_ATTR,
+                    False,
+                )
+            )
+            setattr(request.state, _DELETE_GATE_ACQUIRED_REQUEST_ATTR, False)
+            if acquired:
+                try:
+                    await asyncio.shield(get_run_manager(request).end_thread_delete(thread_id))
+                except BaseException:
+                    logger.exception(
+                        "Could not release failed delete attempt for thread %s",
+                        sanitize_log_param(thread_id),
+                    )
+            raise
+        setattr(request.state, _DELETE_GATE_ACQUIRED_REQUEST_ATTR, False)
+        return result
+
+    return wrapper
 
 
 async def _sync_recovered_thread_search_statuses(
@@ -136,6 +176,11 @@ class ThreadCreateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Initial metadata")
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
+
+    @field_validator("thread_id")
+    @classmethod
+    def _validate_thread_id(cls, value: str | None) -> str | None:
+        return validate_thread_id(value) if value is not None else None
 
 
 class ThreadSearchRequest(BaseModel):
@@ -267,23 +312,45 @@ def _derive_thread_status(checkpoint_tuple) -> str:
 
 
 async def _cleanup_thread_runtime_state(thread_id: str, request: Request, *, user_id: str | None) -> None:
-    """Best-effort cleanup for in-process run and stream state owned by a thread."""
+    """Cancel and drain local runs before destructive thread cleanup."""
     from app.gateway.deps import get_run_manager, get_stream_bridge
 
     try:
         run_manager = get_run_manager(request)
         runs = await run_manager.list_by_thread(thread_id, user_id=user_id, limit=100000)
-    except Exception:
-        logger.debug("Could not list active runs for %s before delete (not critical)", sanitize_log_param(thread_id))
-        return
+    except Exception as exc:
+        logger.exception("Could not list active runs for %s before delete", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=409, detail="Thread runtime could not be stopped") from exc
 
+    local_tasks: set[asyncio.Task] = set()
+    unstable = False
     for run in runs:
         if not is_inflight_status(run.status):
             continue
+        task = getattr(run, "task", None)
         try:
-            await run_manager.cancel(run.run_id)
+            cancelled = await run_manager.cancel(run.run_id)
         except Exception:
-            logger.debug("Could not cancel run %s before thread delete (not critical)", sanitize_log_param(run.run_id))
+            logger.exception("Could not cancel run %s before thread delete", sanitize_log_param(run.run_id))
+            unstable = True
+            continue
+        if not cancelled or task is None:
+            unstable = True
+        elif not task.done():
+            local_tasks.add(task)
+
+    if local_tasks:
+        _, pending = await asyncio.wait(local_tasks, timeout=_DELETE_RUN_DRAIN_TIMEOUT_SECONDS)
+        unstable = unstable or bool(pending)
+
+    try:
+        remaining = await run_manager.list_by_thread(thread_id, user_id=user_id, limit=100000)
+    except Exception as exc:
+        logger.exception("Could not verify stopped runs for %s before delete", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=409, detail="Thread runtime could not be stopped") from exc
+    unstable = unstable or any(is_inflight_status(run.status) for run in remaining)
+    if unstable:
+        raise HTTPException(status_code=409, detail="Thread runtime is still active")
 
     try:
         bridge = get_stream_bridge(request)
@@ -298,30 +365,278 @@ async def _cleanup_thread_runtime_state(thread_id: str, request: Request, *, use
             logger.debug("Could not cleanup stream for run %s before thread delete (not critical)", sanitize_log_param(run.run_id))
 
 
-async def _claim_legacy_thread_related_data(thread_id: str, owner_user_id: str, request: Request) -> None:
-    """Best-effort claim of ownerless/default-owned rows tied to a legacy thread.
-
-    Only repositories that expose ``claim_legacy_by_thread`` participate; JSONL
-    run-events intentionally remain conservative unless such an API is added.
-    """
-    from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store
-
-    repos = []
-    for getter in (get_run_store, get_run_event_store, get_feedback_repo):
+async def _run_blocking_claim_completion_safe(func, *args):
+    """Keep the claim gate closed until a started filesystem mutation ends."""
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
         try:
-            repos.append(getter(request))
+            await await_task_through_repeated_cancellation(task)
         except Exception:
-            logger.debug("Could not access repo for legacy claim of %s", sanitize_log_param(thread_id))
-    repos.append(getattr(request.app.state, "artifact_provenance_repo", None))
+            logger.warning("Filesystem legacy claim failed after cancellation", exc_info=True)
+        raise cancelled
 
-    for repo in repos:
-        claim = getattr(repo, "claim_legacy_by_thread", None)
-        if claim is None:
-            continue
+
+async def _claim_legacy_thread_related_data(
+    thread_id: str,
+    owner_user_id: str,
+    request: Request,
+    *,
+    rollback_new_reservation: bool = False,
+) -> None:
+    """Reserve and converge every legacy surface on one concrete owner."""
+    state = request.app.state
+    paths = get_paths()
+    # Validate every path component before any repository can commit an owner
+    # change. ``thread_dir`` is pure path construction and does not create data.
+    paths.thread_dir(thread_id)
+    paths.thread_dir(thread_id, user_id=DEFAULT_USER_ID)
+    paths.thread_dir(thread_id, user_id=owner_user_id)
+
+    run_manager = get_run_manager(request)
+    thread_store = state.thread_store
+    repos = [
+        getattr(state, "run_store", None),
+        getattr(state, "run_event_store", None),
+        getattr(state, "feedback_repo", None),
+        getattr(state, "artifact_provenance_repo", None),
+        getattr(state, "round_state_store", None),
+    ]
+
+    await run_manager.begin_thread_delete(thread_id)
+    try:
+        runs = await run_manager.list_by_thread(
+            thread_id,
+            user_id=None,
+            limit=100_000,
+        )
+        if any(is_inflight_status(run.status) for run in runs):
+            raise HTTPException(
+                status_code=409,
+                detail="Legacy thread cannot be claimed while a run is active",
+            )
+
         try:
+            await _assert_legacy_thread_claimable(
+                thread_id,
+                owner_user_id,
+                request,
+                repos=repos,
+                paths=paths,
+            )
+        except BaseException:
+            # No repository or filesystem mutation has started yet, so a row
+            # inserted only to reserve this attempt can be removed safely.
+            if rollback_new_reservation:
+                await asyncio.shield(thread_store.delete(thread_id, user_id=owner_user_id))
+            raise
+
+        if not await thread_store.claim_legacy_owner(thread_id, owner_user_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Thread ID is already in use",
+            )
+
+        for repo in repos:
+            claim = getattr(repo, "claim_legacy_by_thread", None)
+            if claim is None:
+                continue
             await claim(thread_id, owner_user_id)
-        except Exception:
-            logger.debug("Could not claim legacy related data for %s", sanitize_log_param(thread_id), exc_info=True)
+        await _run_blocking_claim_completion_safe(
+            paths.claim_legacy_thread_dirs,
+            thread_id,
+            owner_user_id,
+        )
+        if not await thread_store.mark_legacy_claim_complete(
+            thread_id,
+            owner_user_id,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Thread owner changed during legacy claim",
+            )
+    finally:
+        await run_manager.end_thread_delete(thread_id)
+
+
+def _thread_filesystem_owners(paths: Paths, thread_id: str) -> set[str]:
+    """Return user buckets that contain this globally unique thread ID."""
+    owners: set[str] = set()
+    users_dir = paths.base_dir / "users"
+    try:
+        entries = list(os.scandir(users_dir))
+    except FileNotFoundError:
+        return owners
+    for entry in entries:
+        candidate = Path(entry.path) / "threads" / thread_id
+        if not os.path.lexists(candidate):
+            continue
+        # A symlinked user bucket is never safe to claim, even when its name
+        # matches the requested owner.
+        owners.add(f"!symlink:{entry.name}" if entry.is_symlink() else entry.name)
+    return owners
+
+
+async def _repository_thread_owners(repository: Any, thread_id: str) -> set[str | None]:
+    """Enumerate owners, failing closed only when an older store has data."""
+    if repository is None:
+        return set()
+    list_owners = getattr(repository, "list_owners_by_thread", None)
+    if callable(list_owners):
+        try:
+            return set(await list_owners(thread_id))
+        except NotImplementedError:
+            pass
+
+    list_by_thread = getattr(repository, "list_by_thread", None)
+    if callable(list_by_thread):
+        rows = await list_by_thread(thread_id, user_id=None, limit=1)
+        if not rows:
+            return set()
+        raise HTTPException(status_code=409, detail="Legacy thread ownership cannot be verified")
+
+    has_events = getattr(repository, "has_events", None)
+    if callable(has_events):
+        if not await has_events(thread_id, user_id=None):
+            return set()
+        raise HTTPException(status_code=409, detail="Legacy thread ownership cannot be verified")
+
+    raise HTTPException(status_code=409, detail="Legacy thread ownership cannot be verified")
+
+
+async def _assert_legacy_thread_claimable(
+    thread_id: str,
+    owner_user_id: str,
+    request: Request,
+    *,
+    repos: list[Any] | None = None,
+    paths: Paths | None = None,
+) -> None:
+    """Reject a claim when any persistent surface names another real owner."""
+    state = request.app.state
+    repositories = repos or [
+        getattr(state, "run_store", None),
+        getattr(state, "run_event_store", None),
+        getattr(state, "feedback_repo", None),
+        getattr(state, "artifact_provenance_repo", None),
+        getattr(state, "round_state_store", None),
+    ]
+    allowed_owners = {None, DEFAULT_USER_ID, owner_user_id}
+    for repository in repositories:
+        owners = await _repository_thread_owners(repository, thread_id)
+        if any(owner not in allowed_owners for owner in owners):
+            raise HTTPException(status_code=409, detail="Thread ID contains data owned by another user")
+
+    storage_paths = paths or get_paths()
+    file_owners = await asyncio.to_thread(_thread_filesystem_owners, storage_paths, thread_id)
+    if any(owner not in {DEFAULT_USER_ID, owner_user_id} for owner in file_owners):
+        raise HTTPException(status_code=409, detail="Thread ID contains data owned by another user")
+
+
+async def _write_initial_checkpoint(
+    checkpointer: Any,
+    *,
+    thread_id: str,
+    metadata: dict[str, Any],
+    created_at: str,
+    only_if_missing: bool,
+) -> None:
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    if only_if_missing:
+        get_checkpoint = getattr(checkpointer, "aget_tuple", None)
+        if get_checkpoint is None:
+            raise RuntimeError("checkpointer does not support aget_tuple")
+        if await get_checkpoint(config) is not None:
+            return
+    checkpoint_metadata = {
+        "step": -1,
+        "source": "input",
+        "writes": None,
+        "parents": {},
+        **metadata,
+        "created_at": created_at,
+    }
+    await checkpointer.aput(config, empty_checkpoint(), checkpoint_metadata, {})
+
+
+async def _metadata_less_thread_has_legacy_surfaces(
+    thread_id: str,
+    owner_user_id: str | None,
+    request: Request,
+) -> bool:
+    """Fail closed before assigning an unowned explicit ID to a caller."""
+    checkpointer = get_checkpointer(request)
+    list_checkpoints = getattr(checkpointer, "alist", None)
+    if callable(list_checkpoints):
+        async for _checkpoint in list_checkpoints(
+            {"configurable": {"thread_id": thread_id}},
+            limit=1,
+        ):
+            return True
+    else:
+        # Compatibility for custom savers that predate ``alist``. Built-in
+        # savers enumerate every namespace through the branch above.
+        get_checkpoint = getattr(checkpointer, "aget_tuple", None)
+        if callable(get_checkpoint):
+            checkpoint = await get_checkpoint(
+                {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": "",
+                    }
+                }
+            )
+            if checkpoint is not None:
+                return True
+
+    run_store = getattr(request.app.state, "run_store", None)
+    list_runs = getattr(run_store, "list_by_thread", None)
+    if callable(list_runs):
+        rows = await list_runs(
+            thread_id,
+            user_id=None,
+            limit=1,
+        )
+        if rows:
+            return True
+
+    event_store = getattr(request.app.state, "run_event_store", None)
+    has_events = getattr(event_store, "has_events", None)
+    if callable(has_events):
+        if await has_events(thread_id, user_id=None):
+            return True
+    else:
+        # Compatibility for custom/older stores that only expose the message
+        # projection. Built-in stores use the all-category existence probe.
+        count_messages = getattr(event_store, "count_messages", None)
+        if callable(count_messages) and await count_messages(thread_id, user_id=None):
+            return True
+
+    for repository_name in (
+        "feedback_repo",
+        "artifact_provenance_repo",
+        "round_state_store",
+    ):
+        repository = getattr(request.app.state, repository_name, None)
+        list_by_thread = getattr(repository, "list_by_thread", None)
+        if not callable(list_by_thread):
+            continue
+        rows = await list_by_thread(
+            thread_id,
+            user_id=None,
+            limit=1,
+        )
+        if rows:
+            return True
+
+    paths = get_paths()
+
+    def has_files() -> bool:
+        legacy = paths.thread_dir(thread_id)
+        return legacy.exists() or legacy.is_symlink() or bool(_thread_filesystem_owners(paths, thread_id))
+
+    return await asyncio.to_thread(has_files)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +645,14 @@ async def _claim_legacy_thread_related_data(thread_id: str, owner_user_id: str, 
 
 
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@require_permission(
+    "threads",
+    "delete",
+    owner_check=True,
+    require_existing=True,
+    allow_deleting_owner=True,
+)
+@_release_delete_gate_on_failure
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
@@ -338,57 +660,114 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
-    from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store, get_thread_store
+    from app.gateway.deps import get_round_state_store, get_run_event_store, get_run_store, get_thread_store
 
     storage_user_id = get_request_storage_user_id(request)
+    thread_store = get_thread_store(request)
+    try:
+        run_manager = get_run_manager(request)
+        await run_manager.begin_thread_delete(thread_id)
+        setattr(request.state, _DELETE_GATE_ACQUIRED_REQUEST_ATTR, True)
+    except Exception as exc:
+        logger.exception(
+            "Could not acquire exclusive delete gate for %s",
+            sanitize_log_param(thread_id),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Thread runtime could not be stopped",
+        ) from exc
+    try:
+        await thread_store.update_status(thread_id, "deleting", user_id=storage_user_id)
+        deleting_row = await thread_store.get(thread_id, user_id=storage_user_id)
+    except Exception as exc:
+        logger.exception("Could not establish delete barrier for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=409, detail="Thread delete barrier could not be established") from exc
+    if deleting_row is None or deleting_row.get("status") != "deleting":
+        raise HTTPException(status_code=409, detail="Thread delete barrier could not be established")
+
     await _cleanup_thread_runtime_state(thread_id, request, user_id=storage_user_id)
 
-    # Clean local filesystem
+    # Checkpoints are not owner-keyed. Their deletion is the critical gate
+    # before the owner boundary may be removed.
+    checkpointer = getattr(request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        logger.error("Checkpointer unavailable while deleting thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints")
+    try:
+        delete_checkpoints = getattr(checkpointer, "adelete_thread", None)
+        if delete_checkpoints is None:
+            raise RuntimeError("checkpointer does not support adelete_thread")
+        await delete_checkpoints(thread_id)
+    except Exception as exc:
+        logger.exception("Could not delete checkpoints for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints") from exc
+
+    # Clean local filesystem only after no worker can write another checkpoint.
     response = _delete_thread_data(thread_id, user_id=storage_user_id)
 
-    # Remove checkpoints (best-effort)
-    checkpointer = getattr(request.app.state, "checkpointer", None)
-    if checkpointer is not None:
-        try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
-
-    # Remove run events and run records for this owner/thread (best-effort) so
+    # Remove owner-scoped persisted data before dropping the owner boundary so
     # recreating the same thread_id cannot surface stale run history.
     try:
         event_store = get_run_event_store(request)
         await event_store.delete_by_thread(thread_id, user_id=storage_user_id)
-    except Exception:
-        logger.debug("Could not delete run_events for %s (not critical)", sanitize_log_param(thread_id))
+        delete_legacy = getattr(event_store, "delete_legacy_by_thread", None)
+        if delete_legacy is not None:
+            await delete_legacy(thread_id)
+    except Exception as exc:
+        logger.exception("Could not delete run_events for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread run events") from exc
 
     try:
         run_store = get_run_store(request)
         await run_store.delete_by_thread(thread_id, user_id=storage_user_id)
-    except Exception:
-        logger.debug("Could not delete runs for %s (not critical)", sanitize_log_param(thread_id))
+        delete_legacy = getattr(run_store, "delete_legacy_by_thread", None)
+        if delete_legacy is not None:
+            await delete_legacy(thread_id)
+    except Exception as exc:
+        logger.exception("Could not delete runs for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread runs") from exc
 
     try:
-        feedback_repo = get_feedback_repo(request)
-        await feedback_repo.delete_by_thread(thread_id, user_id=storage_user_id)
-    except Exception:
-        logger.debug("Could not delete feedback for %s (not critical)", sanitize_log_param(thread_id))
+        feedback_repo = getattr(request.app.state, "feedback_repo", None)
+        if feedback_repo is not None:
+            await feedback_repo.delete_by_thread(thread_id, user_id=storage_user_id)
+            delete_legacy = getattr(feedback_repo, "delete_legacy_by_thread", None)
+            if delete_legacy is not None:
+                await delete_legacy(thread_id)
+    except Exception as exc:
+        logger.exception("Could not delete feedback for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread feedback") from exc
 
     try:
         artifact_provenance_repo = getattr(request.app.state, "artifact_provenance_repo", None)
         if artifact_provenance_repo is not None:
             await artifact_provenance_repo.delete_by_thread(thread_id, user_id=storage_user_id)
-    except Exception:
-        logger.debug("Could not delete artifact provenance for %s (not critical)", sanitize_log_param(thread_id))
+            delete_legacy = getattr(artifact_provenance_repo, "delete_legacy_by_thread", None)
+            if delete_legacy is not None:
+                await delete_legacy(thread_id)
+    except Exception as exc:
+        logger.exception("Could not delete artifact provenance for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread artifact provenance") from exc
 
-    # Remove thread_meta row (best-effort) — required for sqlite backend
-    # so the deleted thread no longer appears in /threads/search.
+    round_store = get_round_state_store(request)
+    if round_store is not None:
+        try:
+            await round_store.delete_by_thread(thread_id, user_id=storage_user_id)
+            delete_legacy = getattr(round_store, "delete_legacy_by_thread", None)
+            if delete_legacy is not None:
+                await delete_legacy(thread_id)
+        except Exception as exc:
+            logger.exception("Could not delete round state for %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread round state") from exc
+
+    # Owner metadata is the final boundary removed. Any earlier failure leaves
+    # the deleting tombstone in place, blocking workers and API reads.
     try:
-        thread_store = get_thread_store(request)
         await thread_store.delete(thread_id, user_id=storage_user_id)
-    except Exception:
-        logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+    except Exception as exc:
+        logger.exception("Could not delete thread_meta for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread metadata") from exc
 
     return response
 
@@ -421,12 +800,60 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     unscoped_record = None
     if existing_record is None and (requested_thread_id or trusted_owner_user_id):
         unscoped_record = await thread_store.get(thread_id, user_id=None)
-    if existing_record is None and trusted_owner_user_id and unscoped_record is not None:
-        current_owner = unscoped_record.get("user_id")
+    durable_record = existing_record or unscoped_record
+    if durable_record is not None and durable_record.get("status") == "deleting":
+        raise HTTPException(status_code=409, detail="Thread is being deleted")
+    if durable_record is None and requested_thread_id:
+        has_legacy_surfaces = await _metadata_less_thread_has_legacy_surfaces(
+            thread_id,
+            storage_user_id,
+            request,
+        )
+        if has_legacy_surfaces:
+            if not trusted_owner_user_id or storage_user_id is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Thread ID contains unowned legacy data",
+                )
+            await _assert_legacy_thread_claimable(
+                thread_id,
+                storage_user_id,
+                request,
+            )
+            created_reservation = False
+            try:
+                reservation = await thread_store.create(
+                    thread_id,
+                    assistant_id=getattr(body, "assistant_id", None),
+                    **thread_owner_kwargs,
+                    metadata=body.metadata,
+                    status=LEGACY_CLAIMING_STATUS,
+                )
+                created_reservation = getattr(reservation, "created", True)
+            except ThreadMetaConflictError:
+                # A concurrent trusted request may have installed the same
+                # reservation. The owner CAS below remains authoritative.
+                pass
+            await _claim_legacy_thread_related_data(
+                thread_id,
+                storage_user_id,
+                request,
+                rollback_new_reservation=created_reservation,
+            )
+            existing_record = await thread_store.get(
+                thread_id,
+                **thread_owner_kwargs,
+            )
+            unscoped_record = await thread_store.get(thread_id, user_id=None)
+            durable_record = existing_record or unscoped_record
+    if trusted_owner_user_id and durable_record is not None:
+        current_owner = durable_record.get("user_id")
         if current_owner not in (None, DEFAULT_USER_ID, storage_user_id):
             raise HTTPException(status_code=409, detail="Thread ID is already in use")
-        if current_owner != storage_user_id:
-            await thread_store.update_owner(thread_id, storage_user_id, user_id=None)
+        if not await thread_store.is_legacy_claim_complete(
+            thread_id,
+            storage_user_id,
+        ):
             await _claim_legacy_thread_related_data(thread_id, storage_user_id, request)
         existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and unscoped_record is not None:
@@ -435,6 +862,38 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         else:
             raise HTTPException(status_code=409, detail="Thread ID is already in use")
     if existing_record is not None:
+        run_manager = get_run_manager(request)
+        reopening_delete_gate = False
+        try:
+            await run_manager.begin_thread_write(thread_id)
+        except ConflictError as exc:
+            current_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+            if current_record is None or current_record.get("status") == "deleting":
+                raise HTTPException(status_code=409, detail="Thread is being deleted") from exc
+            reopening_delete_gate = await run_manager.begin_thread_recreate(thread_id)
+        try:
+            # A recreate retry may bypass a stale in-memory delete gate left
+            # after a successful DELETE. Re-read the durable barrier after the
+            # writer is registered so it cannot bypass an active deletion.
+            current_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+            if current_record is None or current_record.get("status") == "deleting":
+                raise HTTPException(status_code=409, detail="Thread is being deleted")
+            existing_record = current_record
+            try:
+                await _write_initial_checkpoint(
+                    checkpointer,
+                    thread_id=thread_id,
+                    metadata=existing_record.get("metadata", {}),
+                    created_at=coerce_iso(existing_record.get("created_at", now)),
+                    only_if_missing=True,
+                )
+            except Exception as exc:
+                logger.exception("Failed to ensure checkpoint for thread %s", sanitize_log_param(thread_id))
+                raise HTTPException(status_code=500, detail="Failed to create thread") from exc
+        finally:
+            await run_manager.end_thread_write(thread_id)
+        if reopening_delete_gate:
+            await run_manager.end_thread_delete(thread_id)
         return ThreadResponse(
             thread_id=thread_id,
             status=existing_record.get("status", "idle"),
@@ -443,41 +902,71 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             metadata=existing_record.get("metadata", {}),
         )
 
-    # Write thread_meta so the thread appears in /threads/search immediately
+    run_manager = get_run_manager(request)
+    reopening_delete_gate = await run_manager.begin_thread_recreate(thread_id)
+    created_metadata = False
     try:
-        await thread_store.create(
-            thread_id,
-            assistant_id=getattr(body, "assistant_id", None),
-            **thread_owner_kwargs,
-            metadata=body.metadata,
-        )
-    except Exception:
-        logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create thread")
+        # Write thread_meta so the thread appears in /threads/search immediately.
+        try:
+            create_result = await thread_store.create(
+                thread_id,
+                assistant_id=getattr(body, "assistant_id", None),
+                **thread_owner_kwargs,
+                metadata=body.metadata,
+            )
+            created_metadata = getattr(create_result, "created", True)
+            if created_metadata and trusted_owner_user_id and storage_user_id is not None:
+                await thread_store.mark_legacy_claim_complete(
+                    thread_id,
+                    storage_user_id,
+                )
+        except ThreadMetaConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception:
+            logger.exception(
+                "Failed to write thread_meta for %s",
+                sanitize_log_param(thread_id),
+            )
+            raise HTTPException(status_code=500, detail="Failed to create thread")
 
-    # Write an empty checkpoint so state endpoints work immediately
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    try:
-        ckpt_metadata = {
-            "step": -1,
-            "source": "input",
-            "writes": None,
-            "parents": {},
-            **body.metadata,
-            "created_at": now,
-        }
-        await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
-    except Exception:
-        logger.exception("Failed to create checkpoint for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create thread")
+        # Write an empty checkpoint so state endpoints work immediately.
+        try:
+            await _write_initial_checkpoint(
+                checkpointer,
+                thread_id=thread_id,
+                metadata=create_result.get("metadata", body.metadata),
+                created_at=coerce_iso(create_result.get("created_at", now)),
+                only_if_missing=not created_metadata,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to create checkpoint for thread %s",
+                sanitize_log_param(thread_id),
+            )
+            # Explicit IDs are retryable/idempotent and may already be shared by
+            # a concurrent same-owner request whose checkpoint succeeded.
+            if created_metadata and requested_thread_id is None:
+                try:
+                    await thread_store.delete(thread_id, **thread_owner_kwargs)
+                except Exception:
+                    logger.exception(
+                        "Failed to remove partial thread metadata for %s",
+                        sanitize_log_param(thread_id),
+                    )
+            raise HTTPException(status_code=500, detail="Failed to create thread") from exc
+    finally:
+        await run_manager.end_thread_write(thread_id)
+
+    if reopening_delete_gate:
+        await run_manager.end_thread_delete(thread_id)
 
     logger.info("Thread created: %s", sanitize_log_param(thread_id))
     return ThreadResponse(
         thread_id=thread_id,
-        status="idle",
-        created_at=now,
-        updated_at=now,
-        metadata=body.metadata,
+        status=create_result.get("status", "idle"),
+        created_at=coerce_iso(create_result.get("created_at", now)),
+        updated_at=coerce_iso(create_result.get("updated_at", now)),
+        metadata=create_result.get("metadata", {}),
     )
 
 
@@ -525,7 +1014,13 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=True)
+@require_permission(
+    "threads",
+    "write",
+    owner_check=True,
+    require_existing=True,
+    thread_write_guard=True,
+)
 async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
     from app.gateway.deps import get_thread_store
@@ -619,7 +1114,7 @@ async def get_latest_command_room_round(thread_id: str, request: Request) -> Com
     from deerflow.command_room.round_record import latest_command_room_round
 
     try:
-        record = latest_command_room_round(thread_id=thread_id, user_id=get_request_storage_user_id(request))
+        record = await asyncio.to_thread(latest_command_room_round, thread_id=thread_id, user_id=get_request_storage_user_id(request))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -758,25 +1253,44 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
             "checkpoint_ns": "",
         }
     }
+    run_manager = get_run_manager(request)
     try:
-        new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
-    except Exception:
-        logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to update thread state")
+        await run_manager.begin_thread_write(thread_id)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    new_checkpoint_id: str | None = None
-    if isinstance(new_config, dict):
-        new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+    try:
+        try:
+            new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
+        except Exception:
+            logger.exception(
+                "Failed to update state for thread %s",
+                sanitize_log_param(thread_id),
+            )
+            raise HTTPException(status_code=500, detail="Failed to update thread state")
 
-    # Sync title changes through the ThreadMetaStore abstraction so /threads/search
-    # reflects them immediately in both sqlite and memory backends.
-    if thread_store and body.values and "title" in body.values:
-        new_title = body.values["title"]
-        if new_title:  # Skip empty strings and None
-            try:
-                await thread_store.update_display_name(thread_id, new_title, user_id=get_request_storage_user_id(request))
-            except Exception:
-                logger.debug("Failed to sync title to thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
+        new_checkpoint_id: str | None = None
+        if isinstance(new_config, dict):
+            new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+
+        # Sync title changes through the ThreadMetaStore abstraction so
+        # /threads/search reflects them in sqlite and memory backends.
+        if thread_store and body.values and "title" in body.values:
+            new_title = body.values["title"]
+            if new_title:  # Skip empty strings and None
+                try:
+                    await thread_store.update_display_name(
+                        thread_id,
+                        new_title,
+                        user_id=get_request_storage_user_id(request),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to sync title to thread_meta for %s (non-fatal)",
+                        sanitize_log_param(thread_id),
+                    )
+    finally:
+        await run_manager.end_thread_write(thread_id)
 
     return ThreadStateResponse(
         values=serialize_channel_values_for_api(channel_values),
@@ -800,14 +1314,29 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     """
     checkpointer = get_checkpointer(request)
 
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+    before_config: dict[str, Any] | None = None
     if body.before:
-        config["configurable"]["checkpoint_id"] = body.before
+        before_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": body.before,
+            }
+        }
 
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
     try:
-        async for checkpoint_tuple in checkpointer.alist(config, limit=body.limit):
+        list_kwargs: dict[str, Any] = {"limit": body.limit}
+        if before_config is not None:
+            list_kwargs["before"] = before_config
+        async for checkpoint_tuple in checkpointer.alist(config, **list_kwargs):
             ckpt_config = getattr(checkpoint_tuple, "config", {})
             parent_config = getattr(checkpoint_tuple, "parent_config", None)
             metadata = getattr(checkpoint_tuple, "metadata", {}) or {}

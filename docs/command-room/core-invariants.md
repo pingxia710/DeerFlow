@@ -17,9 +17,9 @@ choosing whether to continue, verify, or ask the user.
 - Direction, boundaries, and acceptance are outputs of Command Room judgment,
   opposition, discussion, evidence, and loop, not inputs the user must fully
   specify upfront.
-- Command Room must not monopolize proposal and approval. It should separate
-  standing roles for planning, boundary discovery, evidence, and opposition,
-  then make a Chair decision from those signals.
+- Command Room must not monopolize proposal and approval on serious high-impact
+  work. Planning, boundary, evidence, and opposition are available persistent
+  identities, activated only when concrete risk warrants separate signals.
 - AI-AI roles are long-running: identity, memory, decisions, open questions, and
   process state continue across rounds. Concrete model calls may be ephemeral.
 - Executor sub-AIs may be disposable for one bounded task at a time. A disposable
@@ -57,8 +57,9 @@ choosing whether to continue, verify, or ask the user.
 
 ## Standing Roles
 
-Standing roles are long-running AI governance roles with persistent memory/state
-across rounds. The concrete model call may still be disposable.
+Standing roles are long-running AI governance identities with persistent
+memory/state across rounds. They are available capabilities, not mandatory lanes;
+the concrete model call may still be disposable.
 
 Role definitions live in `docs/command-room/roles.md`. Role skills live under
 `skills/custom/command-room-*`. Role state lives under `docs/command-room/state/`.
@@ -79,7 +80,7 @@ Runtime role subagents include core roles `planner`, `boundary`, `evidence`,
 - Executor: performs bounded implementation, research, command, or validation
   work, then ends.
 
-## Long-Running AI-AI Flow
+## High-Impact AI-AI Flow
 
 The stable process is AI-AI execution, governance, and management:
 
@@ -92,9 +93,13 @@ The stable process is AI-AI execution, governance, and management:
 7. Executor performs bounded work and returns facts.
 8. The thin handoff runtime carries AI-authored results back to Chair or into an
    explicitly selected next role input without judging or rewriting them.
-9. Evidence and Opposition review the result.
+9. Evidence and Opposition review the result when concrete risk, conflict, or weak evidence warrants it.
 10. Recorder persists rules, decisions, evidence, and progress when needed.
 11. Chair decides complete, continue, revise, ask, or stop.
+
+Ordinary local development may use only Chair -> Executor -> focused verification
+-> Chair. Runtime-observed tool results are facts; later criticism cannot erase
+observed implementation or verification without stronger conflicting evidence.
 
 ## Correct Abstractions
 

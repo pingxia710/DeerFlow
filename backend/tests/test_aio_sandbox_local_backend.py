@@ -127,6 +127,35 @@ def test_start_container_logs_redacted_env_values(monkeypatch, caplog):
     assert "visible-value" not in log_output
 
 
+def test_start_container_injects_scoped_sandbox_key_not_control_token(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", "control-plane-token")
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend._start_container(
+        "sandbox-test",
+        18080,
+        sandbox_api_key="sandbox-only-key",
+    )
+
+    joined_cmd = " ".join(captured_cmd)
+    assert "SANDBOX_API_KEY=sandbox-only-key" in joined_cmd
+    assert "control-plane-token" not in joined_cmd
+
+
 def test_detect_runtime_falls_back_to_docker_when_apple_container_ps_is_unavailable(monkeypatch):
     monkeypatch.setattr("platform.system", lambda: "Darwin")
 
@@ -349,6 +378,37 @@ def test_discover_returns_none_when_runtime_check_fails(monkeypatch):
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert backend.discover("sandbox-blip") is None
+
+
+def test_stop_container_raises_when_runtime_cannot_delete(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            stderr="Cannot connect to the Docker daemon",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to stop container sandbox-busy"):
+        backend._stop_container("sandbox-busy")
+
+
+def test_stop_container_treats_missing_container_as_deleted(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            stderr="Error: No such container: sandbox-missing",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend._stop_container("sandbox-missing")
 
 
 def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):

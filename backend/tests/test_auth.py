@@ -280,6 +280,36 @@ def test_require_permission_denies_wrong_permission():
             assert "Permission denied" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        ("not_found", 404),
+        ("conflict", 409),
+    ],
+)
+def test_require_permission_maps_round_binding_failures(error, expected_status):
+    from fastapi import Request
+
+    from deerflow.persistence.round_state import RoundBindingConflictError, RoundBindingNotFoundError
+
+    app = FastAPI()
+    user = User(id=uuid4(), email="test@example.com", password_hash="hash")
+
+    @app.get("/test")
+    @require_permission("runs", "create")
+    async def endpoint(request: Request):
+        if error == "not_found":
+            raise RoundBindingNotFoundError("hidden round")
+        raise RoundBindingConflictError("round is closed")
+
+    mock_auth = AuthContext(user=user, permissions=[Permissions.RUNS_CREATE])
+    with patch("app.gateway.authz._authenticate", return_value=mock_auth):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/test")
+
+    assert response.status_code == expected_status
+
+
 def _make_internal_owner_check_app():
     """App with an owner_check route and a thread owned by ``alice``."""
     import asyncio
@@ -346,6 +376,98 @@ def test_require_permission_internal_role_without_header_is_scoped_to_internal_u
         with TestClient(app) as client:
             response = client.get("/threads/alice-thread")
     assert response.status_code == 404
+
+
+def test_delete_permission_allows_owner_to_retry_deleting_tombstone():
+    import asyncio
+
+    from fastapi import Request
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    app = FastAPI()
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create("retry-delete", user_id="alice"))
+    asyncio.run(thread_store.update_status("retry-delete", "deleting", user_id="alice"))
+    app.state.thread_store = thread_store
+
+    @app.delete("/threads/{thread_id}")
+    @require_permission(
+        "threads",
+        "delete",
+        owner_check=True,
+        allow_deleting_owner=True,
+    )
+    async def endpoint(thread_id: str, request: Request):
+        return {"ok": True}
+
+    user = User(id=uuid4(), email="alice@example.com", password_hash="hash")
+    user.id = "alice"
+    auth = AuthContext(user=user, permissions=[Permissions.THREADS_DELETE])
+    with patch("app.gateway.authz._authenticate", return_value=auth):
+        with TestClient(app) as client:
+            response = client.delete("/threads/retry-delete")
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_require_permission_thread_write_guard_drains_before_delete():
+    import asyncio
+    from types import SimpleNamespace
+
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("guarded-thread", user_id="alice")
+    run_manager = RunManager()
+    user = User(id=uuid4(), email="alice@example.com", password_hash="hash")
+    user.id = "alice"
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(
+            auth=AuthContext(user=user, permissions=[Permissions.THREADS_WRITE]),
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                thread_store=thread_store,
+                run_manager=run_manager,
+            )
+        ),
+    )
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+
+    @require_permission(
+        "threads",
+        "write",
+        owner_check=True,
+        require_existing=True,
+        thread_write_guard=True,
+    )
+    async def endpoint(thread_id: str, request):
+        write_started.set()
+        await release_write.wait()
+        return {"ok": True}
+
+    write_task = asyncio.create_task(endpoint(thread_id="guarded-thread", request=request))
+    await write_started.wait()
+    delete_task = asyncio.create_task(run_manager.begin_thread_delete("guarded-thread"))
+    await asyncio.sleep(0)
+
+    assert not delete_task.done()
+
+    release_write.set()
+    assert await write_task == {"ok": True}
+    await delete_task
+
+    with pytest.raises(HTTPException) as exc_info:
+        await endpoint(thread_id="guarded-thread", request=request)
+    assert exc_info.value.status_code == 409
 
 
 # ── Weak JWT secret warning ──────────────────────────────────────────────────

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from deerflow.command_room.file_records import append_jsonl_record, read_jsonl_text
 from deerflow.config.paths import get_paths
 
 LaneStatus = Literal["planned", "dispatched", "running", "completed", "failed", "skipped", "blocked", "superseded"]
@@ -18,7 +18,6 @@ DecisionStatus = Literal["recorded", "resolved", "superseded"]
 _TEXT_LIMIT = 2000
 _COMPACT_TEXT_LIMIT = 240
 _REF_LIMIT = 20
-_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -263,11 +262,7 @@ def _file(thread_id: str, user_id: str | None, name: str, base_dir: Path | None 
 
 
 def _append(path: Path, row: dict[str, Any]) -> Path:
-    with _WRITE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    return path
+    return append_jsonl_record(path, row)
 
 
 def record_round_plan(plan: RoundPlan, *, user_id: str | None = None, base_dir: Path | None = None) -> Path:
@@ -283,11 +278,12 @@ def record_chair_decision(decision: ChairDecision, *, user_id: str | None = None
 
 
 def _read_latest(path: Path, thread_id: str, key: str, run_id: str | None = None, round_id: str | None = None) -> list[dict[str, Any]]:
-    if not path.exists():
+    text = read_jsonl_text(path)
+    if text is None:
         return []
     latest: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         try:
             row = json.loads(line)
         except json.JSONDecodeError:

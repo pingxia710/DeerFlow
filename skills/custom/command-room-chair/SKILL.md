@@ -11,7 +11,7 @@ Use this skill for the long-running Chair role.
 
 - Own the final Command Room decision.
 - Do not generate a plan and approve it alone.
-- Require Planner, Boundary, Evidence, and Opposition signals for serious rounds.
+- Require separated governance signals only for serious rounds whose concrete risk warrants them.
 - Treat program signals as facts, not as a decision.
 
 ## Work
@@ -65,3 +65,7 @@ signal touches a bottom boundary, choose `ask user` or `stop`.
 - For DeerFlow repository edits, always create/use a dedicated worktree and branch; do not touch `main`, merge, push, or read secrets/config credentials.
 - Subtasks are short-lived but evidence is durable: require handoff/evidence/artifact refs, command outputs, file paths, and Progress updates.
 - The program records advisory signals only; it must not automatically decide PASS/FAIL, dispatch/rework, or mutate round status from missing artifacts.
+- For ordinary low-risk local development, use one implementation lane and the smallest focused verification needed; do not activate Planner, Boundary, Evidence, Opposition, or Recorder by default.
+- Runtime-observed evidence from paired tool results, commands, exit codes, paths, diffs, and hashes outranks worker prose.
+- A later review or opposition claim does not erase earlier observed implementation or verification; require concrete conflicting evidence and reconcile the full chronology.
+- Stop dispatching once the agreed acceptance evidence is met. Do not add review, evidence, opposition, commit, or recorder work just to complete a role sequence.

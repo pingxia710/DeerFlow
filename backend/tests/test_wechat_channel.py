@@ -1271,7 +1271,7 @@ def test_auth_state_is_loaded_from_disk(tmp_path: Path):
     assert channel._ilink_bot_id == "bot-1"
 
 
-def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path):
+def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path, caplog):
     from app.channels.wechat import WechatChannel
 
     async def go():
@@ -1313,6 +1313,9 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert auth_state["bot_token"] == "bound-token"
         assert auth_state["ilink_bot_id"] == "bot-99"
         assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
+        assert "QR login required" in caplog.text
+        assert "qr-123" not in caplog.text
+        assert "https://example.com/qr.png" not in caplog.text
 
     _run(go())
 

@@ -8,19 +8,17 @@ worker transcripts.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from deerflow.command_room.file_records import append_jsonl_record
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
-_WRITE_LOCK = threading.Lock()
 _FIELD_RE = re.compile(
     r"^(?:[-*+]\s+|\d+[.)]\s+)?[\"'`]*(?:\*\*)?"
     r"(SchemaVersion|SignalId|Role|Claim|EvidenceStrength|EvidenceRefs|EvidenceState|SelfAttestationOnly|"
@@ -45,7 +43,7 @@ _FIELD_CANONICAL = {
 }
 _SCHEMA_VERSION = "command-room.evidence-signal/v1"
 _EVIDENCE_STATES = {"SUPPORTED", "STALE", "CONFLICTED", "REDLINE"}
-_REQUIRED_SIGNAL_FIELDS = ("Role", "Claim", "EvidenceRefs", "RedlineTouched", "RecommendedDecision")
+_REQUIRED_SIGNAL_FIELDS = ("Role", "Claim", "EvidenceRefs", "RedlineTouched")
 _FIELD_VALUE_LIMIT = 1000
 _WEAK_EVIDENCE_RE = re.compile(
     r"^\s*$|^\s*(?:none|no\s+refs?|no\s+evidence|n/a|null|无|无证据)\s*$|"
@@ -61,13 +59,20 @@ _STRONG_EVIDENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _REDLINE_RE = re.compile(
-    r"STOP_CONFIRM|redline|permission smuggling|production|credential|customer|payment|write|"
-    r"红线|权限偷渡|生产|凭据|客户|支付|写入|真实执行",
+    r"STOP_CONFIRM|redline(?:\s+touched)?|permission smuggling|production\s+(?:write|deploy)|"
+    r"credential\s+(?:exposure|leak)|customer\s+data|payment\s+data|"
+    r"触及红线|权限偷渡|写入生产|生产(?:写入|发布)|凭据(?:暴露|泄露)|客户数据|支付数据",
+    re.IGNORECASE,
+)
+_NEGATED_REDLINE_PREFIX_RE = re.compile(
+    r"(?:\bno\b|\bwithout\b|\bdid\s+not\b|\bdoes\s+not\b|\bnot\b)\s+[^.!?\n]{0,80}$|"
+    r"(?:未|没有|不涉及|不会|禁止)[^。！？\n]{0,40}$",
     re.IGNORECASE,
 )
 _BLOCKING_DECISION_RE = re.compile(
     r"STOP_CONFIRM|BLOCKED|NEEDS_MORE|不能\s*PASS|不可\s*PASS|不应\s*PASS|不足以\s*PASS|"
-    r"证据缺口|worker\s*self|self-claim|worker\s*自证|权限偷渡|permission smuggling",
+    r"证据缺口|缺少.{0,24}(?:证据|测试输出|文件引用)|missing.{0,24}(?:evidence|test output|file ref)|"
+    r"worker\s*self|self-claim|worker\s*自证|权限偷渡|permission smuggling",
     re.IGNORECASE,
 )
 
@@ -221,6 +226,15 @@ def _nonempty_non_none(value: Any) -> bool:
     return bool(text) and text not in {"none", "no", "n/a", "null", "无"}
 
 
+def _redline_touched(text: str | None) -> bool:
+    value = text or ""
+    for match in _REDLINE_RE.finditer(value):
+        prefix = value[max(0, match.start() - 100) : match.start()]
+        if not _NEGATED_REDLINE_PREFIX_RE.search(prefix):
+            return True
+    return False
+
+
 def _classify_evidence_state(fields: dict[str, Any]) -> tuple[str, bool]:
     refs = _split_evidence_refs(fields.get("EvidenceRefs"))
     redline = _truthy_text(fields.get("RedlineTouched"))
@@ -270,6 +284,7 @@ def _normalize_evidence_signal(
     description: str,
     result: str | None,
     task_id: str,
+    action_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recover protocol fields that are already available as lane metadata.
 
@@ -291,12 +306,16 @@ def _normalize_evidence_signal(
             fields["Claim"] = _truncate(claim)
             derived.append("Claim")
 
-    if not fields.get("EvidenceRefs") and result:
+    observed_refs = _split_evidence_refs((action_result or {}).get("evidence_refs"))
+    if observed_refs:
+        fields["EvidenceRefs"] = _truncate("\n".join(observed_refs))
+        derived.append("EvidenceRefs")
+    elif not fields.get("EvidenceRefs") and result:
         fields["EvidenceRefs"] = f"worker-output:{task_id}"
         derived.append("EvidenceRefs")
 
     if not fields.get("RedlineTouched"):
-        fields["RedlineTouched"] = "true" if _REDLINE_RE.search(result or "") else "false"
+        fields["RedlineTouched"] = "true" if _redline_touched(result) else "false"
         derived.append("RedlineTouched")
 
     if not fields.get("RecommendedDecision"):
@@ -449,6 +468,7 @@ def record_subagent_handoff(
             description=description,
             result=result,
             task_id=task_id,
+            action_result=action_result,
         )
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -472,11 +492,7 @@ def record_subagent_handoff(
             "signal": signal,
             "action_result": _compact_action_result(action_result),
         }
-        with _WRITE_LOCK:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        return path
+        return append_jsonl_record(path, record)
     except Exception:
         logger.debug("Failed to write subagent handoff audit record", exc_info=True)
         return None

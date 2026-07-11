@@ -221,7 +221,9 @@ def require_permission(
     resource: str,
     action: str,
     owner_check: bool = False,
-    require_existing: bool = False,
+    require_existing: bool = True,
+    allow_deleting_owner: bool = False,
+    thread_write_guard: bool = False,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator that checks permission for resource:action.
 
@@ -232,15 +234,18 @@ def require_permission(
         action: Action name (e.g., "read", "write", "delete")
         owner_check: If True, validates that the current user owns the resource.
                      Requires 'thread_id' path parameter and performs ownership check.
-        require_existing: Only meaningful with ``owner_check=True``. If True, a
-                          missing ``threads_meta`` row counts as a denial (404)
-                          instead of "untracked legacy thread, allow". Use on
-                          **destructive / mutating** routes (DELETE, PATCH,
-                          state-update) so a deleted thread can't be re-targeted
-                          by another user via the missing-row code path.
+        require_existing: Only meaningful with ``owner_check=True``. Defaults to
+                          fail-closed: the row must exist with a concrete owner.
+                          Legacy missing/NULL-owner rows must be explicitly
+                          claimed or migrated before API access.
+        allow_deleting_owner: Permit the concrete owner to retry a DELETE after
+                              a prior attempt left a ``deleting`` tombstone.
+        thread_write_guard: Register the whole handler as a thread write so
+                            DELETE waits for it to commit and new writes fail
+                            once deletion begins.
 
     Usage:
-        # Read-style: legacy untracked threads are allowed
+        # Read-style: an explicit owner row is required
         @require_permission("threads", "read", owner_check=True)
         async def get_thread(thread_id: str, request: Request):
             ...
@@ -286,26 +291,33 @@ def require_permission(
             #
             # 2.0-rc moved thread metadata into the SQL persistence layer
             # (``threads_meta`` table). We verify ownership via
-            # ``ThreadMetaStore.check_access``: in permissive mode it returns
-            # True for missing rows (untracked legacy thread) and rows whose
-            # ``user_id`` is NULL (shared / pre-auth data), so this is
-            # strict-deny rather than strict-allow — only an *existing*
-            # row with a *different* user_id triggers 404.
+            # ``ThreadMetaStore.check_access`` still has a permissive mode for
+            # explicit migration/internal callers. HTTP owner checks default to
+            # strict existing-owner semantics so checkpointer data is never
+            # exposed through a missing or NULL-owner metadata row.
+            thread_id = kwargs.get("thread_id")
             if owner_check:
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
-                thread_id = kwargs.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 
                 from app.gateway.deps import get_thread_store
 
                 thread_store = get_thread_store(request)
-                allowed = await thread_store.check_access(
-                    thread_id,
-                    str(auth.user.id),
-                    require_existing=require_existing,
-                )
+
+                async def owner_has_access(owner_user_id: str) -> bool:
+                    allowed = await thread_store.check_access(
+                        thread_id,
+                        owner_user_id,
+                        require_existing=require_existing,
+                    )
+                    if allowed or not allow_deleting_owner:
+                        return allowed
+                    row = await thread_store.get(thread_id, user_id=owner_user_id)
+                    return row is not None and row.get("status") == "deleting"
+
+                allowed = await owner_has_access(str(auth.user.id))
                 if not allowed and getattr(auth.user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
                     # Trusted internal callers (channel workers) also act for
                     # the connection owner carried in X-DeerFlow-Owner-User-Id.
@@ -317,18 +329,40 @@ def require_permission(
                     # middleware-stamped ``request.state.user``).
                     header_owner = (request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
                     if header_owner:
-                        allowed = await thread_store.check_access(
-                            thread_id,
-                            header_owner,
-                            require_existing=require_existing,
-                        )
+                        allowed = await owner_has_access(header_owner)
                 if not allowed:
                     raise HTTPException(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",
                     )
 
-            return await func(*args, **kwargs)
+            run_manager = None
+            if thread_write_guard:
+                if thread_id is None:
+                    raise ValueError("require_permission with thread_write_guard=True requires 'thread_id' parameter")
+                from app.gateway.deps import get_run_manager
+                from deerflow.runtime import ConflictError
+
+                run_manager = get_run_manager(request)
+                try:
+                    await run_manager.begin_thread_write(thread_id)
+                except ConflictError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+            try:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as exc:
+                    from deerflow.persistence.round_state import RoundBindingConflictError, RoundBindingNotFoundError
+
+                    if isinstance(exc, RoundBindingNotFoundError):
+                        raise HTTPException(status_code=404, detail="Round not found") from exc
+                    if isinstance(exc, RoundBindingConflictError):
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    raise
+            finally:
+                if run_manager is not None:
+                    await run_manager.end_thread_write(thread_id)
 
         return wrapper
 

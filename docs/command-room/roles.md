@@ -1,8 +1,9 @@
 # Command Room Roles
 
-Command Room roles are long-running AI governance roles. Their identity, memory,
-decisions, open questions, and process state persist across rounds. A concrete
-model call may still be ephemeral.
+Command Room roles are available long-running AI governance identities. Their
+identity, memory, decisions, open questions, and process state may persist
+across rounds, but they are activated by risk rather than used as mandatory
+lanes. A concrete model call may still be ephemeral.
 
 Role skills live under `skills/custom/command-room-*`. Role state templates
 live under `docs/command-room/state/`; Chair-accepted runtime role summaries
@@ -50,9 +51,11 @@ changes out of round artifacts.
 
 ## Call Shape
 
-For serious rounds, Chair should collect at least Planner, Boundary, Evidence,
-and Opposition signals before deciding. Recorder runs when durable state, docs,
-skills, AGENTS, SkillOpt, or `Progress.md` should change.
+For high-impact rounds, Chair should collect the independent Planner, Boundary,
+Evidence, and Opposition signals warranted by the risk before deciding. Ordinary
+local development may use one implementation lane and focused acceptance
+verification. Recorder runs when durable state, docs, skills, AGENTS, SkillOpt,
+or `Progress.md` should change.
 
 Program logic may host, record, route, persist, enforce permissions, and expose
 fact signals. It must not manage the AI-AI flow, judge project quality, or

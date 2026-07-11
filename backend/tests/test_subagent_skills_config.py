@@ -9,6 +9,7 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +100,45 @@ def test_command_room_chair_skill_bounds_code_reading_and_visible_thinking():
     assert "Return to envelope and Chair decision flow" in text
     assert "Visible Thinking Budget" in text
     assert "Do not narrate long private deliberation" in text
+
+
+def test_command_room_chair_skill_prioritizes_execution_evidence_over_process_loops():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
+
+    assert "Runtime-observed evidence" in text
+    assert "does not erase earlier observed implementation or verification" in text
+    assert "do not activate Planner, Boundary, Evidence, Opposition, or Recorder by default" in text
+    assert "Stop dispatching" in text
+
+
+def test_naxus_skillopt_probe_rewards_stopping_after_observed_execution():
+    repo_root = Path(__file__).resolve().parents[2]
+    probe_root = repo_root / "docs" / "skillopt" / "naxus-round"
+    tasks = json.loads((probe_root / "tasks.json").read_text(encoding="utf-8"))
+    config = json.loads((probe_root / "config.json").read_text(encoding="utf-8"))
+
+    task = next(item for item in tasks if item["id"] == "test-stop-after-observed-implementation")
+    assert task["required_rules"] == [
+        "ordinary-single-implementation",
+        "runtime-observed-evidence-facts",
+        "stop-on-acceptance",
+        "opposition-risk-triggered",
+    ]
+    assert "opposition-for-pass" not in config["rules"]
+    assert "one implementation lane plus focused acceptance verification" in config["rules"]["ordinary-single-implementation"]
+    assert "Runtime-observed paired tool results" in config["rules"]["runtime-observed-evidence-facts"]
+    assert "Stop dispatching" in config["rules"]["stop-on-acceptance"]
+    assert "risk-triggered" in config["rules"]["opposition-risk-triggered"]
+
+
+def test_naxus_skillopt_entrypoint_runs_model_backed_behavior_gate():
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (repo_root / "scripts" / "skillopt-probe.sh").read_text(encoding="utf-8")
+
+    assert "command-room-skill-behavior-probe.py" in script
+    assert "SKILLOPT_STATIC_ONLY" in script
+    assert "behavior_report.json" in script
 
 
 def test_command_room_recorder_skill_requires_chair_accepted_account_updates():

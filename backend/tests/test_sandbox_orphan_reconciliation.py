@@ -370,6 +370,7 @@ def test_reconcile_adopts_old_containers_into_warm_pool():
         sandbox_url="http://localhost:8081",
         container_name="deer-flow-sandbox-old12345",
         created_at=now - 1200,  # 20 minutes old, > 600s idle_timeout
+        sandbox_api_key="old-key",
     )
     provider._backend.list_running.return_value = [old_info]
 
@@ -378,6 +379,20 @@ def test_reconcile_adopts_old_containers_into_warm_pool():
     # Should NOT destroy directly — let idle checker handle it
     provider._backend.destroy.assert_not_called()
     assert "old12345" in provider._warm_pool
+
+
+def test_reconcile_destroys_unsecured_legacy_container():
+    provider = _make_provider_for_reconciliation()
+    info = SandboxInfo(
+        sandbox_id="legacy-unsecured",
+        sandbox_url="http://localhost:8081",
+    )
+    provider._backend.list_running.return_value = [info]
+
+    provider._reconcile_orphans()
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert "legacy-unsecured" not in provider._warm_pool
 
 
 def test_reconcile_adopts_young_containers():
@@ -390,6 +405,7 @@ def test_reconcile_adopts_young_containers():
         sandbox_url="http://localhost:8082",
         container_name="deer-flow-sandbox-young123",
         created_at=now - 60,  # 1 minute old, < 600s idle_timeout
+        sandbox_api_key="young-key",
     )
     provider._backend.list_running.return_value = [young_info]
 
@@ -411,12 +427,14 @@ def test_reconcile_mixed_containers_all_adopted():
         sandbox_url="http://localhost:8081",
         container_name="deer-flow-sandbox-old_one",
         created_at=now - 1200,
+        sandbox_api_key="old-key",
     )
     young_info = SandboxInfo(
         sandbox_id="young_one",
         sandbox_url="http://localhost:8082",
         container_name="deer-flow-sandbox-young_one",
         created_at=now - 60,
+        sandbox_api_key="young-key",
     )
     provider._backend.list_running.return_value = [old_info, young_info]
 
@@ -437,6 +455,7 @@ def test_reconcile_skips_already_tracked_containers():
         sandbox_url="http://localhost:8081",
         container_name="deer-flow-sandbox-existing1",
         created_at=now - 1200,
+        sandbox_api_key="existing-key",
     )
     # Pre-populate _sandboxes to simulate already-tracked container
     provider._sandboxes["existing1"] = MagicMock()
@@ -476,8 +495,18 @@ def test_reconcile_multiple_containers_all_adopted():
     provider = _make_provider_for_reconciliation()
     now = time.time()
 
-    info1 = SandboxInfo(sandbox_id="cont_one", sandbox_url="http://localhost:8081", created_at=now - 1200)
-    info2 = SandboxInfo(sandbox_id="cont_two", sandbox_url="http://localhost:8082", created_at=now - 1200)
+    info1 = SandboxInfo(
+        sandbox_id="cont_one",
+        sandbox_url="http://localhost:8081",
+        created_at=now - 1200,
+        sandbox_api_key="one-key",
+    )
+    info2 = SandboxInfo(
+        sandbox_id="cont_two",
+        sandbox_url="http://localhost:8082",
+        created_at=now - 1200,
+        sandbox_api_key="two-key",
+    )
 
     provider._backend.list_running.return_value = [info1, info2]
 
@@ -492,7 +521,12 @@ def test_reconcile_zero_created_at_adopted():
     """Containers with created_at=0 (unknown age) should still be adopted into warm pool."""
     provider = _make_provider_for_reconciliation()
 
-    info = SandboxInfo(sandbox_id="unknown1", sandbox_url="http://localhost:8081", created_at=0.0)
+    info = SandboxInfo(
+        sandbox_id="unknown1",
+        sandbox_url="http://localhost:8081",
+        created_at=0.0,
+        sandbox_api_key="unknown-key",
+    )
     provider._backend.list_running.return_value = [info]
 
     provider._reconcile_orphans()
@@ -507,8 +541,18 @@ def test_reconcile_idle_timeout_zero_adopts_all():
     provider._config["idle_timeout"] = 0
     now = time.time()
 
-    old_info = SandboxInfo(sandbox_id="old_one", sandbox_url="http://localhost:8081", created_at=now - 7200)
-    young_info = SandboxInfo(sandbox_id="young_one", sandbox_url="http://localhost:8082", created_at=now - 60)
+    old_info = SandboxInfo(
+        sandbox_id="old_one",
+        sandbox_url="http://localhost:8081",
+        created_at=now - 7200,
+        sandbox_api_key="old-key",
+    )
+    young_info = SandboxInfo(
+        sandbox_id="young_one",
+        sandbox_url="http://localhost:8082",
+        created_at=now - 60,
+        sandbox_api_key="young-key",
+    )
     provider._backend.list_running.return_value = [old_info, young_info]
 
     provider._reconcile_orphans()

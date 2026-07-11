@@ -275,6 +275,12 @@ def _public_text(value: Any, *, max_chars: int = _PUBLIC_TEXT_MAX_CHARS) -> str:
     return f"{text[: max(0, max_chars - len(marker))]}{marker}"
 
 
+def redact_evidence_text(value: Any, *, max_chars: int = _PUBLIC_TEXT_MAX_CHARS) -> str:
+    """Return bounded public text for runtime-observed evidence metadata."""
+
+    return _public_text(value, max_chars=max_chars)
+
+
 def _extract_sha256(text: str) -> str | None:
     match = _SHA256_RE.search(text or "")
     return match.group(1) if match else None
@@ -306,4 +312,4 @@ def summarize_evidence_refs(refs: Iterable[str | None]) -> dict[str, object]:
     }
 
 
-__all__ = ["EvidenceRef", "EvidenceSignal", "analyze_evidence_ref", "normalize_evidence_ref", "summarize_evidence_refs"]
+__all__ = ["EvidenceRef", "EvidenceSignal", "analyze_evidence_ref", "normalize_evidence_ref", "redact_evidence_text", "summarize_evidence_refs"]

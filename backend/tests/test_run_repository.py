@@ -77,6 +77,28 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_create_pending_run_verifies_explicit_owner_without_context_filter(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        try:
+            row = await repo.create_pending_run(
+                "explicit-owner-run",
+                thread_id="explicit-owner-thread",
+                user_id="explicit-owner",
+            )
+            assert row["user_id"] == "explicit-owner"
+            assert (
+                await repo.get(
+                    "explicit-owner-run",
+                    user_id="explicit-owner",
+                )
+            ) is not None
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_put_is_idempotent_for_retried_writes(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", assistant_id="old-agent", status="pending")
@@ -449,6 +471,32 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_by_thread_cursor_is_stable_across_new_insert(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        for index in range(1, 4):
+            await repo.put(
+                f"r{index}",
+                thread_id="t1",
+                created_at=f"2024-01-01T00:00:0{index}+00:00",
+            )
+
+        first_page = await repo.list_by_thread("t1", limit=2)
+        await repo.put(
+            "r4",
+            thread_id="t1",
+            created_at="2024-01-01T00:00:04+00:00",
+        )
+        second_page = await repo.list_by_thread(
+            "t1",
+            limit=2,
+            before=first_page[-1]["run_id"],
+        )
+
+        assert [row["run_id"] for row in first_page] == ["r3", "r2"]
+        assert [row["run_id"] for row in second_page] == ["r1"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_limit(self, tmp_path):
         repo = await _make_repo(tmp_path)
         for i in range(5):
@@ -612,6 +660,39 @@ class TestRunRepository:
         assert cancelled is True
         assert row is not None
         assert row["status"] == "interrupted"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancel_intent_cannot_revive_completed_sql_run(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-terminal", thread_id="thread-terminal", status="pending")
+        lease = await repo.try_acquire_active_slot(
+            "thread-terminal",
+            "run-terminal",
+            owner_worker_id="worker-a",
+        )
+        assert lease is not None
+        await repo.request_cancel("run-terminal", "interrupt", requested_by="user-a")
+        assert await repo.complete_run(
+            "run-terminal",
+            from_statuses={"running", "cancelling", "rolling_back"},
+            terminal_status="interrupted",
+            lease_token=lease.lease_token,
+            generation=lease.generation,
+            terminal_reason="cancelled",
+        )
+
+        intent = await repo.consume_cancel_intent(
+            "run-terminal",
+            lease_token=lease.lease_token,
+            generation=lease.generation,
+        )
+        row = await repo.get("run-terminal")
+
+        assert intent is None
+        assert row is not None
+        assert row["status"] == "interrupted"
+        assert row["metadata"]["terminal_reason"] == "cancelled"
         await _cleanup()
 
     @pytest.mark.anyio

@@ -12,13 +12,13 @@ import hashlib
 import json
 import logging
 import re
-import threading
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from deerflow.command_room.file_records import append_jsonl_record, read_jsonl_text
 from deerflow.command_room.round_context import (
     create_round_context,
     record_action_result_from_event,
@@ -28,7 +28,6 @@ from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
-_WRITE_LOCK = threading.Lock()
 _FIELD_VALUE_LIMIT = 2000
 _BLOCKING_DECISIONS = {"NEEDS_MORE", "BLOCKED", "STOP_CONFIRM"}
 _ALLOWED_VERDICTS = {"PASS", "NEEDS_MORE", "BLOCKED", "STOP_CONFIRM"}
@@ -225,11 +224,12 @@ def _signal_meta_value(signal: dict[str, Any], fields: dict[str, Any], key: str)
 
 def _load_handoff_records(thread_id: str, user_id: str | None) -> tuple[Path, list[dict[str, Any]]]:
     path = get_paths().thread_dir(thread_id, user_id=user_id) / "audit" / "subagent_handoffs.jsonl"
-    if not path.exists():
+    text = read_jsonl_text(path)
+    if text is None:
         return path, []
 
     records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -531,11 +531,7 @@ def record_command_room_round(
 
     try:
         record = _json_safe(record)
-        with _WRITE_LOCK:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        return path
+        return append_jsonl_record(path, record)
     except Exception:
         logger.debug("Failed to write command-room RoundRecord", exc_info=True)
         return None
@@ -548,11 +544,17 @@ def latest_command_room_round(
     base_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     path = _round_file(thread_id, user_id, base_dir=base_dir)
-    if not path.exists():
+    text = read_jsonl_text(path)
+    if text is None:
         return None
     latest: dict[str, Any] | None = None
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
-        latest = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            latest = row
     return latest

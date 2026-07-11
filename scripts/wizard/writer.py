@@ -203,6 +203,7 @@ def build_minimal_config(
 
     model_entry: dict[str, Any] = {
         "name": _make_model_config_name(model_name),
+        "provider": display_name,
         "display_name": display_name,
         "use": provider_use,
         "model": model_name,

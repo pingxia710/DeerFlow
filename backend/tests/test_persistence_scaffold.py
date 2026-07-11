@@ -10,6 +10,7 @@ Tests:
 
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +34,13 @@ class TestDatabaseConfig:
         # Backward-compatible aliases point to the same file
         assert c.checkpointer_sqlite_path == c.sqlite_path
         assert c.app_sqlite_path == c.sqlite_path
+
+    def test_default_sqlite_path_follows_runtime_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "runtime-home"
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+        c = DatabaseConfig(backend="sqlite")
+
+        assert Path(c.sqlite_path) == home / "data" / "deerflow.db"
 
     def test_app_sqlalchemy_url_sqlite(self):
         c = DatabaseConfig(backend="sqlite", sqlite_dir="./data")

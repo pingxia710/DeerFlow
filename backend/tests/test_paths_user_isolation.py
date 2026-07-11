@@ -1,10 +1,16 @@
 """Tests for user-scoped path resolution in Paths."""
 
+import os
 from pathlib import Path
 
 import pytest
 
-from deerflow.config.paths import Paths
+from deerflow.config.paths import (
+    Paths,
+    UnsafePathError,
+    validate_thread_id,
+    validate_user_id,
+)
 
 
 @pytest.fixture
@@ -28,6 +34,19 @@ class TestValidateUserId:
     def test_rejects_empty(self, paths: Paths):
         with pytest.raises(ValueError, match="Invalid user_id"):
             paths.user_dir("")
+
+    def test_rejects_filesystem_component_over_255_utf8_bytes(self):
+        with pytest.raises(ValueError, match="255 UTF-8 bytes"):
+            validate_user_id("u" * 256)
+
+
+class TestValidateThreadId:
+    def test_accepts_255_byte_filesystem_component(self):
+        assert validate_thread_id("t" * 255) == "t" * 255
+
+    def test_rejects_filesystem_component_over_255_utf8_bytes(self):
+        with pytest.raises(ValueError, match="255 UTF-8 bytes"):
+            validate_thread_id("t" * 256)
 
 
 class TestMakeSafeUserId:
@@ -58,6 +77,15 @@ class TestMakeSafeUserId:
         from deerflow.config.paths import make_safe_user_id
 
         assert make_safe_user_id("a.b") != make_safe_user_id("a/b")
+
+    @pytest.mark.parametrize("raw", ["u" * 256, "u" * 300 + "@example.com"])
+    def test_long_external_id_is_normalized_to_valid_component(self, raw: str):
+        from deerflow.config.paths import make_safe_user_id
+
+        safe = make_safe_user_id(raw)
+
+        assert len(safe.encode("utf-8")) <= 255
+        assert validate_user_id(safe) == safe
 
     def test_empty_id_rejected(self):
         from deerflow.config.paths import make_safe_user_id
@@ -215,6 +243,42 @@ class TestEnsureAndDeleteWithUserId:
         assert paths.sandbox_outputs_dir("t1", user_id="u1").is_dir()
         assert paths.acp_workspace_dir("t1", user_id="u1").is_dir()
 
+    def test_concurrent_ensure_thread_dirs_is_idempotent(
+        self,
+        paths: Paths,
+        monkeypatch,
+    ):
+        thread_id = "concurrent-thread"
+        (paths.user_dir("u1") / "threads").mkdir(parents=True)
+        original_mkdir = os.mkdir
+
+        def competing_mkdir(path, mode=0o777, *, dir_fd=None):
+            if path == thread_id:
+                original_mkdir(path, mode, dir_fd=dir_fd)
+                raise FileExistsError(17, "File exists", path)
+            return original_mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "mkdir", competing_mkdir)
+        paths.ensure_thread_dirs(thread_id, user_id="u1")
+
+        assert paths.sandbox_uploads_dir(thread_id, user_id="u1").is_dir()
+
+    def test_ensure_thread_dirs_rejects_symlinked_standard_directory(
+        self,
+        paths: Paths,
+        tmp_path: Path,
+    ):
+        outside = tmp_path / "other-owner"
+        outside.mkdir(mode=0o700)
+        uploads_dir = paths.sandbox_uploads_dir("t1", user_id="u1")
+        uploads_dir.parent.mkdir(parents=True)
+        uploads_dir.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(UnsafePathError):
+            paths.ensure_thread_dirs("t1", user_id="u1")
+
+        assert outside.stat().st_mode & 0o777 == 0o700
+
     def test_delete_thread_dir_removes_user_scoped(self, paths: Paths):
         paths.ensure_thread_dirs("t1", user_id="u1")
         assert paths.thread_dir("t1", user_id="u1").exists()
@@ -238,6 +302,54 @@ class TestEnsureAndDeleteWithUserId:
         paths.delete_thread_dir("t1", user_id="u1")
         assert not paths.thread_dir("t1", user_id="u1").exists()
         assert paths.thread_dir("t1").exists()
+
+
+class TestClaimLegacyThreadDirs:
+    @pytest.mark.parametrize("candidate", ["legacy", "default", "owner"])
+    def test_rejects_symlinked_thread_roots(
+        self,
+        paths: Paths,
+        tmp_path: Path,
+        candidate: str,
+    ):
+        thread_id = "thread-symlink"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("secret", encoding="utf-8")
+        candidates = {
+            "legacy": paths.thread_dir(thread_id),
+            "default": paths.thread_dir(thread_id, user_id="default"),
+            "owner": paths.thread_dir(thread_id, user_id="owner-a"),
+        }
+        root = candidates[candidate]
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            paths.claim_legacy_thread_dirs(thread_id, "owner-a")
+
+        assert root.is_symlink()
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "secret"
+
+    def test_rejects_symlink_inside_legacy_thread_tree(
+        self,
+        paths: Paths,
+        tmp_path: Path,
+    ):
+        thread_id = "thread-nested-symlink"
+        outside = tmp_path / "foreign-user-data"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("foreign secret", encoding="utf-8")
+        legacy = paths.thread_dir(thread_id)
+        legacy.mkdir(parents=True)
+        (legacy / "user-data").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            paths.claim_legacy_thread_dirs(thread_id, "owner-a")
+
+        assert legacy.exists()
+        assert not paths.thread_dir(thread_id, user_id="owner-a").exists()
+        assert (outside / "secret.txt").read_text(encoding="utf-8") == "foreign secret"
 
 
 class TestResolveVirtualPathWithUserId:

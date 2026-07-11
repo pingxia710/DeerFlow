@@ -406,7 +406,9 @@ answer or an unaccepted `next_action` as accepted continuation context.
   user-scoped reads include matching legacy owner rows for compatibility.
 - Staging/shared/production Gateway startup requires `run_events.backend: db`
   and `database.backend` set to `sqlite` or `postgres`; `memory` and `jsonl`
-  run-event stores are local/single-process choices.
+  run-event stores are local/single-process choices. The canonical
+  `config.example.yaml` defaults to SQLite plus the DB event store so a newly
+  seeded production Compose configuration passes this guard unchanged.
 - Explicit event writes should pass `user_id` when the owner is known; all
   RunEventStore backends accept it on `put()` and `put_batch()` rows.
 
@@ -592,6 +594,7 @@ Additional providers also live here (`brave`, `browserless`, `ddg_search`, `exa`
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
 - `PatchedChatDeepSeek` accepts optional `api_keys` for comma/newline separated credential pools and rotates on rate-limit/auth/server errors
+- The Codex Responses provider treats UI-level `max` and `ultra` reasoning effort as aliases for the endpoint-supported `xhigh` value; keep this normalization at the provider boundary so direct and Gateway callers behave identically.
 - Models can set `subagents_inherit: false` to keep subagents with `model: inherit` on the default model instead of inheriting a lead-only model
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
@@ -688,7 +691,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
 
 **Workflow**:
-1. `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`
+1. `MemoryMiddleware` filters messages (user inputs + final AI responses), excludes provider-error fallback turns, captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`; a run whose latest AI response is an error fallback must not enqueue a memory update
 2. Queue debounces (30s default), batches updates, deduplicates per-thread
 3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
 4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append

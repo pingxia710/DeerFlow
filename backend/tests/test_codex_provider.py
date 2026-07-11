@@ -14,8 +14,10 @@ import json
 from unittest.mock import patch
 
 import httpx
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from deerflow.models import openai_codex_provider as codex_provider_module
 from deerflow.models.credential_loader import CodexCliCredential
 
 
@@ -232,6 +234,24 @@ def test_call_codex_api_includes_response_controls(monkeypatch):
     assert captured["payload"]["text"] == {"verbosity": "high"}
 
 
+@pytest.mark.parametrize("reasoning_effort", ["max", "ultra"])
+def test_call_codex_api_maps_unsupported_effort_to_xhigh(monkeypatch, reasoning_effort):
+    model = _make_model()
+    model.reasoning_effort = reasoning_effort
+    captured: dict = {}
+
+    def fake_stream_response(headers, payload):
+        captured["payload"] = payload
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_refresh_codex_auth", lambda: None)
+    monkeypatch.setattr(model, "_stream_response", fake_stream_response)
+
+    model._call_codex_api([HumanMessage(content="Hello")])
+
+    assert captured["payload"]["reasoning"]["effort"] == "xhigh"
+
+
 def test_call_codex_api_retries_transient_connection_errors(monkeypatch):
     model = _make_model()
     attempts = 0
@@ -274,6 +294,36 @@ def test_call_codex_api_retries_incomplete_stream(monkeypatch):
     assert model._call_codex_api([HumanMessage(content="Hello")]) == {"output": [], "usage": {}}
     assert attempts == 2
     assert sleeps == [1]
+
+
+def test_stream_response_logs_bounded_redacted_http_error(monkeypatch, caplog):
+    def handler(request):
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Unsupported reasoning effort\nforged-log-line; api_key=secret-value",
+                    "type": "invalid_request_error",
+                    "param": "reasoning.effort",
+                    "code": "unsupported_value",
+                }
+            },
+            headers={"x-request-id": "req-test-123"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(codex_provider_module.httpx, "Client", lambda **kwargs: client)
+    model = _make_model()
+
+    with caplog.at_level("ERROR", logger="deerflow.models.openai_codex_provider"):
+        with pytest.raises(httpx.HTTPStatusError):
+            model._stream_response({}, {"model": "gpt-5.4"})
+
+    assert "req-test-123" in caplog.text
+    assert "unsupported_value" in caplog.text
+    assert "reasoning.effort" in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "\n" not in caplog.messages[0]
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ Supports:
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -27,6 +28,21 @@ from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli
 logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_SENSITIVE_ERROR_VALUE_RE = re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|authorization|bearer|secret|password)\b\s*[:=]\s*[^,\s;}]+")
+
+
+def _safe_error_detail(response: httpx.Response) -> str:
+    """Return bounded structured provider diagnostics without raw response data."""
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "non-json response"
+
+    error = payload.get("error", payload) if isinstance(payload, dict) else {}
+    if not isinstance(error, dict):
+        return "unstructured response"
+    detail = " ".join(" ".join(f"{key}={error[key]}".split()) for key in ("type", "code", "param", "message") if isinstance(error.get(key), (str, int, float)))
+    return _SENSITIVE_ERROR_VALUE_RE.sub(r"\1=[REDACTED]", detail)[:1000]
 
 
 def _build_usage_metadata(oai_usage: dict) -> dict:
@@ -225,6 +241,7 @@ class CodexChatModel(BaseChatModel):
         """Call the Codex Responses API and return the completed response."""
         self._refresh_codex_auth()
         instructions, input_items = self._convert_messages(messages)
+        reasoning_effort = "xhigh" if self.reasoning_effort in {"max", "ultra"} else self.reasoning_effort
 
         payload = {
             "model": self.model,
@@ -232,7 +249,7 @@ class CodexChatModel(BaseChatModel):
             "input": input_items,
             "store": False,
             "stream": True,
-            "reasoning": {"effort": self.reasoning_effort, "summary": self.reasoning_summary} if self.reasoning_effort != "none" else {"effort": "none"},
+            "reasoning": {"effort": reasoning_effort, "summary": self.reasoning_summary} if reasoning_effort != "none" else {"effort": "none"},
             "text": {"verbosity": self.text_verbosity},
         }
 
@@ -280,6 +297,14 @@ class CodexChatModel(BaseChatModel):
 
         with httpx.Client(timeout=300) as client:
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
+                if getattr(resp, "status_code", 200) >= 400:
+                    resp.read()
+                    logger.error(
+                        "Codex API request failed: status=%s request_id=%s detail=%s",
+                        resp.status_code,
+                        resp.headers.get("x-request-id", "unknown"),
+                        _safe_error_detail(resp),
+                    )
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     data = self._parse_sse_data_line(line)

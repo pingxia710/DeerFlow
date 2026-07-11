@@ -113,6 +113,7 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
     """Keep only user inputs and final assistant responses for memory updates."""
     filtered = []
     skip_next_ai = False
+    current_turn_start: int | None = None
     for msg in messages:
         msg_type = getattr(msg, "type", None)
 
@@ -132,18 +133,27 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
                     continue
                 clean_msg = copy(msg)
                 clean_msg.content = stripped
+                current_turn_start = len(filtered)
                 filtered.append(clean_msg)
                 skip_next_ai = False
             else:
+                current_turn_start = len(filtered)
                 filtered.append(msg)
                 skip_next_ai = False
         elif msg_type == "ai":
+            if getattr(msg, "additional_kwargs", {}).get("deerflow_error_fallback"):
+                if current_turn_start is not None:
+                    del filtered[current_turn_start:]
+                current_turn_start = None
+                skip_next_ai = False
+                continue
             tool_calls = getattr(msg, "tool_calls", None)
             if not tool_calls:
                 if skip_next_ai:
                     skip_next_ai = False
                     continue
                 filtered.append(msg)
+                current_turn_start = None
 
     return filtered
 

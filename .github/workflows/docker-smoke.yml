@@ -99,14 +99,6 @@ jobs:
           mkdir -p .ci/deer-flow-home
           cp config.example.yaml .ci/config.yaml
           cp extensions_config.example.json .ci/extensions_config.json
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path(".ci/config.yaml")
-          text = path.read_text()
-          text = text.replace("run_events:\n  backend: memory", "run_events:\n  backend: db", 1)
-          path.write_text(text)
-          PY
           {
             echo "BETTER_AUTH_SECRET=ci-smoke-better-auth-secret"
             echo "DEER_FLOW_INTERNAL_AUTH_TOKEN=ci-smoke-internal-token"

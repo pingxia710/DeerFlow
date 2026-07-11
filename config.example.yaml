@@ -1340,18 +1340,18 @@ database:
 # ============================================================================
 # Storage backend for run events (messages + execution traces).
 #
-# backend: memory  -- No persistence, data lost on restart (default)
-# backend: db      -- SQL database via ORM, full query capability (production)
+# backend: memory  -- No persistence, data lost on restart (local experiments only)
+# backend: db      -- SQL database via ORM, full query capability (default; required in production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
 # staging/shared/production startup requires backend: db and database.backend
 # set to sqlite or postgres; memory/jsonl are local single-process choices.
 #
 # run_events:
-#   backend: memory
+#   backend: db
 #   max_trace_content: 10240    # Truncation threshold for trace content (db backend, bytes)
 #   track_token_usage: true     # Accumulate token counts to RunRow
 run_events:
-  backend: memory
+  backend: db
   max_trace_content: 10240
   track_token_usage: true
 

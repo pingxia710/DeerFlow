@@ -2,6 +2,7 @@ from importlib import import_module
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi import HTTPException
 from starlette.datastructures import Headers
 
@@ -467,6 +468,19 @@ def test_run_event_store_db_allowed_with_sqlite_in_production(monkeypatch: pytes
     monkeypatch.setenv("ENVIRONMENT", "production")
 
     _assert_run_event_store_config_for_environment(_config(database_backend="sqlite", run_events_backend="db"))
+
+
+def test_example_config_passes_production_run_event_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    example = yaml.safe_load((REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+
+    _assert_run_event_store_config_for_environment(
+        _config(
+            database_backend=example["database"]["backend"],
+            run_events_backend=example["run_events"]["backend"],
+        )
+    )
 
 
 def test_run_event_store_jsonl_allowed_when_environment_unset(monkeypatch: pytest.MonkeyPatch) -> None:

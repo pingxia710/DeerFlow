@@ -11,6 +11,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
+from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.config.memory_config import MemoryConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,6 +187,45 @@ class TestFilterMessagesForMemory:
         result = filter_messages_for_memory(msgs)
         assert len(result) == 2
         assert result[0].content == "Visible message"
+
+    def test_error_fallback_and_its_user_turn_are_excluded(self):
+        msgs = [
+            _human("Remember that I prefer concise answers."),
+            _ai("Understood."),
+            _human("Run the audit."),
+            AIMessage(
+                content="The model request failed.",
+                additional_kwargs={"deerflow_error_fallback": True},
+            ),
+        ]
+
+        result = filter_messages_for_memory(msgs)
+
+        assert [message.content for message in result] == [
+            "Remember that I prefer concise answers.",
+            "Understood.",
+        ]
+
+
+def test_memory_middleware_does_not_queue_a_failed_run(monkeypatch):
+    def fail_if_queue_is_read():
+        raise AssertionError("failed runs must not reach the memory queue")
+
+    monkeypatch.setattr(memory_middleware_module, "get_memory_queue", fail_if_queue_is_read)
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    state = {
+        "messages": [
+            _human("Remember that I prefer concise answers."),
+            _ai("Understood."),
+            _human("Run the audit."),
+            AIMessage(
+                content="The model request failed.",
+                additional_kwargs={"deerflow_error_fallback": True},
+            ),
+        ]
+    }
+
+    assert middleware.after_agent(state, runtime=type("Runtime", (), {"context": {"thread_id": "thread-1"}})()) is None
 
 
 # ===========================================================================

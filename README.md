@@ -271,6 +271,7 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 > Persisted runs that lose their local worker are recovered as `worker_lost` instead of staying visibly `running` forever.
 
 > Staging/shared/production startups also require `run_events.backend: db` and a persistent `database.backend` (`sqlite` or `postgres`). `memory` and `jsonl` run-event stores are for development or local single-process use.
+> The canonical `config.example.yaml` defaults to `database.backend: sqlite` plus `run_events.backend: db`, so a newly seeded `make up` configuration satisfies this production startup contract without CI- or deploy-only rewrites.
 > LangGraph-compatible run creation treats `stream_resumable=true` as a request to keep the run alive across client disconnects unless `on_disconnect=cancel` is explicitly provided.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.

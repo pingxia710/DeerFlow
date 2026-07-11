@@ -79,6 +79,11 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             logger.debug("No messages in state, skipping memory update")
             return None
 
+        latest_ai = next((message for message in reversed(messages) if getattr(message, "type", None) == "ai"), None)
+        if latest_ai is not None and getattr(latest_ai, "additional_kwargs", {}).get("deerflow_error_fallback"):
+            logger.debug("Latest assistant message is an error fallback, skipping memory update")
+            return None
+
         # Filter to only keep user inputs and final assistant responses
         filtered_messages = filter_messages_for_memory(messages)
 

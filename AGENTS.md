@@ -91,6 +91,7 @@ Gateway API. Config schema and resolution order are documented in
 ```bash
 make setup       # Interactive setup wizard (recommended for new users)
 make doctor      # Check configuration and system requirements
+make delivery-readiness  # Read-only local branch/worktree facts; never fetches or changes Git state
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make command-room-contract-check  # Inspect internal command-room audit fixture

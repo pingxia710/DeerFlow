@@ -509,48 +509,48 @@ test("buildThreadRunContext forces command-room into ultra subagent mode", async
   });
 });
 
-test("buildThreadRunContext defaults command-room reasoning to high", async () => {
+test("buildThreadRunContext leaves absent command-room reasoning for the Gateway", async () => {
   const { buildThreadRunContext } = await import("@/core/threads/hooks");
 
-  expect(
-    buildThreadRunContext(
-      {
-        agent_name: "command-room",
-        model_name: "safe-model",
-        mode: "flash",
-      },
-      "thread-123",
-    ),
-  ).toMatchObject({
+  const context = buildThreadRunContext(
+    {
+      agent_name: "command-room",
+      model_name: "safe-model",
+      mode: "flash",
+    },
+    "thread-123",
+  );
+
+  expect(context).toMatchObject({
     mode: "ultra",
-    reasoning_effort: "high",
     subagent_enabled: true,
   });
+  expect(context.reasoning_effort).toBeUndefined();
 });
 
-test("buildThreadRunContext defaults ordinary thinking chat to xhigh", async () => {
+test("buildThreadRunContext leaves absent ordinary reasoning for the Gateway", async () => {
   const { buildThreadRunContext } = await import("@/core/threads/hooks");
 
-  expect(
-    buildThreadRunContext(
-      {
-        model_name: "safe-model",
-        mode: "pro",
-      },
-      "thread-456",
-    ),
-  ).toMatchObject({
+  const context = buildThreadRunContext(
+    {
+      model_name: "safe-model",
+      mode: "pro",
+    },
+    "thread-456",
+  );
+
+  expect(context).toMatchObject({
     model_name: "safe-model",
     mode: "pro",
     thinking_enabled: true,
     is_plan_mode: true,
     subagent_enabled: false,
-    reasoning_effort: "xhigh",
     thread_id: "thread-456",
   });
+  expect(context.reasoning_effort).toBeUndefined();
 });
 
-test("buildThreadRunContext normalizes retired low reasoning effort to xhigh", async () => {
+test("buildThreadRunContext preserves legacy reasoning for Gateway normalization", async () => {
   const { buildThreadRunContext } = await import("@/core/threads/hooks");
 
   expect(
@@ -563,7 +563,7 @@ test("buildThreadRunContext normalizes retired low reasoning effort to xhigh", a
       "thread-789",
     ),
   ).toMatchObject({
-    reasoning_effort: "xhigh",
+    reasoning_effort: "low",
   });
 });
 

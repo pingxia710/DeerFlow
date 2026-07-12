@@ -757,13 +757,6 @@ export function buildThreadRunContext(
   };
   const isCommandRoom = mergedContext.agent_name === "command-room";
   const mode = isCommandRoom ? "ultra" : mergedContext.mode;
-  const requestedReasoningEffort =
-    mergedContext.reasoning_effort === "minimal" ||
-    mergedContext.reasoning_effort === "low"
-      ? isCommandRoom
-        ? "high"
-        : "xhigh"
-      : mergedContext.reasoning_effort;
 
   return {
     ...mergedContext,
@@ -772,14 +765,7 @@ export function buildThreadRunContext(
     thinking_enabled: mode !== "flash",
     is_plan_mode: mode === "pro" || mode === "ultra",
     subagent_enabled: mode === "ultra",
-    reasoning_effort: isCommandRoom
-      ? (requestedReasoningEffort ?? "high")
-      : (requestedReasoningEffort ??
-        (mode === "ultra"
-          ? "xhigh"
-          : mode === "pro" || mode === "thinking"
-            ? "xhigh"
-            : undefined)),
+    reasoning_effort: mergedContext.reasoning_effort,
     reasoning_summary: mergedContext.reasoning_summary,
     text_verbosity: mergedContext.text_verbosity,
     thread_id: threadId,

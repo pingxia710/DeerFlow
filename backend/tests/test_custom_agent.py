@@ -133,6 +133,17 @@ class TestLoadAgentConfig:
             with pytest.raises(FileNotFoundError):
                 load_agent_config("nonexistent-agent")
 
+    def test_loads_builtin_command_room_without_custom_config(self, tmp_path):
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            config = load_agent_config("command-room")
+
+        assert config is not None
+        assert config.name == "command-room"
+        assert config.model is None
+        assert config.skills == []
+
     def test_load_missing_config_yaml_raises(self, tmp_path):
         # Create directory without config.yaml
         (tmp_path / "agents" / "broken-agent").mkdir(parents=True)
@@ -564,6 +575,12 @@ class TestAgentsAPI:
         data = response.json()
         assert data["name"] == "test-agent"
         assert data["soul"] == "Hello world"
+
+    def test_gets_builtin_command_room_without_custom_config(self, agent_client):
+        response = agent_client.get("/api/agents/command-room")
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "command-room"
 
     def test_get_missing_agent_404(self, agent_client):
         response = agent_client.get("/api/agents/nonexistent")

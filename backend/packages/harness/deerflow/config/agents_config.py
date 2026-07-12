@@ -105,6 +105,10 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     agent_dir = resolve_agent_dir(name, user_id=user_id)
     config_file = agent_dir / "config.yaml"
 
+    if not agent_dir.exists() and name == "command-room":
+        # Command Room is built in; a user config, when present, overrides this.
+        return AgentConfig(name=name, skills=[])
+
     if not agent_dir.exists():
         raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
 

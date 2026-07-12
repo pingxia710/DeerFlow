@@ -11,7 +11,7 @@ def resolve_reasoning_effort(
     *,
     thinking_enabled: bool,
 ) -> ReasoningEffort | None:
-    if not model_config.supports_reasoning_effort:
+    if not getattr(model_config, "supports_reasoning_effort", False):
         return None
     if not thinking_enabled:
         return "none"

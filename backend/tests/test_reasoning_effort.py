@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from deerflow.config.model_config import ModelConfig
 from deerflow.models.reasoning_effort import resolve_reasoning_effort
 
@@ -30,3 +32,9 @@ def test_resolve_reasoning_effort_keeps_a_valid_explicit_value():
 
 def test_resolve_reasoning_effort_disables_provider_reasoning_when_thinking_is_disabled():
     assert resolve_reasoning_effort(_model(), "max", thinking_enabled=False) == "none"
+
+
+def test_resolve_reasoning_effort_treats_legacy_model_config_without_capability_as_unsupported():
+    legacy_model = SimpleNamespace(supports_thinking=False)
+
+    assert resolve_reasoning_effort(legacy_model, None, thinking_enabled=True) is None

@@ -23,12 +23,37 @@ export type ThreadSearchParams = NonNullable<
   Parameters<ThreadsClient["search"]>[0]
 >;
 
+const demoThreadRequests = new Map<string, Promise<AgentThread>>();
+let demoThreadIndexRequest: Promise<AgentThread[]> | null = null;
+
+async function loadStaticDemoThreadIndex(): Promise<AgentThread[]> {
+  if (demoThreadIndexRequest) {
+    return demoThreadIndexRequest;
+  }
+
+  demoThreadIndexRequest = globalThis
+    .fetch("/demo/threads/index.json")
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error("Failed to load demo thread index");
+      }
+      const threads = (await response.json()) as AgentThread[];
+      return threads.map((thread) => ({
+        ...thread,
+        updated_at: thread.updated_at ?? thread.created_at,
+      }));
+    })
+    .catch((error: unknown) => {
+      demoThreadIndexRequest = null;
+      throw error;
+    });
+  return demoThreadIndexRequest;
+}
+
 export async function loadStaticDemoThreads(
   params: ThreadSearchParams = {},
 ): Promise<AgentThread[]> {
-  const threads = await Promise.all(
-    DEMO_THREAD_IDS.map((threadId) => loadStaticDemoThread(threadId)),
-  );
+  const threads = await loadStaticDemoThreadIndex();
 
   const sortBy = params.sortBy ?? "updated_at";
   const sortOrder = params.sortOrder ?? "desc";
@@ -53,18 +78,30 @@ export async function loadStaticDemoThreads(
 export async function loadStaticDemoThread(
   threadId: string,
 ): Promise<AgentThread> {
-  const response = await globalThis.fetch(
-    `/demo/threads/${encodeURIComponent(threadId)}/thread.json`,
-  );
-  if (!response.ok) {
-    throw new Error(`Failed to load demo thread ${threadId}`);
+  const cached = demoThreadRequests.get(threadId);
+  if (cached) {
+    return cached;
   }
-  const thread = (await response.json()) as AgentThread;
-  return {
-    ...thread,
-    thread_id: threadId,
-    updated_at: thread.updated_at ?? thread.created_at,
-  };
+
+  const request = globalThis
+    .fetch(`/demo/threads/${encodeURIComponent(threadId)}/thread.json`)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to load demo thread ${threadId}`);
+      }
+      const thread = (await response.json()) as AgentThread;
+      return {
+        ...thread,
+        thread_id: threadId,
+        updated_at: thread.updated_at ?? thread.created_at,
+      };
+    })
+    .catch((error: unknown) => {
+      demoThreadRequests.delete(threadId);
+      throw error;
+    });
+  demoThreadRequests.set(threadId, request);
+  return request;
 }
 
 export function staticDemoThreadState(

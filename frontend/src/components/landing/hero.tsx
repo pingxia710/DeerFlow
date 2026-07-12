@@ -5,10 +5,11 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
-import Galaxy from "@/components/ui/galaxy";
 import { WordRotate } from "@/components/ui/word-rotate";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+import { HeroGalaxy } from "./hero-galaxy";
 
 export function Hero({ className }: { className?: string }) {
   return (
@@ -19,14 +20,7 @@ export function Hero({ className }: { className?: string }) {
       )}
     >
       <div className="absolute inset-0 z-0 bg-black/40">
-        <Galaxy
-          mouseRepulsion={false}
-          starSpeed={0.2}
-          density={0.6}
-          glowIntensity={0.35}
-          twinkleIntensity={0.3}
-          speed={0.5}
-        />
+        <HeroGalaxy />
       </div>
       <FlickeringGrid
         className="absolute inset-0 z-0 translate-y-8 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"

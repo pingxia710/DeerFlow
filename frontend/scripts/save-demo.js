@@ -3,6 +3,8 @@ import fs from "fs";
 import path from "path";
 import { env } from "process";
 
+import { staticDemoIndexEntry } from "./static-demo-index.js";
+
 export async function main() {
   const url = new URL(process.argv[2]);
   const threadId = url.pathname.split("/").pop();
@@ -45,7 +47,31 @@ export async function main() {
   );
   copyFolder("user-data/outputs", rootPath, backendRootPath);
   copyFolder("user-data/uploads", rootPath, backendRootPath);
+  writeThreadIndex(path.resolve(process.cwd(), "public/demo/threads"));
   console.info(`Saved demo "${title}" to ${rootPath}`);
+}
+
+function writeThreadIndex(threadsRootPath) {
+  const summaries = fs
+    .readdirSync(threadsRootPath, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const threadPath = path.resolve(
+        threadsRootPath,
+        entry.name,
+        "thread.json",
+      );
+      if (!fs.existsSync(threadPath)) {
+        return null;
+      }
+      const thread = JSON.parse(fs.readFileSync(threadPath, "utf8"));
+      return staticDemoIndexEntry(entry.name, thread);
+    })
+    .filter(Boolean);
+  fs.writeFileSync(
+    path.resolve(threadsRootPath, "index.json"),
+    JSON.stringify(summaries, null, 2),
+  );
 }
 
 function copyFolder(relPath, rootPath, backendRootPath) {

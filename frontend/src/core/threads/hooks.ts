@@ -1066,7 +1066,10 @@ export async function readRunMessagesPageResponse(
   }
   try {
     return (await response.json()) as RunMessagesPageResponse;
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     throw new Error(response.statusText || fallback);
   }
 }

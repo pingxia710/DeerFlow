@@ -1557,6 +1557,19 @@ test("readRunMessagesPageResponse rejects html without surfacing a JSON SyntaxEr
   ).rejects.toThrow("Failed to load thread history.");
 });
 
+test("readRunMessagesPageResponse preserves an aborted body read", async () => {
+  const abortError = new DOMException(
+    "The operation was aborted.",
+    "AbortError",
+  );
+  const response = new Response("{}");
+  response.json = async () => {
+    throw abortError;
+  };
+
+  await expect(readRunMessagesPageResponse(response)).rejects.toBe(abortError);
+});
+
 test("readRunMessagesPageResponse uses backend JSON error detail", async () => {
   await expect(
     readRunMessagesPageResponse(

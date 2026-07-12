@@ -364,6 +364,45 @@ def test_task_event_writer_recursively_sanitizes_event_payload():
     assert "[redacted]" in rendered
 
 
+def test_task_event_writer_preserves_secret_shaped_routing_identity():
+    events = []
+    raw_event = {
+        "type": "task_completed",
+        "event_type": "task_completed",
+        "thread_id": "task-debug-1783844480",
+        "run_id": "run-sk-1234567890abcdef",
+        "task_id": "task-sk-1234567890abcdef",
+        "status": "completed",
+        "description": "api_key=sk-1234567890abcdef",
+    }
+
+    task_tool_module._emit_task_event(events.append, None, raw_event)
+
+    stored = events[0]
+    assert stored["thread_id"] == raw_event["thread_id"]
+    assert stored["run_id"] == raw_event["run_id"]
+    assert stored["task_id"] == raw_event["task_id"]
+    assert stored["description"] == "[redacted]"
+
+
+def test_task_event_writer_attaches_runtime_round_identity():
+    events = []
+    runtime = SimpleNamespace(context={"round_context": {"round_id": "round-1"}})
+
+    task_tool_module._emit_task_event(
+        events.append,
+        runtime,
+        {
+            "type": "task_started",
+            "task_id": "task-1",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+        },
+    )
+
+    assert events[0]["round_id"] == "round-1"
+
+
 def test_task_tool_returns_structured_worker_text_without_interpreting_next_receiver(monkeypatch):
     runtime = _make_runtime()
     events = []

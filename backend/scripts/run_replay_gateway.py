@@ -31,11 +31,19 @@ def main() -> int:
     parser.add_argument("--cors", default="http://localhost:3000")
     args = parser.parse_args()
 
-    from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, prepare_hermetic_extras
+    from _replay_fixture import (
+        REPLAY_MODEL_BLOCK,
+        TASK_SCENARIO_MODEL_BLOCK,
+        build_config_yaml,
+        prepare_hermetic_extras,
+    )
 
     home = Path(tempfile.mkdtemp(prefix="replay-gw-"))
     cfg = home / "config.yaml"
-    cfg.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
+    cfg.write_text(
+        build_config_yaml(model_block=f"{REPLAY_MODEL_BLOCK}\n{TASK_SCENARIO_MODEL_BLOCK}", home=home),
+        encoding="utf-8",
+    )
 
     # Override (not setdefault): the replay gateway must be hermetic, so an outer
     # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.

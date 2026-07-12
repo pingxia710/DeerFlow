@@ -385,6 +385,114 @@ class ReplayChatModel(BaseChatModel):
         return self
 
 
+class TaskScenarioChatModel(BaseChatModel):
+    """Small deterministic model for the real Gateway task/reload contract."""
+
+    _run_callers: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def __init__(self, **kwargs: Any) -> None:
+        callbacks = kwargs.pop("callbacks", None)
+        super().__init__(callbacks=callbacks)
+        self.callbacks = [*(self.callbacks or []), _ReplayCallerCapture(self._run_callers)]
+
+    @property
+    def _llm_type(self) -> str:
+        return "deerflow-task-scenario"
+
+    def _caller_from_run_manager(self, run_manager: CallbackManagerForLLMRun | None) -> str:
+        if run_manager is None:
+            if len(self._run_callers) == 1:
+                return self._run_callers.pop(next(iter(self._run_callers)))
+            return _DEFAULT_CALLER
+        run_id = str(getattr(run_manager, "run_id", ""))
+        caller = self._run_callers.pop(run_id, None)
+        if caller:
+            return caller
+        return caller_identity(
+            name=getattr(run_manager, "run_name", None) or getattr(run_manager, "name", None),
+            tags=getattr(run_manager, "tags", None),
+        )
+
+    @staticmethod
+    def _has_tool_result(messages: list[BaseMessage], tool_name: str) -> bool:
+        return any(message.type == "tool" and getattr(message, "name", None) == tool_name for message in messages)
+
+    @staticmethod
+    def _contains_task_prompt(messages: list[BaseMessage]) -> bool:
+        return any("E2E_TASK_SCENARIO" in _content_to_text(message.content) for message in messages)
+
+    def _match(self, messages: list[BaseMessage], run_manager: CallbackManagerForLLMRun | None = None) -> AIMessage:
+        caller = self._caller_from_run_manager(run_manager)
+        if caller.startswith("subagent:"):
+            if self._has_tool_result(messages, "write_file"):
+                return AIMessage(content="E2E subagent evidence written.")
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "task-scenario-write-evidence",
+                        "name": "write_file",
+                        "args": {
+                            "description": "Write deterministic task evidence",
+                            "path": "/mnt/user-data/outputs/task-scenario-evidence.txt",
+                            "content": "deterministic task evidence\n",
+                        },
+                    }
+                ],
+            )
+        if caller == _DEFAULT_CALLER and self._has_tool_result(messages, "task"):
+            return AIMessage(content="E2E task scenario final answer.")
+        if caller == _DEFAULT_CALLER and self._contains_task_prompt(messages):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "task-scenario-parent-call",
+                        "name": "task",
+                        "args": {
+                            "description": "E2E task writes runtime evidence",
+                            "prompt": "E2E_TASK_SCENARIO: write deterministic runtime evidence.",
+                            "subagent_type": "general-purpose",
+                        },
+                    }
+                ],
+            )
+        return AIMessage(content="Task scenario metadata.")
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=self._match(messages, run_manager))])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        turn = self._match(messages, run_manager)
+        text = turn.content if isinstance(turn.content, str) else ""
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=turn.content,
+                tool_calls=turn.tool_calls,
+                additional_kwargs=turn.additional_kwargs,
+                id=turn.id,
+            )
+        )
+        if run_manager is not None and text:
+            run_manager.on_llm_new_token(text, chunk=chunk)
+        yield chunk
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Runnable:  # type: ignore[override]
+        return self
+
+
 class _ReplayCallerCapture(BaseCallbackHandler):
     def __init__(self, run_callers: dict[str, str]) -> None:
         self._run_callers = run_callers
@@ -406,6 +514,7 @@ class _ReplayCallerCapture(BaseCallbackHandler):
 # Re-export so the recorder shares the exact hashing logic.
 __all__ = [
     "ReplayChatModel",
+    "TaskScenarioChatModel",
     "caller_identity",
     "hash_input_key",
     "hash_messages",

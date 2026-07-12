@@ -683,6 +683,27 @@ export function mergeMessages(
     }
   }
 
+  const persistedMetadataByLiveBaseIdentity = new Map<
+    string,
+    Record<string, unknown>
+  >();
+  if (allowUnscopedLiveOverlap) {
+    for (const message of historyMessages.slice(cutoff)) {
+      const baseIdentity = baseMessageIdentity(message);
+      if (
+        !baseIdentity ||
+        !liveBaseMessageIds.has(baseIdentity) ||
+        !message.additional_kwargs
+      ) {
+        continue;
+      }
+      persistedMetadataByLiveBaseIdentity.set(
+        baseIdentity,
+        message.additional_kwargs,
+      );
+    }
+  }
+
   const consumedLiveMessages = new Set<Message>();
   const historyWithRunScopedLiveReplacements = historyMessages
     .slice(0, cutoff)
@@ -731,19 +752,64 @@ export function mergeMessages(
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
+    const additionalKwargs = message.additional_kwargs ?? {};
+    const persistedMetadata = persistedMetadataByLiveBaseIdentity.get(
+      baseMessageIdentity(message) ?? "",
+    );
+    const hasRunIdentity =
+      typeof additionalKwargs.deerflow_run_id === "string" ||
+      typeof additionalKwargs.run_id === "string";
+    const hasRoundIdentity =
+      typeof additionalKwargs.deerflow_round_id === "string" ||
+      typeof additionalKwargs.round_id === "string" ||
+      typeof additionalKwargs.roundId === "string";
+    const persistedRunId =
+      typeof persistedMetadata?.deerflow_run_id === "string"
+        ? persistedMetadata.deerflow_run_id
+        : typeof persistedMetadata?.run_id === "string"
+          ? persistedMetadata.run_id
+          : undefined;
+    const persistedRoundId =
+      typeof persistedMetadata?.deerflow_round_id === "string"
+        ? persistedMetadata.deerflow_round_id
+        : typeof persistedMetadata?.round_id === "string"
+          ? persistedMetadata.round_id
+          : typeof persistedMetadata?.roundId === "string"
+            ? persistedMetadata.roundId
+            : undefined;
+    const missingPersistedRunIdentity =
+      !hasRunIdentity && persistedRunId !== undefined;
+    const missingPersistedRoundIdentity =
+      !hasRoundIdentity && persistedRoundId !== undefined;
     const missingTurnDuration =
       identity &&
       savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined;
+      additionalKwargs.turn_duration === undefined;
     const missingHistoryCreatedAt =
       identity &&
       savedHistoryCreatedAt.has(identity) &&
-      message.additional_kwargs?.[HISTORY_CREATED_AT_KEY] === undefined;
-    if (identity && (missingTurnDuration || missingHistoryCreatedAt)) {
+      additionalKwargs[HISTORY_CREATED_AT_KEY] === undefined;
+    const missingPersistedHistoryCreatedAt =
+      additionalKwargs[HISTORY_CREATED_AT_KEY] === undefined &&
+      persistedMetadata?.[HISTORY_CREATED_AT_KEY] !== undefined;
+    if (
+      missingPersistedRunIdentity ||
+      missingPersistedRoundIdentity ||
+      (identity &&
+        (missingTurnDuration ||
+          missingHistoryCreatedAt ||
+          missingPersistedHistoryCreatedAt))
+    ) {
       return {
         ...message,
         additional_kwargs: {
-          ...message.additional_kwargs,
+          ...additionalKwargs,
+          ...(missingPersistedRunIdentity
+            ? { deerflow_run_id: persistedRunId }
+            : {}),
+          ...(missingPersistedRoundIdentity
+            ? { deerflow_round_id: persistedRoundId }
+            : {}),
           ...(missingTurnDuration
             ? { turn_duration: savedTurnDurations.get(identity) }
             : {}),
@@ -751,7 +817,12 @@ export function mergeMessages(
             ? {
                 [HISTORY_CREATED_AT_KEY]: savedHistoryCreatedAt.get(identity),
               }
-            : {}),
+            : missingPersistedHistoryCreatedAt
+              ? {
+                  [HISTORY_CREATED_AT_KEY]:
+                    persistedMetadata[HISTORY_CREATED_AT_KEY],
+                }
+              : {}),
         },
       } as Message;
     }

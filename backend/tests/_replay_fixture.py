@@ -35,6 +35,13 @@ REPLAY_MODEL_BLOCK = """\
     model: replay
     supports_thinking: true"""
 
+TASK_SCENARIO_MODEL_BLOCK = """\
+  - name: task-scenario-model
+    display_name: Task Scenario Model
+    use: replay_provider:TaskScenarioChatModel
+    model: task-scenario
+    supports_thinking: true"""
+
 
 def real_model_block(model: str) -> str:
     return f"""\

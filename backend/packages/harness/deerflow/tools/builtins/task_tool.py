@@ -49,6 +49,19 @@ _SAFE_ACTION_RESULT_EVENT_KEYS = {
     "conflicts",
     "open_questions",
 }
+_TASK_EVENT_IDENTITY_KEYS = {
+    "type",
+    "event_type",
+    "schema_version",
+    "thread_id",
+    "run_id",
+    "round_id",
+    "task_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+}
 _SECRET_LIKE_RE = re.compile(
     r"(?i)(sk-[a-z0-9_-]{12,}|ak(?:ia|as)[a-z0-9]{12,}|"
     r"(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*['\"]?[^'\"\s]+)"
@@ -228,7 +241,18 @@ def _sanitize_task_event_value(value: Any) -> Any:
 
 def _sanitize_task_event(event: dict[str, Any]) -> dict[str, Any]:
     sanitized = _sanitize_task_event_value(event)
-    return sanitized if isinstance(sanitized, dict) else {}
+    if not isinstance(sanitized, dict):
+        return {}
+    # These fields route the event to its durable run/round projection. Redacting
+    # them can make an otherwise valid task event fail the journal's identity
+    # check (for example a thread ID containing an incidental ``sk-`` substring).
+    for key in _TASK_EVENT_IDENTITY_KEYS:
+        if key not in event:
+            continue
+        value = event.get(key)
+        if value is None or isinstance(value, bool | int | float | str):
+            sanitized[key] = value
+    return sanitized
 
 
 def _compact_action_result_event(action_result: Any) -> dict[str, Any]:
@@ -377,7 +401,26 @@ def _find_task_event_recorder(runtime: Any) -> Any | None:
     return None
 
 
+def _runtime_round_id(runtime: Any) -> str | None:
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    if not isinstance(context, dict):
+        return None
+    round_id = context.get("round_id")
+    if isinstance(round_id, str) and round_id:
+        return round_id
+    round_context = context.get("round_context")
+    if isinstance(round_context, dict):
+        round_id = round_context.get("round_id")
+        if isinstance(round_id, str) and round_id:
+            return round_id
+    return None
+
+
 def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
+    if "round_id" not in event:
+        round_id = _runtime_round_id(runtime)
+        if round_id:
+            event = {**event, "round_id": round_id}
     event = _sanitize_task_event(event)
     recorder = _find_task_event_recorder(runtime)
     if recorder is not None:

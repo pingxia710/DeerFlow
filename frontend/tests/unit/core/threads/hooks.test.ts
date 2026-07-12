@@ -660,6 +660,57 @@ test("getThreadMessagesWithLiveSnapshot ignores snapshots from another thread", 
   ).toEqual(currentMessages);
 });
 
+test("mergeMessages keeps persisted task ownership on an unscoped live replacement", async () => {
+  const { mergeMessages } = await import("@/core/threads/hooks");
+  const persistedHuman = {
+    id: "human-1",
+    type: "human",
+    content: "Persisted prompt",
+    additional_kwargs: {
+      deerflow_run_id: "run-1",
+      history_created_at: "2026-07-12T00:00:00.000Z",
+    },
+  } as Message;
+  const persistedTaskCall = {
+    id: "task-call",
+    type: "ai",
+    content: "",
+    tool_calls: [
+      {
+        id: "task-1",
+        name: "task",
+        args: { description: "Persisted task" },
+      },
+    ],
+    additional_kwargs: {
+      deerflow_run_id: "run-1",
+      deerflow_round_id: "round-1",
+      history_created_at: "2026-07-12T00:00:00.000Z",
+    },
+  } as Message;
+  const liveTaskCall = {
+    ...persistedTaskCall,
+    additional_kwargs: { turn_duration: 5 },
+  } as Message;
+  const liveHuman = {
+    ...persistedHuman,
+    additional_kwargs: {},
+  } as Message;
+
+  const messages = mergeMessages(
+    [persistedHuman, persistedTaskCall],
+    [liveHuman, liveTaskCall],
+    [],
+  );
+
+  expect(messages[1]?.additional_kwargs).toMatchObject({
+    deerflow_run_id: "run-1",
+    deerflow_round_id: "round-1",
+    history_created_at: "2026-07-12T00:00:00.000Z",
+    turn_duration: 5,
+  });
+});
+
 test("getThreadMessagesWithLiveSnapshot drops partial live state after authoritative terminal settlement", async () => {
   const {
     buildVisibleHistoryMessages,

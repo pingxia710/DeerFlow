@@ -86,6 +86,24 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["app_config"] is app_config
 
 
+def test_install_runtime_context_exposes_run_journal_to_tools():
+    journal = object()
+    config = {"context": {"thread_id": "caller-thread"}}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+            "__run_journal": journal,
+            "round_context": {"round_id": "round-1"},
+        },
+    )
+
+    assert config["context"]["__run_journal"] is journal
+    assert config["context"]["round_context"] == {"round_id": "round-1"}
+
+
 @pytest.mark.anyio
 async def test_sync_checkpoint_title_fills_empty_display_name():
     checkpointer = SimpleNamespace(

@@ -130,6 +130,10 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         existing_context.setdefault("run_id", runtime_context["run_id"])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
+        if "__run_journal" in runtime_context:
+            existing_context["__run_journal"] = runtime_context["__run_journal"]
+        if "round_context" in runtime_context:
+            existing_context["round_context"] = runtime_context["round_context"]
         return
 
     config["context"] = dict(runtime_context)

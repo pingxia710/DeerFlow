@@ -104,6 +104,11 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission;
   upload responses with `success: false` or any `skipped_files` must abort the
   message submit instead of silently dropping attachments.
+- Visible conversation turns are presentation-only: prefer persisted
+  `deerflow_run_id`/`run_id`, then fall back to human-message boundaries. Do not
+  use Command Room round state or mutate history to construct them.
+- When a reader has left the live edge, stream updates and prepended history must
+  preserve that reader's visible anchor until they explicitly return to the reply.
 - Thread hooks must only render live stream state/history when the source thread
   id matches the visible thread id; switching chats must not display stale
   messages from the previous stream target.

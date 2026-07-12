@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-07-12 — Stable conversation-turn documentation
+
+- Preserved the implemented single-conversation turn and reader-controlled scroll contract as a focused design record.
+- Synced the user-facing behavior into both READMEs and the durable frontend architecture guidance.
+- No runtime code, model behavior, persistence contract, or deployment behavior changed.
+- Validation: `git diff --check` passed; `make skillopt-probe` kept baseline and candidate hard/soft scores at `1.0` and passed all three behavior decisions, with no automatic rule edits.
+
 ## 2026-07-12 — Single-node reliability closure
 
 - Closed the one-Gateway/one-node reliability pass: terminal task state is stamped at its source, runtime snapshots are read-only and bounded, and frontend task-card/model-selection regressions are covered.

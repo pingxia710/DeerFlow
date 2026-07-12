@@ -615,6 +615,8 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+The Web conversation keeps each user request together with its AI work, preserves your reading position while a reply streams or older history loads, and shows a concise completion time whenever it is available.
+
 ### Skills & Tools
 
 Skills are what make DeerFlow do *almost anything*.

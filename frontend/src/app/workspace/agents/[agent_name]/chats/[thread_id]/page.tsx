@@ -127,7 +127,7 @@ export default function AgentChatPage() {
             mode: "ultra" as const,
             model_name:
               settings.context.model_name ?? COMMAND_ROOM_DEFAULT_MODEL,
-            reasoning_effort: settings.context.reasoning_effort ?? "max",
+            reasoning_effort: settings.context.reasoning_effort,
           }
         : {}),
     }),

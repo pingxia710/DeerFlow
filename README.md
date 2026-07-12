@@ -175,6 +175,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
        model: gpt-5.6
        supports_thinking: true
        supports_reasoning_effort: true
+       reasoning_efforts: [medium, high, xhigh, max]
+       default_reasoning_effort: max
 
      - name: gpt-5.4
        provider: Codex CLI
@@ -191,6 +193,11 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
        max_tokens: 4096
        supports_thinking: true
    ```
+
+   `reasoning_efforts` is the provider-valid picker contract and
+   `default_reasoning_effort` is used for missing or stale requests. `ultra`
+   remains a DeerFlow Command Room mode; it is not sent as a provider reasoning
+   effort.
 
    - Codex CLI reads `~/.codex/auth.json`
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`

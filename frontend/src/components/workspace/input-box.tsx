@@ -66,6 +66,10 @@ import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import {
+  getModelReasoningEfforts,
+  resolveModelReasoningEffort,
+} from "@/core/models/reasoning-efforts";
 import type { Model } from "@/core/models/types";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
@@ -104,7 +108,7 @@ import { Tooltip } from "./tooltip";
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 type VisibleReasoningEffort = Extract<
   ReasoningEffort,
-  "medium" | "high" | "xhigh" | "max" | "ultra"
+  "medium" | "high" | "xhigh" | "max"
 >;
 
 const MAX_SKILL_SUGGESTIONS = 6;
@@ -318,8 +322,16 @@ export function InputBox({
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
+    const nextReasoningEffort = resolveModelReasoningEffort(
+      fallbackModel,
+      context.reasoning_effort,
+    );
 
-    if (context.model_name === nextModelName && context.mode === nextMode) {
+    if (
+      context.model_name === nextModelName &&
+      context.mode === nextMode &&
+      context.reasoning_effort === nextReasoningEffort
+    ) {
       return;
     }
 
@@ -327,6 +339,7 @@ export function InputBox({
       ...context,
       model_name: nextModelName,
       mode: nextMode,
+      reasoning_effort: nextReasoningEffort,
     });
   }, [context, models, onContextChange]);
 
@@ -348,14 +361,13 @@ export function InputBox({
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
   );
-  const visibleReasoningEffort: VisibleReasoningEffort =
-    context.reasoning_effort === "medium" ||
-    context.reasoning_effort === "high" ||
-    context.reasoning_effort === "xhigh" ||
-    context.reasoning_effort === "max" ||
-    context.reasoning_effort === "ultra"
-      ? context.reasoning_effort
-      : "xhigh";
+  const modelReasoningEfforts = useMemo(
+    () => getModelReasoningEfforts(selectedModel),
+    [selectedModel],
+  );
+  const visibleReasoningEffort =
+    resolveModelReasoningEffort(selectedModel, context.reasoning_effort) ??
+    "xhigh";
   const compactModelLabel = getCompactModelLabel(
     selectedModel?.display_name,
     selectedModel?.model ?? selectedModel?.name,
@@ -417,7 +429,10 @@ export function InputBox({
         ...context,
         model_name,
         mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        reasoning_effort: resolveModelReasoningEffort(
+          model,
+          context.reasoning_effort,
+        ),
       });
     },
     [onContextChange, context, models],
@@ -430,11 +445,14 @@ export function InputBox({
         mode: getResolvedMode(mode, supportThinking),
         reasoning_effort:
           mode === "pro" || mode === "thinking" || mode === "ultra"
-            ? "xhigh"
+            ? resolveModelReasoningEffort(
+                selectedModel,
+                context.reasoning_effort,
+              )
             : undefined,
       });
     },
-    [onContextChange, context, supportThinking],
+    [onContextChange, context, selectedModel, supportThinking],
   );
 
   const handleReasoningEffortSelect = useCallback(
@@ -469,7 +487,7 @@ export function InputBox({
 
   const reasoningSummaryValue = context.reasoning_summary ?? "detailed";
   const textVerbosityValue = context.text_verbosity ?? "medium";
-  const reasoningEffortOptions: {
+  const allReasoningEffortOptions: {
     value: VisibleReasoningEffort;
     label: string;
     compactLabel: string;
@@ -499,13 +517,10 @@ export function InputBox({
       compactLabel: t.inputBox.reasoningEffortMaxShort,
       description: t.inputBox.reasoningEffortMaxDescription,
     },
-    {
-      value: "ultra",
-      label: t.inputBox.reasoningEffortUltra,
-      compactLabel: t.inputBox.reasoningEffortUltraShort,
-      description: t.inputBox.reasoningEffortUltraDescription,
-    },
   ];
+  const reasoningEffortOptions = allReasoningEffortOptions.filter((option) =>
+    modelReasoningEfforts.includes(option.value),
+  );
   const compactReasoningEffortLabel =
     reasoningEffortOptions.find(
       (option) => option.value === visibleReasoningEffort,

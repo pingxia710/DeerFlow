@@ -26,7 +26,14 @@ def _make_app_config(models: list[ModelConfig], loop_detection: LoopDetectionCon
     )
 
 
-def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
+def _make_model(
+    name: str,
+    *,
+    supports_thinking: bool,
+    supports_reasoning_effort: bool = False,
+    reasoning_efforts: list[str] | None = None,
+    default_reasoning_effort: str | None = None,
+) -> ModelConfig:
     return ModelConfig(
         name=name,
         display_name=name,
@@ -34,6 +41,9 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
         use="langchain_openai:ChatOpenAI",
         model=name,
         supports_thinking=supports_thinking,
+        supports_reasoning_effort=supports_reasoning_effort,
+        reasoning_efforts=reasoning_efforts or [],
+        default_reasoning_effort=default_reasoning_effort,
         supports_vision=False,
     )
 
@@ -239,6 +249,48 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert result["model"] is not None
 
 
+def test_make_lead_agent_records_the_configured_default_reasoning_effort(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model(
+                "terra",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["medium", "high", "xhigh", "max"],
+                default_reasoning_effort="max",
+            )
+        ]
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_chat_model",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config = {
+        "configurable": {
+            "model_name": "terra",
+            "thinking_enabled": True,
+            "reasoning_effort": "ultra",
+            "is_plan_mode": False,
+            "subagent_enabled": False,
+        }
+    }
+
+    lead_agent_module.make_lead_agent(config)
+
+    assert captured["reasoning_effort"] == "max"
+    assert config["metadata"]["reasoning_effort"] == "max"
+
+
 def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     app_config = _make_app_config(
         [
@@ -282,7 +334,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert captured == {
         "name": "context-model",
         "thinking_enabled": False,
-        "reasoning_effort": "high",
+        "reasoning_effort": None,
         "app_config": app_config,
     }
     get_available_tools.assert_called_once_with(

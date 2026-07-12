@@ -117,6 +117,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "description",
             "supports_thinking",
             "supports_reasoning_effort",
+            "reasoning_efforts",
+            "default_reasoning_effort",
             "subagents_inherit",
             "when_thinking_enabled",
             "when_thinking_disabled",
@@ -173,14 +175,21 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided.
+        from deerflow.models.reasoning_effort import resolve_reasoning_effort
+
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
-            model_settings_from_config["reasoning_effort"] = explicit_effort
-        elif "reasoning_effort" not in model_settings_from_config:
-            model_settings_from_config["reasoning_effort"] = "medium"
+        else:
+            effective_effort = resolve_reasoning_effort(
+                model_config,
+                explicit_effort,
+                thinking_enabled=True,
+            )
+            if effective_effort is not None:
+                model_settings_from_config["reasoning_effort"] = effective_effort
+            elif "reasoning_effort" not in model_settings_from_config:
+                model_settings_from_config["reasoning_effort"] = "medium"
         if explicit_reasoning_summary in ("auto", "concise", "detailed"):
             model_settings_from_config["reasoning_summary"] = explicit_reasoning_summary
         if explicit_text_verbosity in ("low", "medium", "high"):

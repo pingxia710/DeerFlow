@@ -116,6 +116,8 @@ def _model_facts(app_config: AppConfig) -> list[dict[str, Any]]:
         "output_version",
         "supports_thinking",
         "supports_reasoning_effort",
+        "reasoning_efforts",
+        "default_reasoning_effort",
         "supports_vision",
         "stream_chunk_timeout",
         "subagents_inherit",

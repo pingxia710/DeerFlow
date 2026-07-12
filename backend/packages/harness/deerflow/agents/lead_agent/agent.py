@@ -485,6 +485,7 @@ def make_lead_agent(config: RunnableConfig):
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
+    from deerflow.models.reasoning_effort import resolve_reasoning_effort
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools
@@ -522,6 +523,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
+    reasoning_effort = resolve_reasoning_effort(
+        model_config,
+        reasoning_effort,
+        thinking_enabled=thinking_enabled,
+    )
 
     logger.info(
         "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, reasoning_summary: %s, text_verbosity: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
@@ -581,7 +587,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+            model=create_chat_model(
+                name=model_name,
+                thinking_enabled=thinking_enabled,
+                reasoning_effort=reasoning_effort,
+                app_config=resolved_app_config,
+                attach_tracing=False,
+            ),
             tools=final_tools,
             middleware=build_middlewares(
                 config,

@@ -29,6 +29,8 @@ def _make_model(
     use: str = "langchain_openai:ChatOpenAI",
     supports_thinking: bool = False,
     supports_reasoning_effort: bool = False,
+    reasoning_efforts: list[str] | None = None,
+    default_reasoning_effort: str | None = None,
     when_thinking_enabled: dict | None = None,
     when_thinking_disabled: dict | None = None,
     thinking: dict | None = None,
@@ -43,6 +45,8 @@ def _make_model(
         max_tokens=max_tokens,
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
+        reasoning_efforts=reasoning_efforts or [],
+        default_reasoning_effort=default_reasoning_effort,
         when_thinking_enabled=when_thinking_enabled,
         when_thinking_disabled=when_thinking_disabled,
         thinking=thinking,
@@ -768,7 +772,7 @@ def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
 
 
-@pytest.mark.parametrize("reasoning_effort", ["minimal", "high", "xhigh", "max", "ultra"])
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "high", "xhigh", "max"])
 def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch, reasoning_effort):
     cfg = _make_app_config(
         [
@@ -791,6 +795,28 @@ def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch, reasoni
     )
 
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == reasoning_effort
+
+
+def test_codex_factory_normalizes_stale_effort_to_configured_max(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "terra",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["medium", "high", "xhigh", "max"],
+                default_reasoning_effort="max",
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="terra", thinking_enabled=True, reasoning_effort="ultra")
+
+    assert FakeChatModel.captured_kwargs["reasoning_effort"] == "max"
 
 
 def test_codex_provider_preserves_response_controls(monkeypatch):

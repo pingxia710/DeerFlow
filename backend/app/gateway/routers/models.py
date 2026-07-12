@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ReasoningEffort
 
 router = APIRouter(prefix="/api", tags=["models"])
 
@@ -17,6 +18,8 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+    reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list, description="Selectable reasoning efforts")
+    default_reasoning_effort: ReasoningEffort | None = Field(default=None, description="Default reasoning effort")
 
 
 class TokenUsageResponse(BaseModel):
@@ -91,6 +94,8 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
             description=model.description,
             supports_thinking=model.supports_thinking,
             supports_reasoning_effort=model.supports_reasoning_effort,
+            reasoning_efforts=model.reasoning_efforts,
+            default_reasoning_effort=model.default_reasoning_effort,
         )
         for model in config.models
     ]
@@ -140,4 +145,6 @@ async def get_model(model_name: str, config: AppConfig = Depends(get_config)) ->
         description=model.description,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
+        reasoning_efforts=model.reasoning_efforts,
+        default_reasoning_effort=model.default_reasoning_effort,
     )

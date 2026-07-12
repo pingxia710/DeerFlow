@@ -45,6 +45,9 @@ def _app_config(tmp_path: Path) -> AppConfig:
                 use="langchain_openai.ChatOpenAI",
                 model="gpt-4.1",
                 supports_vision=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["medium", "high", "xhigh"],
+                default_reasoning_effort="xhigh",
                 api_key="sk-live-secret",
             )
         ],
@@ -126,6 +129,8 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
         assert secret not in dumped
 
     assert snapshot["models"][0]["extra"]["api_key"] == "***"
+    assert snapshot["models"][0]["reasoning_efforts"] == ["medium", "high", "xhigh"]
+    assert snapshot["models"][0]["default_reasoning_effort"] == "xhigh"
     assert snapshot["mcp_servers"][0]["env"] == {"GITHUB_TOKEN": "***"}
     assert snapshot["mcp_servers"][0]["headers"] == {"Authorization": "***"}
     assert snapshot["mcp_servers"][0]["oauth"]["client_secret"] == "***"

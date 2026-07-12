@@ -8,8 +8,7 @@ export type ReasoningEffort =
   | "medium"
   | "high"
   | "xhigh"
-  | "max"
-  | "ultra";
+  | "max";
 
 export type ReasoningSummary = "auto" | "concise" | "detailed";
 

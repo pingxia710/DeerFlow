@@ -264,6 +264,7 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
 def test_task_tool_emits_running_and_completed_events(monkeypatch):
     config = _make_subagent_config()
     runtime = _make_runtime()
+    runtime.config["metadata"]["reasoning_effort"] = "max"
     events = []
     captured = {}
     handoff_records = []
@@ -318,6 +319,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
+    assert captured["executor_kwargs"]["parent_reasoning_effort"] == "max"
     assert captured["executor_kwargs"]["config"].max_turns == config.max_turns
     # Skills are no longer appended to system_prompt; they are loaded per-session
     # by SubagentExecutor and injected as conversation items (Codex pattern).

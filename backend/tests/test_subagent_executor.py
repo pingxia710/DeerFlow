@@ -372,6 +372,7 @@ class TestAgentConstruction:
             tools=[],
             app_config=app_config,
             parent_model="parent-model",
+            parent_reasoning_effort="max",
         )
 
         result = executor._create_agent()
@@ -379,7 +380,8 @@ class TestAgentConstruction:
         assert result is agent
         assert captured["model"] == {
             "name": "parent-model",
-            "thinking_enabled": False,
+            "thinking_enabled": True,
+            "reasoning_effort": "max",
             "app_config": app_config,
             # attach_tracing=False pairs with graph-root tracing callbacks
             # injected in _aexecute (see TestSubagentTracingWiring). Without

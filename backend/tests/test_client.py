@@ -36,6 +36,8 @@ def mock_app_config():
     model.model = "test-model"
     model.supports_thinking = False
     model.supports_reasoning_effort = False
+    model.reasoning_efforts = []
+    model.default_reasoning_effort = None
     model.model_dump.return_value = {"name": "test-model", "use": "langchain_openai:ChatOpenAI"}
 
     config = MagicMock()
@@ -133,6 +135,8 @@ class TestConfigQueries:
         assert "provider" in result["models"][0]
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
+        assert result["models"][0]["reasoning_efforts"] == []
+        assert result["models"][0]["default_reasoning_effort"] is None
 
     def test_list_skills(self, client):
         skill = MagicMock()
@@ -1112,6 +1116,8 @@ class TestGetModel:
         model_cfg.description = "A test model"
         model_cfg.supports_thinking = True
         model_cfg.supports_reasoning_effort = True
+        model_cfg.reasoning_efforts = ["medium", "high", "xhigh", "max"]
+        model_cfg.default_reasoning_effort = "max"
         client._app_config.get_model_config.return_value = model_cfg
 
         result = client.get_model("test-model")
@@ -1123,6 +1129,8 @@ class TestGetModel:
             "description": "A test model",
             "supports_thinking": True,
             "supports_reasoning_effort": True,
+            "reasoning_efforts": ["medium", "high", "xhigh", "max"],
+            "default_reasoning_effort": "max",
         }
 
     def test_not_found(self, client):
@@ -1966,6 +1974,8 @@ class TestScenarioConfigManagement:
         model_cfg.description = None
         model_cfg.supports_thinking = False
         model_cfg.supports_reasoning_effort = False
+        model_cfg.reasoning_efforts = []
+        model_cfg.default_reasoning_effort = None
         client._app_config.get_model_config.return_value = model_cfg
         detail = client.get_model(model_name)
         assert detail["name"] == model_name
@@ -2423,6 +2433,8 @@ class TestGatewayConformance:
         model.description = "A test model"
         model.supports_thinking = False
         model.supports_reasoning_effort = False
+        model.reasoning_efforts = []
+        model.default_reasoning_effort = None
         mock_app_config.models = [model]
         mock_app_config.token_usage.enabled = True
 
@@ -2434,6 +2446,8 @@ class TestGatewayConformance:
         assert len(parsed.models) == 1
         assert parsed.models[0].name == "test-model"
         assert parsed.models[0].model == "gpt-test"
+        assert parsed.models[0].reasoning_efforts == []
+        assert parsed.models[0].default_reasoning_effort is None
         assert parsed.token_usage.enabled is True
 
     def test_get_model(self, mock_app_config):
@@ -2443,6 +2457,9 @@ class TestGatewayConformance:
         model.display_name = "Test Model"
         model.description = "A test model"
         model.supports_thinking = True
+        model.supports_reasoning_effort = True
+        model.reasoning_efforts = ["medium", "high", "xhigh", "max"]
+        model.default_reasoning_effort = "max"
         mock_app_config.models = [model]
         mock_app_config.get_model_config.return_value = model
 
@@ -2454,6 +2471,8 @@ class TestGatewayConformance:
         parsed = ModelResponse(**result)
         assert parsed.name == "test-model"
         assert parsed.model == "gpt-test"
+        assert parsed.reasoning_efforts == ["medium", "high", "xhigh", "max"]
+        assert parsed.default_reasoning_effort == "max"
 
     def test_list_skills(self, client):
         skill = MagicMock()

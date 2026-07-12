@@ -241,7 +241,7 @@ class CodexChatModel(BaseChatModel):
         """Call the Codex Responses API and return the completed response."""
         self._refresh_codex_auth()
         instructions, input_items = self._convert_messages(messages)
-        reasoning_effort = "xhigh" if self.reasoning_effort in {"max", "ultra"} else self.reasoning_effort
+        reasoning_effort = "xhigh" if self.reasoning_effort == "ultra" else self.reasoning_effort
 
         payload = {
             "model": self.model,

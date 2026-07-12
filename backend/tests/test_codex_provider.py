@@ -234,8 +234,11 @@ def test_call_codex_api_includes_response_controls(monkeypatch):
     assert captured["payload"]["text"] == {"verbosity": "high"}
 
 
-@pytest.mark.parametrize("reasoning_effort", ["max", "ultra"])
-def test_call_codex_api_maps_unsupported_effort_to_xhigh(monkeypatch, reasoning_effort):
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_effort"),
+    [("max", "max"), ("ultra", "xhigh")],
+)
+def test_call_codex_api_preserves_max_and_blocks_raw_ultra(monkeypatch, reasoning_effort, expected_effort):
     model = _make_model()
     model.reasoning_effort = reasoning_effort
     captured: dict = {}
@@ -249,7 +252,7 @@ def test_call_codex_api_maps_unsupported_effort_to_xhigh(monkeypatch, reasoning_
 
     model._call_codex_api([HumanMessage(content="Hello")])
 
-    assert captured["payload"]["reasoning"]["effort"] == "xhigh"
+    assert captured["payload"]["reasoning"]["effort"] == expected_effort
 
 
 def test_call_codex_api_retries_transient_connection_errors(monkeypatch):

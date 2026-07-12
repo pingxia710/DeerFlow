@@ -582,6 +582,7 @@ async def task_tool(
     thread_data = None
     thread_id = None
     parent_model = None
+    parent_reasoning_effort = None
     trace_id = None
     user_id = None
     metadata: dict = {}
@@ -596,6 +597,7 @@ async def task_tool(
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
+        parent_reasoning_effort = metadata.get("reasoning_effort")
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
@@ -658,6 +660,7 @@ async def task_tool(
         "config": config,
         "tools": tools,
         "parent_model": inheritable_parent_model,
+        "parent_reasoning_effort": parent_reasoning_effort,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "thread_id": thread_id,

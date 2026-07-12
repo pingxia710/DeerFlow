@@ -607,6 +607,7 @@ class SubagentExecutor:
         tools: list[BaseTool],
         app_config: AppConfig | None = None,
         parent_model: str | None = None,
+        parent_reasoning_effort: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
@@ -626,6 +627,7 @@ class SubagentExecutor:
                 back to ``get_app_config()`` (matches the lead-agent factory's
                 pattern).
             parent_model: The parent agent's model name for inheritance.
+            parent_reasoning_effort: Resolved parent reasoning effort.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
@@ -642,6 +644,7 @@ class SubagentExecutor:
         self.config = config
         self.app_config = app_config
         self.parent_model = parent_model
+        self.parent_reasoning_effort = parent_reasoning_effort
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
         # executors without a config file present.
@@ -680,7 +683,13 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=True,
+            reasoning_effort=self.parent_reasoning_effort,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 

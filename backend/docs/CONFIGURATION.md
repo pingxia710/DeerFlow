@@ -51,6 +51,8 @@ models:
     model: gpt-5.4
     supports_thinking: true
     supports_reasoning_effort: true
+    reasoning_efforts: [medium, high, xhigh]
+    default_reasoning_effort: xhigh
 
   - name: claude-sonnet-4.6
     display_name: Claude Sonnet 4.6 (Claude Code OAuth)

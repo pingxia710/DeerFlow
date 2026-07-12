@@ -1,4 +1,16 @@
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+ReasoningEffort = Literal[
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
 
 
 class ModelConfig(BaseModel):
@@ -24,6 +36,14 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
+    reasoning_efforts: list[ReasoningEffort] = Field(
+        default_factory=list,
+        description="Selectable provider reasoning efforts for this model",
+    )
+    default_reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Reasoning effort used when no selectable request is supplied",
+    )
     subagents_inherit: bool = Field(
         default=True,
         description="Whether subagents using model='inherit' should inherit this model from the lead agent.",
@@ -54,3 +74,11 @@ class ModelConfig(BaseModel):
             "This is a shortcut for `when_thinking_enabled` and will be merged with `when_thinking_enabled` if both are provided."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_reasoning_effort_capability(self) -> "ModelConfig":
+        if self.reasoning_efforts and self.default_reasoning_effort is None:
+            raise ValueError("default_reasoning_effort is required when reasoning_efforts is configured")
+        if self.default_reasoning_effort is not None and self.default_reasoning_effort not in self.reasoning_efforts:
+            raise ValueError("default_reasoning_effort must be included in reasoning_efforts")
+        return self

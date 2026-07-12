@@ -65,7 +65,10 @@ def test_task_tool_queue_full_surfaces_task_failed_event(monkeypatch):
         )
 
     output = asyncio.run(run())
-    assert output == "Task failed. Error: Subagent queue is full; try again later"
+    assert output.content == "Task failed. Error: Subagent queue is full; try again later"
+    assert output.name == "task"
+    assert output.tool_call_id == "tc-full"
+    assert output.additional_kwargs["subagent_status"] == "failed"
     assert [event["type"] for event in events] == ["task_started", "task_failed"]
     assert events[-1]["status"] == "failed"
     assert "queue is full" in events[-1]["error_preview"]

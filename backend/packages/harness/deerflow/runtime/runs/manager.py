@@ -1090,6 +1090,7 @@ class RunManager:
         user_id: str | None = None,
         limit: int = 100,
         before: str | None = None,
+        recover_stale: bool = True,
     ) -> list[RunRecord]:
         """Return a newest-first page of runs for a given thread.
 
@@ -1103,11 +1104,13 @@ class RunManager:
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
             before: Run ID whose strictly older successors should be returned.
+            recover_stale: Whether to run stale recovery and projection retries first.
         """
         if limit <= 0:
             raise ValueError("limit must be greater than zero")
-        await self.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
-        await self._retry_terminal_round_projections(thread_id=thread_id)
+        if recover_stale:
+            await self.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
+            await self._retry_terminal_round_projections(thread_id=thread_id)
         async with self._lock:
             thread_memory_records = self._thread_records_locked(thread_id)
             memory_records = [record for record in thread_memory_records if _record_matches_user_id(record, user_id)]

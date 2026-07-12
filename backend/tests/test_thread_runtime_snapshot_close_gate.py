@@ -158,5 +158,5 @@ def test_runtime_snapshot_includes_read_only_close_gate_facts(tmp_path, monkeypa
     assert round_store.set_run_state_calls == []
     assert round_store.record_task_events_calls == []
     assert handoff.status == before_handoff_status
-    assert app.state.run_manager.begin_thread_write.await_count == 2
-    assert app.state.run_manager.end_thread_write.await_count == 2
+    app.state.run_manager.begin_thread_write.assert_not_awaited()
+    app.state.run_manager.end_thread_write.assert_not_awaited()

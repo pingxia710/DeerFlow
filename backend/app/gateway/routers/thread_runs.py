@@ -118,6 +118,7 @@ _ACTIVE_ARTIFACT_MIME_TYPES = {
 }
 _ARTIFACT_HASH_CHUNK_BYTES = 1024 * 1024
 _ARTIFACT_TEXT_SAMPLE_BYTES = 8192
+_RUNTIME_SNAPSHOT_MESSAGE_CONCURRENCY = 8
 
 
 async def _run_command_room_mutation(func, /, *args, **kwargs):
@@ -257,7 +258,7 @@ class RunCreateRequest(BaseModel):
         description="Behaviour on SSE disconnect",
     )
     on_completion: Literal["delete", "keep"] = Field(default="keep", description="Delete temp thread on completion")
-    multitask_strategy: Literal["reject", "rollback", "interrupt", "enqueue"] = Field(default="reject", description="Concurrency strategy")
+    multitask_strategy: Literal["reject", "rollback", "interrupt"] = Field(default="reject", description="Concurrency strategy")
     after_seconds: float | None = Field(default=None, description="Delayed execution")
     if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
@@ -2149,7 +2150,7 @@ async def list_round_tasks(
 
 
 @router.get("/{thread_id}/runtime-snapshot", response_model=ThreadRuntimeSnapshotResponse)
-@require_permission("runs", "read", owner_check=True, thread_write_guard=True)
+@require_permission("runs", "read", owner_check=True)
 async def get_thread_runtime_snapshot(
     thread_id: str,
     request: Request,
@@ -2159,31 +2160,21 @@ async def get_thread_runtime_snapshot(
     task_lane_limit: int = Query(default=100, ge=1, le=500),
     include_close_gates: bool = Query(default=False),
 ) -> ThreadRuntimeSnapshotResponse:
-    """Return one recovery snapshot for thread runtime state."""
+    """Return one bounded, read-only snapshot of thread runtime state."""
     user_id = get_request_storage_user_id(request)
     run_mgr = get_run_manager(request)
-    stale_recovered_records: list[RunRecord] = []
-    if hasattr(run_mgr, "recover_stale_inflight_runs"):
-        stale_recovered_records = await run_mgr.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
-    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=run_limit)
-    await _sync_thread_error_for_latest_worker_lost(thread_id, request, records=records, user_id=user_id)
-
-    run_messages: list[RuntimeSnapshotRunMessages] = []
-    for record in records:
-        page = await _run_messages_page(
-            thread_id,
-            record.run_id,
-            record,
-            request,
-            user_id=user_id,
-            limit=message_limit,
-        )
-        run_messages.append(RuntimeSnapshotRunMessages(run_id=record.run_id, **page))
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=run_limit, recover_stale=False)
+    run_messages = await _list_runtime_snapshot_run_messages(
+        records=records,
+        thread_id=thread_id,
+        request=request,
+        user_id=user_id,
+        limit=message_limit,
+    )
 
     rounds: list[RoundResponse] = []
     task_lanes: list[TaskLaneResponse] = []
     round_store = get_round_state_store(request)
-    snapshot_self_heal = RuntimeSnapshotSelfHealResponse()
     if round_store is not None and hasattr(round_store, "list_by_thread"):
         round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
         task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
@@ -2193,39 +2184,6 @@ async def get_thread_runtime_snapshot(
             user_id=user_id,
             limit=task_lane_limit,
         )
-        event_projection_repaired = await _repair_task_event_projection_from_store(
-            event_store=get_run_event_store(request),
-            round_store=round_store,
-            records=records,
-            round_rows=round_rows,
-            task_lane_rows=task_lane_rows,
-            user_id=user_id,
-        )
-        if event_projection_repaired:
-            task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
-                round_store,
-                thread_id=thread_id,
-                round_rows=round_rows,
-                user_id=user_id,
-                limit=task_lane_limit,
-            )
-        snapshot_self_heal = await _repair_terminal_runtime_snapshot_rows(
-            round_store=round_store,
-            records=records,
-            round_rows=round_rows,
-            task_lane_rows=task_lane_rows,
-        )
-        if event_projection_repaired:
-            snapshot_self_heal.repaired = True
-        if snapshot_self_heal.repaired:
-            round_rows = await round_store.list_by_thread(thread_id, user_id=user_id, limit=round_limit)
-            task_lane_rows = await _list_runtime_snapshot_task_lane_rows(
-                round_store,
-                thread_id=thread_id,
-                round_rows=round_rows,
-                user_id=user_id,
-                limit=task_lane_limit,
-            )
         rounds = [RoundResponse.model_validate(row) for row in round_rows]
         task_lanes = [TaskLaneResponse.model_validate(row) for row in task_lane_rows]
 
@@ -2256,30 +2214,6 @@ async def get_thread_runtime_snapshot(
             )
             close_gates.append(report.as_dict())
 
-    recovery: RuntimeSnapshotRecoveryResponse | None = None
-    if stale_recovered_records or snapshot_self_heal.repaired:
-        stale_recovery = None
-        if stale_recovered_records:
-            terminal_reasons = [_run_terminal_reason(record) for record in stale_recovered_records]
-            terminal_reason = terminal_reasons[0] if len(set(terminal_reasons)) == 1 else None
-            stale_recovery = RuntimeSnapshotStaleInflightRecoveryResponse(
-                recovered=True,
-                recovered_count=len(stale_recovered_records),
-                run_ids=[record.run_id for record in stale_recovered_records],
-                terminal_reason=terminal_reason,
-                runs=[
-                    RuntimeSnapshotRecoveredRunResponse(
-                        run_id=record.run_id,
-                        terminal_reason=_run_terminal_reason(record),
-                    )
-                    for record in stale_recovered_records
-                ],
-            )
-        recovery = RuntimeSnapshotRecoveryResponse(
-            stale_inflight=stale_recovery,
-            snapshot_self_heal=snapshot_self_heal if snapshot_self_heal.repaired else None,
-        )
-
     return ThreadRuntimeSnapshotResponse(
         thread_id=thread_id,
         runs=[_record_to_response(record) for record in records],
@@ -2287,7 +2221,6 @@ async def get_thread_runtime_snapshot(
         rounds=rounds,
         task_lanes=task_lanes,
         close_gates=close_gates,
-        recovery=recovery,
     )
 
 
@@ -2570,6 +2503,31 @@ async def _run_messages_page(
                     content["additional_kwargs"]["turn_duration"] = duration
 
     return {"data": data, "has_more": has_more}
+
+
+async def _list_runtime_snapshot_run_messages(
+    *,
+    records: list[RunRecord],
+    thread_id: str,
+    request: Request,
+    user_id: str,
+    limit: int,
+) -> list[RuntimeSnapshotRunMessages]:
+    semaphore = asyncio.Semaphore(_RUNTIME_SNAPSHOT_MESSAGE_CONCURRENCY)
+
+    async def load(record: RunRecord) -> RuntimeSnapshotRunMessages:
+        async with semaphore:
+            page = await _run_messages_page(
+                thread_id,
+                record.run_id,
+                record,
+                request,
+                user_id=user_id,
+                limit=limit,
+            )
+        return RuntimeSnapshotRunMessages(run_id=record.run_id, **page)
+
+    return list(await asyncio.gather(*(load(record) for record in records)))
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")

@@ -13,6 +13,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
+from pydantic import ValidationError
 
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
@@ -190,6 +191,14 @@ def _make_store_only_run_manager(status: str = "running") -> RunManager:
     return RunManager(store=store)
 
 
+def test_run_create_request_rejects_unimplemented_enqueue_strategy():
+    schema = thread_runs.RunCreateRequest.model_json_schema()
+
+    assert "enqueue" not in json.dumps(schema)
+    with pytest.raises(ValidationError):
+        thread_runs.RunCreateRequest(multitask_strategy="enqueue")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -326,8 +335,59 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     assert round_store.seen_user_id == user_id
 
 
-def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
-    """Snapshot recovery closes stale native state when the run is already terminal."""
+def test_runtime_snapshot_loads_message_pages_concurrently():
+    class SlowEventStore:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        async def list_messages_by_run(
+            self,
+            thread_id: str,
+            run_id: str,
+            *,
+            limit: int,
+            before_seq: int | None = None,
+            after_seq: int | None = None,
+            user_id: str | None = None,
+        ) -> list[dict]:
+            del thread_id, run_id, limit, before_seq, after_seq, user_id
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return []
+
+    store = SlowEventStore()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_event_store=store)))
+    records = [
+        RunRecord(
+            run_id=f"run-{index}",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            status=RunStatus.success,
+            on_disconnect="cancel",
+        )
+        for index in range(3)
+    ]
+
+    pages = asyncio.run(
+        thread_runs._list_runtime_snapshot_run_messages(
+            records=records,
+            thread_id="thread-1",
+            request=request,
+            user_id="user-1",
+            limit=50,
+        )
+    )
+
+    assert store.max_active > 1
+    assert store.max_active <= thread_runs._RUNTIME_SNAPSHOT_MESSAGE_CONCURRENCY
+    assert [page.run_id for page in pages] == [record.run_id for record in records]
+
+
+def test_runtime_snapshot_does_not_repair_terminal_run_with_open_round_and_task_lane():
+    """A read snapshot reports stored state without repairing it."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -354,24 +414,15 @@ def test_runtime_snapshot_repairs_terminal_run_with_open_round_and_task_lane():
     body = response.json()
     assert body["runs"][0]["status"] == "error"
     assert body["runs"][0]["terminal_reason"] == "worker_lost"
-    assert body["rounds"][0]["state"] == "blocked"
-    assert body["task_lanes"][0]["status"] == "failed"
-    assert body["task_lanes"][0]["error"] == "Parent run ended before this task lane completed: worker_lost."
-    assert body["recovery"]["stale_inflight"] is None
-    assert body["recovery"]["snapshot_self_heal"] == {
-        "repaired": True,
-        "round_count": 1,
-        "task_lane_count": 1,
-        "rounds": [{"run_id": "run-terminal", "round_id": "round-stale", "state": "blocked"}],
-        "task_lanes": [{"run_id": "run-terminal", "round_id": "round-stale", "task_id": "task-stale", "status": "failed"}],
-    }
-    assert round_store.set_run_state_calls[0]["state"] == "blocked"
-    assert round_store.set_run_state_calls[0]["event_type"] == "round.blocked"
-    assert round_store.record_task_events_calls[0][0]["event_type"] == "task_failed"
+    assert body["rounds"][0]["state"] == "executing"
+    assert body["task_lanes"][0]["status"] == "executing"
+    assert body.get("recovery") is None
+    assert round_store.set_run_state_calls == []
+    assert round_store.record_task_events_calls == []
 
 
-def test_runtime_snapshot_recovers_stale_store_only_inflight_run():
-    """Runtime snapshot is a reload convergence point for stale inflight rows."""
+def test_runtime_snapshot_does_not_recover_stale_store_only_inflight_run():
+    """Stale-run recovery belongs to startup and run lifecycle boundaries."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     asyncio.run(
@@ -393,21 +444,16 @@ def test_runtime_snapshot_recovers_stale_store_only_inflight_run():
     assert response.status_code == 200
     body = response.json()
     assert body["runs"][0]["run_id"] == "stale-run"
-    assert body["runs"][0]["status"] == "error"
-    assert body["runs"][0]["terminal_reason"] == "worker_lost"
-    assert body["recovery"]["snapshot_self_heal"] is None
-    assert body["recovery"]["stale_inflight"]["recovered"] is True
-    assert body["recovery"]["stale_inflight"]["recovered_count"] == 1
-    assert body["recovery"]["stale_inflight"]["run_ids"] == ["stale-run"]
-    assert body["recovery"]["stale_inflight"]["terminal_reason"] == "worker_lost"
-    assert body["recovery"]["stale_inflight"]["runs"] == [{"run_id": "stale-run", "terminal_reason": "worker_lost"}]
+    assert body["runs"][0]["status"] == "running"
+    assert body["runs"][0]["terminal_reason"] is None
+    assert body.get("recovery") is None
     stored = asyncio.run(run_store.get("stale-run", user_id=user_id))
-    assert stored["status"] == "error"
-    assert stored["terminal_reason"] == "worker_lost"
+    assert stored["status"] == "running"
+    assert stored.get("terminal_reason") is None
 
 
-def test_runtime_snapshot_repair_keeps_new_active_round_and_lane_isolated():
-    """Repair only closes stale rows for terminal runs when old and new rounds coexist."""
+def test_runtime_snapshot_keeps_stored_round_and_lane_states_isolated():
+    """A read snapshot preserves old and new stored states without writes."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -484,10 +530,10 @@ def test_runtime_snapshot_repair_keeps_new_active_round_and_lane_isolated():
     assert [run["run_id"] for run in body["runs"]] == ["run-new", "run-old"]
     round_states = {round_["round_id"]: round_["state"] for round_ in body["rounds"]}
     lane_statuses = {lane["task_id"]: lane["status"] for lane in body["task_lanes"]}
-    assert round_states == {"round-old": "blocked", "round-new": "executing"}
-    assert lane_statuses == {"task-old": "failed", "task-new": "in_progress"}
-    assert [call["run_id"] for call in round_store.set_run_state_calls] == ["run-old"]
-    assert [event["task_id"] for event in round_store.record_task_events_calls[0]] == ["task-old"]
+    assert round_states == {"round-old": "executing", "round-new": "executing"}
+    assert lane_statuses == {"task-old": "executing", "task-new": "in_progress"}
+    assert round_store.set_run_state_calls == []
+    assert round_store.record_task_events_calls == []
 
 
 def test_returns_middleware_message_rows_as_control_rows():

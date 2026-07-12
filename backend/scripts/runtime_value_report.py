@@ -8,7 +8,7 @@ import math
 import sqlite3
 from pathlib import Path
 
-_REPORT_TABLES = ("runs", "task_lanes", "artifact_provenance")
+_REPORT_TABLES = ("runs", "task_lanes", "artifact_provenance", "feedback")
 _TOKEN_COLUMNS = {
     "input": "total_input_tokens",
     "output": "total_output_tokens",
@@ -67,6 +67,17 @@ def _empty_task_lanes() -> dict[str, object]:
 
 def _empty_artifacts() -> dict[str, object]:
     return {"available": False, "total": 0, "run_count": 0, "coverage": None}
+
+
+def _empty_feedback() -> dict[str, object]:
+    return {
+        "available": False,
+        "total": 0,
+        "positive": 0,
+        "negative": 0,
+        "run_count": 0,
+        "coverage": None,
+    }
 
 
 def build_report(database_path: Path) -> dict[str, object]:
@@ -132,12 +143,41 @@ def build_report(database_path: Path) -> dict[str, object]:
                 "coverage": round(run_count / run_total, 4) if run_total > 0 else None,
             }
 
+        feedback = _empty_feedback()
+        if "feedback" in available_tables:
+            feedback_columns = _table_columns(connection, "feedback")
+            total = int(connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0])
+            positive = 0
+            negative = 0
+            if "rating" in feedback_columns:
+                rating_counts = connection.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END), 0) AS positive,
+                        COALESCE(SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END), 0) AS negative
+                    FROM feedback
+                    """
+                ).fetchone()
+                positive = int(rating_counts["positive"])
+                negative = int(rating_counts["negative"])
+            run_count = int(connection.execute("SELECT COUNT(DISTINCT run_id) FROM feedback").fetchone()[0]) if "run_id" in feedback_columns else 0
+            run_total = int(runs["total"])
+            feedback = {
+                "available": True,
+                "total": total,
+                "positive": positive,
+                "negative": negative,
+                "run_count": run_count,
+                "coverage": round(run_count / run_total, 4) if run_total > 0 else None,
+            }
+
     return {
         "database": {"name": database_path.name, "tables": table_flags},
         "runs": runs,
         "tokens": tokens,
         "task_lanes": task_lanes,
         "artifacts": artifacts,
+        "feedback": feedback,
     }
 
 
@@ -154,11 +194,13 @@ def format_text(report: dict[str, object]) -> str:
     tokens = report["tokens"]
     task_lanes = report["task_lanes"]
     artifacts = report["artifacts"]
+    feedback = report["feedback"]
     assert isinstance(database, dict)
     assert isinstance(runs, dict)
     assert isinstance(tokens, dict)
     assert isinstance(task_lanes, dict)
     assert isinstance(artifacts, dict)
+    assert isinstance(feedback, dict)
     duration_ms = task_lanes["duration_ms"]
     assert isinstance(duration_ms, dict)
     return "\n".join(
@@ -168,6 +210,7 @@ def format_text(report: dict[str, object]) -> str:
             f"Tokens: total={tokens['total']}, lead_agent={tokens['lead_agent']}, subagent={tokens['subagent']}, subagent_share={tokens['subagent_share']}",
             f"Task lanes: {task_lanes['total']} ({_format_outcomes(task_lanes['outcomes'])}), p50_ms={duration_ms['p50']}, p95_ms={duration_ms['p95']}",
             f"Artifacts: total={artifacts['total']}, run_coverage={artifacts['coverage']}",
+            f"Feedback: total={feedback['total']}, positive={feedback['positive']}, negative={feedback['negative']}, run_coverage={feedback['coverage']}",
         ]
     )
 

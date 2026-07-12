@@ -52,6 +52,14 @@ def _create_runtime_fixture(path: Path) -> None:
                 run_id TEXT NOT NULL,
                 virtual_path TEXT NOT NULL
             );
+            CREATE TABLE feedback (
+                feedback_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                user_id TEXT,
+                rating INTEGER NOT NULL,
+                comment TEXT
+            );
             """
         )
         connection.executemany(
@@ -84,6 +92,17 @@ def _create_runtime_fixture(path: Path) -> None:
             """,
             ("user-1", "thread-1", "run-1", "/mnt/user-data/outputs/report.txt"),
         )
+        connection.executemany(
+            """
+            INSERT INTO feedback (feedback_id, run_id, thread_id, user_id, rating, comment)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("feedback-1", "run-1", "thread-1", "user-1", 1, "Useful result"),
+                ("feedback-2", "run-1", "thread-1", "user-2", 1, "Also useful"),
+                ("feedback-3", "run-2", "thread-2", "user-2", -1, "Needs work"),
+            ],
+        )
         connection.commit()
     finally:
         connection.close()
@@ -100,6 +119,7 @@ def test_runtime_value_report_aggregates_without_identifiers(tmp_path: Path) -> 
         "name": "deerflow.db",
         "tables": {
             "artifact_provenance": True,
+            "feedback": True,
             "runs": True,
             "task_lanes": True,
         },
@@ -131,11 +151,20 @@ def test_runtime_value_report_aggregates_without_identifiers(tmp_path: Path) -> 
         "run_count": 1,
         "total": 1,
     }
+    assert report["feedback"] == {
+        "available": True,
+        "coverage": 1.0,
+        "negative": 1,
+        "positive": 2,
+        "run_count": 2,
+        "total": 3,
+    }
 
     rendered = json.dumps(report, sort_keys=True)
     assert "thread-1" not in rendered
     assert "user-1" not in rendered
     assert "report.txt" not in rendered
+    assert "Useful result" not in rendered
     assert str(tmp_path) not in rendered
 
 
@@ -176,6 +205,14 @@ def test_runtime_value_report_handles_missing_optional_tables(tmp_path: Path) ->
         "run_count": 0,
         "total": 0,
     }
+    assert report["feedback"] == {
+        "available": False,
+        "coverage": None,
+        "negative": 0,
+        "positive": 0,
+        "run_count": 0,
+        "total": 0,
+    }
 
 
 def test_runtime_value_report_opens_the_database_read_only(tmp_path: Path) -> None:
@@ -209,5 +246,14 @@ def test_runtime_value_report_cli_emits_only_aggregate_json(tmp_path: Path) -> N
 
     report = json.loads(completed.stdout)
     assert report["runs"]["outcomes"] == {"error": 1, "success": 1}
+    assert report["feedback"] == {
+        "available": True,
+        "coverage": 1.0,
+        "negative": 1,
+        "positive": 2,
+        "run_count": 2,
+        "total": 3,
+    }
     assert "thread-1" not in completed.stdout
     assert "report.txt" not in completed.stdout
+    assert "Useful result" not in completed.stdout

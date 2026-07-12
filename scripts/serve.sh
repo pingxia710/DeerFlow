@@ -365,6 +365,7 @@ stop_all() {
 _start_daemon_command() {
     local cmd="$1"
     local python_bin
+    local pid
 
     if python_bin="$(_pick_python)"; then
         DEERFLOW_DAEMON_ROOT="$REPO_ROOT" "$python_bin" - "$cmd" <<'PY'
@@ -372,7 +373,7 @@ import os
 import subprocess
 import sys
 
-subprocess.Popen(
+process = subprocess.Popen(
     sys.argv[1],
     shell=True,
     stdin=subprocess.DEVNULL,
@@ -381,10 +382,13 @@ subprocess.Popen(
     env=os.environ.copy(),
     start_new_session=True,
 )
+print(process.pid)
 PY
     else
         nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" </dev/null > /dev/null 2>&1 &
-        disown "$!" 2>/dev/null || true
+        pid=$!
+        disown "$pid" 2>/dev/null || true
+        printf '%s\n' "$pid"
     fi
 }
 
@@ -496,7 +500,7 @@ else
         exit 1
     fi
     FRONTEND_SECRET="$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))')"
-    FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$FRONTEND_SECRET pnpm run build && env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$FRONTEND_SECRET pnpm exec next start --hostname '$EDGE_BIND_HOST'"
+    FRONTEND_CMD="env PORT=$FRONTEND_PORT BETTER_AUTH_SECRET=$FRONTEND_SECRET pnpm exec next start --hostname '$EDGE_BIND_HOST'"
     GATEWAY_ENVIRONMENT="production"
 fi
 
@@ -552,6 +556,12 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+if ! $DEV_MODE; then
+    echo "Building frontend for production..."
+    (cd frontend && env BETTER_AUTH_SECRET="$FRONTEND_SECRET" pnpm run build) || { echo "✗ Frontend production build failed"; exit 1; }
+    echo "✓ Frontend production build complete"
+fi
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -580,10 +590,14 @@ cleanup() {
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
+SERVICE_PIDS=()
+SERVICE_NAMES=()
+
 # run_service NAME COMMAND PORT TIMEOUT
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+    local pid
 
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
@@ -593,18 +607,42 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        _start_daemon_command "$cmd"
+        pid="$(_start_daemon_command "$cmd")"
     else
         sh -c "$cmd" &
+        pid=$!
+        SERVICE_PIDS[${#SERVICE_PIDS[@]}]="$pid"
+        SERVICE_NAMES[${#SERVICE_NAMES[@]}]="$name"
     fi
 
-    ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
+    ./scripts/wait-for-port.sh "$port" "$timeout" "$name" "$pid" || {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
         cleanup 1
     }
     echo "✓ $name started on localhost:$port"
+}
+
+_wait_for_any_service_exit() {
+    local index pid name status
+
+    while :; do
+        index=0
+        while [ "$index" -lt "${#SERVICE_PIDS[@]}" ]; do
+            pid="${SERVICE_PIDS[$index]}"
+            name="${SERVICE_NAMES[$index]}"
+            if ! kill -0 "$pid" 2>/dev/null; then
+                status=0
+                wait "$pid" || status=$?
+                [ "$status" -ne 0 ] || status=1
+                echo "✗ $name exited; stopping the remaining services."
+                cleanup "$status"
+            fi
+            index=$((index + 1))
+        done
+        sleep 1
+    done
 }
 
 # ── Start services ───────────────────────────────────────────────────────────
@@ -650,5 +688,5 @@ if $DAEMON_MODE; then
     trap - INT TERM
 else
     echo "  Press Ctrl+C to stop all services"
-    wait
+    _wait_for_any_service_exit
 fi

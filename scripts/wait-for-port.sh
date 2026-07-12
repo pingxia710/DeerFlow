@@ -2,20 +2,22 @@
 #
 # wait-for-port.sh - Wait for a TCP port to become available
 #
-# Usage: ./scripts/wait-for-port.sh <port> [timeout_seconds] [service_name]
+# Usage: ./scripts/wait-for-port.sh <port> [timeout_seconds] [service_name] [service_pid]
 #
 # Arguments:
 #   port             - TCP port to wait for (required)
 #   timeout_seconds  - Max seconds to wait (default: 60)
 #   service_name     - Display name for messages (default: "Service")
+#   service_pid      - Optional PID; fail early if it exits before listening
 #
 # Exit codes:
 #   0 - Port is listening
 #   1 - Timed out waiting
 
-PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
+PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name] [service_pid]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
+SERVICE_PID="${4:-}"
 
 case "$PORT" in
     ''|*[!0-9]*)
@@ -60,7 +62,20 @@ is_port_listening() {
     return 1
 }
 
-while ! is_port_listening; do
+is_service_running() {
+    [ -n "$SERVICE_PID" ] || return 0
+    kill -0 "$SERVICE_PID" 2>/dev/null
+}
+
+while :; do
+    if ! is_service_running; then
+        echo ""
+        echo "✗ $SERVICE exited before listening on port $PORT"
+        exit 1
+    fi
+    if is_port_listening; then
+        break
+    fi
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"

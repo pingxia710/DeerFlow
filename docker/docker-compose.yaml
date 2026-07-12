@@ -68,7 +68,8 @@ services:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
-      - ../frontend/.env
+      - path: ../frontend/.env
+        required: false
     networks:
       - deer-flow
     restart: unless-stopped
@@ -140,7 +141,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -178,7 +180,8 @@ services:
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

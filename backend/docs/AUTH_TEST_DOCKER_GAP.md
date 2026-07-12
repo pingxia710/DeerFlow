@@ -53,7 +53,7 @@ running the test plan section verbatim. Pre-flight:
 ```bash
 # Required on the host
 docker --version           # >=24.x
-docker compose version     # plugin >=2.x
+docker compose version     # plugin >=2.24.0
 
 # Required env var (otherwise sessions reset on every container restart)
 echo "AUTH_JWT_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" \

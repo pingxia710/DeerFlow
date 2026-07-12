@@ -28,13 +28,6 @@ if [ "${1:-}" = "--print-extras" ]; then
     PRINT_EXTRAS_ONLY=1
 fi
 
-# Mirror the legacy command's behavior: redirect both stdout and stderr to the
-# host-mounted log file (../logs/gateway.log → /app/logs/gateway.log). Skip
-# the redirect under --print-extras so the test runner can capture stdout.
-if [ "$PRINT_EXTRAS_ONLY" = "0" ]; then
-    exec >/app/logs/gateway.log 2>&1
-fi
-
 # ── Resolve extras ──────────────────────────────────────────────────────────
 
 EXTRAS_FLAGS=""

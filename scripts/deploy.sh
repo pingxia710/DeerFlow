@@ -7,6 +7,7 @@
 #   deploy.sh build              — build all images (mode-agnostic)
 #   deploy.sh start              — start from pre-built images
 #   deploy.sh down               — stop and remove containers
+#   deploy.sh logs               — follow production container logs
 #
 # Sandbox mode (local / aio / provisioner) is auto-detected from config.yaml.
 #
@@ -15,17 +16,18 @@
 #   deploy.sh build              # build all images
 #   deploy.sh start              # start pre-built images
 #   deploy.sh down               # stop and remove containers
+#   deploy.sh logs               # follow production container logs
 #
 # Must be run from the repo root directory.
 
 set -e
 
 case "${1:-}" in
-    build|start|down)
+    build|start|down|logs)
         CMD="$1"
         if [ -n "${2:-}" ]; then
             echo "Unknown argument: $2"
-            echo "Usage: deploy.sh [build|start|down]"
+            echo "Usage: deploy.sh [build|start|down|logs]"
             exit 1
         fi
         ;;
@@ -34,7 +36,7 @@ case "${1:-}" in
         ;;
     *)
         echo "Unknown argument: $1"
-        echo "Usage: deploy.sh [build|start|down]"
+        echo "Usage: deploy.sh [build|start|down|logs]"
         exit 1
         ;;
 esac
@@ -44,6 +46,70 @@ cd "$REPO_ROOT"
 
 DOCKER_DIR="$REPO_ROOT/docker"
 COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+
+require_optional_env_file_support() {
+    local version major minor remainder
+    version="$(docker compose version --short 2>/dev/null)" || {
+        echo "Docker Compose is unavailable; version 2.24.0 or newer is required." >&2
+        return 1
+    }
+    version="${version#v}"
+    major="${version%%.*}"
+    remainder="${version#*.}"
+    minor="${remainder%%.*}"
+    case "$major:$minor" in
+        *[!0-9:]*)
+            echo "Cannot parse Docker Compose version '$version'; version 2.24.0 or newer is required." >&2
+            return 1
+            ;;
+    esac
+    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }; then
+        echo "Docker Compose $version is too old; version 2.24.0 or newer is required." >&2
+        return 1
+    fi
+}
+
+require_optional_env_file_support || exit 1
+
+prepare_compose_interpolation_defaults() {
+    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
+    export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$REPO_ROOT/config.yaml}"
+    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$REPO_ROOT/extensions_config.json}"
+    export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
+    export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+    export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
+}
+
+# These commands must not create runtime config or secret state. They only
+# need interpolation defaults so Compose can parse the production file.
+case "$CMD" in
+    logs)
+        prepare_compose_interpolation_defaults
+        "${COMPOSE_CMD[@]}" logs -f
+        exit 0
+        ;;
+    down)
+        prepare_compose_interpolation_defaults
+        "${COMPOSE_CMD[@]}" down
+        exit 0
+        ;;
+    build)
+        prepare_compose_interpolation_defaults
+        echo "=========================================="
+        echo "  DeerFlow — Building Images"
+        echo "=========================================="
+        echo ""
+        "${COMPOSE_CMD[@]}" build
+        echo ""
+        echo "=========================================="
+        echo "  ✓ Images built successfully"
+        echo "=========================================="
+        echo ""
+        echo "  Next: deploy.sh start"
+        echo ""
+        exit 0
+        ;;
+esac
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -207,42 +273,6 @@ detect_sandbox_mode() {
     fi
 }
 
-# ── down ──────────────────────────────────────────────────────────────────────
-
-if [ "$CMD" = "down" ]; then
-    # Set minimal env var defaults so docker compose can parse the file without
-    # warning about unset variables that appear in volume specs.
-    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
-    export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
-    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
-    export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
-    export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
-    export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
-    "${COMPOSE_CMD[@]}" down
-    exit 0
-fi
-
-# ── build ────────────────────────────────────────────────────────────────────
-# Build produces mode-agnostic images. No --gateway or sandbox detection needed.
-
-if [ "$CMD" = "build" ]; then
-    echo "=========================================="
-    echo "  DeerFlow — Building Images"
-    echo "=========================================="
-    echo ""
-
-    "${COMPOSE_CMD[@]}" build
-
-    echo ""
-    echo "=========================================="
-    echo "  ✓ Images built successfully"
-    echo "=========================================="
-    echo ""
-    echo "  Next: deploy.sh start"
-    echo ""
-    exit 0
-fi
-
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 echo "=========================================="
@@ -289,17 +319,23 @@ echo ""
 
 # ── Start / Up ───────────────────────────────────────────────────────────────
 
+UP_ARGS=(-d --remove-orphans --wait --wait-timeout 240)
 if [ "$CMD" = "start" ]; then
     echo "Starting containers (no rebuild)..."
     echo ""
-    # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up -d --remove-orphans $services
 else
     # Default: build + start
     echo "Building images and starting containers..."
     echo ""
+    UP_ARGS=(--build "${UP_ARGS[@]}")
+fi
+
+# shellcheck disable=SC2086
+if ! "${COMPOSE_CMD[@]}" up "${UP_ARGS[@]}" $services; then
+    echo -e "${RED}✗ Production services failed to become healthy.${NC}" >&2
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    "${COMPOSE_CMD[@]}" logs --no-color --tail=200 $services || true
+    exit 1
 fi
 
 echo ""
@@ -314,5 +350,5 @@ echo "  API:            /api/langgraph/* → Gateway"
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"
-echo "    make docker-logs — view logs"
+echo "    ./scripts/deploy.sh logs"
 echo ""

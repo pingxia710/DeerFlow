@@ -16,6 +16,28 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
 
+require_optional_env_file_support() {
+    local version major minor remainder
+    version="$(docker compose version --short 2>/dev/null)" || {
+        echo -e "${RED}✗ Docker Compose is unavailable; version 2.24.0 or newer is required.${NC}" >&2
+        return 1
+    }
+    version="${version#v}"
+    major="${version%%.*}"
+    remainder="${version#*.}"
+    minor="${remainder%%.*}"
+    case "$major:$minor" in
+        *[!0-9:]*)
+            echo -e "${RED}✗ Cannot parse Docker Compose version '$version'; version 2.24.0 or newer is required.${NC}" >&2
+            return 1
+            ;;
+    esac
+    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }; then
+        echo -e "${RED}✗ Docker Compose $version is too old; version 2.24.0 or newer is required.${NC}" >&2
+        return 1
+    fi
+}
+
 load_proxy_env_from_dotenv() {
     local env_file="$PROJECT_ROOT/.env"
     local var
@@ -297,10 +319,14 @@ start() {
     load_proxy_env_from_dotenv
 
     echo "Building and starting containers..."
-    cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
+    if ! (cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans --wait --wait-timeout 240 $services); then
+        echo -e "${RED}✗ Docker services failed to become healthy.${NC}" >&2
+        (cd "$DOCKER_DIR" && $COMPOSE_CMD logs --no-color --tail=200 $services) || true
+        return 1
+    fi
     echo ""
     echo "=========================================="
-    echo "  DeerFlow Docker is starting!"
+    echo "  DeerFlow Docker is running!"
     echo "=========================================="
     echo ""
     echo "  🌐 Application: http://localhost:2026"
@@ -363,12 +389,26 @@ stop() {
 
 # Restart Docker development environment
 restart() {
+    local running_services
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"
     echo ""
     echo -e "${BLUE}Restarting containers...${NC}"
-    cd "$DOCKER_DIR" && $COMPOSE_CMD restart
+    running_services="$(cd "$DOCKER_DIR" && $COMPOSE_CMD ps --services --status running)"
+    if [ -z "$running_services" ]; then
+        echo -e "${RED}✗ No running DeerFlow services were found.${NC}" >&2
+        return 1
+    fi
+    if ! (cd "$DOCKER_DIR" && $COMPOSE_CMD restart $running_services); then
+        echo -e "${RED}✗ Failed to restart Docker services.${NC}" >&2
+        return 1
+    fi
+    if ! (cd "$DOCKER_DIR" && $COMPOSE_CMD up -d --no-build --no-recreate --wait --wait-timeout 240 $running_services); then
+        echo -e "${RED}✗ Restarted services failed to become healthy.${NC}" >&2
+        (cd "$DOCKER_DIR" && $COMPOSE_CMD logs --no-color --tail=200 $running_services) || true
+        return 1
+    fi
     echo ""
     echo -e "${GREEN}✓ Docker services restarted${NC}"
     echo ""
@@ -398,6 +438,11 @@ help() {
 }
 
 main() {
+    case "${1:-}" in
+        init|start|restart|logs|stop)
+            require_optional_env_file_support || exit 1
+            ;;
+    esac
     # Main command dispatcher
     case "$1" in
         init)

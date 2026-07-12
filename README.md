@@ -242,6 +242,15 @@ make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
 ```
 
+Docker launch commands wait for service healthchecks before reporting success
+and print recent container logs on failure. `.env` and `frontend/.env` are
+optional only when the containers do not rely on values loaded from them;
+model API keys that must reach Docker still belong in the root `.env` unless
+Compose explicitly forwards them. Docker Compose 2.24.0 or newer is required
+for optional env-file support. Use
+`make docker-logs` for the development stack; for the production stack use
+`./scripts/deploy.sh logs`.
+
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 Docker-based AIO sandbox containers keep Docker's default seccomp profile unless `sandbox.seccomp_unconfined: true` is explicitly set for a custom image.
 Custom sandbox mounts default to read-only; dangerous host mounts and host-access escape hatches fail fast in staging/shared/production.

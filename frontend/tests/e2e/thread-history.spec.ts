@@ -268,6 +268,34 @@ test.describe("Thread history", () => {
     await expect(sidebar.getByText("Second conversation")).toHaveCount(0);
   });
 
+  test("deleting the newest saved chat on /new preserves the unsent draft", async ({
+    page,
+  }) => {
+    const draft = "unsent draft must survive deleting an old chat";
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.locator("textarea[name='message']");
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(draft);
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const newestSavedThread = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "Second conversation",
+      })
+      .first();
+    await newestSavedThread.hover();
+    await newestSavedThread.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(textarea).toHaveValue(draft);
+    await expect(sidebar.getByText("Second conversation")).toHaveCount(0);
+  });
+
   test("deleting the active existing chat removes it and prevents stale history from returning", async ({
     page,
   }) => {
@@ -1083,14 +1111,366 @@ test.describe("Thread history", () => {
     expect(activeRunMessageLoads).toBe(0);
   });
 
-  test("runtime snapshot round change drops the previous round history", async ({
+  test("snapshot fallback skips empty control runs before showing visible history", async ({
+    page,
+  }) => {
+    const runIds = ["run-hidden", "run-empty", "run-visible", "run-older"];
+    const visibleMarker = "VISIBLE-AFTER-EMPTY-RUNS";
+    let messageLoads = 0;
+    let snapshotRunLimit: string | null = null;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Snapshot fallback conversation",
+          updated_at: "2025-06-05T12:00:00Z",
+          messages: [],
+        },
+      ],
+    });
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
+      (route) => {
+        snapshotRunLimit = new URL(route.request().url()).searchParams.get(
+          "run_limit",
+        );
+        return route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "snapshot unavailable" }),
+        });
+      },
+    );
+    await page.route(
+      /\/api\/(?:langgraph\/)?threads\/[^/]+\/runs(\?|$)/,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            runIds.map((runId, index) => ({
+              run_id: runId,
+              thread_id: MOCK_THREAD_ID,
+              assistant_id: "lead_agent",
+              status: "success",
+              metadata: {},
+              kwargs: {},
+              created_at: `2025-06-05T12:00:0${index}Z`,
+              updated_at: `2025-06-05T12:00:0${index}Z`,
+            })),
+          ),
+        }),
+    );
+    await page.route(
+      new RegExp(
+        `/api/threads/${MOCK_THREAD_ID}/runs/([^/]+)/messages(?:\\?.*)?$`,
+      ),
+      (route) => {
+        messageLoads += 1;
+        const runId = new URL(route.request().url()).pathname.split("/").at(-2);
+        const data =
+          runId === "run-hidden"
+            ? [
+                {
+                  run_id: runId,
+                  content: {
+                    type: "ai",
+                    id: "hidden-control-message",
+                    content: "CONTROL-MESSAGE-MUST-NOT-RENDER",
+                  },
+                  metadata: { caller: "middleware:guard" },
+                  created_at: "2025-06-05T12:00:00Z",
+                },
+              ]
+            : runId === "run-visible"
+              ? [
+                  {
+                    run_id: runId,
+                    content: {
+                      type: "ai",
+                      id: "visible-history-message",
+                      content: visibleMarker,
+                    },
+                    metadata: { caller: "lead_agent" },
+                    created_at: "2025-06-05T12:00:02Z",
+                  },
+                ]
+              : [];
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ data, hasMore: false }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(visibleMarker)).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(snapshotRunLimit).toBe("10");
+    expect(messageLoads).toBe(4);
+    await expect(page.getByText("CONTROL-MESSAGE-MUST-NOT-RENDER")).toHaveCount(
+      0,
+    );
+    await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
+  });
+
+  test("successful bounded snapshot respects the empty-run cap and remains manually continuable", async ({
+    page,
+  }) => {
+    const snapshotRunIds = Array.from(
+      { length: 10 },
+      (_, index) => `snapshot-empty-${index}`,
+    );
+    const olderRunIds = ["older-visible-1", "older-visible-2"];
+    const firstMarker = "VISIBLE-BEYOND-SNAPSHOT-LIMIT-1";
+    const secondMarker = "VISIBLE-BEYOND-SNAPSHOT-LIMIT-2";
+    let messageLoads = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Bounded snapshot conversation",
+          updated_at: "2025-06-05T13:00:00Z",
+          messages: [],
+        },
+      ],
+    });
+
+    const run = (runId: string, index: number) => ({
+      run_id: runId,
+      thread_id: MOCK_THREAD_ID,
+      assistant_id: "lead_agent",
+      status: "success",
+      metadata: {},
+      kwargs: {},
+      created_at: `2025-06-05T13:00:${String(index).padStart(2, "0")}Z`,
+      updated_at: `2025-06-05T13:00:${String(index).padStart(2, "0")}Z`,
+    });
+    const allRuns = [...snapshotRunIds, ...olderRunIds].map(run);
+
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: MOCK_THREAD_ID,
+            runs: allRuns.slice(0, 10),
+            rounds: [],
+            run_messages: snapshotRunIds.map((runId) => ({
+              run_id: runId,
+              data: [],
+              has_more: false,
+            })),
+            task_lanes: [],
+          }),
+        }),
+    );
+    await page.route(
+      /\/api\/(?:langgraph\/)?threads\/[^/]+\/runs(\?|$)/,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(allRuns),
+        }),
+    );
+    await page.route(
+      new RegExp(
+        `/api/threads/${MOCK_THREAD_ID}/runs/([^/]+)/messages(?:\\?.*)?$`,
+      ),
+      (route) => {
+        messageLoads += 1;
+        const runId = new URL(route.request().url()).pathname.split("/").at(-2);
+        const marker =
+          runId === olderRunIds[0]
+            ? firstMarker
+            : runId === olderRunIds[1]
+              ? secondMarker
+              : null;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: marker
+              ? [
+                  {
+                    run_id: runId,
+                    content: {
+                      type: "ai",
+                      id: `${runId}-message`,
+                      content: marker,
+                    },
+                    metadata: { caller: "lead_agent" },
+                    created_at: "2025-06-05T13:01:00Z",
+                  },
+                ]
+              : [],
+            hasMore: false,
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByRole("button", { name: /load more/i })).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(messageLoads).toBe(0);
+    await expect(page.getByText(firstMarker)).toHaveCount(0);
+
+    await page.getByRole("button", { name: /load more/i }).click();
+    await expect(page.getByText(firstMarker)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(secondMarker)).toBeVisible({ timeout: 15_000 });
+    expect(messageLoads).toBe(2);
+    await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
+  });
+
+  test("a successful snapshot stays visible and offers retry when the full run list fails", async ({
+    page,
+  }) => {
+    const snapshotRunId = "snapshot-visible";
+    const olderRunId = "older-after-retry";
+    const snapshotMarker = "VISIBLE-SNAPSHOT-SURVIVES-RUN-LIST-ERROR";
+    const olderMarker = "VISIBLE-OLDER-RUN-AFTER-RETRY";
+    let runsAttempts = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Snapshot retry conversation",
+          updated_at: "2025-06-05T14:00:00Z",
+          messages: [],
+        },
+      ],
+    });
+
+    const run = (runId: string, createdAt: string) => ({
+      run_id: runId,
+      thread_id: MOCK_THREAD_ID,
+      assistant_id: "lead_agent",
+      status: "success",
+      metadata: {},
+      kwargs: {},
+      created_at: createdAt,
+      updated_at: createdAt,
+    });
+    const snapshotRun = run(snapshotRunId, "2025-06-05T14:00:02Z");
+    const olderRun = run(olderRunId, "2025-06-05T14:00:01Z");
+
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: MOCK_THREAD_ID,
+            runs: [snapshotRun],
+            rounds: [],
+            run_messages: [
+              {
+                run_id: snapshotRunId,
+                data: [
+                  {
+                    run_id: snapshotRunId,
+                    content: {
+                      type: "ai",
+                      id: "snapshot-visible-message",
+                      content: snapshotMarker,
+                    },
+                    metadata: { caller: "lead_agent" },
+                    created_at: "2025-06-05T14:00:02Z",
+                  },
+                ],
+                has_more: false,
+              },
+            ],
+            task_lanes: [],
+          }),
+        }),
+    );
+    await page.route(
+      /\/api\/(?:langgraph\/)?threads\/[^/]+\/runs(\?|$)/,
+      (route) => {
+        runsAttempts += 1;
+        if (runsAttempts <= 2) {
+          return route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "temporary run-list failure" }),
+          });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([snapshotRun, olderRun]),
+        });
+      },
+    );
+    await page.route(
+      new RegExp(
+        `/api/threads/${MOCK_THREAD_ID}/runs/${olderRunId}/messages(?:\\?.*)?$`,
+      ),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: [
+              {
+                run_id: olderRunId,
+                content: {
+                  type: "ai",
+                  id: "older-visible-message",
+                  content: olderMarker,
+                },
+                metadata: { caller: "lead_agent" },
+                created_at: "2025-06-05T14:00:01Z",
+              },
+            ],
+            hasMore: false,
+          }),
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(snapshotMarker)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      page.getByRole("button", { name: /load more/i }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /load more/i }).click();
+    await expect.poll(() => runsAttempts).toBe(2);
+    await expect(page.getByText(snapshotMarker)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /load more/i }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /load more/i }).click();
+    await expect(page.getByText(olderMarker)).toBeVisible({ timeout: 15_000 });
+    expect(runsAttempts).toBe(3);
+    await expect(page.getByText(snapshotMarker)).toBeVisible();
+  });
+
+  test("runtime snapshot round and current-run changes drop previous history", async ({
     page,
   }) => {
     const oldRunId = "snapshot-old-round-run";
     const newRunId = "snapshot-new-round-run";
+    const resumedRunId = "snapshot-same-round-resumed-run";
     const oldMarker = "SNAPSHOT-OLD-ROUND-MUST-DISAPPEAR";
     const newMarker = "SNAPSHOT-NEW-ROUND-MARKER";
-    let currentRound = "old";
+    const resumedMarker = "SNAPSHOT-SAME-ROUND-NEW-CURRENT-RUN";
+    let currentPhase: "old" | "new" | "resumed" = "old";
     let snapshotLoads = 0;
 
     mockLangGraphAPI(page, {
@@ -1129,12 +1509,18 @@ test.describe("Thread history", () => {
       hasMore: false,
     });
     const currentRuns = () =>
-      currentRound === "old"
+      currentPhase === "old"
         ? [run(oldRunId, "round-old")]
-        : [run(newRunId, "round-new"), run(oldRunId, "round-old")];
+        : currentPhase === "new"
+          ? [run(newRunId, "round-new"), run(oldRunId, "round-old")]
+          : [
+              run(resumedRunId, "round-new"),
+              run(newRunId, "round-new"),
+              run(oldRunId, "round-old"),
+            ];
 
     await page.route(
-      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot$`),
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
       (route) => {
         snapshotLoads += 1;
         return route.fulfill({
@@ -1144,7 +1530,7 @@ test.describe("Thread history", () => {
             thread_id: MOCK_THREAD_ID,
             runs: currentRuns(),
             rounds:
-              currentRound === "old"
+              currentPhase === "old"
                 ? [
                     {
                       thread_id: MOCK_THREAD_ID,
@@ -1157,7 +1543,8 @@ test.describe("Thread history", () => {
                     {
                       thread_id: MOCK_THREAD_ID,
                       round_id: "round-new",
-                      current_run_id: newRunId,
+                      current_run_id:
+                        currentPhase === "new" ? newRunId : resumedRunId,
                       state: "closed",
                     },
                     {
@@ -1168,12 +1555,18 @@ test.describe("Thread history", () => {
                     },
                   ],
             run_messages:
-              currentRound === "old"
+              currentPhase === "old"
                 ? [messagePage(oldRunId, oldMarker)]
-                : [
-                    messagePage(newRunId, newMarker),
-                    messagePage(oldRunId, oldMarker),
-                  ],
+                : currentPhase === "new"
+                  ? [
+                      messagePage(newRunId, newMarker),
+                      messagePage(oldRunId, oldMarker),
+                    ]
+                  : [
+                      messagePage(resumedRunId, resumedMarker),
+                      messagePage(newRunId, newMarker),
+                      messagePage(oldRunId, oldMarker),
+                    ],
             task_lanes: [],
             recovery: null,
           }),
@@ -1190,25 +1583,32 @@ test.describe("Thread history", () => {
     await page.route(
       new RegExp(`/api/threads/${MOCK_THREAD_ID}/runs/[^/]+/messages`),
       (route) => {
-        const runId = route.request().url().includes(newRunId)
-          ? newRunId
-          : oldRunId;
+        const runId = route.request().url().includes(resumedRunId)
+          ? resumedRunId
+          : route.request().url().includes(newRunId)
+            ? newRunId
+            : oldRunId;
+        const marker =
+          runId === resumedRunId
+            ? resumedMarker
+            : runId === newRunId
+              ? newMarker
+              : oldMarker;
         return route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(
-            messagePage(runId, runId === newRunId ? newMarker : oldMarker),
-          ),
+          body: JSON.stringify(messagePage(runId, marker)),
         });
       },
     );
 
     const handleRoundChange = (route: Route) => {
-      currentRound = "new";
+      currentPhase = currentPhase === "old" ? "new" : "resumed";
+      const nextRunId = currentPhase === "new" ? newRunId : resumedRunId;
       const events = [
         {
           event: "metadata",
-          data: { run_id: newRunId, thread_id: MOCK_THREAD_ID },
+          data: { run_id: nextRunId, thread_id: MOCK_THREAD_ID },
         },
         {
           event: "custom",
@@ -1216,7 +1616,7 @@ test.describe("Thread history", () => {
             type: "run.terminal",
             event_type: "run.terminal",
             thread_id: MOCK_THREAD_ID,
-            run_id: newRunId,
+            run_id: nextRunId,
             round_id: "round-new",
             status: "success",
             terminal_reason: "success",
@@ -1250,6 +1650,17 @@ test.describe("Thread history", () => {
 
     await expect.poll(() => snapshotLoads).toBeGreaterThan(1);
     await expect(page.getByText(newMarker)).toBeVisible();
+    await expect(page.getByText(oldMarker)).toHaveCount(0);
+
+    const snapshotLoadsAfterRoundChange = snapshotLoads;
+    await textarea.fill("resume within the current round");
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => snapshotLoads)
+      .toBeGreaterThan(snapshotLoadsAfterRoundChange);
+    await expect(page.getByText(resumedMarker)).toBeVisible();
+    await expect(page.getByText(newMarker)).toHaveCount(0);
     await expect(page.getByText(oldMarker)).toHaveCount(0);
   });
 

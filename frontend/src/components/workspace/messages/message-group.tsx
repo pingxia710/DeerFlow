@@ -13,7 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -443,6 +443,10 @@ function ToolCall({
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const artifactPath =
+    name === "write_file" || name === "str_replace"
+      ? (args as { path?: string }).path
+      : undefined;
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
@@ -452,6 +456,45 @@ function ToolCall({
     ) : (
       fallback
     );
+
+  useEffect(() => {
+    if (
+      !isLoading ||
+      !isLast ||
+      !autoOpen ||
+      !autoSelect ||
+      !artifactPath ||
+      result ||
+      window.innerWidth < 768
+    ) {
+      return;
+    }
+
+    const url = new URL(
+      `write-file:${artifactPath}?message_id=${messageId}&tool_call_id=${id}`,
+    ).toString();
+    if (selectedArtifact === url) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      select(url, true);
+      setOpen(true);
+    }, 100);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    artifactPath,
+    autoOpen,
+    autoSelect,
+    id,
+    isLast,
+    isLoading,
+    messageId,
+    result,
+    select,
+    selectedArtifact,
+    setOpen,
+  ]);
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -600,19 +643,7 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
+    const path = artifactPath;
 
     return (
       <ChainOfThoughtStep

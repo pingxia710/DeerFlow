@@ -5,6 +5,25 @@ export function shouldDeselectArtifactForThreadChange(
   return previousThreadId !== nextThreadId;
 }
 
+export function shouldAutoSelectStaticArtifact({
+  artifactCount,
+  autoSelectFirstArtifact,
+  isMobileViewport,
+  staticWebsiteOnly,
+}: {
+  artifactCount: number;
+  autoSelectFirstArtifact: boolean;
+  isMobileViewport: boolean;
+  staticWebsiteOnly: boolean;
+}) {
+  return (
+    staticWebsiteOnly &&
+    autoSelectFirstArtifact &&
+    !isMobileViewport &&
+    artifactCount > 0
+  );
+}
+
 export function getCurrentThreadArtifacts(
   artifacts: readonly string[] | null | undefined,
   messages: readonly {

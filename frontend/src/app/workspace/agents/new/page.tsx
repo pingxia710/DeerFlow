@@ -27,6 +27,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { beginThreadNavigation } from "@/components/workspace/chats";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
@@ -72,6 +73,10 @@ async function getAgentWithRetry(agentName: string) {
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
+  const navigate = (nextPath: string) => {
+    beginThreadNavigation(nextPath);
+    router.push(nextPath);
+  };
 
   const [step, setStep] = useState<Step>("name");
   const [nameInput, setNameInput] = useState("");
@@ -263,7 +268,7 @@ export default function NewAgentPage() {
         <Button
           variant="ghost"
           size="icon-sm"
-          onClick={() => router.push("/workspace/agents")}
+          onClick={() => navigate("/workspace/agents")}
         >
           <ArrowLeftIcon className="h-4 w-4" />
         </Button>
@@ -380,14 +385,14 @@ export default function NewAgentPage() {
                   <div className="flex gap-2">
                     <Button
                       onClick={() =>
-                        router.push(`/workspace/agents/${agentName}/chats/new`)
+                        navigate(`/workspace/agents/${agentName}/chats/new`)
                       }
                     >
                       {t.agents.startChatting}
                     </Button>
                     <Button
                       variant="outline"
-                      onClick={() => router.push("/workspace/agents")}
+                      onClick={() => navigate("/workspace/agents")}
                     >
                       {t.agents.backToGallery}
                     </Button>

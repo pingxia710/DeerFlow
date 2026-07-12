@@ -879,6 +879,9 @@ function ThreadRuntimeSlot({ slot }: { slot: ThreadRuntimeSlotConfig }) {
     runtimeOwnerId: slotId,
     context: slot.context,
     isMock: slot.isMock,
+    onThreadId(threadId) {
+      claimRuntimeThreadId(latestSlotIdRef.current, threadId);
+    },
     onSend(threadId) {
       callRuntimeCallback(latestSlotIdRef.current, "onSend", threadId);
     },

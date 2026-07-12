@@ -5,6 +5,7 @@ import { expect, test } from "@rstest/core";
 
 import {
   getCurrentThreadArtifacts,
+  shouldAutoSelectStaticArtifact,
   shouldDeselectArtifactForThreadChange,
 } from "@/components/workspace/chats/chat-box-state";
 
@@ -15,6 +16,25 @@ test("artifact selection is cleared only when the visible thread changes", () =>
   expect(shouldDeselectArtifactForThreadChange("thread-a", "thread-b")).toBe(
     true,
   );
+});
+
+test("static demos auto-select artifacts only on desktop", () => {
+  expect(
+    shouldAutoSelectStaticArtifact({
+      artifactCount: 1,
+      autoSelectFirstArtifact: true,
+      isMobileViewport: false,
+      staticWebsiteOnly: true,
+    }),
+  ).toBe(true);
+  expect(
+    shouldAutoSelectStaticArtifact({
+      artifactCount: 1,
+      autoSelectFirstArtifact: true,
+      isMobileViewport: true,
+      staticWebsiteOnly: true,
+    }),
+  ).toBe(false);
 });
 
 test("current thread artifacts include write-file tool calls from its messages", () => {

@@ -65,6 +65,7 @@ export type MockModel = {
 
 export type MockAPIOptions = {
   threads?: MockThread[];
+  createdThreadIds?: string[];
   agents?: MockAgent[];
   skills?: MockSkill[];
   models?: MockModel[];
@@ -129,6 +130,7 @@ function mockStreamMessages() {
  */
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
+  let createdThreadCount = 0;
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
   const models = options?.models ?? DEFAULT_MODELS;
@@ -253,8 +255,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      const createdThreadId =
+        options?.createdThreadIds?.[createdThreadCount++] ?? MOCK_THREAD_ID;
       upsertThread({
-        thread_id: MOCK_THREAD_ID,
+        thread_id: createdThreadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
         messages: [],
@@ -263,7 +267,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: createdThreadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           metadata: {},
@@ -368,28 +372,31 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  void page.route(/\/api\/threads\/([^/]+)\/runtime-snapshot$/, (route) => {
-    if (route.request().method() === "GET") {
-      const threadId = decodeURIComponent(
-        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
-      );
-      const matchingThread = threads.find((t) => t.thread_id === threadId);
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          thread_id: threadId,
-          runs: [],
-          rounds: [],
-          run_messages: [],
-          task_lanes: [],
-          recovery: null,
-          ...(matchingThread?.runtimeSnapshot ?? {}),
-        }),
-      });
-    }
-    return route.fallback();
-  });
+  void page.route(
+    /\/api\/threads\/([^/]+)\/runtime-snapshot(?:\?.*)?$/,
+    (route) => {
+      if (route.request().method() === "GET") {
+        const threadId = decodeURIComponent(
+          new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+        );
+        const matchingThread = threads.find((t) => t.thread_id === threadId);
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: threadId,
+            runs: [],
+            rounds: [],
+            run_messages: [],
+            task_lanes: [],
+            recovery: null,
+            ...(matchingThread?.runtimeSnapshot ?? {}),
+          }),
+        });
+      }
+      return route.fallback();
+    },
+  );
 
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
@@ -641,7 +648,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
  */
 export function handleRunStream(
   route: Route,
-  { messages = mockStreamMessages() }: { messages?: unknown[] } = {},
+  {
+    messages = mockStreamMessages(),
+    includeContentLocation = true,
+  }: {
+    messages?: unknown[];
+    includeContentLocation?: boolean;
+  } = {},
 ) {
   const events = [
     {
@@ -664,6 +677,11 @@ export function handleRunStream(
   return route.fulfill({
     status: 200,
     contentType: "text/event-stream",
+    headers: includeContentLocation
+      ? {
+          "Content-Location": `/threads/${MOCK_THREAD_ID}/runs/${MOCK_RUN_ID}`,
+        }
+      : undefined,
     body,
   });
 }

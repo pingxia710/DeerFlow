@@ -92,8 +92,9 @@ export default function ChatsPage() {
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
                 {filteredThreads.map((thread) => {
                   const channelSource = channelSourceOfThread(thread);
+                  const threadPath = pathOfThread(thread);
                   return (
-                    <Link key={thread.thread_id} href={pathOfThread(thread)}>
+                    <Link key={thread.thread_id} href={threadPath}>
                       <div className="flex flex-col gap-2 border-b p-4">
                         <div className="flex min-w-0 items-center gap-2">
                           <ThreadChannelIcon source={channelSource} />

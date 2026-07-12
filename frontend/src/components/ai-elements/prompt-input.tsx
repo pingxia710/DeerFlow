@@ -1100,7 +1100,7 @@ export const PromptInputSubmit = ({
 
   return (
     <InputGroupButton
-      aria-label="Submit"
+      aria-label={status === "streaming" ? "Stop" : "Submit"}
       className={cn(className)}
       size={size}
       type="submit"

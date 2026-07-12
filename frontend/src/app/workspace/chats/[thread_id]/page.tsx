@@ -8,9 +8,11 @@ import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
+  beginThreadNavigation,
   ChatBox,
+  getThreadNavigationGeneration,
   isThreadFinishForVisibleChat,
-  pendingNavigationAllowsThreadStart,
+  shouldCommitThreadStart,
   shouldShowWelcomeMode,
   useSpecificChatMode,
   useThreadChat,
@@ -83,6 +85,10 @@ export default function ChatPage() {
   const defaultedModeThreadIdRef = useRef<string | null>(null);
   const visibleThreadIdRef = useRef(threadId);
   const pendingStartThreadIdRef = useRef<string | null>(null);
+  const runtimeNavigationRef = useRef<{
+    runtimeKey: string;
+    generation: number;
+  } | null>(null);
   useSpecificChatMode();
 
   visibleThreadIdRef.current = threadId;
@@ -108,9 +114,21 @@ export default function ChatPage() {
   const { showNotification } = useNotification();
 
   const runtimeKey = getChatRuntimeKey(threadId, isNewThread);
+  if (runtimeNavigationRef.current?.runtimeKey !== runtimeKey) {
+    runtimeNavigationRef.current = {
+      runtimeKey,
+      generation: getThreadNavigationGeneration(),
+    };
+  }
+  const navigationGeneration = runtimeNavigationRef.current.generation;
 
-  const threadRuntime = useMemo(
-    () => ({
+  useEffect(() => {
+    pendingStartThreadIdRef.current = null;
+  }, [runtimeKey]);
+
+  const threadRuntime = useMemo(() => {
+    let navigationGenerationAtSend = navigationGeneration;
+    return {
       runtimeScope: "chat",
       runtimeKey,
       threadId: isNewThread ? undefined : threadId,
@@ -121,6 +139,7 @@ export default function ChatPage() {
       // LangGraph SDK eagerly fetches /history the moment it receives a
       // thread id and assumes the thread exists on the backend (issue #2746).
       onSend: (sentThreadId: string) => {
+        navigationGenerationAtSend = getThreadNavigationGeneration();
         pendingStartThreadIdRef.current = sentThreadId;
         setIsWelcomeMode(false);
       },
@@ -128,12 +147,14 @@ export default function ChatPage() {
         const pendingThreadId = pendingStartThreadIdRef.current;
         const visibleThreadId = visibleThreadIdRef.current;
         const currentPathname = window.location.pathname;
-        const streamStillOwnsVisibleChat =
-          pendingNavigationAllowsThreadStart(createdThreadId) &&
-          (visibleThreadId === createdThreadId ||
-            (pendingThreadId !== null &&
-              visibleThreadId === pendingThreadId &&
-              currentPathname.endsWith("/new")));
+        const streamStillOwnsVisibleChat = shouldCommitThreadStart({
+          createdThreadId,
+          pendingThreadId,
+          visibleThreadId,
+          committedPathname: currentPathname,
+          navigationGenerationAtSend,
+          currentNavigationGeneration: getThreadNavigationGeneration(),
+        });
         if (!streamStillOwnsVisibleChat) {
           return;
         }
@@ -172,18 +193,18 @@ export default function ChatPage() {
           showNotification(state.title, { body });
         }
       },
-    }),
-    [
-      isMock,
-      isNewThread,
-      setIsNewThread,
-      setThreadId,
-      runtimeKey,
-      settings.context,
-      showNotification,
-      threadId,
-    ],
-  );
+    };
+  }, [
+    isMock,
+    isNewThread,
+    navigationGeneration,
+    setIsNewThread,
+    setThreadId,
+    runtimeKey,
+    settings.context,
+    showNotification,
+    threadId,
+  ]);
 
   const {
     thread,
@@ -235,6 +256,7 @@ export default function ChatPage() {
 
     const agentPath = pathOfThread(threadId, { agent_name: agentName });
     if (window.location.pathname !== agentPath) {
+      beginThreadNavigation(agentPath);
       router.replace(agentPath);
     }
   }, [isMock, isNewThread, router, threadId, threadMetadata.data]);

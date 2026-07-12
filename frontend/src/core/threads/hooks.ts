@@ -203,6 +203,7 @@ export type ThreadStreamOptions = {
   runtimeOwnerId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
+  onThreadId?: (threadId: string) => void;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string | null) => void;
   onFinish?: (state: AgentThreadState, meta: ThreadStreamFinishMeta) => void;
@@ -547,7 +548,7 @@ export function resolveThreadRunsLoadAction({
   if (hasNextRunPage && (!hasUnloadedRuns || nextPageIsError)) {
     return "fetch-next-page" as const;
   }
-  if (runsIsError && !hasRunsData) {
+  if (runsIsError && (!hasRunsData || !hasUnloadedRuns)) {
     return "refetch-runs" as const;
   }
   return "load-messages" as const;
@@ -573,6 +574,18 @@ export function isCurrentThreadHistoryRequest({
   );
 }
 
+export function resolveThreadHistoryError({
+  loadError,
+  runsError,
+  hasSnapshot,
+}: {
+  loadError: unknown;
+  runsError: unknown;
+  hasSnapshot: boolean;
+}) {
+  return loadError ?? (!hasSnapshot ? runsError : null);
+}
+
 export function createOptimisticMessageId(prefix: string) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
@@ -587,6 +600,66 @@ export function isSameSendRequest(
     (!current.runtimeOwnerId ||
       !request.runtimeOwnerId ||
       current.runtimeOwnerId === request.runtimeOwnerId)
+  );
+}
+
+export function getDeferredThreadStopRequest({
+  runId,
+  activeRequest,
+  currentOwner,
+}: {
+  runId: string | null | undefined;
+  activeRequest: SendRequestOwnership | null;
+  currentOwner: ThreadRuntimeOwnerSnapshot | null;
+}): SendRequestOwnership | null {
+  if (runId || !activeRequest || !currentOwner) {
+    return null;
+  }
+  const ownerThreadIds = new Set(
+    [currentOwner.threadId, currentOwner.displayThreadId].filter(
+      (value): value is string => Boolean(value),
+    ),
+  );
+  const ownsRequestThread = [
+    activeRequest.threadId,
+    activeRequest.displayThreadId,
+  ].some((value) => Boolean(value && ownerThreadIds.has(value)));
+  const ownsRequestRuntime =
+    !activeRequest.runtimeOwnerId ||
+    !currentOwner.runtimeOwnerId ||
+    activeRequest.runtimeOwnerId === currentOwner.runtimeOwnerId;
+  return ownsRequestThread && ownsRequestRuntime ? activeRequest : null;
+}
+
+export function shouldBindDeferredThreadStopRun({
+  pendingRequest,
+  deferredRequest,
+  threadId,
+  runId,
+  currentOwner,
+}: {
+  pendingRequest: SendRequestOwnership | null;
+  deferredRequest: SendRequestOwnership | null;
+  threadId: string | null | undefined;
+  runId: string | null | undefined;
+  currentOwner: ThreadRuntimeOwnerSnapshot | null;
+}) {
+  const ownedPendingRequest = getDeferredThreadStopRequest({
+    runId: null,
+    activeRequest: pendingRequest,
+    currentOwner,
+  });
+  return Boolean(
+    threadId &&
+    runId &&
+    ownedPendingRequest &&
+    deferredRequest &&
+    isSameSendRequest(ownedPendingRequest, deferredRequest) &&
+    shouldClaimThreadRuntimeOwner({
+      eventThreadId: threadId,
+      eventRunId: runId,
+      currentOwner,
+    }),
   );
 }
 
@@ -945,6 +1018,8 @@ type ThreadRuntimeSnapshotResponse = {
   recovery?: RuntimeSnapshotRecovery | null;
 };
 
+export const THREAD_RUNTIME_SNAPSHOT_RUN_LIMIT = 10;
+
 export function threadRuntimeSnapshotQueryKey(threadId?: string | null) {
   return queryKeys.thread.runtimeSnapshot(threadId);
 }
@@ -959,7 +1034,8 @@ export function buildThreadRuntimeSnapshotUrl(
     `${normalizedBaseUrl}${path}`,
     typeof window !== "undefined" ? window.location.origin : "http://localhost",
   );
-  return normalizedBaseUrl ? url.toString() : url.pathname;
+  url.searchParams.set("run_limit", String(THREAD_RUNTIME_SNAPSHOT_RUN_LIMIT));
+  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
 const THREAD_RUNS_PAGE_SIZE = 100;
@@ -1917,6 +1993,7 @@ export function useThreadStream({
   runtimeOwnerId,
   context,
   isMock,
+  onThreadId: onThreadIdAssigned,
   onSend,
   onStart,
   onFinish,
@@ -1978,6 +2055,11 @@ export function useThreadStream({
   const locallySettledRunRef = useRef<StreamErrorRecoveryRun | null>(null);
   const startedRef = useRef(false);
   const activeSendRequestRef = useRef<SendRequestOwnership | null>(null);
+  const pendingRunCreationRequestRef = useRef<SendRequestOwnership | null>(
+    null,
+  );
+  const deferredStopRequestRef = useRef<SendRequestOwnership | null>(null);
+  const stopCurrentStreamRef = useRef<(() => Promise<void>) | null>(null);
   const queuedReleasePausedRef = useRef(false);
   const queuedReleaseInFlightRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
@@ -2080,7 +2162,9 @@ export function useThreadStream({
       currentOwner: getCurrentRuntimeOwner(),
       nextDisplayThreadId: currentViewThreadIdRef.current,
       streamFinished: streamFinishedRef.current,
-      sendInFlight: sendInFlightRef.current,
+      sendInFlight:
+        sendInFlightRef.current ||
+        pendingRunCreationRequestRef.current !== null,
     });
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
@@ -2095,6 +2179,8 @@ export function useThreadStream({
       setStreamClientThreadId(normalizedThreadId);
     }
     if (!preserveRuntimeOwner) {
+      pendingRunCreationRequestRef.current = null;
+      deferredStopRequestRef.current = null;
       streamThreadIdRef.current = normalizedThreadId;
       streamOwnerSnapshotRef.current = createThreadRuntimeOwnerSnapshot({
         threadId: normalizedThreadId,
@@ -2159,6 +2245,92 @@ export function useThreadStream({
     ? { threadId: streamClientThreadId }
     : {};
 
+  const consumeDeferredStopRequest = useCallback(() => {
+    const pendingRunCreationRequest = pendingRunCreationRequestRef.current;
+    const deferredStopRequest = deferredStopRequestRef.current;
+    if (
+      !pendingRunCreationRequest ||
+      !deferredStopRequest ||
+      !isSameSendRequest(pendingRunCreationRequest, deferredStopRequest)
+    ) {
+      return false;
+    }
+    pendingRunCreationRequestRef.current = null;
+    deferredStopRequestRef.current = null;
+    queueMicrotask(() => {
+      void stopCurrentStreamRef.current?.();
+    });
+    return true;
+  }, []);
+
+  const registerStreamRun = useCallback(
+    (meta: { thread_id: string; run_id: string }) => {
+      if (
+        (streamThreadIdRef.current === meta.thread_id &&
+          streamRunIdRef.current === meta.run_id) ||
+        isDeletedThreadTombstoned(meta.thread_id) ||
+        !shouldClaimThreadRuntimeOwner({
+          eventThreadId: meta.thread_id,
+          eventRunId: meta.run_id,
+          currentOwner: getCurrentRuntimeOwner(),
+        })
+      ) {
+        return;
+      }
+      handleStreamStart(meta.thread_id, meta.run_id);
+      if (!consumeDeferredStopRequest()) {
+        pendingRunCreationRequestRef.current = null;
+      }
+      markThreadBusyInCaches(queryClient, meta.thread_id, {
+        runId: meta.run_id,
+        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
+      });
+      startBackgroundRunProbe({
+        queryClient,
+        threadId: meta.thread_id,
+        runId: meta.run_id,
+        isMock,
+        settleRunSubtasks,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: threadRunsQueryKey(meta.thread_id),
+      });
+      const now = new Date().toISOString();
+      const threadRecord: AgentThread = {
+        thread_id: meta.thread_id,
+        created_at: now,
+        updated_at: now,
+        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        status: "busy",
+        values: {
+          title: t.pages.newChat,
+          messages: [],
+          artifacts: [],
+        },
+        interrupts: {},
+      };
+      upsertThreadInSearchCache(queryClient, threadRecord);
+      upsertThreadInInfiniteCache(queryClient, threadRecord);
+      if (context.agent_name && !isMock) {
+        void getAPIClient()
+          .threads.update(meta.thread_id, {
+            metadata: { agent_name: context.agent_name },
+          })
+          .catch(() => ({}));
+      }
+    },
+    [
+      context.agent_name,
+      consumeDeferredStopRequest,
+      getCurrentRuntimeOwner,
+      handleStreamStart,
+      isMock,
+      queryClient,
+      settleRunSubtasks,
+      t.pages.newChat,
+    ],
+  );
+
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId,
@@ -2195,6 +2367,7 @@ export function useThreadStream({
         threadId: createdThreadId,
         runId: streamRunIdRef.current,
       });
+      onThreadIdAssigned?.(createdThreadId);
       setOnStreamThreadId(createdThreadId);
       for (const previousId of previousIds) {
         clearThreadActivity(previousId);
@@ -2205,65 +2378,10 @@ export function useThreadStream({
       });
     },
     onCreated(meta) {
-      if (
-        isDeletedThreadTombstoned(meta.thread_id) ||
-        !shouldClaimThreadRuntimeOwner({
-          eventThreadId: meta.thread_id,
-          eventRunId: meta.run_id,
-          currentOwner: getCurrentRuntimeOwner(),
-        })
-      ) {
-        return;
-      }
-      handleStreamStart(meta.thread_id, meta.run_id);
-      markThreadBusyInCaches(queryClient, meta.thread_id, {
-        runId: meta.run_id,
-        runtimeOwnerId: currentRuntimeOwnerIdRef.current,
-      });
-      startBackgroundRunProbe({
-        queryClient,
-        threadId: meta.thread_id,
-        runId: meta.run_id,
-        isMock,
-        settleRunSubtasks,
-      });
-      void queryClient.invalidateQueries({
-        queryKey: threadRunsQueryKey(meta.thread_id),
-      });
-      const now = new Date().toISOString();
-      upsertThreadInSearchCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
-        },
-        interrupts: {},
-      });
-      upsertThreadInInfiniteCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
-        },
-        interrupts: {},
-      });
-      if (context.agent_name && !isMock) {
-        void getAPIClient()
-          .threads.update(meta.thread_id, {
-            metadata: { agent_name: context.agent_name },
-          })
-          .catch(() => ({}));
-      }
+      registerStreamRun(meta);
+    },
+    onMetadataEvent(meta) {
+      registerStreamRun(meta);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
@@ -2496,7 +2614,23 @@ export function useThreadStream({
       const streamRunId =
         recoveryOwner?.runId ?? run?.run_id ?? streamRunIdRef.current;
       if (isDeletedThreadTombstoned(streamThreadId)) {
+        pendingRunCreationRequestRef.current = null;
+        deferredStopRequestRef.current = null;
         return;
+      }
+      const deferredStopOwnsErrorRun = shouldBindDeferredThreadStopRun({
+        pendingRequest: pendingRunCreationRequestRef.current,
+        deferredRequest: deferredStopRequestRef.current,
+        threadId: streamThreadId,
+        runId: streamRunId,
+        currentOwner: getCurrentRuntimeOwner(),
+      });
+      if (deferredStopOwnsErrorRun) {
+        registerStreamRun({
+          thread_id: streamThreadId!,
+          run_id: streamRunId!,
+        });
+        consumeDeferredStopRequest();
       }
       const currentOwner = getCurrentRuntimeOwner();
       const errorOwnsCurrentUi = isCurrentThreadRuntimeOwnerEvent({
@@ -2535,6 +2669,10 @@ export function useThreadStream({
         isMock,
         settleRunSubtasks,
       });
+      if (!deferredStopOwnsErrorRun || recoveryRun === null) {
+        pendingRunCreationRequestRef.current = null;
+        deferredStopRequestRef.current = null;
+      }
       if (
         errorOwnsCurrentUi ||
         isSameStreamErrorRecoveryRun(
@@ -2579,6 +2717,8 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      pendingRunCreationRequestRef.current = null;
+      deferredStopRequestRef.current = null;
       const finishEventThreadId = run?.thread_id ?? null;
       const finishEventRunId = run?.run_id ?? null;
       const finishMeta = resolveThreadStreamFinishMeta({
@@ -3148,6 +3288,7 @@ export function useThreadStream({
           }),
         );
 
+        pendingRunCreationRequestRef.current = sendRequest;
         streamSubmitStarted = true;
         await thread.submit(
           {
@@ -3193,6 +3334,12 @@ export function useThreadStream({
       } catch (error) {
         if (!ownsSendRequest()) {
           return;
+        }
+        if (
+          isSameSendRequest(pendingRunCreationRequestRef.current, sendRequest)
+        ) {
+          pendingRunCreationRequestRef.current = null;
+          deferredStopRequestRef.current = null;
         }
         releaseStreamClientThreadId(streamThreadIdRef.current);
         if (!streamSubmitStarted || isStaleThreadUploadError(error)) {
@@ -3365,6 +3512,7 @@ export function useThreadStream({
 
         prepareStreamOwnerForSend(threadId);
         streamClientThreadIdLockedRef.current = true;
+        pendingRunCreationRequestRef.current = sendRequest;
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
@@ -3398,6 +3546,12 @@ export function useThreadStream({
       } catch (error) {
         if (!ownsSendRequest()) {
           return;
+        }
+        if (
+          isSameSendRequest(pendingRunCreationRequestRef.current, sendRequest)
+        ) {
+          pendingRunCreationRequestRef.current = null;
+          deferredStopRequestRef.current = null;
         }
         releaseStreamClientThreadId(streamThreadIdRef.current);
         setLiveMessagesThreadTarget(null);
@@ -3461,7 +3615,10 @@ export function useThreadStream({
     }),
   );
   const effectiveThreadIsLoading =
-    thread.isLoading && !hasLocallySettledCurrentStream;
+    (thread.isLoading ||
+      sendInFlightRef.current ||
+      pendingRunCreationRequestRef.current !== null) &&
+    !hasLocallySettledCurrentStream;
 
   const mergedMessages = mergeMessages(
     visibleHistory,
@@ -3482,6 +3639,18 @@ export function useThreadStream({
     if (isDeletedThreadTombstoned(stopThreadId)) {
       return;
     }
+    const deferredStopRequest = getDeferredThreadStopRequest({
+      runId: stopRunId,
+      activeRequest:
+        activeSendRequestRef.current ?? pendingRunCreationRequestRef.current,
+      currentOwner: owner,
+    });
+    if (deferredStopRequest) {
+      deferredStopRequestRef.current = deferredStopRequest;
+      return;
+    }
+    pendingRunCreationRequestRef.current = null;
+    deferredStopRequestRef.current = null;
     const cancellation = beginLocalRunCancellation({
       queryClient,
       threadId: stopThreadId,
@@ -3613,6 +3782,7 @@ export function useThreadStream({
     settleRunSubtasks,
     thread,
   ]);
+  stopCurrentStreamRef.current = stopCurrentStream;
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
@@ -3671,7 +3841,7 @@ type ThreadHistoryOptions = {
   pendingSupersededRunIds?: ReadonlySet<string>;
 };
 
-function runsForHistoryScope(runs: Run[], runId: string | null) {
+export function scopeRunsForThreadHistory(runs: Run[], runId: string | null) {
   return runId ? runs.filter((run) => run.run_id === runId) : runs;
 }
 
@@ -3684,6 +3854,7 @@ export {
   roundIdOfRun,
   taskLanesForLatestRound,
 } from "./command-room-read-model";
+export { getSnapshotHistoryContinuationState } from "./message-history";
 
 function useThreadRuntimeSnapshot(
   threadId?: string,
@@ -3982,10 +4153,17 @@ export function useThreadHistory(
       snapshotRoundIdRef.current !== null &&
       latestRoundId !== null &&
       snapshotRoundIdRef.current !== latestRoundId;
-    const resetSnapshotHistory = snapshotThreadChanged || snapshotRoundChanged;
+    const snapshotScopeRunChanged = Boolean(
+      !snapshotThreadChanged &&
+      historyScopeRunIdRef.current &&
+      snapshotRuns[0]?.run_id &&
+      historyScopeRunIdRef.current !== snapshotRuns[0].run_id,
+    );
+    const resetSnapshotHistory =
+      snapshotThreadChanged || snapshotRoundChanged || snapshotScopeRunChanged;
     if (snapshotThreadChanged) {
       historyScopeRunIdRef.current = null;
-    } else if (snapshotRoundChanged) {
+    } else if (snapshotRoundChanged || snapshotScopeRunChanged) {
       historyScopeRunIdRef.current = snapshotRuns[0]?.run_id ?? null;
     }
     const snapshotPages = historyScopeRunIdRef.current
@@ -3993,7 +4171,7 @@ export function useThreadHistory(
           (page) => page.run_id === historyScopeRunIdRef.current,
         )
       : data.run_messages;
-    const snapshotHistoryRuns = runsForHistoryScope(
+    const snapshotHistoryRuns = scopeRunsForThreadHistory(
       snapshotRuns,
       historyScopeRunIdRef.current,
     );
@@ -4072,13 +4250,22 @@ export function useThreadHistory(
       latestRoundIdRef.current !== null &&
       latestRoundId !== null &&
       latestRoundIdRef.current !== latestRoundId;
-    const resetToCurrentRun = enabled && !threadChanged && roundChanged;
-    const resetMode = resolveThreadHistoryReset({
-      enabled,
-      threadChanged,
-      previousRoundId: latestRoundIdRef.current,
-      latestRoundId,
-    });
+    const scopedCurrentRunChanged = Boolean(
+      !threadChanged &&
+      historyScopeRunIdRef.current &&
+      authoritativeRuns?.[0]?.run_id &&
+      historyScopeRunIdRef.current !== authoritativeRuns[0].run_id,
+    );
+    const resetToCurrentRun =
+      enabled && !threadChanged && (roundChanged || scopedCurrentRunChanged);
+    const resetMode = scopedCurrentRunChanged
+      ? "clear"
+      : resolveThreadHistoryReset({
+          enabled,
+          threadChanged,
+          previousRoundId: latestRoundIdRef.current,
+          latestRoundId,
+        });
     threadIdRef.current = threadId;
 
     if (resetMode !== "none") {
@@ -4120,7 +4307,7 @@ export function useThreadHistory(
     }
 
     if (authoritativeRuns && authoritativeRuns.length > 0) {
-      const scopedRuns = runsForHistoryScope(
+      const scopedRuns = scopeRunsForThreadHistory(
         authoritativeRuns,
         historyScopeRunIdRef.current,
       );
@@ -4226,8 +4413,32 @@ export function useThreadHistory(
     if (action === "refetch-runs") {
       const result = await refetchRuns();
       if (result.error) {
-        setError(result.error);
+        if (snapshot.data) {
+          toast.error("Failed to load thread history.");
+        } else {
+          setError(result.error);
+        }
+        return;
       }
+      if (
+        threadIdRef.current !== threadId ||
+        isDeletedThreadTombstoned(threadId)
+      ) {
+        return;
+      }
+      const nextRuns = mergeRunsWithTerminalPrecedence({
+        snapshotRuns: snapshot.data?.runs,
+        queriedRuns: result.data,
+        rounds: snapshot.data?.rounds,
+      });
+      if (nextRuns && nextRuns.length > 0) {
+        runsRef.current = nextRuns;
+        indexRef.current = findLatestUnloadedRunIndex(
+          nextRuns,
+          loadedRunIdsRef.current,
+        );
+      }
+      await loadMessages();
       return;
     }
     if (action === "fetch-next-page") {
@@ -4264,8 +4475,7 @@ export function useThreadHistory(
     refetchRuns,
     runsData?.length,
     runsIsError,
-    snapshot.data?.rounds,
-    snapshot.data?.runs,
+    snapshot.data,
     threadId,
   ]);
 
@@ -4330,7 +4540,10 @@ export function useThreadHistory(
   const hasMore =
     enabled &&
     hasThreadId &&
-    (indexRef.current >= 0 || hasUnloadedRuns || Boolean(hasNextRunPage));
+    (indexRef.current >= 0 ||
+      hasUnloadedRuns ||
+      Boolean(hasNextRunPage) ||
+      Boolean(snapshot.data && runs.isError));
   return {
     runs: runsData,
     commandRoomReadModel,
@@ -4338,7 +4551,11 @@ export function useThreadHistory(
     terminalNotice,
     loading:
       loading || isRunsLoading || isRunsUnresolved || isFetchingNextRunPage,
-    error: error ?? (runs.isError ? runs.error : null),
+    error: resolveThreadHistoryError({
+      loadError: error,
+      runsError: runs.isError ? runs.error : null,
+      hasSnapshot: Boolean(snapshot.data),
+    }),
     appendMessages,
     refreshRuns,
     hasMore,

@@ -7,6 +7,27 @@ import { shouldApplyVisibleThreadEffect } from "@/core/threads/effect-policy";
 import { uuid } from "@/core/utils/uuid";
 
 export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
+let threadNavigationGeneration = 0;
+
+export function getThreadNavigationGeneration() {
+  return threadNavigationGeneration;
+}
+
+export function beginThreadNavigation(nextHref?: string) {
+  if (nextHref && typeof window !== "undefined") {
+    const current = new URL(window.location.href);
+    const target = new URL(nextHref, current);
+    if (
+      target.origin === current.origin &&
+      target.pathname === current.pathname &&
+      target.search === current.search
+    ) {
+      return threadNavigationGeneration;
+    }
+  }
+  threadNavigationGeneration += 1;
+  return threadNavigationGeneration;
+}
 
 let pendingThreadChatPathname: string | null = null;
 
@@ -71,6 +92,43 @@ export function threadIdFromCommittedPathname(pathname: string) {
   }
 }
 
+export function isThreadAtCommittedPath(
+  threadId: string,
+  committedPathname: string,
+) {
+  return threadIdFromCommittedPathname(committedPathname) === threadId;
+}
+
+export function shouldCommitThreadStart({
+  createdThreadId,
+  pendingThreadId,
+  visibleThreadId,
+  committedPathname,
+  navigationGenerationAtSend,
+  currentNavigationGeneration,
+}: {
+  createdThreadId: string;
+  pendingThreadId: string | null;
+  visibleThreadId: string | null;
+  committedPathname: string;
+  navigationGenerationAtSend: number;
+  currentNavigationGeneration: number;
+}) {
+  if (
+    navigationGenerationAtSend !== currentNavigationGeneration ||
+    !pendingNavigationAllowsThreadStart(createdThreadId)
+  ) {
+    return false;
+  }
+  if (committedPathname.endsWith("/new")) {
+    return pendingThreadId !== null && visibleThreadId === pendingThreadId;
+  }
+  return (
+    visibleThreadId === createdThreadId &&
+    isThreadAtCommittedPath(createdThreadId, committedPathname)
+  );
+}
+
 export function isNewThreadRoute({
   threadIdFromPath,
   actualPathname,
@@ -133,6 +191,7 @@ export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
   if (typeof window === "undefined") {
     return;
   }
+  beginThreadNavigation();
   window.dispatchEvent(
     new CustomEvent<ThreadChatResetDetail>(THREAD_CHAT_RESET_EVENT, {
       detail,
@@ -179,6 +238,43 @@ export function useThreadChat() {
     newThreadIdRef.current = nextThreadId;
     setIsNewThreadState(true);
     setThreadIdState(nextThreadId);
+  }, []);
+
+  useEffect(() => {
+    const handleNavigationClick = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        !(event.target instanceof Element)
+      ) {
+        return;
+      }
+      const anchor = event.target.closest<HTMLAnchorElement>("a[href]");
+      if (
+        !anchor ||
+        anchor.hasAttribute("download") ||
+        (anchor.target && anchor.target !== "_self")
+      ) {
+        return;
+      }
+      const target = new URL(anchor.href, window.location.href);
+      if (target.origin === window.location.origin) {
+        beginThreadNavigation(`${target.pathname}${target.search}`);
+      }
+    };
+
+    const handlePopState = () => beginThreadNavigation();
+
+    document.addEventListener("click", handleNavigationClick, true);
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      document.removeEventListener("click", handleNavigationClick, true);
+      window.removeEventListener("popstate", handlePopState);
+    };
   }, []);
 
   useEffect(() => {

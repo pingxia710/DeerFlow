@@ -568,6 +568,27 @@ export function applySnapshotRunMessagePageState(
   }
 }
 
+export function getSnapshotHistoryContinuationState(
+  runs: Run[],
+  pages: RuntimeSnapshotRunMessagesPage[],
+) {
+  const pagesByRunId = new Map(pages.map((page) => [page.run_id, page]));
+  let consecutiveEmptyLoads = 0;
+  let visibleMessageCount = 0;
+
+  for (const run of runs) {
+    const page = pagesByRunId.get(run.run_id);
+    if (!page || getNextRunMessagesBeforeSeq(page) !== null) {
+      break;
+    }
+    visibleMessageCount = page.data.filter(isVisibleHistoryRunMessage).length;
+    consecutiveEmptyLoads =
+      visibleMessageCount === 0 ? consecutiveEmptyLoads + 1 : 0;
+  }
+
+  return { consecutiveEmptyLoads, visibleMessageCount };
+}
+
 export function isAbortError(error: unknown) {
   return (
     typeof error === "object" &&

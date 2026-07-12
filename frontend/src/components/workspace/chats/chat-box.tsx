@@ -11,6 +11,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { env } from "@/env";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import {
@@ -24,12 +25,14 @@ import { useThread } from "../messages/context";
 import {
   getCurrentThreadArtifacts,
   getEffectiveSelectedArtifact,
+  shouldAutoSelectStaticArtifact,
   shouldDeselectArtifactForThreadChange,
   shouldShowArtifactPanel,
 } from "./chat-box-state";
 
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
 const OPEN_MODE = { chat: 60, artifacts: 40 };
+const MOBILE_OPEN_MODE = { chat: 0, artifacts: 100 };
 
 const ChatBoxContent: React.FC<{
   children: React.ReactNode;
@@ -39,6 +42,9 @@ const ChatBoxContent: React.FC<{
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
   const layoutRef = useRef<GroupImperativeHandle>(null);
+  const isMobileViewport = useIsMobile();
+  const useMobileArtifactLayout =
+    typeof window !== "undefined" ? window.innerWidth < 768 : isMobileViewport;
 
   const {
     open: artifactsOpen,
@@ -71,13 +77,16 @@ const ChatBoxContent: React.FC<{
     setArtifacts(currentArtifacts);
 
     if (
-      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
-      autoSelectFirstArtifact
+      shouldAutoSelectStaticArtifact({
+        artifactCount: currentArtifacts.length,
+        autoSelectFirstArtifact,
+        isMobileViewport: useMobileArtifactLayout,
+        staticWebsiteOnly: env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+      })
     ) {
-      if (currentArtifacts.length > 0) {
-        setAutoSelectFirstArtifact(false);
-        selectArtifact(currentArtifacts[0]!);
-      }
+      setAutoSelectFirstArtifact(false);
+      selectArtifact(currentArtifacts[0]!);
+      setArtifactsOpen(true);
     }
   }, [
     threadId,
@@ -86,7 +95,9 @@ const ChatBoxContent: React.FC<{
     selectArtifact,
     selectedArtifact,
     setArtifacts,
+    setArtifactsOpen,
     currentArtifacts,
+    useMobileArtifactLayout,
   ]);
 
   const artifactPanelOpen = useMemo(
@@ -107,12 +118,14 @@ const ChatBoxContent: React.FC<{
   useEffect(() => {
     if (layoutRef.current) {
       if (artifactPanelOpen) {
-        layoutRef.current.setLayout(OPEN_MODE);
+        layoutRef.current.setLayout(
+          useMobileArtifactLayout ? MOBILE_OPEN_MODE : OPEN_MODE,
+        );
       } else {
         layoutRef.current.setLayout(CLOSE_MODE);
       }
     }
-  }, [artifactPanelOpen]);
+  }, [artifactPanelOpen, useMobileArtifactLayout]);
 
   return (
     <ResizablePanelGroup

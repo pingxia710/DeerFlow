@@ -198,6 +198,151 @@ test("isSameSendRequest requires matching request and thread ownership", async (
   expect(isSameSendRequest(null, request)).toBe(false);
 });
 
+test("stop before run creation defers only for the owning send request", async () => {
+  const { createThreadRuntimeOwnerSnapshot, getDeferredThreadStopRequest } =
+    await import("@/core/threads/hooks");
+  const request = {
+    requestId: "send-1",
+    threadId: "pending-thread",
+    displayThreadId: "pending-thread",
+    runtimeOwnerId: "runtime-a",
+  };
+  const owner = createThreadRuntimeOwnerSnapshot({
+    threadId: null,
+    runId: null,
+    displayThreadId: "pending-thread",
+    runtimeOwnerId: "runtime-a",
+  });
+
+  expect(
+    getDeferredThreadStopRequest({
+      runId: null,
+      activeRequest: request,
+      currentOwner: owner,
+    }),
+  ).toBe(request);
+  expect(
+    getDeferredThreadStopRequest({
+      runId: "run-1",
+      activeRequest: request,
+      currentOwner: owner,
+    }),
+  ).toBeNull();
+  expect(
+    getDeferredThreadStopRequest({
+      runId: null,
+      activeRequest: request,
+      currentOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "thread-b",
+        runId: null,
+        displayThreadId: "thread-b",
+        runtimeOwnerId: "runtime-b",
+      }),
+    }),
+  ).toBeNull();
+});
+
+test("stream error run metadata binds only the owning deferred stop", async () => {
+  const { createThreadRuntimeOwnerSnapshot, shouldBindDeferredThreadStopRun } =
+    await import("@/core/threads/hooks");
+  const pendingRequest = {
+    requestId: "send-1",
+    threadId: "pending-thread",
+    displayThreadId: "pending-thread",
+    runtimeOwnerId: "runtime-a",
+  };
+  const owner = createThreadRuntimeOwnerSnapshot({
+    threadId: "pending-thread",
+    runId: null,
+    displayThreadId: "pending-thread",
+    runtimeOwnerId: "runtime-a",
+  });
+
+  expect(
+    shouldBindDeferredThreadStopRun({
+      pendingRequest,
+      deferredRequest: pendingRequest,
+      threadId: "pending-thread",
+      runId: "run-1",
+      currentOwner: owner,
+    }),
+  ).toBe(true);
+  expect(
+    shouldBindDeferredThreadStopRun({
+      pendingRequest,
+      deferredRequest: pendingRequest,
+      threadId: "pending-thread",
+      runId: null,
+      currentOwner: owner,
+    }),
+  ).toBe(false);
+  expect(
+    shouldBindDeferredThreadStopRun({
+      pendingRequest,
+      deferredRequest: { ...pendingRequest, requestId: "send-2" },
+      threadId: "pending-thread",
+      runId: "run-1",
+      currentOwner: owner,
+    }),
+  ).toBe(false);
+  expect(
+    shouldBindDeferredThreadStopRun({
+      pendingRequest,
+      deferredRequest: pendingRequest,
+      threadId: "pending-thread",
+      runId: "stale-run",
+      currentOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "pending-thread",
+        runId: "current-run",
+        displayThreadId: "pending-thread",
+        runtimeOwnerId: "runtime-a",
+      }),
+    }),
+  ).toBe(false);
+  expect(
+    shouldBindDeferredThreadStopRun({
+      pendingRequest,
+      deferredRequest: pendingRequest,
+      threadId: "pending-thread",
+      runId: "run-1",
+      currentOwner: createThreadRuntimeOwnerSnapshot({
+        threadId: "pending-thread",
+        runId: null,
+        displayThreadId: "pending-thread",
+        runtimeOwnerId: "runtime-b",
+      }),
+    }),
+  ).toBe(false);
+});
+
+test("successful runtime snapshots remain visible when the full run list fails", async () => {
+  const { resolveThreadHistoryError } = await import("@/core/threads/hooks");
+  const runsError = new Error("later run page failed");
+  const loadError = new Error("message page failed");
+
+  expect(
+    resolveThreadHistoryError({
+      loadError: null,
+      runsError,
+      hasSnapshot: true,
+    }),
+  ).toBeNull();
+  expect(
+    resolveThreadHistoryError({
+      loadError: null,
+      runsError,
+      hasSnapshot: false,
+    }),
+  ).toBe(runsError);
+  expect(
+    resolveThreadHistoryError({
+      loadError,
+      runsError,
+      hasSnapshot: true,
+    }),
+  ).toBe(loadError);
+});
+
 test("async send ownership rejects stale upload and regenerate continuations after a thread switch", async () => {
   const { isSameSendRequest, shouldApplyUploadContinuation } =
     await import("@/core/threads/hooks");

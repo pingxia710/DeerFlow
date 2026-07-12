@@ -4,6 +4,7 @@ import { BotIcon, PlusIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { beginThreadNavigation } from "@/components/workspace/chats";
 import { useAgents } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -15,7 +16,9 @@ export function AgentGallery() {
   const router = useRouter();
 
   const handleNewAgent = () => {
-    router.push("/workspace/agents/new");
+    const nextPath = "/workspace/agents/new";
+    beginThreadNavigation(nextPath);
+    router.push(nextPath);
   };
 
   return (

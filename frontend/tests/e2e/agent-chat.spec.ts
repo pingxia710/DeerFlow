@@ -370,7 +370,7 @@ test.describe("Agent chat", () => {
   }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
     await page.route(
-      /\/api\/threads\/nonexistent\/runtime-snapshot$/,
+      /\/api\/threads\/nonexistent\/runtime-snapshot(?:\?.*)?$/,
       (route) => {
         if (route.request().method() === "GET") {
           return route.fulfill({

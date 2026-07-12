@@ -28,6 +28,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { beginThreadNavigation } from "@/components/workspace/chats";
 import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
@@ -107,6 +108,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   function handleChat() {
+    beginThreadNavigation();
     router.push(`/workspace/agents/${agent.name}/chats/new`);
   }
 

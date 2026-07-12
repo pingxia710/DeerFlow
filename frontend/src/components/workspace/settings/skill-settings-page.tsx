@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { resetThreadChatToNew } from "@/components/workspace/chats";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
@@ -79,8 +80,10 @@ function SkillSettingsList({
     [skills, filter],
   );
   const handleCreateSkill = () => {
+    const nextPath = "/workspace/chats/new?mode=skill";
     onClose?.();
-    router.push("/workspace/chats/new?mode=skill");
+    resetThreadChatToNew(nextPath);
+    router.push(nextPath);
   };
   return (
     <div className="flex w-full flex-col gap-4">

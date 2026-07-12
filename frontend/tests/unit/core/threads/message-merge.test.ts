@@ -21,6 +21,7 @@ import {
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
   getLatestRunTerminalNotice,
+  getSnapshotHistoryContinuationState,
   getTerminalTransitionRunIds,
   getThreadActivitySnapshot,
   getSupersededRunIds,
@@ -47,6 +48,7 @@ import {
   resolveThreadHistoryReset,
   roundIdOfRun,
   runMessagesPageHasMore,
+  scopeRunsForThreadHistory,
   shouldAutoContinueOnEmptyRun,
   shouldAutoContinueRunHistory,
   shouldAutoLoadLatestRun,
@@ -887,10 +889,10 @@ test("buildThreadRuntimeSnapshotUrl encodes the thread id", () => {
       "thread/with space",
     ),
   ).toBe(
-    "https://api.example.test/api/threads/thread%2Fwith%20space/runtime-snapshot",
+    "https://api.example.test/api/threads/thread%2Fwith%20space/runtime-snapshot?run_limit=10",
   );
   expect(buildThreadRuntimeSnapshotUrl("", "thread-1")).toBe(
-    "/api/threads/thread-1/runtime-snapshot",
+    "/api/threads/thread-1/runtime-snapshot?run_limit=10",
   );
 });
 
@@ -2520,6 +2522,43 @@ test("shouldAutoContinueRunHistory stops when no older runs remain", () => {
       consecutiveEmptyLoads: 0,
     }),
   ).toBe(false);
+});
+
+test("snapshot continuation counts only the trailing complete empty runs", () => {
+  const runs = ["visible", "empty-1", "empty-2", "incomplete"].map(
+    (run_id) => ({ run_id }) as Run,
+  );
+  const visible = {
+    run_id: "visible",
+    data: [
+      {
+        ...runMessage(1),
+        run_id: "visible",
+        metadata: { caller: "lead_agent" },
+      },
+    ],
+    has_more: false,
+  };
+  const pages = [
+    visible,
+    { run_id: "empty-1", data: [], has_more: false },
+    { run_id: "empty-2", data: [], has_more: false },
+    { run_id: "incomplete", data: [], has_more: true },
+  ];
+
+  expect(getSnapshotHistoryContinuationState(runs, pages)).toEqual({
+    consecutiveEmptyLoads: 2,
+    visibleMessageCount: 0,
+  });
+});
+
+test("round-scoped history excludes runs from previous rounds", () => {
+  const runs = ["current-run", "previous-run"].map(
+    (run_id) => ({ run_id }) as Run,
+  );
+
+  expect(scopeRunsForThreadHistory(runs, "current-run")).toEqual([runs[0]]);
+  expect(scopeRunsForThreadHistory(runs, null)).toEqual(runs);
 });
 
 test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {

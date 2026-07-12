@@ -44,6 +44,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import {
+  isThreadAtCommittedPath,
   markThreadChatNavigationIntent,
   resetThreadChatAfterDelete,
 } from "@/components/workspace/chats/use-thread-chat";
@@ -132,15 +133,13 @@ export function RecentChatList() {
     (thread: AgentThread) => {
       const currentPathname =
         typeof window === "undefined" ? pathname : window.location.pathname;
-      const threadPath = pathOfThread(thread);
       const nextThreadPath = pathOfThread("new", {
         agent_name: agentNameFromPath,
       });
-      const isNewThreadPath = currentPathname === nextThreadPath;
-      const isCurrentThread =
-        thread.thread_id === threadIdFromPath ||
-        threadPath === currentPathname ||
-        (isNewThreadPath && threads[0]?.thread_id === thread.thread_id);
+      const isCurrentThread = isThreadAtCommittedPath(
+        thread.thread_id,
+        currentPathname,
+      );
 
       deleteThread({
         threadId: thread.thread_id,
@@ -156,14 +155,7 @@ export function RecentChatList() {
           : undefined,
       });
     },
-    [
-      agentNameFromPath,
-      deleteThread,
-      pathname,
-      router,
-      threadIdFromPath,
-      threads,
-    ],
+    [agentNameFromPath, deleteThread, pathname, router],
   );
 
   const handleRenameClick = useCallback(
@@ -255,7 +247,8 @@ export function RecentChatList() {
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
               {threads.map((thread) => {
-                const isActive = pathOfThread(thread) === pathname;
+                const threadPath = pathOfThread(thread);
+                const isActive = threadPath === pathname;
                 const channelSource = channelSourceOfThread(thread);
                 const isRunning = shouldShowThreadRunningStatus(
                   thread.status,

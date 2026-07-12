@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
+import {
+  handleRunStream,
+  mockLangGraphAPI,
+  MOCK_RUN_ID,
+  MOCK_THREAD_ID,
+} from "./utils/mock-api";
 
 test.describe("Chat workspace", () => {
   test.beforeEach(async ({ page }) => {
@@ -23,6 +28,100 @@ test.describe("Chat workspace", () => {
 
     await textarea.fill("Hello, DeerFlow!");
     await expect(textarea).toHaveValue("Hello, DeerFlow!");
+  });
+
+  test("stop before run metadata waits for the exact run and cancels it", async ({
+    page,
+  }) => {
+    let releaseStream!: () => void;
+    let markStreamRequested!: () => void;
+    const streamRelease = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const streamRequested = new Promise<void>((resolve) => {
+      markStreamRequested = resolve;
+    });
+    const cancelRequests: string[] = [];
+    const delayedStream = async (
+      route: Parameters<typeof handleRunStream>[0],
+    ) => {
+      markStreamRequested();
+      await streamRelease;
+      return handleRunStream(route);
+    };
+    await page.route("**/api/langgraph/runs/stream", delayedStream);
+    await page.route("**/api/langgraph/threads/*/runs/stream", delayedStream);
+    await page.route(
+      /\/api\/threads\/[^/]+\/runs\/[^/]+\/cancel(?:\?.*)?$/,
+      (route) => {
+        cancelRequests.push(route.request().url());
+        return route.fulfill({ status: 202 });
+      },
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("Stop this run before metadata arrives");
+    await textarea.press("Enter");
+    await streamRequested;
+
+    const stopButton = page.getByRole("button", { name: /stop/i });
+    await expect(stopButton).toBeVisible();
+    await stopButton.click();
+    expect(cancelRequests).toHaveLength(0);
+
+    releaseStream();
+    await expect.poll(() => cancelRequests.length, { timeout: 15_000 }).toBe(1);
+    expect(new URL(cancelRequests[0]!).pathname).toBe(
+      `/api/threads/${MOCK_THREAD_ID}/runs/${MOCK_RUN_ID}/cancel`,
+    );
+  });
+
+  test("stop before run metadata cancels from SSE metadata without Content-Location", async ({
+    page,
+  }) => {
+    let releaseStream!: () => void;
+    let markStreamRequested!: () => void;
+    const streamRelease = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const streamRequested = new Promise<void>((resolve) => {
+      markStreamRequested = resolve;
+    });
+    const cancelRequests: string[] = [];
+    const delayedStream = async (
+      route: Parameters<typeof handleRunStream>[0],
+    ) => {
+      markStreamRequested();
+      await streamRelease;
+      return handleRunStream(route, { includeContentLocation: false });
+    };
+    await page.route("**/api/langgraph/runs/stream", delayedStream);
+    await page.route("**/api/langgraph/threads/*/runs/stream", delayedStream);
+    await page.route(
+      /\/api\/threads\/[^/]+\/runs\/[^/]+\/cancel(?:\?.*)?$/,
+      (route) => {
+        cancelRequests.push(route.request().url());
+        return route.fulfill({ status: 202 });
+      },
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("Stop this run from metadata SSE");
+    await textarea.press("Enter");
+    await streamRequested;
+
+    const stopButton = page.getByRole("button", { name: /stop/i });
+    await expect(stopButton).toBeVisible();
+    await stopButton.click();
+    expect(cancelRequests).toHaveLength(0);
+
+    releaseStream();
+    await expect.poll(() => cancelRequests.length, { timeout: 15_000 }).toBe(1);
+    expect(new URL(cancelRequests[0]!).pathname).toBe(
+      `/api/threads/${MOCK_THREAD_ID}/runs/${MOCK_RUN_ID}/cancel`,
+    );
   });
 
   test("groups model selection by provider before model", async ({ page }) => {

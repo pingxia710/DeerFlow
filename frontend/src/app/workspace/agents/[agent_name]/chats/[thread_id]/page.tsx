@@ -10,10 +10,12 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
+  beginThreadNavigation,
   ChatBox,
+  getThreadNavigationGeneration,
   isThreadFinishForVisibleChat,
   markThreadChatNavigationIntent,
-  pendingNavigationAllowsThreadStart,
+  shouldCommitThreadStart,
   shouldShowWelcomeMode,
   useThreadChat,
 } from "@/components/workspace/chats";
@@ -113,6 +115,10 @@ export default function AgentChatPage() {
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const visibleThreadIdRef = useRef(threadId);
   const pendingStartThreadIdRef = useRef<string | null>(null);
+  const runtimeNavigationRef = useRef<{
+    runtimeKey: string;
+    generation: number;
+  } | null>(null);
 
   visibleThreadIdRef.current = threadId;
 
@@ -135,9 +141,21 @@ export default function AgentChatPage() {
   );
 
   const runtimeKey = getAgentChatRuntimeKey(agent_name, threadId, isNewThread);
+  if (runtimeNavigationRef.current?.runtimeKey !== runtimeKey) {
+    runtimeNavigationRef.current = {
+      runtimeKey,
+      generation: getThreadNavigationGeneration(),
+    };
+  }
+  const navigationGeneration = runtimeNavigationRef.current.generation;
 
-  const runtimeRegistration = useMemo(
-    () => ({
+  useEffect(() => {
+    pendingStartThreadIdRef.current = null;
+  }, [runtimeKey]);
+
+  const runtimeRegistration = useMemo(() => {
+    let navigationGenerationAtSend = navigationGeneration;
+    return {
       runtimeScope,
       runtimeKey,
       threadId: isNewThread ? undefined : threadId,
@@ -145,6 +163,7 @@ export default function AgentChatPage() {
       context: threadContext,
       isMock,
       onSend: (sentThreadId: string) => {
+        navigationGenerationAtSend = getThreadNavigationGeneration();
         pendingStartThreadIdRef.current = sentThreadId;
         setIsWelcomeMode(false);
       },
@@ -152,12 +171,14 @@ export default function AgentChatPage() {
         const pendingThreadId = pendingStartThreadIdRef.current;
         const visibleThreadId = visibleThreadIdRef.current;
         const currentPathname = window.location.pathname;
-        const streamStillOwnsVisibleChat =
-          pendingNavigationAllowsThreadStart(createdThreadId) &&
-          (visibleThreadId === createdThreadId ||
-            (pendingThreadId !== null &&
-              visibleThreadId === pendingThreadId &&
-              currentPathname.endsWith("/new")));
+        const streamStillOwnsVisibleChat = shouldCommitThreadStart({
+          createdThreadId,
+          pendingThreadId,
+          visibleThreadId,
+          committedPathname: currentPathname,
+          navigationGenerationAtSend,
+          currentNavigationGeneration: getThreadNavigationGeneration(),
+        });
         if (!streamStillOwnsVisibleChat) {
           return;
         }
@@ -200,20 +221,20 @@ export default function AgentChatPage() {
           showNotification(state.title, { body });
         }
       },
-    }),
-    [
-      agent_name,
-      isMock,
-      isNewThread,
-      runtimeScope,
-      setIsNewThread,
-      runtimeKey,
-      setThreadId,
-      showNotification,
-      threadContext,
-      threadId,
-    ],
-  );
+    };
+  }, [
+    agent_name,
+    isMock,
+    isNewThread,
+    navigationGeneration,
+    runtimeScope,
+    setIsNewThread,
+    runtimeKey,
+    setThreadId,
+    showNotification,
+    threadContext,
+    threadId,
+  ]);
 
   const {
     thread,
@@ -263,7 +284,11 @@ export default function AgentChatPage() {
       return;
     }
 
-    router.replace(pathOfThread(threadId, { agent_name: metadataAgentName }));
+    const nextPath = pathOfThread(threadId, {
+      agent_name: metadataAgentName,
+    });
+    beginThreadNavigation(nextPath);
+    router.replace(nextPath);
   }, [agent_name, isMock, isNewThread, router, threadId, threadMetadata.data]);
 
   const handleSubmit = useCallback(

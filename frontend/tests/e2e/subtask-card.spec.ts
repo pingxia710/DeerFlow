@@ -56,7 +56,7 @@ test.describe("Subtask card", () => {
       ],
     });
     await page.route(
-      `**/api/threads/${MOCK_THREAD_ID}/runtime-snapshot`,
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
       async (route) => {
         if (route.request().method() !== "GET") {
           return route.fallback();

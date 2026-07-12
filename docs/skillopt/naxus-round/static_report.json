@@ -1,5 +1,5 @@
 {
-  "skill_path": "/Users/pingxia/projects/deer-flow/skills/custom/naxus-round/SKILL.md",
+  "skill_path": "skills/custom/naxus-round/SKILL.md",
   "baseline": {
     "train": {
       "hard": 1.0,
@@ -14,7 +14,7 @@
     "test": {
       "hard": 1.0,
       "soft": 1.0,
-      "n": 21
+      "n": 4
     }
   },
   "candidate": {
@@ -31,7 +31,7 @@
     "test": {
       "hard": 1.0,
       "soft": 1.0,
-      "n": 21
+      "n": 4
     }
   },
   "gate": {

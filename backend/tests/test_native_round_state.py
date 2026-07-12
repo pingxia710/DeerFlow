@@ -298,7 +298,7 @@ async def test_sql_legacy_round_delete_only_removes_unowned_rows(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_completed_run_round_followup_starts_new_round_with_next_action_only():
+async def test_completed_run_round_followup_starts_new_round_without_next_action_authorization():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
@@ -321,7 +321,8 @@ async def test_completed_run_round_followup_starts_new_round_with_next_action_on
     context = second.metadata["round_context"]
     assert context["parent_round_id"] == first.round_id
     assert context["current_intent"] == "好的，下一步"
-    assert context["accepted_next_action"] is None
+    assert "accepted_next_action" not in context
+    assert "next_action" not in context
 
     first_round = next(round_ for round_ in await round_store.list_by_thread("thread-1") if round_["round_id"] == first.round_id)
     assert first_round["state"] == "closed"
@@ -371,7 +372,7 @@ async def test_terminal_round_closure_serializes_before_replacement_binding():
 
 
 @pytest.mark.anyio
-async def test_success_run_closes_round_without_inventing_quality_verdict_or_next_action():
+async def test_closed_round_state_is_mechanical_not_quality_verdict_or_authorization():
     round_store = MemoryRoundStateStore()
     manager = RunManager(store=MemoryRunStore(), round_store=round_store, terminal_cleanup_delay=-1)
 
@@ -403,7 +404,8 @@ async def test_success_run_closes_round_without_inventing_quality_verdict_or_nex
     assert second.round_id != first.round_id
     context = second.metadata["round_context"]
     assert context["parent_round_id"] == first.round_id
-    assert context["accepted_next_action"] is None
+    assert "accepted_next_action" not in context
+    assert "next_action" not in context
     assert second.status != RunStatus.running
     assert not round_store.task_lanes
 
@@ -411,19 +413,19 @@ async def test_success_run_closes_round_without_inventing_quality_verdict_or_nex
     assert second_round["state"] not in {"executing", "validating"}
 
 
-def test_round_context_does_not_treat_unaccepted_row_next_action_as_accepted():
+def test_round_context_keeps_row_next_action_out_of_model_context():
     context = RunManager._round_context_from_info(
         {
             "round_id": "round-1",
             "state": "open",
             "next_action": "Run another review loop.",
-            "accepted_next_action": None,
         },
         run_id="run-1",
         current_intent="implement the fix",
     )
 
-    assert context["accepted_next_action"] is None
+    assert "accepted_next_action" not in context
+    assert "next_action" not in context
 
 
 @pytest.mark.anyio
@@ -738,7 +740,7 @@ async def test_task_refs_flow_into_native_round_context():
     assert context["evidence_refs"] == ["command: pytest backend/tests/test_native_round_state.py -q; exit code: 0"]
     text = format_native_round_context_for_model(context)
     assert text is not None
-    assert "Current Intent: run task" in text
+    assert "Current user goal: run task" in text
     assert "ArtifactRefs: outputs/findings.md" in text
     assert "EvidenceRefs: command: pytest backend/tests/test_native_round_state.py -q; exit code: 0" in text
 

@@ -1,12 +1,3 @@
-# Opposition State
+# Opposition notes
 
-## Active Attack Patterns
-
-- Status: initial
-- Current strongest objection:
-- Recurring failure pattern:
-
-## Watchpoints
-
-- Attack plan, boundary, evidence, and overconfidence.
-- Do not become a polite summary or a second Chair.
+No standing state is required. Use this file only for a durable, task-relevant note that benefits from being retained; otherwise leave it unchanged.

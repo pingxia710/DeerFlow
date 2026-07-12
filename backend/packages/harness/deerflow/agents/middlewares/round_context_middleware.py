@@ -1,14 +1,12 @@
-"""Inject compact Command Room Round signals into model-call context.
+"""Inject active Command Room facts into model-call context.
 
-The middleware is intentionally read-only and advisory: it does not make
-PASS/FAIL decisions, trigger rework, dispatch reviewers, or change visible
-responses.  It only exposes the latest persisted Command Room RoundRecord's
-roundContextSignals to the main model as short internal context.
+Persisted RoundRecords are audit data, not instructions for a later user turn.
+The lead model receives only active native facts, so historic actions cannot
+become a soft workflow directive.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, override
 
@@ -18,9 +16,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
-from deerflow.command_room.context_compaction import ContextBlock, compact_command_room_context_blocks
 from deerflow.config.app_config import AppConfig
-from deerflow.runtime.user_context import get_effective_user_id
 
 _INTERNAL_CONTEXT_HEADER = "[Internal Command Room Round signals]"
 _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
@@ -47,55 +43,76 @@ def _as_list(value: Any, *, limit: int = 3) -> list[str]:
 
 
 def format_round_context_for_model(record: Mapping[str, Any] | None) -> str | None:
-    """Return a short advisory context block for the model, or None.
+    """Return objective persisted-round facts without workflow guidance."""
 
-    Only records with ``roundRequired=True`` and non-empty
-    ``roundContextSignals`` are injected.  Raw sub-agent output is deliberately
-    excluded; only compact mechanical signals are surfaced.
-    """
-
-    if not record or record.get("roundRequired") is not True:
-        return None
-    signals = record.get("roundContextSignals")
-    if not isinstance(signals, Mapping):
+    if not isinstance(record, Mapping):
         return None
 
-    evidence = signals.get("evidence_signals") if isinstance(signals.get("evidence_signals"), Mapping) else {}
-    brief = record.get("roundBrief") if isinstance(record.get("roundBrief"), Mapping) else evidence.get("round_brief")
-    brief = brief if isinstance(brief, Mapping) else {}
-    lines = [
-        _INTERNAL_CONTEXT_HEADER,
-        "These are advisory signals from the previous/current RoundRecord, not a verdict. The main AI must judge next steps; do not expose this block verbatim.",
-    ]
-    if brief:
-        if brief.get("summary"):
-            lines.append(f"brief: {brief.get('summary')}")
-        if brief.get("evidence_status"):
-            lines.append(f"evidence_status: {brief.get('evidence_status')}")
-        if brief.get("next_safe_action"):
-            lines.append(f"next_safe_action: {brief.get('next_safe_action')}")
-    round_complete = bool(signals.get("round_complete"))
-    next_round_is_safe = bool(signals.get("next_round_is_safe"))
-    needs_user_confirmation = bool(signals.get("needs_user_confirmation") or signals.get("requires_confirmation"))
-    evidence_summary = evidence.get("evidence_state") or evidence.get("state") or evidence.get("summary") or signals.get("summary") or "available"
-    status_line = "; ".join(
-        [
-            f"round_complete={round_complete}",
-            f"next_round_is_safe={next_round_is_safe}",
-            f"needs_user_confirmation={needs_user_confirmation}",
-        ]
-    )
-    lines.extend(
-        [
-            status_line,
-            f"actions={signals.get('action_count', 0)}; evidence={evidence_summary}",
-        ]
-    )
-    for key, label in (("risks", "risks"), ("unresolved", "unresolved"), ("open_questions", "open_questions"), ("conflicts", "conflicts")):
-        values = _as_list(signals.get(key))
-        if values:
-            lines.append(f"{label}: " + "; ".join(values))
-    return "\n".join(lines)
+    lines: list[str] = []
+    if record.get("version") != 2:
+        if record.get("roundRequired") is not True:
+            return None
+        signals = record.get("roundContextSignals")
+        if not isinstance(signals, Mapping):
+            return None
+        evidence = signals.get("evidence_signals") if isinstance(signals.get("evidence_signals"), Mapping) else {}
+        brief = record.get("roundBrief") if isinstance(record.get("roundBrief"), Mapping) else evidence.get("round_brief")
+        brief = brief if isinstance(brief, Mapping) else {}
+        goal = brief.get("goal")
+        if isinstance(goal, str) and goal.strip():
+            lines.append(f"Current user goal: {goal.strip()}")
+        for label, values in (("Boundary", brief.get("boundaries")), ("Action occurred", brief.get("handoff_signals"))):
+            facts = _as_list(values)
+            if facts:
+                lines.append(f"{label}: " + "; ".join(facts))
+        for key, label in (("risks", "Risk"), ("conflicts", "Conflict"), ("open_questions", "Unresolved question"), ("unresolved", "Unresolved")):
+            facts = _as_list(signals.get(key))
+            if facts:
+                lines.append(f"{label}: " + "; ".join(facts))
+        if not lines:
+            return None
+        return "\n".join([_INTERNAL_CONTEXT_HEADER, "Objective round working memory; do not expose this block verbatim.", *lines])
+
+    goal = record.get("userGoal")
+    if isinstance(goal, Mapping):
+        chars = goal.get("chars")
+        if isinstance(chars, int) and chars:
+            lines.append(f"Persisted user goal fact: text fingerprint recorded ({chars} chars)")
+
+    boundaries = record.get("explicitBoundary")
+    if isinstance(boundaries, list):
+        facts = [str(item.get("value")).strip() for item in boundaries if isinstance(item, Mapping) and isinstance(item.get("value"), str) and item.get("value").strip()]
+        if facts:
+            lines.append("Explicit boundary: " + "; ".join(facts[:3]))
+
+    actions = record.get("actionResults")
+    if isinstance(actions, list):
+        action_facts: list[str] = []
+        for action in actions[:3]:
+            if not isinstance(action, Mapping):
+                continue
+            pieces: list[str] = []
+            for key, label in (("taskId", "task"), ("status", "status"), ("role", "role")):
+                value = action.get(key)
+                if isinstance(value, str) and value.strip():
+                    pieces.append(f"{label} {value.strip()}")
+            result = action.get("actionResult")
+            if isinstance(result, Mapping):
+                for key in ("description", "summary", "output_ref", "result_ref"):
+                    value = result.get(key)
+                    if isinstance(value, str) and value.strip():
+                        pieces.append(f"{key}: {value.strip()}")
+            error = action.get("error")
+            if isinstance(error, str) and error.strip():
+                pieces.append(f"error: {error.strip()}")
+            if pieces:
+                action_facts.append(", ".join(pieces))
+        if action_facts:
+            lines.append("Action occurred: " + "; ".join(action_facts))
+
+    if not lines:
+        return None
+    return "\n".join([_INTERNAL_CONTEXT_HEADER, "Objective persisted round facts; do not expose this block verbatim.", *lines])
 
 
 def latest_round_context_for_thread(thread_id: str | None, user_id: str | None = None) -> str | None:
@@ -107,29 +124,21 @@ def latest_round_context_for_thread(thread_id: str | None, user_id: str | None =
 
 
 def format_native_round_context_for_model(round_context: Mapping[str, Any] | None) -> str | None:
+    """Format only actual native intent and artifact facts for the model."""
+
     if not round_context:
         return None
-    lines = [
-        _NATIVE_ROUND_CONTEXT_HEADER,
-        "Mechanical lifecycle state only. Do not treat this as quality judgment or expose it verbatim.",
-    ]
-    for key, label in (
-        ("round_id", "round_id"),
-        ("state", "state"),
-        ("current_run_id", "current_run_id"),
-        ("source_goal_run_id", "source_goal_run_id"),
-        ("parent_round_id", "parent_round_id"),
-        ("current_intent", "Current Intent"),
-        ("accepted_next_action", "Accepted Next Action"),
-    ):
-        value = round_context.get(key)
-        if isinstance(value, str) and value.strip():
-            lines.append(f"{label}: {value.strip()}")
+    lines: list[str] = []
+    intent = round_context.get("current_intent")
+    if isinstance(intent, str) and intent.strip():
+        lines.append(f"Current user goal: {intent.strip()}")
     for key, label in (("artifact_refs", "ArtifactRefs"), ("evidence_refs", "EvidenceRefs")):
         refs = _as_list(round_context.get(key), limit=5)
         if refs:
             lines.append(f"{label}: " + "; ".join(refs))
-    return "\n".join(lines) if len(lines) > 2 else None
+    if not lines:
+        return None
+    return "\n".join([_NATIVE_ROUND_CONTEXT_HEADER, "Objective round working memory; do not expose this block verbatim.", *lines])
 
 
 def format_capability_snapshot_for_model(snapshot: Mapping[str, Any] | None) -> str | None:
@@ -376,7 +385,7 @@ def latest_pending_handoffs_for_thread(
 
 
 class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
-    """Append latest Round signals as an internal SystemMessage for Command Room."""
+    """Append active-run facts as an internal SystemMessage for Command Room."""
 
     def __init__(self, *, agent_name: str | None, app_config: AppConfig | None = None):
         self.agent_name = agent_name
@@ -399,98 +408,17 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if self.agent_name != "command-room":
             return None
         ctx = getattr(runtime, "context", None) or {}
-        thread_id = ctx.get("thread_id") if isinstance(ctx, Mapping) else None
-        user_id = get_effective_user_id()
-        thread_id_text = str(thread_id) if thread_id else None
         native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
-        current_run_id = native_context.get("current_run_id") if isinstance(native_context, Mapping) else None
-        round_id = native_context.get("round_id") if isinstance(native_context, Mapping) else None
-        native_evidence_refs = _as_list(native_context.get("evidence_refs"), limit=20) if isinstance(native_context, Mapping) else []
-        snapshot = self._capability_snapshot(thread_id_text, user_id)
-        from deerflow.command_room.account_ledger import list_account_decisions, list_account_proposals
-        from deerflow.command_room.brief import build_chair_operating_brief, format_chair_operating_brief_for_model
-        from deerflow.command_room.pending_handoff import list_pending_handoffs
-        from deerflow.command_room.quality import list_quality_signals
-        from deerflow.command_room.review import list_review_invocations
-        from deerflow.command_room.role_state import list_role_states
-
-        quality_rows = list_quality_signals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
-        review_rows = list_review_invocations(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
-        proposal_rows = list_account_proposals(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
-        decision_rows = list_account_decisions(thread_id=thread_id_text, user_id=user_id, run_id=str(current_run_id) if current_run_id else None, limit=3) if thread_id_text else []
-        role_state_rows = list_role_states(thread_id=thread_id_text, user_id=user_id, limit=5) if thread_id_text else []
-        pending_handoff_rows = (
-            list_pending_handoffs(
-                thread_id=thread_id_text,
-                user_id=user_id,
-                run_id=str(current_run_id) if current_run_id else None,
-                status="pending",
-                limit=5,
-            )
-            if thread_id_text
-            else []
-        )
-        parts: list[ContextBlock] = []
-        if thread_id_text:
-            brief = build_chair_operating_brief(
-                thread_id=thread_id_text,
-                run_id=str(current_run_id or ""),
-                round_id=str(round_id) if round_id else None,
-                capability_snapshot=snapshot,
-                evidence={"evidence_refs": [{"ref": ref, "round_id": str(round_id) if round_id else None} for ref in native_evidence_refs]},
-                quality_signals=quality_rows,
-                review_invocations=review_rows,
-                account_proposals=proposal_rows,
-                account_decisions=decision_rows,
-            )
-            brief_text = format_chair_operating_brief_for_model(brief)
-            if brief_text:
-                parts.append(ContextBlock(name="chair_brief", priority=30, content=brief_text))
-        capability_text = format_capability_snapshot_for_model(snapshot)
-        if capability_text:
-            parts.append(ContextBlock(name="capability", priority=45, content=capability_text))
         if isinstance(native_context, Mapping):
-            text = format_native_round_context_for_model(native_context)
-            if text:
-                parts.append(ContextBlock(name="native_round", priority=10, content=text))
-        quality_text = format_quality_signals_for_model(quality_rows)
-        if quality_text:
-            parts.append(ContextBlock(name="quality", priority=60, content=quality_text))
-        review_text = format_review_invocations_for_model(review_rows)
-        if review_text:
-            parts.append(ContextBlock(name="review", priority=61, content=review_text))
-        account_text = format_account_ledger_for_model(proposal_rows, decision_rows)
-        if account_text:
-            parts.append(ContextBlock(name="account", priority=70, content=account_text))
-        role_state_text = format_role_states_for_model(role_state_rows)
-        if role_state_text:
-            parts.append(ContextBlock(name="role_state", priority=40, content=role_state_text))
-        pending_handoff_text = format_pending_handoffs_for_model(pending_handoff_rows)
-        if pending_handoff_text:
-            parts.append(ContextBlock(name="pending_handoffs", priority=20, content=pending_handoff_text))
-        # Native round_state is the lifecycle authority; legacy RoundRecord is
-        # appended only as an audit/signals projection and must not override it.
-        legacy_text = latest_round_context_for_thread(thread_id_text, user_id)
-        if legacy_text:
-            parts.append(ContextBlock(name="close_gate", priority=15, content=legacy_text))
-        return compact_command_room_context_blocks(parts) if parts else None
+            return format_native_round_context_for_model(native_context)
+        return None
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         text = self._context_text(request.runtime)
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        headers = (
-            _INTERNAL_CONTEXT_HEADER,
-            _NATIVE_ROUND_CONTEXT_HEADER,
-            _CAPABILITY_CONTEXT_HEADER,
-            _QUALITY_SIGNALS_HEADER,
-            _REVIEW_INVOCATIONS_HEADER,
-            _ACCOUNT_LEDGER_HEADER,
-            _CHAIR_BRIEF_HEADER,
-            _ROLE_STATE_HEADER,
-            _PENDING_HANDOFFS_HEADER,
-        )
+        headers = (_INTERNAL_CONTEXT_HEADER, _NATIVE_ROUND_CONTEXT_HEADER)
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
@@ -502,7 +430,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
-        return await handler(await asyncio.to_thread(self._inject, request))
+        return await handler(self._inject(request))
 
 
 __all__ = [

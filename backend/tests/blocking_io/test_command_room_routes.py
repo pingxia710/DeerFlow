@@ -101,14 +101,13 @@ async def test_latest_command_room_round_read_is_offloaded(tmp_path, monkeypatch
     assert response.round == {"round_id": "round-1", "thread_id": "thread-1"}
 
 
-async def test_async_model_context_filesystem_reads_are_offloaded(tmp_path, monkeypatch) -> None:
+async def test_async_model_context_uses_active_memory_without_persisted_read(monkeypatch) -> None:
     middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
     request = object()
+    calls: list[object] = []
 
     def inject(value: object) -> object:
-        path = tmp_path / "round-context.json"
-        path.write_text('{"round_id":"round-1"}', encoding="utf-8")
-        assert path.read_text(encoding="utf-8")
+        calls.append(value)
         return value
 
     async def handler(value: object) -> object:
@@ -117,6 +116,7 @@ async def test_async_model_context_filesystem_reads_are_offloaded(tmp_path, monk
     monkeypatch.setattr(middleware, "_inject", inject)
 
     assert await middleware.awrap_model_call(request, handler) is request
+    assert calls == [request]
 
 
 async def test_subagent_handoff_audit_write_is_offloaded(tmp_path, monkeypatch) -> None:

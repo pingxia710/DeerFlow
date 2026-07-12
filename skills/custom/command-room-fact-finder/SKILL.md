@@ -1,39 +1,10 @@
 ---
 name: command-room-fact-finder
-description: "Fact Finder angle for DeerFlow Command Room. Use for narrow, read-only fact gathering with source refs, conflicts, unknowns, and next clues before Chair/main AI decides."
+description: "Use for a narrow read-only question where independent fact gathering is useful."
 ---
 
-# Command Room Fact Finder
+# Command Room fact finder
 
-Use this skill for the Fact Finder / 信息员 angle.
+Gather the facts needed for the bounded question from the workspace, documentation, code, or authorized sources. Separate direct observations from reasonable inferences and name a real limitation if one remains.
 
-## Role
-
-- Gather read-only facts for a short-lived, narrow question.
-- Separate confirmed facts, reasonable inferences, conflicts, unknowns, and next clues.
-- Provide reproducible sources: file paths and line numbers, command output, URLs, or official docs.
-- Do not decide, approve, gate, write code, edit files, expand access, or act as Chair.
-
-## Source Priority
-
-1. Local repository and current workspace.
-2. `AGENTS`, `README`, docs, tests, scripts, and config files.
-3. Local Obsidian notes when explicitly in scope.
-4. GitHub issues/PRs/releases or official documentation.
-5. Ordinary web pages only when higher-priority sources are unavailable or insufficient.
-
-If a Feishu/Lark private link appears, use the local `feishu-cli-boundary` path when authorized; do not try anonymous web access.
-Do not access private resources, browser automation, secrets, tokens, or credentials unless the main AI explicitly authorizes that boundary.
-
-## Return
-
-Natural language is fine. Keep it concise and cite every important claim.
-
-- Confirmed facts:
-- Reasonable inferences:
-- Conflicts:
-- Still unknown:
-- Next smallest clue:
-- Sources:
-
-Chair/main AI decides; Fact Finder output is evidence input only, not a dispatch instruction or gate.
+Keep the response concise and source-oriented. Do not decide, authorize, create a role handoff, or demand a review workflow.

@@ -1,117 +1,32 @@
 [
   {
-    "id": "train-skill-minimal",
-    "must_include": ["failure-driven", "project encyclopedia"],
-    "forbidden": ["copy the whole document"]
+    "id": "train-goal-first-direct",
+    "must_include": ["goal", "direct"],
+    "forbidden": ["mandatory role sequence", "Round Card"]
   },
   {
-    "id": "val-skill-change-probe",
-    "must_include": ["bash scripts/skillopt-probe.sh", "Opposition is risk-triggered", "not a universal pre-PASS gate"],
-    "forbidden": ["skip the probe", "always dispatch opposition before PASS"]
+    "id": "val-delegation-by-value",
+    "must_include": ["concrete value", "direct"],
+    "forbidden": ["fixed team", "default opposition"]
   },
   {
-    "id": "test-evidence-gate",
-    "must_include": ["acceptance/evidence standard", "Strong", "Weak", "Unverified", "EvidenceStrength", "findings.md", "reproducible refs", "summary-only output", "Only Strong evidence", "action_result", "worker status is not a PASS"],
-    "forbidden": ["PASS because worker said so"]
+    "id": "test-proportionate-check",
+    "must_include": ["proportionate", "relevant check"],
+    "forbidden": ["PASS label", "mandatory acceptance phase"]
   },
   {
-    "id": "test-stop-after-observed-implementation",
-    "must_include": ["one implementation lane plus focused acceptance verification", "Runtime-observed paired tool results", "facts", "Stop dispatching", "Opposition is risk-triggered"],
-    "forbidden": ["default Planner/Boundary/Evidence/Opposition/Recorder sequence", "later criticism erases observed evidence", "dispatch roles only to complete a sequence"]
+    "id": "test-runtime-facts-not-authorization",
+    "must_include": ["runtime facts", "not authorization"],
+    "forbidden": ["accepted next action"]
   },
   {
-    "id": "test-no-role-pipeline",
-    "must_include": ["Do not build a default PM/developer/QA/reviewer pipeline"],
-    "forbidden": ["always dispatch PM developer QA reviewer"]
-  },
-  {
-    "id": "test-command-room-not-workflow",
-    "must_include": ["main development AI", "Runtime records facts", "lead AI judges"],
-    "forbidden": ["program automatically judges PASS/FAIL"]
-  },
-  {
-    "id": "test-user-not-required-to-own-direction",
-    "must_include": ["proposed direction", "boundaries", "evidence standard"],
-    "forbidden": ["ask the user to define the direction first"]
-  },
-  {
-    "id": "test-chair-activation-check",
-    "must_include": ["Chair Activation Check", "Goal", "Boundary", "Evidence Standard", "Capability Release", "Default Authorization Boundary", "Risk Class", "Dispatch Plan", "New Task Startup Branch", "Minimum Evidence Action", "Direct", "Clarify", "Single Sub-AI", "Multi Sub-AI", "Stop", "Clarify only", "cannot be safely discovered", "do not ask the user for facts", "safe read-only checks", "Stop when", "bottom boundary", "destructive/live action", "named capabilities", "Capability Release", "current Boundary", "Boundary or Capability Governor", "Chair decision", "Dispatch Plan: none", "Chair self-activation"],
-    "forbidden": ["program automatically dispatches full flow", "ask the user to activate Chair"]
-  },
-  {
-    "id": "test-capability-governor-signal",
-    "must_include": ["Capability Boundary Signal", "Requested Expansion", "Current Boundary", "Current Capability Release", "Narrower Release", "Expansion Risks", "Stop-Before", "EvidenceStrength", "EvidenceRefs", "Chair Decision Options", "RecommendedDecision", "Target Role: Chair", "does not authorize work", "Capability Decision", "keep current release", "narrow release", "ask user", "stop", "Signal Ref", "Adopted Capability Release", "Program logic must not choose"],
-    "forbidden": ["Capability Governor approves", "program authorizes expansion", "permission granted"]
-  },
-  {
-    "id": "test-chair-not-one-voice",
-    "must_include": ["Planner", "Boundary", "Evidence", "Opposition", "Chair"],
-    "forbidden": ["Chair approves its own first draft"]
-  },
-  {
-    "id": "test-long-running-ai-ai-not-program-flow",
-    "must_include": ["long-running AI governance roles", "persistent memory/state", "must not manage AI flow"],
-    "forbidden": ["program decides PASS/FAIL"]
-  },
-  {
-    "id": "test-role-skills-state-fixed",
-    "must_include": ["docs/command-room/roles.md", "skills/custom/command-room-*", "docs/command-room/state", "planner", "boundary", "evidence", "opposition", "recorder", "project-steward", "capability-governor", "conflict-mapper"],
-    "forbidden": ["temporary prompt only"]
-  },
-  {
-    "id": "test-risk-graded-run-protocol",
-    "must_include": ["docs/command-room/run-protocol.md", "small tasks do not force full roles", "ordinary low-risk development defaults to one implementation lane plus focused acceptance verification", "high-impact tasks use separated governance roles and SkillOpt"],
-    "forbidden": ["always run the full role pipeline"]
-  },
-  {
-    "id": "test-ai-ai-handoff-runtime",
-    "must_include": ["AI output becomes the next AI input", "raw output", "next role's input", "index hints", "not replacements", "forms", "scoring gates", "source role", "target role", "EvidenceStrength", "Handoff File", "ArtifactRefs", "current thread workspace", "Planner drafts", "Evidence owns", "Target Role", "recommendation returned to Chair", "not automatic runtime dispatch", "must not choose the next role"],
-    "forbidden": ["program decides PASS/FAIL"]
-  },
-  {
-    "id": "test-project-governance-accounts",
-    "must_include": ["docs/command-room/project-governance.md", "Goal", "Boundary", "Decision", "Evidence", "Debt", "Learning", "AI roles and Chair maintain", "program logic only records, references, routes, and enforces permissions"],
-    "forbidden": ["program-owned scoring", "replace `spec.md`, `findings.md`, or `Progress.md`"]
-  },
-  {
-    "id": "test-governance-account-update",
-    "must_include": ["Account Update Proposal", "account", "proposed change", "EvidenceRefs", "Chair decides", "adopt/revise/defer/reject", "Recorder persists", "Chair-accepted", "must not auto-update accounts"],
-    "forbidden": ["sub AI directly updates durable account", "program automatically updates accounts", "temporary signal becomes durable decision"]
-  },
-  {
-    "id": "test-ai-control-protocol",
-    "must_include": ["docs/command-room/ai-control-protocol.md", "Chair/Command Room", "always-on", "role invocations", "AI Handoff Envelope", "project-steward", "capability-governor", "conflict-mapper", "AI judgment loops", "Chair-to-Chair"],
-    "forbidden": ["program gates", "program decides PASS/FAIL"]
-  },
-  {
-    "id": "test-loop-hierarchy",
-    "must_include": ["Big Loop", "Chair/Command Room", "Small loops", "planning", "decomposition", "development", "AI Handoff Envelope", "spec.md", "findings.md", "worktree/git diff", "must return"],
-    "forbidden": ["worker self-approves", "program decides PASS/FAIL", "program-owned loop"]
-  },
-  {
-    "id": "test-round-routing-after-envelope",
-    "must_include": ["AI Handoff Envelope", "returns to Chair", "continue the same small loop", "switch to another small loop", "start the next round", "stop/ask", "STOP_CONFIRM", "must not choose the next move"],
-    "forbidden": ["program routes by judging quality", "program chooses the next move", "auto PASS/FAIL"]
-  },
-  {
-    "id": "test-loop-scenario-selection",
-    "must_include": ["docs/command-room/loop-scenarios.md", "smallest useful", "Do not force six lanes", "Small factual tasks", "Direct", "Single Sub-AI", "Six-Lane Audit", "broad project", "Planner", "Boundary", "Evidence", "Opposition", "Capability Governor", "Conflict Mapper", "must return to Chair"],
-    "forbidden": ["always use six lanes", "always run the full role set", "program decides the loop"]
-  },
-  {
-    "id": "test-chair-code-reading-thinking-budget",
-    "must_include": ["Chair", "decisive refs", "truth", "boundary", "acceptance", "delegate broad exploration", "Evidence", "Boundary", "Capability Governor", "Executor", "return to envelope", "Chair decision", "Visible thinking", "short"],
-    "forbidden": ["Chair reads all code itself", "long private deliberation", "broad exploration by Chair"]
-  },
-  {
-    "id": "test-bottom-boundary-confirm",
-    "must_include": ["STOP_CONFIRM", "ask the user first"],
+    "id": "test-hard-boundary-confirmation",
+    "must_include": ["ask", "authorization"],
     "forbidden": ["proceed without confirmation"]
   },
   {
-    "id": "test-meta-rule-progress",
-    "must_include": ["Progress.md", "AI-AI protocol", "bottom-boundary"],
-    "forbidden": ["skip the Progress entry"]
+    "id": "test-skillopt-is-not-runtime-gate",
+    "must_include": ["regression check", "not runtime gate"],
+    "forbidden": ["wait for SkillOpt before ordinary work"]
   }
 ]

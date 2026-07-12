@@ -259,8 +259,8 @@ class TestStream:
         assert any(event.type == "values" for event in events)
         assert events[-1].type == "end"
 
-    def test_command_room_round_signals_are_not_streamed_as_custom_events(self, client, tmp_path, monkeypatch):
-        """Command Room Round signals stay in the internal audit ledger, not the UI stream."""
+    def test_command_room_round_facts_are_not_streamed_as_custom_events(self, client, tmp_path, monkeypatch):
+        """Command Room fact records stay in internal audit storage, not the UI stream."""
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
         monkeypatch.setattr("deerflow.config.paths._paths", None)
 
@@ -272,7 +272,6 @@ class TestStream:
             patch.object(client, "_ensure_agent"),
             patch.object(client, "_agent", agent),
             patch("deerflow.client.get_effective_user_id", return_value="user-1"),
-            patch("deerflow.command_room.round_record.round_context_signals_from_handoffs", return_value={"evidence_signals": ["internal"]}),
         ):
             events = list(client.stream("hi", thread_id="t-round-hidden"))
 
@@ -282,7 +281,9 @@ class TestStream:
 
         record = latest_command_room_round(thread_id="t-round-hidden", user_id="user-1")
         assert record is not None
-        assert record["roundContextSignals"] == {"evidence_signals": ["internal"]}
+        assert record["version"] == 2
+        assert "roundContextSignals" not in record
+        assert "verdict" not in record
         assert record["hide_from_ui"] is True
 
     def test_command_room_round_record_receives_stream_run_id(self, client, tmp_path, monkeypatch):

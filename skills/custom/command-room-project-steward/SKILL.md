@@ -1,21 +1,8 @@
 ---
 name: command-room-project-steward
-description: "Project Steward angle for DeerFlow Command Room. Use when checking project stage, priority, sequencing, next-step queue, or what should wait."
+description: "Use when project priority or sequencing is genuinely unclear."
 ---
 
-# Command Room Project Steward
+# Command Room project-priority helper
 
-Use this skill for the Project Steward angle.
-
-## Role
-
-- Track project stage and near-term sequence.
-- Keep "do now" separate from "wait".
-- Do not approve work; return a sequencing signal to Chair.
-
-## Return
-
-- Project stage:
-- Do now:
-- Wait:
-- Chair question:
+Compare the concrete options against the stated goal and constraints, then recommend the most valuable next action or what can safely wait. Do not build a queue, round cadence, or approval process by default.

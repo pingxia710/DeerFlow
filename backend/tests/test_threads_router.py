@@ -1961,7 +1961,7 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
 # ── command-room RoundRecord read API ────────────────────────────────────────
 
 
-def test_get_latest_command_room_round_returns_record(tmp_path):
+def test_get_latest_command_room_round_returns_objective_fact_record(tmp_path):
     from deerflow.command_room.round_record import record_command_room_round
 
     paths = Paths(tmp_path)
@@ -2022,11 +2022,20 @@ SECRET_FINAL_TEXT_SHOULD_NOT_APPEAR
     body = response.json()
     latest = body["round"]
     assert latest["threadId"] == "round-thread"
-    assert latest["verdict"]["decision"] == "PASS"
-    assert latest["verdict"]["modelDecision"] == "PASS"
-    assert latest["signals"][0]["recommendedDecision"] == "STOP_CONFIRM"
-    assert latest["dispatchPlan"][0]["role"] == "opposition"
-    assert latest["signals"][0]["outputRef"] == {"chars": 20, "sha256": "result-hash"}
+    assert latest["version"] == 2
+    assert latest["userGoal"]["chars"] > 0
+    assert latest["artifacts"]["finalText"]["chars"] > 0
+    assert latest["actionResults"] == [
+        {
+            "taskId": "lane-opposition",
+            "status": "completed",
+            "role": "opposition",
+            "resultRef": {"chars": 20, "sha256": "result-hash"},
+            "actionResult": {"description": "opposition check"},
+            "error": "",
+        }
+    ]
+    assert {"verdict", "signals", "dispatchPlan"}.isdisjoint(latest)
 
 
 def test_get_latest_command_room_round_returns_404_when_missing(tmp_path):
@@ -2082,7 +2091,7 @@ def test_get_latest_command_room_round_is_user_scoped(tmp_path):
     assert response.status_code == 404
 
 
-def test_get_latest_command_room_round_uses_internal_owner_header(tmp_path):
+def test_get_latest_command_room_round_uses_internal_owner_header_for_objective_facts(tmp_path):
     import asyncio
 
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
@@ -2114,11 +2123,11 @@ def test_get_latest_command_room_round_uses_internal_owner_header(tmp_path):
             ),
             audit_records=[],
         )
-
         response = asyncio.run(call_unwrapped(threads.get_latest_command_room_round, "channel-round-thread", request))
 
     assert response.round["threadId"] == "channel-round-thread"
-    assert response.round["verdict"]["decision"] == "PASS"
+    assert response.round["version"] == 2
+    assert "verdict" not in response.round
 
 
 def test_get_latest_command_room_round_rejects_invalid_thread_id(tmp_path):

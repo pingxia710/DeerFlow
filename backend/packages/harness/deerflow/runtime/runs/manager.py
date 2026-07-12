@@ -759,7 +759,6 @@ class RunManager:
             "source_goal_run_id": info.get("source_goal_run_id"),
             "parent_round_id": info.get("parent_round_id"),
             "current_intent": current_intent or info.get("current_intent"),
-            "accepted_next_action": info.get("accepted_next_action"),
         }
         for key in ("artifact_refs", "evidence_refs"):
             refs = info.get(key)

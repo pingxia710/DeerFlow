@@ -95,7 +95,7 @@ If the agent tries to call more subagents than the limit allows, the middleware 
 
 ## Handoff audit
 
-Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps status, usage, hashes, character counts, and extracted Evidence Signal fields, while omitting raw prompts, worker output, and error text.
+Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps dispatch metadata, status, usage, hashes, character counts, and compact action-result facts, while omitting raw prompts, worker output, and error text. It does not infer a verdict, evidence strength, or next action from worker prose.
 
 ## ACP agents (external agents)
 

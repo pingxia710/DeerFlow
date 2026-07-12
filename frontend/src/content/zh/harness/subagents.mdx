@@ -94,7 +94,7 @@ subagents:
 
 ## Handoff audit
 
-每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留状态、用量、哈希、字符数和提取出的 Evidence Signal 字段，不写入原始 prompt、worker 输出或错误正文。
+每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留调度元数据、状态、用量、哈希、字符数和精简的 action-result 事实，不写入原始 prompt、worker 输出或错误正文；不会从 worker 自然语言中推导 verdict、证据强弱或下一步动作。
 
 ## ACP Agent（外部 Agent）
 

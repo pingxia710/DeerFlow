@@ -15,14 +15,12 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
-from deerflow.command_room.handoff import handoff_envelope_from_packet, handoff_envelope_to_audit_dict
-from deerflow.command_room.pending_handoff import build_pending_handoff, record_pending_handoff
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.audit import extract_handoff_packet, record_subagent_handoff
+from deerflow.subagents.audit import record_subagent_handoff
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -36,7 +34,6 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
-_TARGET_ROLE_RE = re.compile(r"^\s*(?:[-*+]\s+)?(?:\*\*)?(?:Target Role|Target|Receiver|To)(?:\*\*)?\s*[:：]\s*(.*?)\s*$", re.IGNORECASE | re.MULTILINE)
 _TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1"
 _EVENT_PREVIEW_MAX_CHARS = 240
 _SAFE_ACTION_RESULT_EVENT_KEYS = {
@@ -264,10 +261,8 @@ def _runtime_observed_evidence_refs(result: Any) -> list[str]:
     return list(dict.fromkeys(_redacted_preview(ref) for ref in refs if isinstance(ref, str) and ref.strip()))
 
 
-def _format_task_success(result_text: str, *, observed_evidence_refs: list[str], suggested_receiver: str | None = None) -> str:
+def _format_task_success(result_text: str, *, observed_evidence_refs: list[str]) -> str:
     prefix = "Task Succeeded."
-    if suggested_receiver:
-        prefix = f"Task Succeeded. Suggested next receiver (advisory only): {suggested_receiver}. Chair/main AI decides."
     if not observed_evidence_refs:
         return f"{prefix} Result: {result_text}"
     evidence = "\n".join(f"- {ref}" for ref in observed_evidence_refs)
@@ -443,76 +438,6 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [skill for skill in child if skill in parent_set]
 
 
-def _with_ai_handoff_envelope(prompt: str, *, description: str, subagent_type: str) -> str:
-    packet = extract_handoff_packet(prompt, description=description, subagent_type=subagent_type)
-    envelope = "\n".join(
-        [
-            "AI Handoff Envelope",
-            f"Source Role: {packet.get('sourceRole') or 'command-room'}",
-            f"Target Role: {packet.get('targetRole') or subagent_type}",
-            f"Task/Question: {packet.get('taskOrQuestion') or description}",
-            f"EvidenceRefs: {packet.get('evidenceRefs') or 'none'}",
-            f"EvidenceStrength: {packet.get('evidenceStrength') or 'Unverified'}",
-            f"OutputRefs: {packet.get('outputRefs') or 'none'}",
-            f"Handoff File: {packet.get('handoffFile') or 'none'}",
-            f"ArtifactRefs: {packet.get('artifactRefs') or 'none'}",
-            f"Boundary Status: {packet.get('boundaryStatus') or packet.get('boundary') or 'unknown'}",
-            f"Recommended Next Decision: {packet.get('recommendedNextDecision') or 'none'}",
-            "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement.",
-        ]
-    )
-    return f"{envelope}\n\nTask Prompt\n{prompt}"
-
-
-def _compact_handoff_envelope(handoff_prompt: str, *, raw_prompt: str, description: str, subagent_type: str) -> dict[str, Any]:
-    packet = extract_handoff_packet(handoff_prompt, description=description, subagent_type=subagent_type)
-    envelope = handoff_envelope_from_packet(packet, raw_input=raw_prompt)
-    return handoff_envelope_to_audit_dict(envelope)
-
-
-def _suggested_handoff_receiver(result: str | None) -> str | None:
-    """Extract advisory Target Role text without resolving or dispatching it."""
-    match = _TARGET_ROLE_RE.search(result or "")
-    if not match:
-        return None
-    packet = extract_handoff_packet(result, description="", subagent_type="")
-    target_role = str(packet.get("targetRole") or match.group(1)).strip()
-    return target_role or None
-
-
-async def _record_output_pending_handoff(
-    *,
-    thread_id: str | None,
-    run_id: str | None,
-    round_id: str | None,
-    task_id: str,
-    user_id: str | None,
-    subagent_type: str,
-    result: str | None,
-) -> None:
-    """Record a worker's next-role suggestion without dispatching it."""
-
-    if not thread_id or not run_id or not result:
-        return
-    try:
-        packet = extract_handoff_packet(result, description="", subagent_type=subagent_type)
-        envelope = handoff_envelope_from_packet(packet, raw_input=result)
-        if not envelope.target_role:
-            return
-        if not envelope.source_role:
-            envelope = replace(envelope, source_role=subagent_type)
-        pending = build_pending_handoff(
-            thread_id=thread_id,
-            run_id=run_id,
-            round_id=round_id,
-            task_id=task_id,
-            envelope=envelope,
-        )
-        await asyncio.to_thread(record_pending_handoff, pending, user_id=user_id)
-    except Exception:
-        logger.debug("Failed to record pending Command Room handoff", exc_info=True)
-
-
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
@@ -618,8 +543,6 @@ async def task_tool(
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
     run_id = parent_context.get("run_id")
-    round_context = parent_context.get("round_context") if isinstance(parent_context.get("round_context"), dict) else {}
-    round_id = round_context.get("round_id")
 
     parent_available_skills = metadata.get("available_skills")
     if config.skills is not None and "subagent_available_skills" in metadata:
@@ -677,9 +600,7 @@ async def task_tool(
 
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
-    handoff_prompt = _with_ai_handoff_envelope(prompt, description=description, subagent_type=subagent_type)
-    handoff_envelope = _compact_handoff_envelope(handoff_prompt, raw_prompt=prompt, description=description, subagent_type=subagent_type)
-    task_id = executor.execute_async(handoff_prompt, task_id=tool_call_id)
+    task_id = executor.execute_async(prompt, task_id=tool_call_id)
     started_at = _utc_now_iso()
     started_monotonic = time.monotonic()
     await _record_subagent_handoff_async(
@@ -690,7 +611,7 @@ async def task_tool(
         user_id=user_id,
         subagent_type=subagent_type,
         description=description,
-        prompt=handoff_prompt,
+        prompt=prompt,
         status="started",
     )
 
@@ -713,7 +634,6 @@ async def task_tool(
             "subagent_type": subagent_type,
             "status": "in_progress",
             "summary": _redacted_preview(description, fallback="Task started"),
-            "handoff_envelope": handoff_envelope,
         },
     )
 
@@ -748,7 +668,6 @@ async def task_tool(
                         "error_preview": error,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
@@ -800,7 +719,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=handoff_prompt,
+                    prompt=prompt,
                     status="completed",
                     result=result.result,
                     usage=usage,
@@ -824,25 +743,11 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
                 result_text = _redacted_tool_text(result.result)
-                suggested_receiver = _suggested_handoff_receiver(result.result)
-                if suggested_receiver:
-                    # Target Role is advisory metadata for the Chair/main AI. Do not redispatch here.
-                    await _record_output_pending_handoff(
-                        thread_id=thread_id if isinstance(thread_id, str) else None,
-                        run_id=run_id if isinstance(run_id, str) else None,
-                        round_id=round_id if isinstance(round_id, str) else None,
-                        task_id=task_id,
-                        user_id=user_id,
-                        subagent_type=subagent_type,
-                        result=result.result,
-                    )
-                    return _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs, suggested_receiver=suggested_receiver)
                 return _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs)
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
@@ -856,7 +761,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=handoff_prompt,
+                    prompt=prompt,
                     status="failed",
                     error=result.error,
                     usage=usage,
@@ -880,7 +785,6 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 error_text = _redacted_tool_text(result.error)
@@ -905,7 +809,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=handoff_prompt,
+                    prompt=prompt,
                     status="cancelled",
                     error=result.error,
                     usage=usage,
@@ -929,7 +833,6 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {_redacted_tool_text(result.error)}")
@@ -953,7 +856,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=handoff_prompt,
+                    prompt=prompt,
                     status="timed_out",
                     error=result.error,
                     usage=usage,
@@ -977,7 +880,6 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 error_text = _redacted_tool_text(result.error)
@@ -1014,7 +916,7 @@ async def task_tool(
                     user_id=user_id,
                     subagent_type=subagent_type,
                     description=description,
-                    prompt=handoff_prompt,
+                    prompt=prompt,
                     status="polling_timed_out",
                     error=error,
                     usage=usage,
@@ -1038,7 +940,6 @@ async def task_tool(
                         "usage": usage,
                         "artifact_refs": _artifact_refs(action_result),
                         "action_result": _compact_action_result_event(action_result),
-                        "handoff_envelope": handoff_envelope,
                     },
                 )
                 # The task may still be running in the background. Signal cooperative
@@ -1080,7 +981,7 @@ async def task_tool(
             user_id=user_id,
             subagent_type=subagent_type,
             description=description,
-            prompt=handoff_prompt,
+            prompt=prompt,
             status="cancelled",
             error=getattr(final_result, "error", None) if final_result is not None else "Parent run cancelled",
             usage=usage,
@@ -1104,7 +1005,6 @@ async def task_tool(
                 "usage": usage,
                 "artifact_refs": _artifact_refs(action_result),
                 "action_result": _compact_action_result_event(action_result),
-                "handoff_envelope": handoff_envelope,
             },
         )
         if final_result is not None and _is_subagent_terminal(final_result):

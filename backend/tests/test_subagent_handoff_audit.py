@@ -2,81 +2,7 @@
 
 import json
 
-from deerflow.subagents.audit import extract_evidence_signal, extract_handoff_packet, record_subagent_handoff
-
-
-def test_extract_evidence_signal_fields():
-    signal = extract_evidence_signal(
-        """Evidence Signal
-Role: fact-finder
-Claim: config is loadable
-EvidenceStrength: Strong
-EvidenceRefs: config.yaml:1055
-Unknown/Stale: none
-Conflicts: none
-RedlineTouched: false
-RecommendedDecision: PASS
-NextAction: continue
-"""
-    )
-
-    assert signal["valid"] is True
-    assert signal["fields"]["Role"] == "fact-finder"
-    assert signal["fields"]["EvidenceStrength"] == "Strong"
-    assert signal["fields"]["EvidenceRefs"] == "config.yaml:1055"
-    assert signal["missing"] == []
-
-
-def test_extract_evidence_signal_markdown_fields():
-    signal = extract_evidence_signal(
-        """## Evidence Signal
-- **Role:** opposition
-- **Claim:** Draft PASS is unsupported.
-- **EvidenceRefs:** worker-a: no refs; worker-b: no refs
-- **Unknown/Stale:** OAuth evidence missing
-- **Conflicts:** Draft next conflicts with read-only boundary.
-- **RedlineTouched:** true
-- **RecommendedDecision:** STOP_CONFIRM
-- **NextAction:** collect concrete evidence refs
-"""
-    )
-
-    assert signal["valid"] is True
-    assert signal["fields"]["Role"] == "opposition"
-    assert signal["fields"]["RecommendedDecision"] == "STOP_CONFIRM"
-    assert signal["missing"] == []
-
-
-def test_extract_evidence_signal_without_heading():
-    signal = extract_evidence_signal(
-        """- Role: opposition
-- Claim: Draft PASS is unsupported.
-- EvidenceRefs: worker self-claims only
-- RedlineTouched: true
-- RecommendedDecision: STOP_CONFIRM
-"""
-    )
-
-    assert signal["valid"] is True
-    assert signal["fields"]["EvidenceRefs"] == "worker self-claims only"
-    assert signal["missing"] == []
-
-
-def test_extract_evidence_signal_json_like_fields():
-    signal = extract_evidence_signal(
-        """{
-  "Role": "opposition",
-  "Claim": "Draft PASS is unsupported.",
-  "EvidenceRefs": "worker self-claims only",
-  "RedlineTouched": "true",
-  "RecommendedDecision": "STOP_CONFIRM"
-}"""
-    )
-
-    assert signal["valid"] is True
-    assert signal["fields"]["Role"] == "opposition"
-    assert signal["fields"]["RecommendedDecision"] == "STOP_CONFIRM"
-    assert signal["missing"] == []
+from deerflow.subagents.audit import extract_handoff_packet, record_subagent_handoff
 
 
 def test_record_subagent_handoff_omits_raw_payloads(tmp_path):
@@ -129,134 +55,8 @@ SECRET_RESULT_SHOULD_NOT_APPEAR
     assert record["action_result"]["error_sha256"]
     assert "summary" not in record["action_result"]
     assert "error" not in record["action_result"]
-    assert record["signal"]["valid"] is True
-    assert record["signal"]["fields"]["EvidenceRefs"] == "test-ref"
-
-
-def test_record_subagent_handoff_normalizes_mechanical_signal_fields(tmp_path):
-    raw_result = """Evidence Signal
-EvidenceRefs: worker self-claims only
-RecommendedDecision: NEEDS_MORE because concrete evidence is missing.
-NextAction: collect refs
-"""
-
-    path = record_subagent_handoff(
-        thread_id="thread-1",
-        run_id="run-1",
-        task_id="task-1",
-        trace_id="trace-1",
-        user_id="user-1",
-        subagent_type="opposition",
-        description="反方机制验证",
-        prompt="test prompt",
-        status="completed",
-        result=raw_result,
-        base_dir=tmp_path,
-    )
-
-    assert path is not None
-    record = json.loads(path.read_text(encoding="utf-8"))
-    signal = record["signal"]
-
-    assert signal["valid"] is True
-    assert signal["missing"] == []
-    assert signal["fields"]["Role"] == "opposition"
-    assert signal["fields"]["Claim"] == "NEEDS_MORE because concrete evidence is missing."
-    assert signal["fields"]["RedlineTouched"] == "false"
-    assert signal["derived"] == ["Claim", "RedlineTouched", "Role"]
-
-
-def test_record_subagent_handoff_accepts_natural_worker_output(tmp_path):
-    path = record_subagent_handoff(
-        thread_id="thread-1",
-        run_id="run-1",
-        task_id="task-natural",
-        trace_id="trace-1",
-        user_id="user-1",
-        subagent_type="opposition",
-        description="自然反方检查",
-        prompt="test prompt",
-        status="completed",
-        result="这个结论还不能直接进入真实执行，缺少可核查的测试输出和文件引用。",
-        base_dir=tmp_path,
-    )
-
-    assert path is not None
-    record = json.loads(path.read_text(encoding="utf-8"))
-    signal = record["signal"]
-
-    assert signal["valid"] is True
-    assert signal["missing"] == []
-    assert signal["fields"]["Role"] == "opposition"
-    assert signal["fields"]["EvidenceRefs"] == "worker-output:task-natural"
-    assert signal["fields"]["RecommendedDecision"] == "NEEDS_MORE"
-    assert signal["fields"]["RedlineTouched"] == "false"
-    assert "EvidenceRefs" in signal["derived"]
-
-
-def test_runtime_observed_evidence_validates_natural_implementation_without_false_redline(tmp_path):
-    evidence_ref = "command: pytest backend/tests/test_services.py -q; exit code: 0"
-    path = record_subagent_handoff(
-        thread_id="thread-1",
-        run_id="run-1",
-        task_id="task-implementation",
-        trace_id="trace-1",
-        user_id="user-1",
-        subagent_type="general-purpose",
-        description="implement the scoped fix",
-        prompt="implement and test",
-        status="completed",
-        result="Implemented the scoped fix. No production write or credential access occurred.",
-        action_result={
-            "action_id": "task-implementation",
-            "status": "completed",
-            "evidence_refs": [evidence_ref],
-        },
-        base_dir=tmp_path,
-    )
-
-    record = json.loads(path.read_text(encoding="utf-8"))
-    signal = record["signal"]
-
-    assert signal["valid"] is True
-    assert signal["missing"] == []
-    assert signal["fields"]["EvidenceRefs"] == evidence_ref
-    assert signal["fields"]["RedlineTouched"] == "false"
-    assert signal["evidenceState"] == "SUPPORTED"
-    assert signal["selfAttestationOnly"] is False
-    assert "RecommendedDecision" not in signal["fields"]
-
-
-def test_record_subagent_handoff_infers_blocking_decision(tmp_path):
-    raw_result = """Evidence Signal
-EvidenceRefs: worker self-claims only; no logs or outputRefs.
-Conflicts: Draft Next enters real execution despite read-only boundary.
-RedlineTouched: true
-RecommendedDecision:
-"""
-
-    path = record_subagent_handoff(
-        thread_id="thread-1",
-        run_id="run-1",
-        task_id="task-1",
-        trace_id="trace-1",
-        user_id="user-1",
-        subagent_type="opposition",
-        description="反方机制验证",
-        prompt="test prompt",
-        status="completed",
-        result=raw_result,
-        base_dir=tmp_path,
-    )
-
-    assert path is not None
-    record = json.loads(path.read_text(encoding="utf-8"))
-    signal = record["signal"]
-
-    assert signal["valid"] is True
-    assert signal["missing"] == []
-    assert signal["fields"]["RecommendedDecision"] == "STOP_CONFIRM"
-    assert "RecommendedDecision" in signal["derived"]
+    assert "signal" not in record
+    assert "output_handoff_packet" not in record
 
 
 def test_record_subagent_handoff_records_compact_handoff_packet(tmp_path):
@@ -347,7 +147,7 @@ Recommended Next Decision: NEEDS_MORE
     assert packet["recommendedNextDecision"] == "NEEDS_MORE"
 
 
-def test_record_subagent_handoff_records_output_handoff_packet(tmp_path):
+def test_record_subagent_handoff_keeps_worker_handoff_text_as_hash_only(tmp_path):
     raw_result = """AI Handoff Envelope
 Source Role: Planner
 Target Role: Opposition
@@ -376,16 +176,10 @@ Recommended Next Decision: NEEDS_MORE
     )
 
     record = json.loads(path.read_text(encoding="utf-8"))
-    packet = record["output_handoff_packet"]
-    assert packet["sourceRole"] == "Planner"
-    assert packet["targetRole"] == "Opposition"
-    assert packet["taskOrQuestion"] == "attack the proposed plan"
-    assert packet["evidenceRefs"] == "planner-output:1"
-    assert packet["evidenceStrength"] == "Weak"
-    assert packet["outputRefs"] == "planner-result:1"
-    assert packet["handoffFile"] == "docs/command-room/spec.md"
-    assert packet["artifactRefs"] == "docs/command-room/spec.md; docs/command-room/findings.md"
-    assert packet["recommendedNextDecision"] == "NEEDS_MORE"
+    assert record["result_sha256"]
+    assert record["result_chars"] == len(raw_result)
+    assert "output_handoff_packet" not in record
+    assert "signal" not in record
 
 
 def test_extract_handoff_packet_supports_context_input_and_stop_aliases():

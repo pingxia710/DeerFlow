@@ -47,7 +47,6 @@ def test_task_tool_queue_full_surfaces_task_failed_event(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
     monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **_kwargs: None)
-    monkeypatch.setattr(task_tool_module, "record_pending_handoff", lambda *args, **kwargs: None)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _delay: asyncio.sleep(0))
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))

@@ -1,15 +1,3 @@
-# Planner State
+# Planner notes
 
-## Candidate Direction
-
-- Status: initial
-- Current candidate:
-- Rejected alternatives:
-
-## Assumptions
-
--
-
-## Watchpoints
-
-- Keep alternatives visible; do not approve your own plan.
+No standing state is required. Use this file only for a durable, task-relevant note that benefits from being retained; otherwise leave it unchanged.

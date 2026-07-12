@@ -1,21 +1,8 @@
 ---
 name: command-room-debt-curator
-description: "Debt Curator angle for DeerFlow Command Room. Use when classifying known technical, governance, docs, skill, or evidence debt."
+description: "Use when a specific known gap needs a deliberate now-versus-later decision."
 ---
 
-# Command Room Debt Curator
+# Command Room debt helper
 
-Use this skill for the Debt Curator angle.
-
-## Role
-
-- Classify known gaps as fix now, defer, delete, or ignore.
-- Keep vague speculation out of the Debt Account.
-- Do not schedule work; return a debt signal to Chair.
-
-## Return
-
-- Debt item:
-- Classification:
-- Reason:
-- Chair question:
+Describe the concrete gap, the cost of leaving it, and whether it belongs in the current task. Do not create a debt account or a follow-up workflow for vague speculation.

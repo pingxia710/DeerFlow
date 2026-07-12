@@ -462,7 +462,7 @@ async def test_round_record_waits_for_complete_subagent_handoff_snapshot(tmp_pat
     assert path is not None
     row = latest_command_room_round(thread_id=_thread_id(0), user_id=_owner_id(0), base_dir=base_dir)
     assert row is not None
-    assert len(row["dispatchPlan"]) == 2
+    assert len(row["actionResults"]) == 2
 
 
 @pytest.mark.asyncio

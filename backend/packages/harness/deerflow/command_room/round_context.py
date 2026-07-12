@@ -56,18 +56,17 @@ class RoundContextSignals:
 
 @dataclass(frozen=True)
 class RoundBrief:
-    """Short internal working-memory brief for the main AI.
+    """Objective, compact working memory for the main AI.
 
-    This is advisory context only. It is intentionally not a workflow decision,
-    quality judgement, or automatic rework trigger.
+    Legacy persisted fields may remain in older records, but are deprecated for
+    prompt injection: the model receives facts, not completion or next-step
+    guidance.
     """
 
     goal: str
     boundaries: list[str]
     handoff_signals: list[str]
-    evidence_status: str
     open_risks_or_questions: list[str]
-    next_safe_action: str
     summary: str
 
     def as_dict(self) -> dict[str, object]:
@@ -75,9 +74,7 @@ class RoundBrief:
             "goal": self.goal,
             "boundaries": list(self.boundaries),
             "handoff_signals": list(self.handoff_signals),
-            "evidence_status": self.evidence_status,
             "open_risks_or_questions": list(self.open_risks_or_questions),
-            "next_safe_action": self.next_safe_action,
             "summary": self.summary,
         }
 
@@ -94,20 +91,10 @@ def _brief_text(value: str, *, limit: int = 180) -> str:
 def create_round_brief(round_: Round) -> RoundBrief:
     """Create compact high-signal working memory from a Round.
 
-    The brief is derived from existing Round/action/evidence signals and keeps
-    only useful next-step context. It deliberately avoids gate/verdict/pass/fail
-    semantics so the lead AI remains responsible for judgement.
+    The brief is derived from existing Round/action signals and preserves only
+    stated goal, boundaries, occurred actions, and unresolved facts. It does
+    not infer evidence gaps, completion, or a next step.
     """
-
-    evidence = round_.evidence_signals()
-    strong = int(evidence.get("strong_count") or 0)
-    weak = int(evidence.get("weak_count") or 0)
-    if strong:
-        evidence_status = f"{strong} trusted observable evidence signal(s)"
-    elif weak:
-        evidence_status = f"{weak} weak evidence signal(s); treat worker self-claims as untrusted"
-    else:
-        evidence_status = "no observable evidence signal yet"
 
     handoff_signals = []
     for result in round_.action_results[:3]:
@@ -128,28 +115,22 @@ def create_round_brief(round_: Round) -> RoundBrief:
         if len(open_items) >= 5:
             break
 
-    next_safe_action = _brief_text(round_.next_step, limit=180)
-    if not next_safe_action and round_.next_round is not None and round_.next_round.within_current_boundary and not round_.next_round.needs_user_confirmation:
-        next_safe_action = _brief_text(round_.next_round.proposal, limit=180)
-    if not next_safe_action:
-        next_safe_action = "continue only inside stated boundaries; ask user before new authorization or redline changes"
-
+    goal = _brief_text(round_.goal, limit=160)
+    boundaries = [_brief_text(item) for item in round_.boundaries[:4] if _brief_text(item)]
     summary_parts = [
         part
         for part in [
-            f"Goal: {_brief_text(round_.goal, limit=160)}" if round_.goal.strip() else "",
-            f"Evidence: {evidence_status}",
-            f"Next safe action: {next_safe_action}",
+            f"Goal: {goal}" if goal else "",
+            *(f"Action: {item}" for item in handoff_signals),
+            *(f"Unresolved: {item}" for item in open_items),
         ]
         if part
     ]
     return RoundBrief(
-        goal=_brief_text(round_.goal, limit=160),
-        boundaries=[_brief_text(item) for item in round_.boundaries[:4] if _brief_text(item)],
+        goal=goal,
+        boundaries=boundaries,
         handoff_signals=handoff_signals,
-        evidence_status=evidence_status,
         open_risks_or_questions=open_items,
-        next_safe_action=next_safe_action,
         summary=" | ".join(summary_parts),
     )
 

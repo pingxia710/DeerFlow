@@ -170,7 +170,6 @@ class MemoryRoundStateStore:
                 thread_id=thread_id,
                 user_id=user_id,
             )
-        accepted_next_action = None
         if explicit_round_id is None and row is None and latest is not None and latest["state"] not in TERMINAL_ROUND_STATES:
             row = latest
         previous_run_id = row.get("current_run_id") if row is not None else None
@@ -214,7 +213,7 @@ class MemoryRoundStateStore:
                 "previous_updated_at": previous_updated_at,
             },
         )
-        return {**row, "accepted_next_action": accepted_next_action}
+        return dict(row)
 
     async def rollback_run_binding(self, run_id: str) -> bool:
         attachment = next(

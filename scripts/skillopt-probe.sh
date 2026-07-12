@@ -28,7 +28,10 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
-python outputs/skill_probe_template/run_static_benchmark.py \
+# The static benchmark resolves a relative skill_path from its current directory.
+# Keep the checked-in config portable by invoking it from this worktree.
+cd "$REPO_ROOT"
+python "$SKILLOPT_ROOT/outputs/skill_probe_template/run_static_benchmark.py" \
   --config "$CONFIG" \
   --tasks "$TASKS" \
   --out "$OUT"
@@ -38,7 +41,6 @@ if [[ "${SKILLOPT_STATIC_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
-cd "$REPO_ROOT"
 behavior_args=(
   --skill "$SKILL"
   --schema "$BEHAVIOR_SCHEMA"

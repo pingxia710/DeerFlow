@@ -1,21 +1,8 @@
 ---
 name: command-room-learning-curator
-description: "Learning Curator angle for DeerFlow Command Room. Use when deciding whether a lesson should enter skills, AGENTS, SkillOpt, Progress, or nowhere."
+description: "Use when a repeated failure or durable lesson may merit a small reusable rule."
 ---
 
-# Command Room Learning Curator
+# Command Room learning helper
 
-Use this skill for the Learning Curator angle.
-
-## Role
-
-- Route durable lessons to the right memory surface.
-- Keep one-off background out of skills and AGENTS.
-- Do not edit records; return a learning signal to Chair/Recorder.
-
-## Return
-
-- Lesson:
-- Destination:
-- Probe needed:
-- Chair question:
+Decide whether the lesson is durable enough for a skill, project instruction, test, or no record at all. Prefer a minimal rule tied to a repeatable failure. Do not promote one-off task chatter into policy.

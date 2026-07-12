@@ -1,17 +1,3 @@
-# Evidence State
+# Evidence notes
 
-## Evidence Standard
-
-- Status: initial
-- Current standard:
-- Accepted strong evidence:
-
-## Weak Evidence
-
-- Worker self-claims
-- Summary-only output
-- Output paths without reproducible backing
-
-## Watchpoints
-
-- Never turn `Task Succeeded` into PASS by itself.
+No standing state is required. Use this file only for a durable, task-relevant note that benefits from being retained; otherwise leave it unchanged.

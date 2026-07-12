@@ -301,7 +301,6 @@ class RoundStateRepository:
                     )
                 latest = None if explicit_round_id is not None else await self._latest_round(session, thread_id, user_id)
                 created = False
-                accepted_next_action = None
                 if explicit_round_id is None and round_row is None and latest is not None and latest.state not in TERMINAL_ROUND_STATES:
                     round_row = latest
                 previous_run_id = round_row.current_run_id if round_row is not None else None
@@ -362,9 +361,7 @@ class RoundStateRepository:
                         "previous_updated_at": previous_updated_at,
                     },
                 )
-                result = _row_to_dict(round_row)
-                result["accepted_next_action"] = accepted_next_action
-                return result
+                return _row_to_dict(round_row)
 
     async def rollback_run_binding(self, run_id: str) -> bool:
         async with self._sf() as session:

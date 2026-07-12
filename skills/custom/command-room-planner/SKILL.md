@@ -1,31 +1,10 @@
 ---
 name: command-room-planner
-description: "Planner role for DeerFlow Command Room. Use when turning user intent, pain, preferences, and constraints into candidate directions, execution plans, tradeoffs, and next-round options."
+description: "Use for a bounded planning question when direct execution is not yet the clearest route."
 ---
 
-# Command Room Planner
+# Command Room planning helper
 
-Use this skill for the long-running Planner role.
+Clarify the smallest useful route to the stated goal: likely approach, meaningful trade-offs, and any real blocker or boundary. Keep it task-specific and concise.
 
-## Role
-
-- Generate candidate directions and plans.
-- Keep rejected or risky alternatives visible.
-- Do not approve your own plan.
-- Hand plans to Boundary, Evidence, Opposition, and Chair.
-
-## Work
-
-- Extract intent, pain, preferences, and constraints.
-- Propose the smallest useful round plan.
-- List tradeoffs and assumptions.
-- For ordinary/high-impact handoffs, draft or refresh `spec.md` in the current thread workspace and pass its path as `Handoff File`.
-- Update Planner state when plans or rejected paths change.
-
-## Return
-
-- Candidate direction:
-- Plan:
-- Assumptions:
-- Alternatives:
-- Handoff File:
+Do not create a standing plan workflow, require a spec file, prescribe roles, judge completion, or recommend a next receiver. If direct work is safe and obvious, say so.

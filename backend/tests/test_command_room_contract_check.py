@@ -21,113 +21,34 @@ def _contract() -> dict:
 
 def _valid_round(contract: dict) -> dict:
     for case in contract["cases"]:
-        errors = checker.validate_round(case["round"], contract)
-        if case.get("expected_valid") and not errors:
+        if case.get("expected_valid"):
             return copy.deepcopy(case["round"])
     raise AssertionError("contract fixture has no valid baseline round")
 
 
 def test_all_fixture_cases_match_expected_valid():
     contract = _contract()
-
     for case in contract["cases"]:
         errors = checker.validate_round(case.get("round") or {}, contract)
         assert (not errors) is bool(case.get("expected_valid")), (case.get("name"), errors)
 
 
-def test_self_attested_worker_output_only_evidence_cannot_support_pass():
+def test_quality_gate_fields_are_rejected_from_fact_record():
     contract = _contract()
     round_record = _valid_round(contract)
-    round_record["decisionSignals"]["decision"] = "PASS"
-    round_record["verdict"] = round_record["decisionSignals"]
-    round_record["signals"][0].update(
-        {
-            "evidenceState": "SUPPORTED",
-            "selfAttestationOnly": True,
-            "evidenceRefs": ["outputRef only", "worker self-claims only"],
-            "redlineTouched": False,
-            "recommendedDecision": "PASS",
-        }
-    )
+    round_record["verdict"] = {"decision": "PASS"}
+    round_record["decisionSignals"] = {"gated": False}
 
     errors = checker.validate_round(round_record, contract)
 
-    assert any("self-claimed evidence must not be SUPPORTED" in error for error in errors)
-    assert any("PASS requires concrete non-self-attested evidenceRefs" in error for error in errors)
+    assert "round contains prohibited fact-contract fields: decisionSignals, verdict" in errors
 
 
-def test_output_ref_only_evidence_cannot_support_pass():
+def test_missing_objective_action_fact_is_reported():
     contract = _contract()
     round_record = _valid_round(contract)
-    round_record["decisionSignals"]["decision"] = "PASS"
-    round_record["decisionSignals"]["evidenceRefs"] = ["output_ref: worker-output-123"]
-    round_record["verdict"] = round_record["decisionSignals"]
-    round_record["signals"][0].update(
-        {
-            "evidenceState": "SUPPORTED",
-            "selfAttestationOnly": False,
-            "evidenceRefs": ["output_ref: worker-output-123"],
-            "redlineTouched": False,
-            "recommendedDecision": "PASS",
-        }
-    )
+    del round_record["actionResults"][0]["status"]
 
     errors = checker.validate_round(round_record, contract)
 
-    assert any("PASS requires concrete non-self-attested evidenceRefs" in error for error in errors)
-
-
-def test_runtime_evidence_can_support_pass_without_opposition_or_exemption():
-    contract = _contract()
-    round_record = copy.deepcopy(next(case["round"] for case in contract["cases"] if case["name"] == "pass_with_runtime_evidence_without_opposition"))
-    evidence_ref = "command: pytest tests/test_example.py -q; exit code: 0; output_sha256: abc123"
-    round_record["signals"][0].update(
-        {
-            "claim": "Focused acceptance test passed.",
-            "evidenceRefs": [evidence_ref],
-            "evidenceState": "SUPPORTED",
-            "selfAttestationOnly": False,
-            "unknownStale": [],
-            "conflicts": [],
-            "recommendedDecision": "PASS",
-        }
-    )
-    round_record["decisionSignals"].update(
-        {
-            "decision": "PASS",
-            "reason": "Runtime-observed acceptance evidence is complete.",
-            "evidenceRefs": [evidence_ref],
-        }
-    )
-    round_record["verdict"] = round_record["decisionSignals"]
-
-    errors = checker.validate_round(round_record, contract)
-
-    assert errors == []
-
-
-def test_target_role_and_round_advisory_gated_false_are_not_hard_gate_failures():
-    contract = _contract()
-    round_record = _valid_round(contract)
-    round_record["roundContextAvailable"] = False
-    round_record["roundRequired"] = False
-    round_record["dispatchPlan"][0]["role"] = "target-opposition"
-    round_record["signals"][0]["role"] = "target-opposition"
-    round_record["decisionSignals"]["gated"] = False
-    round_record["verdict"] = round_record["decisionSignals"]
-
-    errors = checker.validate_round(round_record, contract)
-
-    assert errors == []
-
-
-def test_invalid_alias_and_missing_required_field_are_reported():
-    contract = _contract()
-    round_record = _valid_round(contract)
-    round_record["compatibilityAliases"]["verdict"] = "hardGate"
-    del round_record["nextRoundContract"]["nextGoal"]
-
-    errors = checker.validate_round(round_record, contract)
-
-    assert "compatibilityAliases.verdict must point to decisionSignals" in errors
-    assert "nextRoundContract missing fields: nextGoal" in errors
+    assert "actionResults[0] missing fields: status" in errors

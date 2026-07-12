@@ -9,7 +9,6 @@ Covers:
 - Skills filter passthrough in task_tool config assembly
 """
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,95 +40,63 @@ def _read_custom_skill_or_skip(repo_root: Path, skill_name: str) -> str:
     return skill_file.read_text(encoding="utf-8")
 
 
-def test_command_room_findings_role_skills_require_evidence_strength():
+def test_command_room_evidence_and_opposition_skills_are_optional():
     repo_root = Path(__file__).resolve().parents[2]
-    for skill_name in ("command-room-evidence", "command-room-opposition"):
-        text = _read_custom_skill_or_skip(repo_root, skill_name)
-        assert "findings.md" in text
-        assert "EvidenceStrength:" in text
-        assert "Strong/Weak/Unverified" in text
+    evidence = _read_custom_skill_or_skip(repo_root, "command-room-evidence")
+    opposition = _read_custom_skill_or_skip(repo_root, "command-room-opposition")
+
+    assert "smallest useful observable check" in evidence
+    assert "Do not require labels, forms, findings files" in evidence
+    assert "not for routine work" in opposition
+    assert "Do not run by default" in opposition
 
 
-def test_command_room_capability_governor_skill_defines_boundary_signal():
+def test_command_room_capability_governor_is_limited_to_material_expansion():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-capability-governor")
 
-    assert "Capability Boundary Signal" in text
-    assert "Requested Expansion:" in text
-    assert "Current Boundary:" in text
-    assert "Current Capability Release:" in text
-    assert "Expansion Risks:" in text
-    assert "Chair Decision Options:" in text
-    assert "Target Role: Chair" in text
+    assert "narrowest safe scope" in text
+    assert "whether user authorization is needed" in text
+    assert "Do not authorize it yourself" in text
 
 
-def test_command_room_fact_finder_skill_defines_read_only_sources_and_boundaries():
+def test_command_room_fact_finder_skill_is_bounded_and_read_only():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-fact-finder")
 
     assert "read-only" in text
-    assert "Source Priority" in text
-    assert "Confirmed facts" in text
-    assert "Reasonable inferences" in text
-    assert "Conflicts" in text
-    assert "Still unknown" in text
-    assert "Chair/main AI decides" in text
-    assert "Do not decide" in text
+    assert "direct observations" in text
+    assert "Do not decide, authorize" in text
+    assert "review workflow" in text
 
 
-def test_command_room_chair_skill_defines_capability_decision():
+def test_command_room_chair_skill_keeps_the_lead_goal_first():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
 
-    assert "Capability Decision" in text
-    assert "Signal Ref:" in text
-    assert "Decision: keep current release / narrow release / ask user / stop" in text
-    assert "Adopted Capability Release:" in text
-    assert "Reason:" in text
-    assert "Next Role:" in text
-    assert "Program logic must not choose this decision" in text
+    assert "user's goal" in text
+    assert "optional perspective" in text
+    assert "Validate in proportion to the action" in text
+    assert "Do not emit Round Cards" in text
 
 
-def test_command_room_chair_skill_bounds_code_reading_and_visible_thinking():
+def test_command_room_recorder_skill_preserves_only_durable_facts_when_useful():
     repo_root = Path(__file__).resolve().parents[2]
-    text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
+    text = _read_custom_skill_or_skip(repo_root, "command-room-recorder")
 
-    assert "Chair Code Reading Policy" in text
-    assert "decisive refs" in text
-    assert "delegate broad exploration" in text
-    assert "Return to envelope and Chair decision flow" in text
-    assert "Visible Thinking Budget" in text
-    assert "Do not narrate long private deliberation" in text
+    assert "durable fact" in text
+    assert "Do not create accounts, templates, Progress entries" in text
+    assert "not a durable decision" in text
 
 
-def test_command_room_chair_skill_prioritizes_execution_evidence_over_process_loops():
+def test_naxus_skill_is_goal_first_and_has_no_default_process():
     repo_root = Path(__file__).resolve().parents[2]
-    text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
+    skill = _read_custom_skill_or_skip(repo_root, "naxus-round")
 
-    assert "Runtime-observed evidence" in text
-    assert "does not erase earlier observed implementation or verification" in text
-    assert "do not activate Planner, Boundary, Evidence, Opposition, or Recorder by default" in text
-    assert "Stop dispatching" in text
-
-
-def test_naxus_skillopt_probe_rewards_stopping_after_observed_execution():
-    repo_root = Path(__file__).resolve().parents[2]
-    probe_root = repo_root / "docs" / "skillopt" / "naxus-round"
-    tasks = json.loads((probe_root / "tasks.json").read_text(encoding="utf-8"))
-    config = json.loads((probe_root / "config.json").read_text(encoding="utf-8"))
-
-    task = next(item for item in tasks if item["id"] == "test-stop-after-observed-implementation")
-    assert task["required_rules"] == [
-        "ordinary-single-implementation",
-        "runtime-observed-evidence-facts",
-        "stop-on-acceptance",
-        "opposition-risk-triggered",
-    ]
-    assert "opposition-for-pass" not in config["rules"]
-    assert "one implementation lane plus focused acceptance verification" in config["rules"]["ordinary-single-implementation"]
-    assert "Runtime-observed paired tool results" in config["rules"]["runtime-observed-evidence-facts"]
-    assert "Stop dispatching" in config["rules"]["stop-on-acceptance"]
-    assert "risk-triggered" in config["rules"]["opposition-risk-triggered"]
+    assert "Take the most valuable next action directly" in skill
+    assert "Roles are optional perspectives" in skill
+    assert "Do not require evidence labels, Round Cards, PASS/NEEDS_MORE verdicts" in skill
+    assert "SkillOpt is a regression check" in skill
 
 
 def test_naxus_skillopt_entrypoint_runs_model_backed_behavior_gate():
@@ -141,42 +108,14 @@ def test_naxus_skillopt_entrypoint_runs_model_backed_behavior_gate():
     assert "behavior_report.json" in script
 
 
-def test_command_room_recorder_skill_requires_chair_accepted_account_updates():
-    repo_root = Path(__file__).resolve().parents[2]
-    text = _read_custom_skill_or_skip(repo_root, "command-room-recorder")
-
-    assert "Account Update Proposal" in text
-    assert "Goal / Boundary / Decision / Evidence / Debt / Learning" in text
-    assert "Chair-accepted" in text
-    assert "adopt / revise / defer / reject" in text
-    assert "Program logic must not auto-update accounts" in text
-    assert "Recorder Target:" in text
-
-
-def test_command_room_loop_scenario_library_is_linked_and_bounded():
+def test_command_room_iteration_docs_reject_required_loops():
     repo_root = Path(__file__).resolve().parents[2]
     doc = (repo_root / "docs" / "command-room" / "loop-scenarios.md").read_text(encoding="utf-8")
     protocol = (repo_root / "docs" / "command-room" / "ai-control-protocol.md").read_text(encoding="utf-8")
-    skill = _read_custom_skill_or_skip(repo_root, "naxus-round")
 
-    for expected in (
-        "Loop Scenario Library",
-        "New Task Startup Loop",
-        "Plan Loop",
-        "Development Loop",
-        "Evidence Loop",
-        "Capability Loop",
-        "Conflict Loop",
-        "Debt Loop",
-        "Learning Loop",
-        "Six-Lane Audit Loop",
-        "Do not force six lanes",
-        "must return to Chair",
-    ):
-        assert expected in doc
-
-    assert "docs/command-room/loop-scenarios.md" in protocol
-    assert "docs/command-room/loop-scenarios.md" in skill
+    assert "Iterate only while it helps achieve the current goal" in doc
+    assert "Do not require named loops, rounds, role rotations, or standard artifacts" in doc
+    assert "There is no required role sequence, artifact set, handoff envelope, round, verdict label, or approval chain" in protocol
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +498,7 @@ class TestRegistryCustomAgentLookup:
         # Should get the builtin description, not the custom one
         assert config.description == BUILTIN_SUBAGENTS["general-purpose"].description
 
-    def test_command_room_role_subagents_are_builtin_except_chair(self):
+    def test_command_room_role_subagents_are_optional_helpers_except_chair(self):
         from deerflow.subagents.registry import get_subagent_config, get_subagent_names
 
         _reset_subagents_config()
@@ -583,22 +522,17 @@ class TestRegistryCustomAgentLookup:
             config = get_subagent_config(name)
             assert config is not None
             assert config.skills == [skill]
-            assert "EvidenceStrength:" in config.system_prompt
-            assert "Handoff File:" in config.system_prompt
-            assert "ArtifactRefs:" in config.system_prompt
-            assert "Chair/main AI" in config.system_prompt
-            assert "decides; a worker recommendation is not a dispatch instruction" in config.system_prompt
-            assert "worker recommendation is not a dispatch instruction" in config.system_prompt
-            assert "Target Role: <suggested next receiver or Chair>" in config.system_prompt
+            assert "temporary Command Room helper" in config.system_prompt
+            assert "return only concise task-relevant observations, actions, or blockers" in config.system_prompt
+            assert "Do not require or invent a role handoff, evidence label, verdict, next receiver, or approval workflow" in config.system_prompt
+            assert "EvidenceStrength:" not in config.system_prompt
+            assert "Recommended Next Decision:" not in config.system_prompt
 
         assert "chair" not in names
         assert "command-room" not in names
 
         prompt_by_role = {name: get_subagent_config(name).system_prompt for name in ("planner", "boundary", "evidence", "opposition")}
-        assert "Target Role: Boundary" not in prompt_by_role["planner"]
-        assert "Target Role: Evidence" not in prompt_by_role["boundary"]
-        assert "Target Role: Opposition" not in prompt_by_role["evidence"]
-        assert "Target Role: Chair" not in prompt_by_role["opposition"]
+        assert all("Target Role:" not in prompt for prompt in prompt_by_role.values())
 
     def test_custom_command_room_role_overrides_builtin_role(self):
         from deerflow.subagents.registry import get_subagent_config

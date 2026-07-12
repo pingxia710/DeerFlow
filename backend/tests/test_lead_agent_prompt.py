@@ -216,14 +216,12 @@ def test_command_room_prompt_allows_live_discussion_without_implicit_interventio
 
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
-    assert "While sub-AIs are running, your conversation with the user remains live" in section
-    assert "do not cancel" in section
-    assert "unless the user explicitly asks for that intervention" in section
-    assert "dispatch a fresh `task` with a new handoff" in section
-    assert "not a silent mutation of an already-running worker" in section
+    assert "While sub-AIs are running, keep the user conversation responsive" in section
+    assert "Do not silently change a running task's goal or permissions" in section
+    assert "create a new task or ask when needed" in section
 
 
-def test_command_room_prompt_allows_direct_grounding_but_keeps_risky_work_delegated():
+def test_command_room_prompt_prefers_direct_safe_work_and_bounds_delegation():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -234,13 +232,14 @@ def test_command_room_prompt_allows_direct_grounding_but_keeps_risky_work_delega
 
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
-    assert "You may inspect project files directly" in section
-    assert "run bounded bash commands directly" not in section
-    assert "Delegate bash execution, risky, long-running, write-heavy, web, or multi-lane work" in section
-    assert "Do not perform direct file/web/bash investigation" not in section
+    assert "complete safe, ordinary, reversible technical work directly" in section
+    assert "Use your own reasoning and available tools to inspect" in section
+    assert "Dispatch sub-AIs only when they provide concrete value" in section
+    assert "Make ordinary technical choices yourself within the user's stated scope" in section
+    assert "Stop and ask before destructive or irreversible actions" in section
 
 
-def test_command_room_prompt_requires_chair_activation_check():
+def test_command_room_prompt_has_no_required_governance_workflow():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -251,29 +250,12 @@ def test_command_room_prompt_requires_chair_activation_check():
 
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
-    assert "Chair Activation Check" in section
-    assert "Goal:" in section
-    assert "Boundary:" in section
-    assert "Evidence Standard:" in section
-    assert "Capability Release:" in section
-    assert "Default Authorization Boundary:" in section
-    assert "Risk Class:" in section
-    assert "Dispatch Plan:" in section
-    assert "New Task Startup Branch:" in section
-    assert "Direct / Clarify / Single Sub-AI / Multi Sub-AI / Stop" in section
-    assert "Minimum Evidence Action:" in section
-    assert "Clarify only when user intent, boundary, required input, or authorization is missing" in section
-    assert "Stop when the next step touches a bottom boundary, destructive/live action, sensitive data exposure" in section
-    assert "Do not use Clarify for facts the current workspace, docs, logs, or safe read-only checks can discover" in section
-    assert "Default authorization allows only the named capabilities in Capability Release" in section
-    assert "Expansion to new write surfaces, live/external systems, credentials, customer/payment data" in section
-    assert "requires Boundary or Capability Governor signal and Chair decision" in section
-    assert "Evidence Strength: choose Strong / Weak / Unverified" in section
-    assert "Strong evidence requires reproducible refs" in section
-    assert "Weak evidence includes worker self-claims, summary-only output" in section
-    assert "Unverified claims cannot support PASS" in section
-    assert "Dispatch Plan: none" in section
-    assert "program-owned scheduling" in section
+    assert "Do not maintain a fixed role roster" in section
+    assert "do not require default evidence formats, test suites, verdict labels, or adversarial review for routine work" in section
+    assert "A single sub-AI is fine when it is genuinely useful" in section
+    assert "Chair Activation Check" not in section
+    assert "Evidence Strength" not in section
+    assert "PASS" not in section
 
 
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
@@ -525,43 +507,18 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     assert "append=True" in template
 
 
-def test_system_prompt_template_contains_command_room_ai_first_exception():
-    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+def test_command_room_clarification_system_is_goal_first():
+    template = prompt_module.COMMAND_ROOM_CLARIFICATION_SYSTEM
 
-    assert "AI-FIRST EXCEPTION FOR THIS AGENT" in template
-    assert "AI-FIRST" in template
-    assert "Missing project location" in template
-    assert "Round is the basic unit of autonomous progress" in template
-    assert "user provides intent, pain, preferences, constraints" in template
-    assert "Command Room generates proposed direction" in template
-    assert "long-running AI-AI governance roles" in template
-    assert "do not let program logic manage AI flow or judge project quality" in template
-    assert "ordinary technical execution" in template
-    assert "Handle ordinary technical execution autonomously inside the round" in template
-    assert "redlines or boundary changes" in template
-    assert "If multiple concrete unknowns or work items are independent" in template
-    assert "dispatch them concurrently" in template
-    assert "in this same response/round up to the operational cap" in template
-    assert "Do not process independent items one by one merely from habit" in template
-    assert "Serialize only for true dependencies" in template
-    assert "parallel read-only discovery first and one synthesized landing action" in template
-    assert "If a concrete unknown blocks progress but can be investigated in the current round, dispatch sub-AIs now" in template
-    assert "overrides the generic clarification-first rule for discoverable facts" in template
-    assert "delegated AI discovery has failed" in template
-    assert "Use Next Round for concrete carryover" in template
-    assert '"if we continue", "I suggest digging into"' in template
-    assert "not a human software-team pipeline" in template
-    assert "fixed delegation counts" in template
-    assert "user-listed work items as goals and information sources" in template
-    assert "fixed report formats" in template
-    assert "visible status labels" in template
-    assert "Answer naturally and directly" in template
-    assert "Keep internal protocol, labels, and fixed forms out of user-facing replies" in template
-    assert 'Do not send a bare "review the given materials" task without the materials' in template
-    assert "explicit `Verdict: PASS|NEEDS_MORE|BLOCKED|STOP_CONFIRM` line" not in template
-    assert "Round Cards" not in template
-    assert "Evidence Signal forms" not in template
-    assert "literal `Verdict:`" not in template
+    assert "WORK FROM THE USER'S GOAL" in template
+    assert "Complete ordinary safe, reversible work directly" in template
+    assert "Make normal technical choices within the stated scope yourself" in template
+    assert "Match validation to the action and risk" in template
+    assert "Do not create a separate final verification, opposition, temporary-commit, or acceptance phase" in template
+    assert "MANDATORY Clarification Scenarios" not in template
+    assert "Clarification ALWAYS comes BEFORE action" not in template
+    assert "PASS" not in template
+    assert "NEEDS_MORE" not in template
 
 
 def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatch):
@@ -590,48 +547,17 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
     )
 
     assert "AI DISPATCH MODE" in prompt
-    assert "You may dispatch a single sub-AI" in prompt
-    assert "dispatch them in parallel in the same response/round" in prompt
-    assert "up to the operational cap" in prompt
-    assert "Do not serialize independent work out of habit" in prompt
-    assert "Serialize only for real dependencies" in prompt
-    assert "parallel read-only checks first and a single landing path" in prompt
-    assert "A Round is the command-room execution cadence" in prompt
-    assert "Before execution, make the round's acceptance/evidence standard concrete" in prompt
-    assert "After execution, compare results back to that standard" in prompt
-    assert "Round Model" in prompt
-    assert "Classify unknowns yourself" in prompt
-    assert "discoverable or executable now -> dispatch sub-AI" in prompt
-    assert "blocked by cap/context -> concrete Next Round" in prompt
-    assert "checked acceptance/evidence standard" in prompt
-    assert "user-only/redline/boundary-changing -> ask or stop" in prompt
-    assert "If progress needs facts or ordinary technical execution you can handle with tools or sub-AIs inside the current round, dispatch `task` in this same response" in prompt
-    assert "Command Room generates proposed direction, current-round boundaries" in prompt
-    assert "Governance roles are available, not mandatory standing lanes" in prompt
-    assert "ordinary low-risk local development" in prompt
-    assert "do not dispatch Planner, Boundary, Evidence, Opposition, or Recorder by default" in prompt
-    assert "Runtime-observed evidence returned by `task`" in prompt
-    assert "Later criticism does not erase earlier observed file changes or passing commands" in prompt
-    assert "Stop dispatching when the agreed acceptance evidence is met" in prompt
-    assert "Program logic records and routes facts, but must not manage AI flow or judge project quality" in prompt
-    assert "Do not stop for routine implementation choices" in prompt
-    assert "user-only/redline/boundary-changing -> ask or stop" in prompt
-    assert "Use Next Round only as a concrete continuation state" in prompt
-    assert "full subagent LLM" in prompt
-    assert "Direct inspection and execution belong in delegated sub-AIs" in prompt
-    assert "a single delegation is allowed" in prompt
+    assert "Start with the user's goal and complete safe, ordinary, reversible technical work directly" in prompt
+    assert "A single sub-AI is fine when it is genuinely useful" in prompt
+    assert "dispatch them in parallel" in prompt
+    assert "Make ordinary technical choices yourself within the user's stated scope" in prompt
     assert "maximum 2 `task` calls per response" in prompt
-    assert "Chair Code Reading Policy" in prompt
-    assert "sample decisive refs" in prompt
-    assert "delegate broad exploration" in prompt
-    assert "Visible Thinking Budget" in prompt
-    assert "Do not narrate long private deliberation" in prompt
-    assert "AI-FIRST CHECK" in prompt
-    assert "dispatch `task` first" in prompt
     assert "PRIORITY CHECK: If anything is unclear" not in prompt
-    assert "Do not require formal report formats" in prompt
+    assert "A Round is the command-room execution cadence" not in prompt
+    assert "Before execution, make the round's acceptance/evidence standard concrete" not in prompt
+    assert "Maintain long-running AI-AI governance roles across rounds" not in prompt
+    assert "Chair Code Reading Policy" not in prompt
     assert "required Evidence Signal fields" not in prompt
-    assert "default reviewers, gates, dashboards" in prompt
     assert "Single task = No value from subagents = Execute directly" not in prompt
     assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
 
@@ -675,6 +601,7 @@ def test_system_prompt_template_preserves_placeholders():
         "{soul}",
         "{self_update_section}",
         "{clarification_priority}",
+        "{clarification_system}",
         "{subagent_thinking}",
         "{skills_section}",
         "{deferred_tools_section}",

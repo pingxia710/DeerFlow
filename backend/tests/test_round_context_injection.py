@@ -1,57 +1,9 @@
 from deerflow.agents.middlewares.round_context_middleware import (
-    CommandRoomRoundContextMiddleware,
-    format_account_ledger_for_model,
-    format_capability_snapshot_for_model,
-    format_pending_handoffs_for_model,
-    format_quality_signals_for_model,
-    format_review_invocations_for_model,
-    format_role_states_for_model,
     format_round_context_for_model,
-    latest_account_ledger_for_thread,
-    latest_pending_handoffs_for_thread,
-    latest_quality_signals_for_thread,
-    latest_review_invocations_for_thread,
-    latest_role_states_for_thread,
     latest_round_context_for_thread,
 )
-from deerflow.command_room.account_ledger import (
-    build_account_decision,
-    build_account_update_proposal,
-    record_account_decision,
-    record_account_update_proposal,
-)
-from deerflow.command_room.handoff import HandoffEnvelope
-from deerflow.command_room.pending_handoff import build_pending_handoff, record_pending_handoff
-from deerflow.command_room.quality import build_quality_signal, record_quality_signal
-from deerflow.command_room.review import build_review_invocation, complete_review_invocation, record_review_invocation
-from deerflow.command_room.role_state import build_role_state, record_role_state
 from deerflow.command_room.round_record import record_command_room_round
 from deerflow.subagents.audit import record_subagent_handoff
-
-
-class _Runtime:
-    context = {
-        "thread_id": "thread-brief",
-        "round_context": {
-            "round_id": "round-brief",
-            "state": "closed",
-            "current_run_id": "run-brief",
-            "evidence_refs": ["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
-        },
-    }
-
-
-class _RuntimeNoData:
-    context = {
-        "thread_id": "thread-empty",
-        "round_context": {
-            "current_run_id": "run-empty",
-        },
-    }
-
-
-class _RuntimeNoThread:
-    context = {}
 
 
 def _record(agent_name="command-room", signals=True, required=True):
@@ -59,388 +11,69 @@ def _record(agent_name="command-room", signals=True, required=True):
         "agentName": agent_name,
         "roundRequired": required,
         "roundBrief": {
-            "summary": "Goal: continue safely | Evidence: 1 weak evidence signal(s); treat worker self-claims as untrusted | Next safe action: inspect backend tests",
+            "goal": "inspect backend tests",
+            "boundaries": ["read-only", "no credentials"],
+            "handoff_signals": ["inspect: command exited 0"],
+            "summary": "Evidence: 1 weak evidence signal; Next safe action: inspect backend tests",
             "evidence_status": "1 weak evidence signal(s); treat worker self-claims as untrusted",
             "next_safe_action": "inspect backend tests",
         },
         "roundContextSignals": {
             "action_count": 1,
             "risks": ["risk-a", "risk-b", "risk-c", "risk-d"],
-            "conflicts": [],
-            "open_questions": ["what next?"],
-            "unresolved": ["missing evidence"],
+            "conflicts": ["conflict-a"],
+            "open_questions": ["what remains?"],
+            "unresolved": ["missing output path"],
             "evidence_signals": {"evidence_state": "STALE"},
             "summary": "long worker output must not appear",
             "needs_user_confirmation": True,
             "requires_confirmation": True,
             "round_complete": False,
             "next_round_is_safe": False,
+            "quality_verdict": "PASS",
+            "auto_rework": True,
         },
     }
 
 
-def test_command_room_latest_round_signals_format_short_internal_context():
+def test_command_room_context_injects_only_objective_working_memory():
     text = format_round_context_for_model(_record())
 
     assert text is not None
     assert "Internal Command Room Round signals" in text
-    assert "not a verdict" in text
-    assert "brief: Goal: continue safely" in text
-    assert "next_safe_action: inspect backend tests" in text
-    assert "round_complete=False" in text
-    assert "next_round_is_safe=False" in text
-    assert "needs_user_confirmation=True" in text
-    assert "risks: risk-a; risk-b; risk-c" in text
+    assert "Current user goal: inspect backend tests" in text
+    assert "Boundary: read-only; no credentials" in text
+    assert "Action occurred: inspect: command exited 0" in text
+    assert "Risk: risk-a; risk-b; risk-c" in text
+    assert "Conflict: conflict-a" in text
+    assert "Unresolved question: what remains?" in text
+    assert "Unresolved: missing output path" in text
     assert "risk-d" not in text
-    assert "missing evidence" in text
-    assert "what next?" in text
+    lowered = text.lower()
+    for prohibited in (
+        "evidence_status",
+        "evidence=",
+        "round_complete",
+        "next_round_is_safe",
+        "quality_verdict",
+        "auto_rework",
+        "next_safe_action",
+        "next safe action",
+        "worker self-claims",
+        "pass",
+    ):
+        assert prohibited not in lowered
 
 
-def test_no_round_signals_or_not_required_does_not_inject():
+def test_round_context_without_actual_facts_does_not_inject_governance_shell():
+    record = {"roundRequired": True, "roundContextSignals": {"action_count": 0}}
+    assert format_round_context_for_model(record) is None
     assert format_round_context_for_model({"roundRequired": True}) is None
     assert format_round_context_for_model(_record(required=False)) is None
     assert format_round_context_for_model(None) is None
 
 
-def test_capability_snapshot_format_includes_tools_and_stop_before_risks():
-    text = format_capability_snapshot_for_model(
-        {
-            "tools": [{"name": "read_file"}, {"name": "bash"}],
-            "approval_policy": {"stop_before": ["credential disclosure", "production writes"]},
-            "sandbox": {
-                "use": "deerflow.sandbox.local:LocalSandboxProvider",
-                "host_bash_available": False,
-                "unrestricted_host_access": False,
-            },
-        }
-    )
-
-    assert text is not None
-    assert "Internal Capability Snapshot" in text
-    assert "enabled_tools: read_file, bash" in text
-    assert "stop_before: credential disclosure; production writes" in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-
-def test_quality_signals_format_short_internal_context(tmp_path, monkeypatch):
-    thread_id = "thread-quality"
-    user_id = "user-quality"
-    fake_thread_dir = tmp_path / "thread"
-
-    class Paths:
-        def thread_dir(self, thread_id, user_id=None):
-            return fake_thread_dir
-
-    monkeypatch.setattr("deerflow.command_room.quality.get_paths", lambda: Paths())
-
-    signal = build_quality_signal(
-        thread_id=thread_id,
-        run_id="run-1",
-        round_id="round-1",
-        task_id="task-1",
-        author_role="opposition",
-        recommendation="needs_revision",
-        rationale="Needs a narrower evidence check. " + ("x" * 400),
-        evidence_refs=["summary only"],
-    )
-    record_quality_signal(signal, user_id=user_id)
-
-    text = latest_quality_signals_for_thread(thread_id, user_id)
-    assert text is not None
-    assert "Internal AI Quality Signals" in text
-    assert "recommendation=needs_revision" in text
-    assert "target=Chair" in text
-    assert "task_id=task-1" in text
-    assert "EvidenceRefs: summary only" in text
-    assert "x" * 300 not in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-    formatted = format_quality_signals_for_model([signal.as_dict()])
-    assert formatted is not None
-    assert "Chair decides next steps" in formatted
-
-
-def test_review_invocations_format_short_internal_context(tmp_path, monkeypatch):
-    thread_id = "thread-review"
-    user_id = "user-review"
-    fake_thread_dir = tmp_path / "thread"
-
-    class Paths:
-        def thread_dir(self, thread_id, user_id=None):
-            return fake_thread_dir
-
-    monkeypatch.setattr("deerflow.command_room.review.get_paths", lambda: Paths())
-
-    invocation = build_review_invocation(
-        thread_id=thread_id,
-        run_id="run-1",
-        round_id="round-1",
-        task_id="task-1",
-        requested_by_role="lead",
-        reviewer_role="synthesis_checker",
-        reason="Need a compact synthesis review. " + ("r" * 400),
-        focus="Check whether the synthesis preserves evidence boundaries. " + ("f" * 400),
-    )
-    completed = complete_review_invocation(
-        invocation,
-        result_summary="The synthesis needs one more concrete ref. " + ("x" * 400),
-        result_evidence_refs=["findings.md"],
-    )
-    record_review_invocation(invocation, user_id=user_id)
-    record_review_invocation(completed, user_id=user_id)
-
-    text = latest_review_invocations_for_thread(thread_id, user_id)
-    assert text is not None
-    assert "Internal AI Review Invocations" in text
-    assert "reviewer=synthesis_checker" in text
-    assert "status=completed" in text
-    assert "target=Chair" in text
-    assert "task_id=task-1" in text
-    assert "focus: Check whether the synthesis preserves evidence boundaries." in text
-    assert "result_summary: The synthesis needs one more concrete ref." in text
-    assert "f" * 300 not in text
-    assert "r" * 300 not in text
-    assert "auto_rework" not in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-    formatted = format_review_invocations_for_model([completed.as_dict()])
-    assert formatted is not None
-    assert "Chair decides next steps" in formatted
-
-
-def test_account_ledger_format_short_internal_context(tmp_path, monkeypatch):
-    thread_id = "thread-account"
-    user_id = "user-account"
-    fake_thread_dir = tmp_path / "thread"
-
-    class Paths:
-        def thread_dir(self, thread_id, user_id=None):
-            return fake_thread_dir
-
-    monkeypatch.setattr("deerflow.command_room.account_ledger.get_paths", lambda: Paths())
-
-    proposal = build_account_update_proposal(
-        thread_id=thread_id,
-        run_id="run-1",
-        round_id="round-1",
-        task_id="task-1",
-        proposed_by_role="learning-curator",
-        account_type="learning",
-        proposed_change="Long raw proposed change should stay out of injected context. " + ("x" * 400),
-        rationale="Long raw rationale should stay out of injected context. " + ("r" * 400),
-    )
-    decision = build_account_decision(
-        proposal_id=proposal.proposal_id,
-        thread_id=thread_id,
-        run_id="run-1",
-        decision="defer",
-        rationale="Long raw decision rationale should stay out. " + ("d" * 400),
-        revised_change="Long raw revised change should stay out. " + ("z" * 400),
-    )
-    record_account_update_proposal(proposal, user_id=user_id)
-    record_account_decision(decision, user_id=user_id)
-
-    text = latest_account_ledger_for_thread(thread_id, user_id)
-    assert text is not None
-    assert "Internal AI Account Ledger" in text
-    assert "account_type=learning" in text
-    assert "proposed_by_role=learning-curator" in text
-    assert "decision=defer" in text
-    assert "target=Chair" in text
-    assert "raw proposed change" not in text
-    assert "raw rationale" not in text
-    assert "raw revised change" not in text
-    assert "auto_rework" not in text
-    assert "auto_apply" not in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-    formatted = format_account_ledger_for_model([proposal.as_dict()], [decision.as_dict()])
-    assert formatted is not None
-    assert "not automatically applied" in formatted
-
-
-def test_role_state_format_short_internal_context(tmp_path, monkeypatch):
-    thread_id = "thread-role-state"
-    user_id = "user-role-state"
-    fake_thread_dir = tmp_path / "thread"
-
-    class Paths:
-        def thread_dir(self, thread_id, user_id=None):
-            return fake_thread_dir
-
-    monkeypatch.setattr("deerflow.command_room.role_state.get_paths", lambda: Paths())
-
-    state = build_role_state(
-        thread_id=thread_id,
-        run_id="run-1",
-        round_id="round-1",
-        role_name="Evidence",
-        summary="Evidence role should keep refs compact. " + ("x" * 400),
-        current_focus="Check the run snapshot evidence.",
-        open_questions=["Which reload path still needs coverage?"],
-        accepted_signals=["Worker self-claims stay weak."],
-        evidence_refs=["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
-    )
-    record_role_state(state, user_id=user_id)
-
-    text = latest_role_states_for_thread(thread_id, user_id)
-    assert text is not None
-    assert "Internal AI Role State" in text
-    assert "role=evidence" in text
-    assert "summary: Evidence role should keep refs compact." in text
-    assert "current_focus: Check the run snapshot evidence." in text
-    assert "open_questions: Which reload path still needs coverage?" in text
-    assert "accepted_signals: Worker self-claims stay weak." in text
-    assert "x" * 300 not in text
-    assert "auto_dispatch" not in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-    formatted = format_role_states_for_model([state.as_dict()])
-    assert formatted is not None
-    assert "Chair-accepted AI role memory only" in formatted
-
-
-def test_pending_handoffs_format_short_internal_context(tmp_path, monkeypatch):
-    thread_id = "thread-pending-handoff"
-    user_id = "user-pending-handoff"
-    fake_thread_dir = tmp_path / "thread"
-
-    class Paths:
-        def thread_dir(self, thread_id, user_id=None):
-            return fake_thread_dir
-
-    monkeypatch.setattr("deerflow.command_room.pending_handoff.get_paths", lambda: Paths())
-
-    handoff = build_pending_handoff(
-        thread_id=thread_id,
-        run_id="run-1",
-        round_id="round-1",
-        task_id="task-1",
-        envelope=HandoffEnvelope(
-            source_role="planner",
-            target_role="Evidence",
-            task_or_question="Inspect concrete evidence refs.",
-            evidence_refs=["command: pytest tests/test_round_context_injection.py -q; exit code: 0"],
-            evidence_strength="Strong",
-            raw_input_sha256="abc123",
-        ),
-    )
-    record_pending_handoff(handoff, user_id=user_id)
-
-    text = latest_pending_handoffs_for_thread(thread_id, user_id, run_id="run-1")
-    assert text is not None
-    assert "Internal Pending AI Handoffs" in text
-    assert f"handoff_id={handoff.handoff_id}" in text
-    assert "source=planner" in text
-    assert "target=Evidence" in text
-    assert "status=pending" in text
-    assert "task_or_question: Inspect concrete evidence refs." in text
-    assert "EvidenceRefs: command: pytest tests/test_round_context_injection.py -q; exit code: 0" in text
-    lowered = text.lower()
-    assert "automatic dispatch" in lowered
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-
-    formatted = format_pending_handoffs_for_model([handoff.as_dict()])
-    assert formatted is not None
-    assert "Chair decides" in formatted
-
-
-def test_round_context_includes_compact_chair_brief(monkeypatch):
-    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
-    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: {"version": 1})
-    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
-
-    text = middleware._context_text(_Runtime())
-
-    assert text is not None
-    assert "Internal Chair Operating Brief" in text
-    assert "thread_id=thread-brief; run_id=run-brief; round_id=round-brief" in text
-    assert "capability_snapshot_version=1" in text
-    assert "evidence: total=1" in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-    assert "needs_rework" not in lowered
-
-
-def test_round_context_chair_brief_no_data_does_not_block(monkeypatch):
-    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
-    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
-    monkeypatch.setattr("deerflow.command_room.quality.list_quality_signals", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
-
-    text = middleware._context_text(_RuntimeNoData())
-
-    assert text is not None
-    assert "Internal Chair Operating Brief" in text
-    assert "run_id=run-empty" in text
-    assert "known_gaps: no_capability_snapshot; no_evidence_refs; no_quality_signals" in text
-    lowered = text.lower()
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-    assert "auto_rework" not in lowered
-    assert "auto_dispatch" not in lowered
-
-
-def test_native_round_context_precedes_legacy_round_record(monkeypatch):
-    class Runtime:
-        context = {
-            "thread_id": "thread-native-priority",
-            "round_context": {
-                "round_id": "round-native",
-                "state": "blocked",
-                "current_run_id": "run-native",
-            },
-        }
-
-    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
-    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
-    monkeypatch.setattr("deerflow.command_room.quality.list_quality_signals", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.review.list_review_invocations", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_proposals", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.account_ledger.list_account_decisions", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.role_state.list_role_states", lambda **kwargs: [])
-    monkeypatch.setattr("deerflow.command_room.pending_handoff.list_pending_handoffs", lambda **kwargs: [])
-    monkeypatch.setattr(
-        "deerflow.agents.middlewares.round_context_middleware.latest_round_context_for_thread",
-        lambda thread_id, user_id=None: "[Internal Command Room Round signals]\nstate: closed\nrun_id: run-legacy",
-    )
-
-    text = middleware._context_text(Runtime())
-
-    assert text is not None
-    native_index = text.index("[Internal Native Round State]")
-    legacy_index = text.index("[Internal Command Room Round signals]")
-    assert native_index < legacy_index
-    assert "state: blocked" in text[native_index:legacy_index]
-    assert "current_run_id: run-native" in text[native_index:legacy_index]
-    assert "run_id: run-legacy" in text[legacy_index:]
-
-
-def test_round_context_without_thread_id_skips_runtime_context(monkeypatch):
-    middleware = CommandRoomRoundContextMiddleware(agent_name="command-room")
-    monkeypatch.setattr(middleware, "_capability_snapshot", lambda thread_id, user_id: None)
-
-    assert middleware._context_text(_RuntimeNoThread()) is None
-
-
-def test_round_context_recovers_from_subagent_handoff_file(tmp_path, monkeypatch):
+def test_round_context_recovers_objective_facts_from_subagent_handoff_file(tmp_path, monkeypatch):
     thread_id = "thread-1"
     user_id = "user-1"
     run_id = "run-1"
@@ -508,13 +141,20 @@ Next: continue bounded review
     assert path == fake_thread_dir / "audit" / "command_room_rounds.jsonl"
     text = latest_round_context_for_thread(thread_id, user_id)
     assert text is not None
-    assert "brief: Goal: recover next round context" in text
-    assert "trusted observable evidence" in text
-    assert "动作“task-1”已完成" in text
-    assert "actions=1" in text
+    assert "Persisted user goal fact: text fingerprint recorded" in text
+    assert "Explicit boundary: read-only" in text
+    assert "Action occurred:" in text
+    assert "task task-1" in text
+    assert "status completed" in text
+    assert "description: inspect recovery path" in text
     lowered = text.lower()
-    assert "gate" not in lowered
-    assert "pass" not in lowered
-    assert "fail" not in lowered
-    assert "raw_prompt_secret" not in lowered
-    assert "raw_result_secret" not in lowered
+    for prohibited in (
+        "evidence_state",
+        "pass",
+        "round_complete",
+        "next_safe_action",
+        "accepted_next_action",
+        "raw_prompt_secret",
+        "raw_result_secret",
+    ):
+        assert prohibited not in lowered

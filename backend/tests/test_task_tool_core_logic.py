@@ -1,7 +1,6 @@
 """Core behavior tests for task tool orchestration."""
 
 import asyncio
-import hashlib
 import importlib
 from enum import Enum
 from types import SimpleNamespace
@@ -84,84 +83,6 @@ def _run_task_tool(**kwargs) -> str:
 
 async def _no_sleep(_: float) -> None:
     return None
-
-
-@pytest.fixture(autouse=True)
-def _no_pending_handoff_disk_writes(monkeypatch):
-    monkeypatch.setattr(task_tool_module, "record_pending_handoff", lambda *args, **kwargs: None)
-
-
-def test_with_ai_handoff_envelope_preserves_explicit_fields():
-    prompt = """Source Role: Planner
-Target Role: Boundary
-Task/Question: check bottom-boundary risk
-EvidenceRefs: docs/command-room/run-protocol.md:25
-EvidenceStrength: Strong
-OutputRefs: planner-output:round-1
-Handoff File: docs/command-room/spec.md
-ArtifactRefs: docs/command-room/spec.md; docs/command-room/findings.md
-Boundary Status: unclear
-Recommended Next Decision: NEEDS_MORE
-"""
-
-    handoff_prompt = task_tool_module._with_ai_handoff_envelope(
-        prompt,
-        description="boundary review",
-        subagent_type="boundary",
-    )
-    envelope = handoff_prompt.split("\n\nTask Prompt\n", 1)[0]
-
-    assert handoff_prompt.startswith("AI Handoff Envelope\n")
-    assert "Task Prompt\nSource Role: Planner" in handoff_prompt
-    assert "Source Role: Planner" in envelope
-    assert "Target Role: Boundary" in envelope
-    assert "Task/Question: check bottom-boundary risk" in envelope
-    assert "EvidenceRefs: docs/command-room/run-protocol.md:25" in envelope
-    assert "EvidenceStrength: Strong" in envelope
-    assert "OutputRefs: planner-output:round-1" in envelope
-    assert "Handoff File: docs/command-room/spec.md" in envelope
-    assert "ArtifactRefs: docs/command-room/spec.md; docs/command-room/findings.md" in envelope
-    assert "Boundary Status: unclear" in envelope
-    assert "Recommended Next Decision: NEEDS_MORE" in envelope
-    assert "Handoff Fidelity: Task Prompt below is the raw upstream AI output; envelope fields are index hints, not a replacement." in envelope
-    compact = task_tool_module._compact_handoff_envelope(
-        handoff_prompt,
-        raw_prompt=prompt,
-        description="boundary review",
-        subagent_type="boundary",
-    )
-    assert compact["sourceRole"] == "Planner"
-    assert compact["targetRole"] == "Boundary"
-    assert compact["taskOrQuestion"] == "check bottom-boundary risk"
-    assert compact["evidenceRefs"] == ["docs/command-room/run-protocol.md:25"]
-    assert compact["evidenceStrength"] == "Strong"
-    assert compact["artifactRefs"] == ["docs/command-room/spec.md", "docs/command-room/findings.md"]
-    assert compact["rawInputSha256"] == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    assert prompt not in str(compact)
-
-
-def test_handoff_envelope_marks_refs_as_unverified_index_hints():
-    prompt = """Source Role: Planner
-Target Role: Evidence
-Task/Question: inspect referenced artifacts
-EvidenceRefs: command: pytest tests/test_native_round_state.py -q; exit code: 0
-ArtifactRefs: outputs/findings.md
-
-Raw upstream notes must remain available.
-"""
-
-    handoff_prompt = task_tool_module._with_ai_handoff_envelope(
-        prompt,
-        description="inspect referenced artifacts",
-        subagent_type="evidence",
-    )
-    envelope, raw_prompt = handoff_prompt.split("\n\nTask Prompt\n", 1)
-
-    assert "EvidenceRefs: command: pytest tests/test_native_round_state.py -q; exit code: 0" in envelope
-    assert "ArtifactRefs: outputs/findings.md" in envelope
-    assert "EvidenceStrength: Unverified" in envelope
-    assert "index hints, not a replacement" in envelope
-    assert raw_prompt == prompt
 
 
 class _DummyScheduledTask:
@@ -312,10 +233,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     )
 
     assert output == ("Task Succeeded. Runtime-observed evidence:\n- command: pytest backend/tests/test_example.py -q; exit code: 0\nResult: all done")
-    assert captured["prompt"].startswith("AI Handoff Envelope\n")
-    assert "Target Role: general-purpose" in captured["prompt"]
-    assert "Task/Question: 运行子任务" in captured["prompt"]
-    assert "Task Prompt\ncollect diagnostics" in captured["prompt"]
+    assert captured["prompt"] == "collect diagnostics"
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
@@ -344,12 +262,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert events[-1]["redacted"] is True
     assert "result" not in events[-1]
     assert events[0]["action_result"] is None
-    assert events[0]["handoff_envelope"]["targetRole"] == "general-purpose"
-    assert events[0]["handoff_envelope"]["taskOrQuestion"] == "运行子任务"
-    assert events[0]["handoff_envelope"]["evidenceStrength"] == "Unverified"
-    assert events[0]["handoff_envelope"]["rawInputSha256"] == task_tool_module._sha256_text("collect diagnostics")
-    assert "collect diagnostics" not in str(events[0]["handoff_envelope"])
-    assert events[-1]["handoff_envelope"] == events[0]["handoff_envelope"]
+    assert all("handoff_envelope" not in event for event in events)
     assert events[-1]["action_result"] == {
         "action_id": "tc-123",
         "description": "运行子任务",
@@ -367,7 +280,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert [record["status"] for record in handoff_records] == ["started", "completed"]
     assert all(record["prompt"] == captured["prompt"] for record in handoff_records)
     assert handoff_records[-1]["action_result"]["evidence_refs"] == ["command: pytest backend/tests/test_example.py -q; exit code: 0"]
-    packet = task_tool_module.extract_handoff_packet(
+    from deerflow.subagents.audit import extract_handoff_packet
+
+    packet = extract_handoff_packet(
         handoff_records[0]["prompt"],
         description="运行子任务",
         subagent_type="general-purpose",
@@ -440,12 +355,11 @@ def test_task_event_writer_recursively_sanitizes_event_payload():
     assert "[redacted]" in rendered
 
 
-def test_task_tool_returns_explicit_ai_handoff_to_chair_without_auto_running_next_subagent(monkeypatch):
+def test_task_tool_returns_structured_worker_text_without_interpreting_next_receiver(monkeypatch):
     runtime = _make_runtime()
     events = []
     captured_prompts = []
     handoff_records = []
-    pending_handoffs = []
     get_available_tools = MagicMock(return_value=["tool-a"])
 
     class DummyExecutor:
@@ -479,7 +393,6 @@ Planner Raw Judgment:
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **kwargs: handoff_records.append(kwargs))
-    monkeypatch.setattr(task_tool_module, "record_pending_handoff", lambda handoff, **kwargs: pending_handoffs.append((handoff, kwargs)))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
@@ -492,23 +405,17 @@ Planner Raw Judgment:
         tool_call_id="tc-chain",
     )
 
-    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): opposition. Chair/main AI decides.")
+    assert output.startswith("Task Succeeded. Result: AI Handoff Envelope")
+    assert "Suggested next receiver" not in output
+    assert "Chair/main AI decides" not in output
     assert "routed" not in output.lower()
     assert "dispatched" not in output.lower()
     assert [item[0] for item in captured_prompts] == ["general-purpose"]
     assert captured_prompts[0][2] == "tc-chain"
-    assert "Task Prompt\ndraft plan" in captured_prompts[0][1]
+    assert captured_prompts[0][1] == "draft plan"
     assert [event["type"] for event in events] == ["task_started", "task_completed"]
     assert [record["status"] for record in handoff_records] == ["started", "completed"]
     assert len(handoff_records) == 2
-    assert len(pending_handoffs) == 1
-    pending, kwargs = pending_handoffs[0]
-    assert pending.target_role == "opposition"
-    assert pending.task_or_question == "attack the plan before Chair decides"
-    assert pending.status == "pending"
-    assert pending.programmatic_dispatch is False
-    assert pending.auto_dispatch is False
-    assert kwargs == {"user_id": "test-user-autouse"}
 
 
 @pytest.mark.parametrize("target_role", ["planner", "boundary", "evidence", "fact-finder", "opposition", "chair"])
@@ -550,7 +457,8 @@ def test_task_tool_treats_command_room_target_role_as_advisory_signal_without_re
         tool_call_id="tc-roles",
     )
 
-    assert output.startswith(f"Task Succeeded. Suggested next receiver (advisory only): {target_role}. Chair/main AI decides.")
+    assert output.startswith(f"Task Succeeded. Result: AI Handoff Envelope\nTarget Role: {target_role}")
+    assert "Suggested next receiver" not in output
     assert "routed" not in output.lower()
     assert "dispatched" not in output.lower()
     assert [item[0] for item in captured_prompts] == ["planner"]
@@ -597,7 +505,7 @@ def test_task_tool_smoke_uses_real_command_room_role_registry(monkeypatch):
     finally:
         load_subagents_config_from_dict({})
 
-    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): boundary. Chair/main AI decides.")
+    assert output.startswith("Task Succeeded. Result: AI Handoff Envelope\nTarget Role: boundary")
     assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
         ("planner", ["command-room-planner"]),
     ]
@@ -692,7 +600,7 @@ def test_task_tool_smoke_uses_real_command_room_angle_role_registry(monkeypatch)
     finally:
         load_subagents_config_from_dict({})
 
-    assert output.startswith("Task Succeeded. Suggested next receiver (advisory only): capability-governor. Chair/main AI decides.")
+    assert output.startswith("Task Succeeded. Result: AI Handoff Envelope\nTarget Role: capability-governor")
     assert [(name, skills) for name, skills, _, _ in captured_prompts] == [
         ("planner", ["command-room-planner"]),
     ]
@@ -742,7 +650,8 @@ Recommended Next Decision: NEEDS_MORE
         tool_call_id="tc-chain",
     )
 
-    assert "Suggested next receiver (advisory only): boundary" in output
+    assert output.startswith("Task Succeeded. Result: AI Handoff Envelope\nTarget Role: boundary")
+    assert "Suggested next receiver" not in output
     assert "not available" not in output
     assert [event["type"] for event in events] == ["task_started", "task_completed"]
 

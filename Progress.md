@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-07-12 — Single-node reliability closure
+
+- Closed the one-Gateway/one-node reliability pass: terminal task state is stamped at its source, runtime snapshots are read-only and bounded, and frontend task-card/model-selection regressions are covered.
+- Added a deterministic local AI-to-AI path that exercises lead delegation, subagent evidence writing, task-lane persistence, A → B → A conversation isolation, and reload recovery through the real Gateway and browser.
+- Added `backend/scripts/runtime_value_report.py` for read-only, aggregate-only SQLite evidence covering outcomes, task duration, token distribution, and artifact coverage; its output omits prompts, responses, IDs, and artifact paths.
+- Validation: backend lint/format plus 173 focused tests; frontend check/format plus 748 unit tests, 83 mock-browser tests, and 8 real-Gateway browser tests all passed.
+- Deliberately kept the deployment boundary: one Gateway and one node; no Redis, multi-worker runtime, migration, external dependency, production mutation, or automatic multi-hop routing.
+
 ## 2026-07-07 — Command Room confirmed-plan local execution rule
 
 - Clarified that after the user confirms a plan and boundary, Command Room should autonomously continue local low-risk code, tests, docs, reversible validation, and evidence gathering instead of repeatedly asking about ordinary technical details.

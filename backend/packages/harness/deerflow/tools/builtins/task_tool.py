@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
+from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
@@ -28,6 +29,7 @@ from deerflow.subagents.executor import (
     get_background_task_result,
     request_cancel_background_task,
 )
+from deerflow.subagents.status_contract import SubagentStatusValue, make_subagent_additional_kwargs
 from deerflow.tools.types import Runtime
 
 if TYPE_CHECKING:
@@ -269,6 +271,20 @@ def _format_task_success(result_text: str, *, observed_evidence_refs: list[str])
     return f"{prefix} Runtime-observed evidence:\n{evidence}\nResult: {result_text}"
 
 
+def _terminal_task_message(
+    content: str,
+    *,
+    tool_call_id: str,
+    status: SubagentStatusValue,
+) -> ToolMessage:
+    return ToolMessage(
+        content=content,
+        name="task",
+        tool_call_id=tool_call_id,
+        additional_kwargs=make_subagent_additional_kwargs(status),
+    )
+
+
 def pop_cached_subagent_usage(tool_call_id: str, *, run_id: str | None = None) -> dict | None:
     return _subagent_usage_cache.pop(_subagent_usage_cache_key(tool_call_id, run_id), None)
 
@@ -445,7 +461,7 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
-) -> str:
+) -> ToolMessage:
     """Delegate a task to a specialized subagent that runs in its own context.
 
     Subagents help you:
@@ -489,11 +505,19 @@ async def task_tool(
     config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None:
         available = ", ".join(available_subagent_names)
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: {available}"
+        return _terminal_task_message(
+            f"Error: Unknown subagent type '{subagent_type}'. Available: {available}",
+            tool_call_id=tool_call_id,
+            status="failed",
+        )
     if subagent_type == "bash":
         host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
         if not host_bash_allowed:
-            return f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}"
+            return _terminal_task_message(
+                f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}",
+                tool_call_id=tool_call_id,
+                status="failed",
+            )
 
     # Build config overrides
     overrides: dict = {}
@@ -671,7 +695,11 @@ async def task_tool(
                     },
                 )
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
-                return f"Error: Task {task_id} disappeared from background tasks"
+                return _terminal_task_message(
+                    f"Error: Task {task_id} disappeared from background tasks",
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                )
 
             # Log status changes for debugging
             if result.status != last_status:
@@ -748,7 +776,11 @@ async def task_tool(
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
                 result_text = _redacted_tool_text(result.result)
-                return _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs)
+                return _terminal_task_message(
+                    _format_task_success(result_text, observed_evidence_refs=observed_evidence_refs),
+                    tool_call_id=tool_call_id,
+                    status="completed",
+                )
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
@@ -790,7 +822,11 @@ async def task_tool(
                 error_text = _redacted_tool_text(result.error)
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {error_text}")
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
-                return f"Task failed. Error: {error_text}"
+                return _terminal_task_message(
+                    f"Task failed. Error: {error_text}",
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                )
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
@@ -837,7 +873,11 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {_redacted_tool_text(result.error)}")
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
-                return "Task cancelled by user."
+                return _terminal_task_message(
+                    "Task cancelled by user.",
+                    tool_call_id=tool_call_id,
+                    status="cancelled",
+                )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, run_id=run_id, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
@@ -885,7 +925,11 @@ async def task_tool(
                 error_text = _redacted_tool_text(result.error)
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {error_text}")
                 _scoped_cleanup_background_task(task_id, run_id=run_id)
-                return f"Task timed out. Error: {error_text}"
+                return _terminal_task_message(
+                    f"Task timed out. Error: {error_text}",
+                    tool_call_id=tool_call_id,
+                    status="timed_out",
+                )
 
             # Still running, wait before next poll
             await asyncio.sleep(5)
@@ -947,7 +991,11 @@ async def task_tool(
                 # _background_tasks once the background thread reaches a terminal state.
                 _scoped_request_cancel_background_task(task_id, run_id=run_id)
                 _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count, run_id=run_id)
-                return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                return _terminal_task_message(
+                    f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}",
+                    tool_call_id=tool_call_id,
+                    status="polling_timed_out",
+                )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.
         _scoped_request_cancel_background_task(task_id, run_id=run_id)

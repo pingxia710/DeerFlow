@@ -29,13 +29,9 @@ _TASK_TOOL_NAME = "task"
 def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: str | None = None) -> ToolMessage:
     """Centralised stamping of ``additional_kwargs.subagent_status``.
 
-    Bytedance/deer-flow issue #3146: the frontend now reads the subagent
-    status from a structured field instead of parsing the leading text of
-    the task tool's return string. That contract is enforced here, in the
-    one place every task tool result flows through, rather than at the 5
-    normal-return + 3 ``Error:`` pre-execution branches inside
-    ``task_tool.py``. Centralisation prevents the "added a new return
-    path, forgot the stamp" drift mode.
+    ``task_tool`` stamps normal terminal results at its producer boundary.
+    This middleware preserves the contract for legacy plain-text tool results
+    and for exceptions converted into a new ``ToolMessage`` here.
 
     For non-``task`` tools this is a no-op so other tools' additional_kwargs
     conventions are untouched.

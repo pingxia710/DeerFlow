@@ -59,6 +59,8 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
  */
 export const SUCCESS_WITH_SUGGESTED_RECEIVER_PREFIX =
   "Task Succeeded. Suggested next receiver";
+export const SUCCESS_WITH_RUNTIME_OBSERVED_EVIDENCE_PREFIX =
+  "Task Succeeded. Runtime-observed evidence:";
 export const SUCCESS_PREFIX = "Task Succeeded. Result:";
 export const FAILURE_PREFIX = "Task failed.";
 export const TIMEOUT_PREFIX = "Task timed out";
@@ -70,8 +72,8 @@ export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
  * Map a `task` tool result to a {@link SubtaskStatus}.
  *
  * Bytedance/deer-flow issue #3146: prefers the structured
- * ``additional_kwargs.subagent_status`` field the backend now stamps via
- * ``ToolErrorHandlingMiddleware``. Falls back to the legacy prefix
+ * ``additional_kwargs.subagent_status`` field the backend task tool now
+ * stamps at its producer boundary. Falls back to the legacy prefix
  * matching for messages that pre-date the stamping commit (historical
  * threads, third-party clients, or any tool path that bypasses the
  * middleware). Both shapes converge on the same {@link SubtaskStatus}
@@ -154,6 +156,18 @@ export function derivePendingSubtaskStatus(
 
 function parseFromText(trimmed: string): SubtaskResultUpdate {
   if (trimmed.startsWith(SUCCESS_WITH_SUGGESTED_RECEIVER_PREFIX)) {
+    const resultMarker = "Result:";
+    const resultIndex = trimmed.indexOf(resultMarker);
+    return {
+      status: "completed",
+      result:
+        resultIndex >= 0
+          ? trimmed.slice(resultIndex + resultMarker.length).trim()
+          : "",
+    };
+  }
+
+  if (trimmed.startsWith(SUCCESS_WITH_RUNTIME_OBSERVED_EVIDENCE_PREFIX)) {
     const resultMarker = "Result:";
     const resultIndex = trimmed.indexOf(resultMarker);
     return {

@@ -11,6 +11,13 @@
       "expected_error_contains": null
     },
     {
+      "name": "succeeded_with_runtime_observed_evidence",
+      "origin": "task_tool.py succeeded path with runtime-observed tool evidence",
+      "content": "Task Succeeded. Runtime-observed evidence:\n- tool: write_file; path: /mnt/user-data/outputs/evidence.txt; status: success; output_sha256: abc\nResult: wrote evidence",
+      "expected_status": "completed",
+      "expected_error_contains": "wrote evidence"
+    },
+    {
       "name": "succeeded_with_suggested_receiver",
       "origin": "task_tool.py succeeded path with advisory next receiver",
       "content": "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",

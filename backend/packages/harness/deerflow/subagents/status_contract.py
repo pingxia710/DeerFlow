@@ -6,16 +6,16 @@ subtask card state by string-matching the leading text of the
 the backend silently broke the card lifecycle, and the issue history
 of #3107 BUG-007 / #3131 review showed it repeatedly.
 
-This module replaces the text-shaped contract with a small structured
-one carried inside ``ToolMessage.additional_kwargs``:
+This module defines a small structured contract carried inside
+``ToolMessage.additional_kwargs``:
 
 - ``subagent_status``: one of ``SUBAGENT_STATUS_VALUES``.
 - ``subagent_error`` (optional): the human-readable error blob the
   backend recorded.
 
-The mapping from "task tool result text" to status is the one piece
-the backend stamper (``ToolErrorHandlingMiddleware``) and the
-frontend fallback parser must agree on. The shared fixture at
+``task_tool`` writes normal terminal statuses directly. The mapping from
+historical task-result text to status remains the one piece the middleware
+exception fallback and frontend parser must agree on. The shared fixture at
 ``contracts/subagent_status_contract.json`` is the single source of
 truth — both sides' tests load it and assert behaviour.
 """
@@ -49,12 +49,13 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 # Prefix table — ordered most-specific-first because some prefixes are
 # substrings of others ("Task timed out" vs "Task polling timed out", "Task
 # failed" vs "Task failed. Error: ..."). The "Task " prefixes come from
-# ``task_tool.py``'s 5 normal-return strings; the bare ``Error:`` prefix
-# catches both the 3 ``Error:`` pre-execution returns and the wrapper
-# produced by ``ToolErrorHandlingMiddleware`` for any task tool exception.
+# ``task_tool.py``'s normal-return strings; the bare ``Error:`` prefix catches
+# both its pre-execution returns and the wrapper produced by
+# ``ToolErrorHandlingMiddleware`` for a task tool exception.
 _PREFIX_TO_STATUS: tuple[tuple[str, SubagentStatusValue], ...] = (
     ("Task Succeeded. Suggested next receiver", "completed"),
     ("Task Succeeded. Result:", "completed"),
+    ("Task Succeeded. Runtime-observed evidence:", "completed"),
     ("Task polling timed out", "polling_timed_out"),
     ("Task timed out", "timed_out"),
     ("Task cancelled by user", "cancelled"),

@@ -49,6 +49,13 @@ describe("parseSubtaskResult", () => {
     expect(parsed.result).toBe("reviewed files");
   });
 
+  it("recognises runtime-observed-evidence success and extracts its result", () => {
+    const parsed = parseSubtaskResult(
+      "Task Succeeded. Runtime-observed evidence:\n- tool: write_file; status: success\nResult: wrote evidence",
+    );
+    expect(parsed).toEqual({ status: "completed", result: "wrote evidence" });
+  });
+
   it("recognises the standard failure prefix", () => {
     const parsed = parseSubtaskResult(
       "Task failed. underlying tool raised RuntimeError",

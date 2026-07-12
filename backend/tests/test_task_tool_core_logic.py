@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_KEY
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
@@ -73,12 +75,17 @@ def _make_result(
     )
 
 
-def _run_task_tool(**kwargs) -> str:
+def _invoke_task_tool(**kwargs) -> object:
     """Execute the task tool across LangChain sync/async wrapper variants."""
     coroutine = getattr(task_tool_module.task_tool, "coroutine", None)
     if coroutine is not None:
         return asyncio.run(coroutine(**kwargs))
     return task_tool_module.task_tool.func(**kwargs)
+
+
+def _run_task_tool(**kwargs) -> str:
+    result = _invoke_task_tool(**kwargs)
+    return result.content if isinstance(result, ToolMessage) else result
 
 
 async def _no_sleep(_: float) -> None:
@@ -224,7 +231,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
 
-    output = _run_task_tool(
+    output = _invoke_task_tool(
         runtime=runtime,
         description="运行子任务",
         prompt="collect diagnostics",
@@ -232,7 +239,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         tool_call_id="tc-123",
     )
 
-    assert output == ("Task Succeeded. Runtime-observed evidence:\n- command: pytest backend/tests/test_example.py -q; exit code: 0\nResult: all done")
+    assert isinstance(output, ToolMessage)
+    assert output.content == ("Task Succeeded. Runtime-observed evidence:\n- command: pytest backend/tests/test_example.py -q; exit code: 0\nResult: all done")
+    assert output.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
     assert captured["prompt"] == "collect diagnostics"
     assert captured["task_id"] == "tc-123"
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"

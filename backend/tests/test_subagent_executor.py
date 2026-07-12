@@ -1920,6 +1920,58 @@ class TestCooperativeCancellation:
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
 
+    @pytest.mark.anyio
+    async def test_aexecute_cancelled_mid_stream_closes_stream_and_releases_lease(
+        self,
+        classes,
+        base_config,
+        msg,
+    ):
+        """Early return must close astream and release the invocation-owned lease."""
+        from deerflow.sandbox.sandbox_provider import (
+            mark_runtime_sandbox_lease,
+            reset_sandbox_provider,
+            set_sandbox_provider,
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+        stream_closed = asyncio.Event()
+        provider = MagicMock()
+
+        async def mock_astream(*_args, context, **_kwargs):
+            mark_runtime_sandbox_lease(context, "sandbox-subagent")
+            try:
+                yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+                cancel_event.set()
+                yield {"messages": [msg.human("Task"), msg.ai("Ignored", "msg-2")]}
+            finally:
+                stream_closed.set()
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mock_astream
+        result_holder = SubagentResult(
+            task_id="cancel-lease",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        set_sandbox_provider(provider)
+        try:
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                result = await executor._aexecute("Task", result_holder=result_holder)
+        finally:
+            reset_sandbox_provider()
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert stream_closed.is_set()
+        provider.release.assert_called_once_with("sandbox-subagent")
+
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
         SubagentResult = classes["SubagentResult"]

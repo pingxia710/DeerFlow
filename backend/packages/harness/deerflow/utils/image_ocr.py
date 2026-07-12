@@ -46,7 +46,7 @@ def ocr_sidecar_path(path: Path) -> Path:
 
 
 def is_ocr_sidecar(path: Path) -> bool:
-    return path.name.endswith(OCR_SIDECAR_SUFFIX)
+    return path.name.lower().endswith(OCR_SIDECAR_SUFFIX)
 
 
 def _clean_text(text: str) -> str:

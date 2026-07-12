@@ -20,7 +20,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider, mark_runtime_sandbox_lease
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed, is_unrestricted_host_access_allowed
 from deerflow.tools.types import Runtime
@@ -1253,6 +1253,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
 
     provider = get_sandbox_provider()
     sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    mark_runtime_sandbox_lease(runtime.context, sandbox_id)
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1298,6 +1299,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     provider = get_sandbox_provider()
     sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    mark_runtime_sandbox_lease(runtime.context, sandbox_id)
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 

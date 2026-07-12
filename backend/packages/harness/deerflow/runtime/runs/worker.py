@@ -33,6 +33,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.sandbox_provider import release_runtime_sandbox_lease_async
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
@@ -235,6 +236,7 @@ async def run_agent(
     terminal_committed = False
 
     journal = None
+    runtime_ctx: dict[str, Any] | None = None
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -540,6 +542,16 @@ async def run_agent(
         )
         if callable(clear_subagent_usage):
             clear_subagent_usage(run_id)
+
+        if runtime_ctx is not None:
+            try:
+                await release_runtime_sandbox_lease_async(runtime_ctx)
+            except Exception:
+                logger.warning(
+                    "Failed to release sandbox lease for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
         if lease_control_task is not None:
             lease_control_task.cancel()

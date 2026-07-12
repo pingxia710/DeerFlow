@@ -14,6 +14,11 @@ from langgraph.types import Command
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    mark_runtime_sandbox_lease,
+    release_runtime_sandbox_lease,
+    release_runtime_sandbox_lease_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +69,23 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     async def _release_sandbox_async(self, sandbox_id: str) -> None:
         await asyncio.to_thread(get_sandbox_provider().release, sandbox_id)
 
+    @staticmethod
+    def _retain_existing_sandbox(state: SandboxMiddlewareState, runtime: Runtime) -> bool:
+        sandbox = state.get("sandbox")
+        sandbox_id = sandbox.get("sandbox_id") if sandbox is not None else None
+        if sandbox_id is None:
+            sandbox_id = (runtime.context or {}).get("sandbox_id")
+        if not isinstance(sandbox_id, str):
+            return False
+        retain = getattr(get_sandbox_provider(), "retain", None)
+        if not callable(retain) or not retain(sandbox_id):
+            return False
+        mark_runtime_sandbox_lease(runtime.context, sandbox_id)
+        return True
+
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        self._retain_existing_sandbox(state, runtime)
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return super().before_agent(state, runtime)
@@ -76,12 +96,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             if thread_id is None:
                 return super().before_agent(state, runtime)
             sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
+            mark_runtime_sandbox_lease(runtime.context, sandbox_id)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        self._retain_existing_sandbox(state, runtime)
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return await super().abefore_agent(state, runtime)
@@ -93,23 +115,32 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
             sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+            mark_runtime_sandbox_lease(runtime.context, sandbox_id)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        provider = get_sandbox_provider()
+        if release_runtime_sandbox_lease(runtime.context, provider=provider):
+            return None
+
+        if callable(getattr(provider, "retain", None)):
+            return super().after_agent(state, runtime)
+
+        # Providers without retain/release counting keep their legacy lifecycle.
         sandbox = state.get("sandbox")
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
             logger.info(f"Releasing sandbox {sandbox_id}")
-            get_sandbox_provider().release(sandbox_id)
+            provider.release(sandbox_id)
             return None
 
         if (runtime.context or {}).get("sandbox_id") is not None:
             sandbox_id = runtime.context.get("sandbox_id")
             logger.info(f"Releasing sandbox {sandbox_id} from context")
-            get_sandbox_provider().release(sandbox_id)
+            provider.release(sandbox_id)
             return None
 
         # No sandbox to release
@@ -117,6 +148,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        provider = get_sandbox_provider()
+        if await release_runtime_sandbox_lease_async(runtime.context, provider=provider):
+            return None
+
+        if callable(getattr(provider, "retain", None)):
+            return await super().aafter_agent(state, runtime)
+
+        # Providers without retain/release counting keep their legacy lifecycle.
         sandbox = state.get("sandbox")
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

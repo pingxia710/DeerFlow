@@ -705,20 +705,19 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
 
     from deerflow.uploads.manager import (
         UnsafeUploadPathError,
+        acquire_upload_transaction_lock,
         claim_unique_filename,
         ensure_uploads_dir,
         normalize_filename,
+        release_upload_transaction_lock,
         write_upload_file_no_symlink,
     )
 
-    def _prepare_uploads_dir() -> tuple[Path, set[str]]:
-        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
-        # blocking filesystem IO that must stay off the event loop.
-        target = ensure_uploads_dir(thread_id, user_id=user_id)
-        existing = {entry.name for entry in target.iterdir() if entry.is_file()}
-        return target, existing
-
-    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
+    uploads_dir = await asyncio.to_thread(
+        ensure_uploads_dir,
+        thread_id,
+        user_id=user_id,
+    )
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -754,24 +753,33 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                     ext = ".png"
                 filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
 
+            def persist_file() -> tuple[str, Path]:
+                lock_handle = acquire_upload_transaction_lock(uploads_dir)
+                try:
+                    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                    safe_name = claim_unique_filename(
+                        normalize_filename(filename),
+                        seen_names,
+                    )
+                    dest = write_upload_file_no_symlink(
+                        uploads_dir,
+                        safe_name,
+                        data,
+                    )
+                    return safe_name, dest
+                finally:
+                    release_upload_transaction_lock(lock_handle)
+
             try:
-                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
-            except ValueError:
+                safe_name, dest = await asyncio.to_thread(persist_file)
+            except (UnsafeUploadPathError, ValueError):
                 logger.warning(
-                    "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
-                    msg.channel_name,
+                    "[Manager] skipping inbound file with unsafe destination: %r",
                     filename,
                 )
                 continue
-
-            dest = uploads_dir / safe_name
-            try:
-                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
-            except UnsafeUploadPathError:
-                logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
-                continue
             except Exception:
-                logger.exception("[Manager] failed to write inbound file: %s", dest)
+                logger.exception("[Manager] failed to write inbound file: %r", filename)
                 continue
 
             created.append(

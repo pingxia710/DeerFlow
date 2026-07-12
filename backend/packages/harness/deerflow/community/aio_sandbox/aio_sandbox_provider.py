@@ -148,6 +148,7 @@ class AioSandboxProvider(SandboxProvider):
         self._thread_locks: WeakValueDictionary[tuple[str, str], threading.Lock] = WeakValueDictionary()
         self._sandbox_locks: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
+        self._lease_counts: dict[str, int] = {}  # sandbox_id -> concurrent holders
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -414,6 +415,9 @@ class AioSandboxProvider(SandboxProvider):
         with self._lock:
             # Active sandboxes: tracked via _last_activity
             for sandbox_id, last_activity in self._last_activity.items():
+                lease_counts = getattr(self, "_lease_counts", None)
+                if lease_counts is not None and lease_counts.get(sandbox_id, 0) > 0:
+                    continue
                 idle_duration = current_time - last_activity
                 if idle_duration > idle_timeout:
                     active_to_destroy.append(sandbox_id)
@@ -436,11 +440,14 @@ class AioSandboxProvider(SandboxProvider):
                         if last_activity is None:
                             logger.info(f"Sandbox {sandbox_id} already gone before idle destroy, skipping")
                             continue
+                        if self._lease_counts.get(sandbox_id, 0) > 0:
+                            logger.info(f"Sandbox {sandbox_id} has an active lease before idle destroy, skipping")
+                            continue
                         if (time.time() - last_activity) < idle_timeout:
                             logger.info(f"Sandbox {sandbox_id} was re-acquired before idle destroy, skipping")
                             continue
                     logger.info(f"Destroying idle sandbox {sandbox_id}")
-                    self._destroy_sandbox_locked(sandbox_id)
+                    self._destroy_sandbox_locked(sandbox_id, only_if_unleased=True)
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
@@ -524,6 +531,23 @@ class AioSandboxProvider(SandboxProvider):
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
         return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else uuid.uuid4().hex
 
+    def _increment_lease_unlocked(self, sandbox_id: str) -> None:
+        """Increment a sandbox lease while ``self._lock`` is held."""
+        lease_counts = getattr(self, "_lease_counts", None)
+        if lease_counts is None:
+            lease_counts = {}
+            self._lease_counts = lease_counts
+        lease_counts[sandbox_id] = lease_counts.get(sandbox_id, 0) + 1
+
+    def retain(self, sandbox_id: str) -> bool:
+        """Retain an already-active sandbox by ID for another concurrent holder."""
+        with self._lock:
+            if sandbox_id not in self._sandboxes:
+                return False
+            self._increment_lease_unlocked(sandbox_id)
+            self._last_activity[sandbox_id] = time.time()
+            return True
+
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
@@ -568,6 +592,7 @@ class AioSandboxProvider(SandboxProvider):
             suffix = " (post-lock check)" if post_lock else ""
             logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
             self._last_activity[existing_id] = time.time()
+            self._increment_lease_unlocked(existing_id)
             return existing_id
 
     def _reclaim_warm_pool_sandbox(
@@ -627,6 +652,7 @@ class AioSandboxProvider(SandboxProvider):
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[key] = sandbox_id
+            self._increment_lease_unlocked(sandbox_id)
 
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
@@ -656,6 +682,7 @@ class AioSandboxProvider(SandboxProvider):
             self._sandbox_infos[info.sandbox_id] = info
             self._last_activity[info.sandbox_id] = time.time()
             self._thread_sandboxes[key] = info.sandbox_id
+            self._increment_lease_unlocked(info.sandbox_id)
 
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for user/thread {user_id}/{thread_id} at {info.sandbox_url}")
         return info.sandbox_id
@@ -675,6 +702,7 @@ class AioSandboxProvider(SandboxProvider):
             self._last_activity[sandbox_id] = time.time()
             if thread_id:
                 self._thread_sandboxes[self._thread_key(thread_id, self._effective_acquire_user_id(user_id))] = sandbox_id
+            self._increment_lease_unlocked(sandbox_id)
 
         logger.info(f"Created sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
         return sandbox_id
@@ -770,6 +798,7 @@ class AioSandboxProvider(SandboxProvider):
         sandbox_id: str,
         *,
         expected_info: SandboxInfo | None = None,
+        only_if_unleased: bool = False,
     ) -> tuple[Sandbox | None, SandboxInfo | None, bool]:
         """Remove a sandbox from in-process tracking maps.
 
@@ -781,6 +810,10 @@ class AioSandboxProvider(SandboxProvider):
         thread_keys_to_remove: list[tuple[str, str]] = []
 
         with self._lock:
+            lease_counts = getattr(self, "_lease_counts", None)
+            if only_if_unleased and lease_counts is not None and lease_counts.get(sandbox_id, 0) > 0:
+                return None, None, False
+
             active_info = self._sandbox_infos.get(sandbox_id)
             warm_item = self._warm_pool.get(sandbox_id)
             warm_info = warm_item[0] if warm_item is not None else None
@@ -793,6 +826,9 @@ class AioSandboxProvider(SandboxProvider):
             for key in thread_keys_to_remove:
                 del self._thread_sandboxes[key]
             self._last_activity.pop(sandbox_id, None)
+            lease_counts = getattr(self, "_lease_counts", None)
+            if lease_counts is not None:
+                lease_counts.pop(sandbox_id, None)
             if info is None and sandbox_id in self._warm_pool:
                 info, _ = self._warm_pool.pop(sandbox_id)
             else:
@@ -1194,6 +1230,19 @@ class AioSandboxProvider(SandboxProvider):
         thread_keys_to_remove: list[tuple[str, str]] = []
 
         with self._lock:
+            lease_counts = getattr(self, "_lease_counts", None)
+            lease_count = lease_counts.get(sandbox_id, 0) if lease_counts is not None else 0
+            if lease_count > 1:
+                lease_counts[sandbox_id] = lease_count - 1
+                logger.info(
+                    "Released one lease for sandbox %s (%d holder(s) remain)",
+                    sandbox_id,
+                    lease_count - 1,
+                )
+                return
+            if lease_count == 1:
+                lease_counts.pop(sandbox_id, None)
+
             sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_keys_to_remove = [key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id]
@@ -1215,7 +1264,7 @@ class AioSandboxProvider(SandboxProvider):
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
-    def destroy(self, sandbox_id: str) -> None:
+    def destroy(self, sandbox_id: str, *, only_if_unleased: bool = False) -> None:
         """Destroy a sandbox: stop the container and free all resources.
 
         Unlike release(), this actually stops the container.  Use this for
@@ -1227,13 +1276,27 @@ class AioSandboxProvider(SandboxProvider):
 
         Args:
             sandbox_id: The ID of the sandbox to destroy.
+            only_if_unleased: Skip destruction if a concurrent holder owns a lease.
         """
         with self._get_sandbox_lock(sandbox_id):
-            self._destroy_sandbox_locked(sandbox_id)
+            self._destroy_sandbox_locked(
+                sandbox_id,
+                only_if_unleased=only_if_unleased,
+            )
 
-    def _destroy_sandbox_locked(self, sandbox_id: str) -> None:
+    def _destroy_sandbox_locked(
+        self,
+        sandbox_id: str,
+        *,
+        only_if_unleased: bool = False,
+    ) -> None:
         """Destroy one sandbox while its lifecycle lock is held."""
-        sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
+        sandbox, info, removed = self._remove_tracked_sandbox(
+            sandbox_id,
+            only_if_unleased=only_if_unleased,
+        )
+        if not removed:
+            return
 
         if sandbox is not None:
             # Defense-in-depth: close() already swallows its own errors; this

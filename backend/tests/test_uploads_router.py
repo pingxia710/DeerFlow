@@ -914,7 +914,7 @@ def test_replacing_remote_image_without_ocr_deletes_stale_sidecar(tmp_path):
     assert "/mnt/user-data/uploads/image.png.ocr.txt" in sandbox.execute_command.call_args.args[0]
 
 
-def test_replacing_document_without_conversion_removes_stale_markdown(tmp_path):
+def test_replacing_document_without_conversion_preserves_existing_markdown(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     (thread_uploads_dir / "report.pdf").write_bytes(b"old pdf")
@@ -939,10 +939,10 @@ def test_replacing_document_without_conversion_removes_stale_markdown(tmp_path):
 
     assert result.success is True
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"new pdf"
-    assert not stale_markdown.exists()
+    assert stale_markdown.read_text(encoding="utf-8") == "old conversion"
 
 
-def test_replacing_remote_document_without_conversion_deletes_stale_markdown(
+def test_replacing_remote_document_without_conversion_preserves_existing_markdown(
     tmp_path,
 ):
     thread_uploads_dir = tmp_path / "uploads"
@@ -986,7 +986,8 @@ def test_replacing_remote_document_without_conversion_deletes_stale_markdown(
 
     assert result.success is True
     sandbox.execute_command.assert_called_once()
-    assert "/mnt/user-data/uploads/report.md" in sandbox.execute_command.call_args.args[0]
+    assert "/mnt/user-data/uploads/report_1.md" in sandbox.execute_command.call_args.args[0]
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "old conversion"
 
 
 def test_later_remote_sync_failure_restores_deleted_stale_companion(tmp_path):
@@ -1106,7 +1107,7 @@ def test_missing_written_file_during_remote_sync_rolls_back_instead_of_deleting(
     sandbox.execute_command.assert_not_called()
 
 
-def test_replacing_document_with_conversion_disabled_removes_stale_markdown(
+def test_replacing_document_with_conversion_disabled_preserves_existing_markdown(
     tmp_path,
 ):
     thread_uploads_dir = tmp_path / "uploads"
@@ -1130,7 +1131,7 @@ def test_replacing_document_with_conversion_disabled_removes_stale_markdown(
         )
 
     assert result.success is True
-    assert not stale_markdown.exists()
+    assert stale_markdown.read_text(encoding="utf-8") == "old conversion"
 
 
 def test_explicit_markdown_upload_wins_over_document_companion_in_same_request(
@@ -1165,7 +1166,13 @@ def test_explicit_markdown_upload_wins_over_document_companion_in_same_request(
 def test_later_explicit_markdown_is_reserved_before_document_conversion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
-    convert = AsyncMock()
+    converted = tmp_path / "converted.md"
+
+    async def convert_file(*_args, **_kwargs):
+        converted.write_bytes(b"converted")
+        return converted
+
+    convert = AsyncMock(side_effect=convert_file)
 
     with (
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
@@ -1188,9 +1195,10 @@ def test_later_explicit_markdown_is_reserved_before_document_conversion(tmp_path
 
     assert result.success is True
     assert [item.filename for item in result.files] == ["report.pdf", "report.md"]
-    assert result.files[0].markdown_file is None
+    assert result.files[0].markdown_file == "report_1.md"
+    assert (thread_uploads_dir / "report_1.md").read_bytes() == b"converted"
     assert (thread_uploads_dir / "report.md").read_bytes() == b"explicit"
-    convert.assert_not_awaited()
+    convert.assert_awaited_once()
 
 
 def test_ocr_sidecar_symlink_race_cannot_overwrite_outside_uploads(tmp_path):
@@ -1685,8 +1693,9 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
             result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
-            assert result.success is True
+            assert result.success is False
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
+            assert result.skipped_files == [bad_name]
 
         # Path-traversal prefixes are stripped to the basename and accepted safely
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
@@ -1880,7 +1889,7 @@ def test_upload_files_overwrites_existing_regular_file(tmp_path):
     assert existing_file.stat().st_nlink == 1
 
 
-def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
+def test_delete_uploaded_file_preserves_untracked_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     (thread_uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
@@ -1898,7 +1907,7 @@ def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     assert not (thread_uploads_dir / "report.pdf").exists()
-    assert not (thread_uploads_dir / "report.md").exists()
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
 
 
 @pytest.mark.asyncio
@@ -1955,7 +1964,7 @@ async def test_same_thread_delete_waits_for_inflight_upload(tmp_path):
     assert not (thread_uploads_dir / "same.txt").exists()
 
 
-def test_delete_uploaded_file_removes_remote_base_and_companions(tmp_path):
+def test_delete_uploaded_file_removes_remote_base_and_ocr_sidecar(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     (thread_uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
@@ -1986,11 +1995,12 @@ def test_delete_uploaded_file_removes_remote_base_and_companions(tmp_path):
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     commands = [call.args[0] for call in sandbox.execute_command.call_args_list]
-    assert len(commands) == 3
+    assert len(commands) == 2
     assert all("rm -f --" in command for command in commands)
     assert any("report.pdf" in command for command in commands)
-    assert any("report.md" in command for command in commands)
+    assert not any("report.md" in command for command in commands)
     assert any("report.pdf.ocr.txt" in command for command in commands)
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
 
 
 def test_remote_delete_failure_restores_host_and_attempted_remote_file(tmp_path):
@@ -2162,7 +2172,7 @@ async def test_cancelled_local_delete_finishes_remote_delete_before_exit(tmp_pat
             await delete_task
 
     assert not base.exists()
-    assert sandbox.execute_command.call_count == 3
+    assert sandbox.execute_command.call_count == 2
 
 
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import threading
 import time
 from typing import Any, Literal
@@ -25,7 +24,14 @@ from app.channels.message_bus import (
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
+    acquire_upload_transaction_lock,
+    claim_unique_filename,
+    normalize_filename,
+    release_upload_transaction_lock,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -322,9 +328,13 @@ class FeishuChannel(Channel):
 
     async def _upload_image(self, path) -> str:
         """Upload an image to Feishu and return the image_key."""
-        with open(str(path), "rb") as f:
-            request = self._CreateImageRequest.builder().request_body(self._CreateImageRequestBody.builder().image_type("message").image(f).build()).build()
-            response = await asyncio.to_thread(self._api_client.im.v1.image.create, request)
+
+        def upload():
+            with open(str(path), "rb") as f:
+                request = self._CreateImageRequest.builder().request_body(self._CreateImageRequestBody.builder().image_type("message").image(f).build()).build()
+                return self._api_client.im.v1.image.create(request)
+
+        response = await asyncio.to_thread(upload)
         if not response.success():
             raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
         return response.data.image_key
@@ -343,9 +353,12 @@ class FeishuChannel(Channel):
         else:
             file_type = "stream"
 
-        with open(str(path), "rb") as f:
-            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
-            response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
+        def upload():
+            with open(str(path), "rb") as f:
+                request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
+                return self._api_client.im.v1.file.create(request)
+
+        response = await asyncio.to_thread(upload)
         if not response.success():
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
@@ -421,50 +434,94 @@ class FeishuChannel(Channel):
 
         paths = get_paths()
         effective_user_id = user_id or get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
+
+        def prepare_uploads_dir():
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            return paths.sandbox_uploads_dir(
+                thread_id,
+                user_id=effective_user_id,
+            ).resolve()
+
+        uploads_dir = await asyncio.to_thread(prepare_uploads_dir)
 
         ext = "png" if type == "image" else "bin"
         raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
 
-        # Sanitize filename: preserve extension, replace path chars in name part
-        if "." in raw_filename:
-            name_part, ext = raw_filename.rsplit(".", 1)
-            name_part = re.sub(r"[./\\]", "_", name_part)
-            filename = f"{name_part}.{ext}"
-        else:
-            filename = re.sub(r"[./\\]", "_", raw_filename)
-        resolved_target = uploads_dir / filename
-
-        def down_load():
-            # use thread_lock to avoid filename conflicts when writing
-            with self._thread_lock:
-                return write_upload_file_no_symlink(uploads_dir, filename, content)
+        def persist_download():
+            lock_handle = acquire_upload_transaction_lock(uploads_dir)
+            try:
+                with self._thread_lock:
+                    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                    filename = claim_unique_filename(
+                        normalize_filename(raw_filename),
+                        seen_names,
+                    )
+                    return write_upload_file_no_symlink(
+                        uploads_dir,
+                        filename,
+                        content,
+                    )
+            finally:
+                release_upload_transaction_lock(lock_handle)
 
         try:
-            resolved_target = await asyncio.to_thread(down_load)
+            resolved_target = await asyncio.to_thread(persist_download)
+        except (UnsafeUploadPathError, ValueError):
+            logger.warning(
+                "[Feishu] rejected unsafe downloaded resource filename: %r",
+                raw_filename,
+            )
+            return f"Failed to obtain the [{type}]"
         except Exception:
-            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
+            logger.exception(
+                "[Feishu] failed to persist downloaded resource: %s, type=%s",
+                raw_filename,
+                type,
+            )
             return f"Failed to obtain the [{type}]"
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
         try:
-
-            def sync_to_sandbox() -> bool:
-                sandbox_provider = get_sandbox_provider()
-                sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
-                if sandbox_id == "local":
-                    return True
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    return False
-                sandbox.update_file(virtual_path, content)
-                return True
-
-            if not await asyncio.to_thread(sync_to_sandbox):
-                logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                return f"Failed to obtain the [{type}]"
+            sandbox_provider = get_sandbox_provider()
+            acquire_async = getattr(sandbox_provider, "acquire_async", None)
+            if callable(acquire_async):
+                sandbox_id = await acquire_async(
+                    thread_id,
+                    user_id=effective_user_id,
+                )
+            else:
+                sandbox_id = await asyncio.to_thread(
+                    sandbox_provider.acquire,
+                    thread_id,
+                    user_id=effective_user_id,
+                )
+            try:
+                if sandbox_id != "local":
+                    sandbox = sandbox_provider.get(sandbox_id)
+                    if sandbox is None:
+                        logger.warning(
+                            "[Feishu] sandbox not found for thread_id=%s",
+                            thread_id,
+                        )
+                        return f"Failed to obtain the [{type}]"
+                    await asyncio.to_thread(
+                        sandbox.update_file,
+                        virtual_path,
+                        content,
+                    )
+            finally:
+                try:
+                    await asyncio.to_thread(
+                        sandbox_provider.release,
+                        sandbox_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[Feishu] failed to release sandbox lease %s",
+                        sandbox_id,
+                        exc_info=True,
+                    )
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"

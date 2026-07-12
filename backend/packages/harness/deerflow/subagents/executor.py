@@ -27,6 +27,7 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.sandbox.sandbox_provider import release_runtime_sandbox_lease_async
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -881,6 +882,8 @@ class SubagentExecutor:
         seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
 
         collector: SubagentTokenCollector | None = None
+        stream: Any | None = None
+        context: dict[str, Any] | None = None
         try:
             state, final_tools, deferred_setup = await self._build_initial_state(task)
             agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
@@ -927,7 +930,7 @@ class SubagentExecutor:
                 environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             )
 
-            context: dict[str, Any] = {}
+            context = {}
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}
                 context["thread_id"] = self.thread_id
@@ -960,7 +963,8 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            async for chunk in stream:
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,
                 # so long-running tool calls within a single iteration will not be
@@ -1092,7 +1096,23 @@ class SubagentExecutor:
                 error=str(e),
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
-
+        finally:
+            try:
+                if stream is not None:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
+            finally:
+                if context is not None:
+                    try:
+                        await release_runtime_sandbox_lease_async(context)
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
         return result
 
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:

@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import MutableMapping
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
@@ -71,6 +72,7 @@ _default_sandbox_provider: SandboxProvider | None = None
 # self-deadlock such a provider and would block every concurrent `get()` during a
 # slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
+RUNTIME_SANDBOX_LEASE_KEY = "__deerflow_sandbox_lease_id"
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -110,6 +112,47 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     if hasattr(provider, "shutdown"):
         provider.shutdown()
     return winner
+
+
+def mark_runtime_sandbox_lease(context: object, sandbox_id: str) -> None:
+    """Record the sandbox lease owned by one graph invocation."""
+    if isinstance(context, MutableMapping):
+        context[RUNTIME_SANDBOX_LEASE_KEY] = sandbox_id
+
+
+def _take_runtime_sandbox_lease(context: object) -> str | None:
+    if not isinstance(context, MutableMapping):
+        return None
+    sandbox_id = context.pop(RUNTIME_SANDBOX_LEASE_KEY, None)
+    return sandbox_id if isinstance(sandbox_id, str) else None
+
+
+def release_runtime_sandbox_lease(context: object, *, provider: SandboxProvider | None = None) -> bool:
+    """Release and clear the lease owned by *context*, exactly once."""
+    sandbox_id = _take_runtime_sandbox_lease(context)
+    if sandbox_id is None:
+        return False
+    (provider or get_sandbox_provider()).release(sandbox_id)
+    return True
+
+
+async def release_runtime_sandbox_lease_async(
+    context: object,
+    *,
+    provider: SandboxProvider | None = None,
+) -> bool:
+    """Async, cancellation-safe counterpart to ``release_runtime_sandbox_lease``."""
+    sandbox_id = _take_runtime_sandbox_lease(context)
+    if sandbox_id is None:
+        return False
+    lease_provider = provider or get_sandbox_provider()
+    release_task = asyncio.create_task(asyncio.to_thread(lease_provider.release, sandbox_id))
+    try:
+        await asyncio.shield(release_task)
+    except asyncio.CancelledError:
+        await release_task
+        raise
+    return True
 
 
 def reset_sandbox_provider() -> None:

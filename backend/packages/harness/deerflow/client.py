@@ -20,7 +20,6 @@ import json
 import logging
 import mimetypes
 import os
-import shutil
 import tempfile
 import uuid
 from collections.abc import Generator, Sequence
@@ -55,12 +54,16 @@ from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
+    acquire_upload_transaction_lock,
     claim_unique_filename,
+    copy_upload_file_no_symlink,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    normalize_filename,
+    release_upload_transaction_lock,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1277,7 +1280,7 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -1289,13 +1292,40 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(p.name, seen_names)
+            dest_name = claim_unique_filename(normalize_filename(p.name), seen_names)
             resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
+        lock_handle = acquire_upload_transaction_lock(uploads_dir)
+        try:
+            return self._upload_files_transaction(
+                thread_id,
+                resolved_files,
+                seen_names,
+                has_convertible_file,
+                uploads_dir,
+            )
+        finally:
+            release_upload_transaction_lock(lock_handle)
+
+    def _upload_files_transaction(
+        self,
+        thread_id: str,
+        resolved_files: list[tuple[Path, str]],
+        seen_names: set[str],
+        has_convertible_file: bool,
+        uploads_dir: Path,
+    ) -> dict:
+        from deerflow.utils.file_conversion import (
+            CONVERTIBLE_EXTENSIONS,
+            convert_file_to_markdown,
+        )
+
         uploaded_files: list[dict] = []
+        derived_names = set(seen_names)
+        derived_names.update(path.name for path in uploads_dir.iterdir())
 
         conversion_pool = None
         if has_convertible_file:
@@ -1310,13 +1340,18 @@ class DeerFlowClient:
                 # creating a new ThreadPoolExecutor per converted file.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        def _convert_in_thread(path: Path):
-            return asyncio.run(convert_file_to_markdown(path))
+        def _convert_in_thread(path: Path, output_path: Path):
+            if output_path == path.with_suffix(".md"):
+                return asyncio.run(convert_file_to_markdown(path))
+            return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
         try:
             for src_path, dest_name in resolved_files:
-                dest = uploads_dir / dest_name
-                shutil.copy2(src_path, dest)
+                dest = copy_upload_file_no_symlink(
+                    uploads_dir,
+                    dest_name,
+                    src_path,
+                )
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
@@ -1329,11 +1364,16 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                    default_markdown_path = dest.with_suffix(".md")
+                    markdown_name = claim_unique_filename(default_markdown_path.name, derived_names)
+                    markdown_path = uploads_dir / markdown_name
                     try:
                         if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
-                        else:
+                            md_path = conversion_pool.submit(_convert_in_thread, dest, markdown_path).result()
+                        elif markdown_path == default_markdown_path:
                             md_path = asyncio.run(convert_file_to_markdown(dest))
+                        else:
+                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=markdown_path))
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
@@ -1388,10 +1428,8 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             PermissionError: If path traversal is detected.
         """
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
-
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts

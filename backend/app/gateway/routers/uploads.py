@@ -28,6 +28,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    acquire_upload_transaction_lock,
     claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
@@ -36,6 +37,7 @@ from deerflow.uploads.manager import (
     list_files_in_dir,
     normalize_filename,
     open_upload_file_no_symlink,
+    release_upload_transaction_lock,
     upload_artifact_url,
     upload_virtual_path,
     write_upload_file_no_symlink,
@@ -58,6 +60,25 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
 _RESTORE_FAILURE_MARKER = ".restore-failed"
 _UPLOAD_MUTATION_LOCKS: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
+
+
+async def _acquire_upload_file_lock(uploads_dir: Path):
+    task = asyncio.create_task(asyncio.to_thread(acquire_upload_transaction_lock, uploads_dir))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        handle = await task
+        await asyncio.to_thread(release_upload_transaction_lock, handle)
+        raise
+
+
+async def _release_upload_file_lock(handle) -> None:
+    task = asyncio.create_task(asyncio.to_thread(release_upload_transaction_lock, handle))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 class UploadedFileInfo(BaseModel):
@@ -340,10 +361,6 @@ def _restore_upload_backups(
         if backup is None:
             continue
         try:
-            try:
-                os.unlink(target.name, dir_fd=uploads_fd)
-            except FileNotFoundError:
-                pass
             os.replace(
                 backup.name,
                 target.name,
@@ -619,21 +636,29 @@ async def upload_files(
                 thread_id,
                 user_id=effective_user_id,
             )
-            uploads_fd = open_directory_no_symlinks(uploads_dir)
         except (FileNotFoundError, UnsafePathError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        lock_handle = await _acquire_upload_file_lock(uploads_dir)
         try:
-            return await _upload_files_locked(
-                thread_id,
-                request,
-                files=files,
-                config=config,
-                effective_user_id=effective_user_id,
-                uploads_dir=uploads_dir,
-                uploads_fd=uploads_fd,
-            )
+            try:
+                uploads_fd = open_directory_no_symlinks(uploads_dir)
+            except (FileNotFoundError, UnsafePathError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            try:
+                return await _upload_files_locked(
+                    thread_id,
+                    request,
+                    files=files,
+                    config=config,
+                    effective_user_id=effective_user_id,
+                    uploads_dir=uploads_dir,
+                    uploads_fd=uploads_fd,
+                )
+            finally:
+                os.close(uploads_fd)
         finally:
-            os.close(uploads_fd)
+            await _release_upload_file_lock(lock_handle)
 
 
 async def _upload_files_locked(
@@ -667,6 +692,7 @@ async def _upload_files_locked(
     prepared_files: list[tuple[UploadFile, str, str]] = []
     for file in files:
         if not file.filename:
+            skipped_files.append("<unnamed>")
             continue
         try:
             original_filename = normalize_filename(file.filename)
@@ -676,15 +702,34 @@ async def _upload_files_locked(
             )
         except ValueError:
             logger.warning("Skipping file with unsafe filename: %r", file.filename)
+            skipped_files.append(file.filename)
             continue
         prepared_files.append((file, original_filename, safe_filename))
     explicit_filenames = {safe_filename for _, _, safe_filename in prepared_files}
+    generated_filenames = set(explicit_filenames)
+    generated_filenames.update(await asyncio.to_thread(os.listdir, uploads_dir))
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     adjust_upload_permissions = _needs_upload_permission_adjustment(sandbox_provider)
     sandbox = None
     sandbox_id: str | None = None
+
+    async def release_sandbox_lease() -> None:
+        nonlocal sandbox_id
+        if sandbox_id is None:
+            return
+        acquired_id = sandbox_id
+        sandbox_id = None
+        try:
+            await asyncio.to_thread(sandbox_provider.release, acquired_id)
+        except Exception:
+            logger.warning(
+                "Failed to release sandbox lease %s after upload",
+                acquired_id,
+                exc_info=True,
+            )
+
     if sync_to_sandbox:
         acquire_async = getattr(type(sandbox_provider), "acquire_async", None)
         if callable(acquire_async):
@@ -700,7 +745,9 @@ async def _upload_files_locked(
             )
         sandbox = sandbox_provider.get(sandbox_id)
         if sandbox is None:
+            await release_sandbox_lease()
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
+
     auto_convert_documents = _auto_convert_documents_enabled(config)
     backup_dir, backup_fd = _create_pinned_upload_subdirectory(
         uploads_dir,
@@ -717,7 +764,8 @@ async def _upload_files_locked(
         attempted_generated_paths: list[Path] = []
         snapshot_path: Path | None = None
         try:
-            _backup_existing_upload(
+            await asyncio.to_thread(
+                _backup_existing_upload,
                 Path(uploads_dir) / safe_filename,
                 backup_dir,
                 backups,
@@ -773,6 +821,7 @@ async def _upload_files_locked(
                     ocr_path.name,
                     ocr_text.encode("utf-8"),
                     directory_fd=uploads_fd,
+                    allow_reserved_ocr=True,
                 )
                 written_paths.append(ocr_path)
                 if deferred_cancellation is not None:
@@ -792,9 +841,14 @@ async def _upload_files_locked(
                     )
                 )
 
-            markdown_target = file_path.with_suffix(".md")
-            create_markdown_companion = file_ext in CONVERTIBLE_EXTENSIONS and markdown_target.name not in explicit_filenames
+            create_markdown_companion = file_ext in CONVERTIBLE_EXTENSIONS
             if create_markdown_companion:
+                default_markdown_target = file_path.with_suffix(".md")
+                markdown_filename = claim_unique_filename(
+                    default_markdown_target.name,
+                    generated_filenames,
+                )
+                markdown_target = file_path.with_name(markdown_filename)
                 _backup_existing_upload(
                     markdown_target,
                     backup_dir,
@@ -840,13 +894,19 @@ async def _upload_files_locked(
             uploaded_files.append(file_info)
 
         except HTTPException as e:
-            _cleanup_uploaded_paths(written_paths, directory_fd=uploads_fd)
-            _restore_upload_backups(
+            await _run_blocking_completion_safe(
+                _cleanup_uploaded_paths,
+                written_paths,
+                directory_fd=uploads_fd,
+            )
+            await _run_blocking_completion_safe(
+                _restore_upload_backups,
                 backups,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
             )
-            _discard_upload_backups(
+            await _run_blocking_completion_safe(
+                _discard_upload_backups,
                 backup_dir,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
@@ -862,7 +922,8 @@ async def _upload_files_locked(
             del written_paths[written_start:]
             del sandbox_sync_targets[sync_targets_start:]
             total_size = total_size_before
-            _restore_upload_backups(
+            await _run_blocking_completion_safe(
+                _restore_upload_backups,
                 backups,
                 set(backups) - backups_before,
                 uploads_fd=uploads_fd,
@@ -871,13 +932,19 @@ async def _upload_files_locked(
             skipped_files.append(safe_filename)
             continue
         except asyncio.CancelledError:
-            _cleanup_uploaded_paths(written_paths, directory_fd=uploads_fd)
-            _restore_upload_backups(
+            await _run_blocking_completion_safe(
+                _cleanup_uploaded_paths,
+                written_paths,
+                directory_fd=uploads_fd,
+            )
+            await _run_blocking_completion_safe(
+                _restore_upload_backups,
                 backups,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
             )
-            _discard_upload_backups(
+            await _run_blocking_completion_safe(
+                _discard_upload_backups,
                 backup_dir,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
@@ -885,13 +952,19 @@ async def _upload_files_locked(
             raise
         except Exception:
             logger.exception("Failed to upload file %r", file.filename)
-            _cleanup_uploaded_paths(written_paths, directory_fd=uploads_fd)
-            _restore_upload_backups(
+            await _run_blocking_completion_safe(
+                _cleanup_uploaded_paths,
+                written_paths,
+                directory_fd=uploads_fd,
+            )
+            await _run_blocking_completion_safe(
+                _restore_upload_backups,
                 backups,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
             )
-            _discard_upload_backups(
+            await _run_blocking_completion_safe(
+                _discard_upload_backups,
                 backup_dir,
                 uploads_fd=uploads_fd,
                 backup_fd=backup_fd,
@@ -989,6 +1062,8 @@ async def _upload_files_locked(
             status_code=500,
             detail="Failed to synchronize uploaded files",
         ) from exc
+    finally:
+        await release_sandbox_lease()
 
     _discard_upload_backups(
         backup_dir,
@@ -1067,27 +1142,32 @@ async def delete_uploaded_file(thread_id: str, filename: str, request: Request) 
             safe_filename = normalize_filename(filename)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        lock_handle = await _acquire_upload_file_lock(uploads_dir)
         try:
-            uploads_fd = open_directory_no_symlinks(uploads_dir)
-        except FileNotFoundError as exc:
-            raise HTTPException(
-                status_code=404,
-                detail=f"File not found: {safe_filename}",
-            ) from exc
-        except UnsafePathError as exc:
-            raise HTTPException(status_code=400, detail="Invalid upload path") from exc
-        try:
-            return await _delete_uploaded_file_locked(
-                thread_id,
-                filename,
-                request,
-                effective_user_id=effective_user_id,
-                uploads_dir=Path(uploads_dir),
-                uploads_fd=uploads_fd,
-                safe_filename=safe_filename,
-            )
+            try:
+                uploads_fd = open_directory_no_symlinks(uploads_dir)
+            except FileNotFoundError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"File not found: {safe_filename}",
+                ) from exc
+            except UnsafePathError as exc:
+                raise HTTPException(status_code=400, detail="Invalid upload path") from exc
+            try:
+                return await _delete_uploaded_file_locked(
+                    thread_id,
+                    filename,
+                    request,
+                    effective_user_id=effective_user_id,
+                    uploads_dir=Path(uploads_dir),
+                    uploads_fd=uploads_fd,
+                    safe_filename=safe_filename,
+                )
+            finally:
+                os.close(uploads_fd)
         finally:
-            os.close(uploads_fd)
+            await _release_upload_file_lock(lock_handle)
 
 
 async def _delete_uploaded_file_locked(
@@ -1103,8 +1183,6 @@ async def _delete_uploaded_file_locked(
     """Delete a file from a thread's uploads directory."""
     file_path = Path(uploads_dir) / safe_filename
     delete_targets = [file_path, ocr_sidecar_path(file_path)]
-    if file_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-        delete_targets.append(file_path.with_suffix(".md"))
 
     snapshots: dict[Path, bytes] = {}
     for target in delete_targets:
@@ -1159,7 +1237,6 @@ async def _delete_uploaded_file_locked(
             delete_file_safe,
             uploads_dir,
             safe_filename,
-            convertible_extensions=CONVERTIBLE_EXTENSIONS,
             directory_fd=uploads_fd,
         )
     except FileNotFoundError:

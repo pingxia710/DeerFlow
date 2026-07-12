@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import {
   AlertCircleIcon,
+  ArrowDownIcon,
   BrainCircuitIcon,
   ChevronUpIcon,
   Loader2Icon,
@@ -10,9 +11,11 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type MutableRefObject,
   type MouseEvent,
 } from "react";
 
@@ -37,6 +40,8 @@ import {
   extractTextFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
+  getConversationTurnTiming,
+  getConversationTurns,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
@@ -81,10 +86,20 @@ import {
 } from "./message-token-usage";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
+import { useConversationTurnScroll } from "./use-conversation-turn-scroll";
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+type HistoryPrependRunner = (
+  loadMore: () => Promise<void> | void,
+) => Promise<void>;
+
+type LocalTurnTiming = {
+  startedAt: number;
+  completedAt?: number;
+};
 
 export function getMessageGroupKey(
   group: { type: string; id?: string | null },
@@ -350,18 +365,39 @@ function getMessagesHistoryStartTime(messages: Message[]) {
   return startTime;
 }
 
+function formatConversationTime(timestamp: number, locale: string) {
+  return new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(timestamp);
+}
+
 function LoadMoreHistoryIndicator({
+  historyPrependRef,
   isLoading,
   hasMore,
   loadMore,
 }: {
+  historyPrependRef: MutableRefObject<HistoryPrependRunner | null>;
   isLoading?: boolean;
   hasMore?: boolean;
-  loadMore?: () => void;
+  loadMore?: () => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadRef = useRef(0);
+
+  const runLoadMore = useCallback(() => {
+    if (!loadMore) {
+      return;
+    }
+    const runWithHistoryAnchor = historyPrependRef.current;
+    if (runWithHistoryAnchor) {
+      void runWithHistoryAnchor(loadMore);
+      return;
+    }
+    void loadMore();
+  }, [historyPrependRef, loadMore]);
 
   const throttledLoadMore = useCallback(() => {
     if (!hasMore || isLoading) {
@@ -374,7 +410,7 @@ function LoadMoreHistoryIndicator({
 
     if (remaining <= 0) {
       lastLoadRef.current = now;
-      loadMore?.();
+      runLoadMore();
       return;
     }
 
@@ -388,9 +424,9 @@ function LoadMoreHistoryIndicator({
         return;
       }
       lastLoadRef.current = Date.now();
-      loadMore?.();
+      runLoadMore();
     }, remaining);
-  }, [hasMore, isLoading, loadMore]);
+  }, [hasMore, isLoading, runLoadMore]);
 
   useEffect(() => {
     return () => {
@@ -427,6 +463,52 @@ function LoadMoreHistoryIndicator({
         )}
       </Button>
     </div>
+  );
+}
+
+function ConversationTurnScrollController({
+  historyPrependRef,
+  threadId,
+  activeTurnId,
+  isStreaming,
+}: {
+  historyPrependRef: MutableRefObject<HistoryPrependRunner | null>;
+  threadId: string;
+  activeTurnId?: string;
+  isStreaming: boolean;
+}) {
+  const { t } = useI18n();
+  const {
+    runWithHistoryAnchor,
+    returnToCurrentReply,
+    shouldShowReturnToCurrentReply,
+  } = useConversationTurnScroll({ threadId, activeTurnId, isStreaming });
+
+  useLayoutEffect(() => {
+    historyPrependRef.current = runWithHistoryAnchor;
+    return () => {
+      if (historyPrependRef.current === runWithHistoryAnchor) {
+        historyPrependRef.current = null;
+      }
+    };
+  }, [historyPrependRef, runWithHistoryAnchor]);
+
+  if (!shouldShowReturnToCurrentReply) {
+    return null;
+  }
+
+  return (
+    <Button
+      aria-label={t.conversation.returnToCurrentReply}
+      className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-sm"
+      onClick={returnToCurrentReply}
+      size="sm"
+      type="button"
+      variant="outline"
+    >
+      <ArrowDownIcon className="mr-1 size-3.5" />
+      {t.conversation.returnToCurrentReply}
+    </Button>
   );
 }
 
@@ -533,7 +615,7 @@ export function MessageList({
   hideThinkingUi?: boolean;
   contextSnapshot?: ThreadContextUsageSnapshot | null;
   hasMoreHistory?: boolean;
-  loadMoreHistory?: () => void;
+  loadMoreHistory?: () => Promise<void> | void;
   isHistoryLoading?: boolean;
   historyRuns?: ReadonlyArray<MessageListRun>;
   terminalNotice?: ThreadRunTerminalNotice | null;
@@ -545,18 +627,104 @@ export function MessageList({
   ) => void | Promise<void>;
   canRegenerate?: boolean;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
   const prevIsLoading = useRef(thread.isLoading);
-
-  useEffect(() => {
-    if (thread.isLoading && !prevIsLoading.current) {
-      setTurnStartTime(Date.now());
-    }
-    prevIsLoading.current = thread.isLoading;
-  }, [thread.isLoading]);
   const messages = thread.messages;
   const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
+  const conversationTurns = useMemo(
+    () => getConversationTurns(groupedMessages),
+    [groupedMessages],
+  );
+  const groupIndexes = useMemo(
+    () => new Map(groupedMessages.map((group, index) => [group, index])),
+    [groupedMessages],
+  );
+  const turnNumbers = useMemo(() => {
+    const numbers = new Map<string, number>();
+    let turnCount = 0;
+    for (const turn of conversationTurns) {
+      if (turn.hasHumanMessage) {
+        numbers.set(turn.id, ++turnCount);
+      }
+    }
+    return numbers;
+  }, [conversationTurns]);
+  const activeConversationTurn = useMemo(
+    () => [...conversationTurns].reverse().find((turn) => turn.hasHumanMessage),
+    [conversationTurns],
+  );
+  const [localTurnTimings, setLocalTurnTimings] = useState<
+    Record<string, LocalTurnTiming>
+  >({});
+  const [liveElapsedSeconds, setLiveElapsedSeconds] = useState<number | null>(
+    null,
+  );
+  const activeStreamingTurnIdRef = useRef<string | null>(null);
+  const historyPrependRef = useRef<HistoryPrependRunner | null>(null);
+
+  useEffect(() => {
+    activeStreamingTurnIdRef.current = null;
+    prevIsLoading.current = false;
+    setLocalTurnTimings({});
+    setLiveElapsedSeconds(null);
+    setTurnStartTime(null);
+  }, [threadId]);
+
+  useEffect(() => {
+    const wasLoading = prevIsLoading.current;
+    if (thread.isLoading && !wasLoading) {
+      const startedAt = activeConversationTurn
+        ? (getConversationTurnTiming(activeConversationTurn).startedAt ??
+          Date.now())
+        : Date.now();
+      setTurnStartTime(startedAt);
+      if (activeConversationTurn) {
+        activeStreamingTurnIdRef.current = activeConversationTurn.id;
+        setLocalTurnTimings((current) => ({
+          ...current,
+          [activeConversationTurn.id]: { startedAt },
+        }));
+      }
+    } else if (!thread.isLoading && wasLoading) {
+      const turnId = activeStreamingTurnIdRef.current;
+      if (turnId) {
+        setLocalTurnTimings((current) => {
+          const timing = current[turnId];
+          return timing
+            ? {
+                ...current,
+                [turnId]: { ...timing, completedAt: Date.now() },
+              }
+            : current;
+        });
+      }
+    }
+    prevIsLoading.current = thread.isLoading;
+  }, [activeConversationTurn, thread.isLoading]);
+  const activeTurnId = activeConversationTurn?.id;
+  const activeTurnStartedAt = activeConversationTurn
+    ? (getConversationTurnTiming(activeConversationTurn).startedAt ??
+      localTurnTimings[activeConversationTurn.id]?.startedAt ??
+      turnStartTime)
+    : null;
+
+  useEffect(() => {
+    if (!thread.isLoading || activeTurnStartedAt === null) {
+      setLiveElapsedSeconds(null);
+      return;
+    }
+
+    const updateElapsed = () => {
+      setLiveElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - activeTurnStartedAt) / 1000)),
+      );
+    };
+
+    updateElapsed();
+    const interval = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(interval);
+  }, [activeTurnId, activeTurnStartedAt, thread.isLoading]);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<
     string | null
   >(null);
@@ -602,11 +770,24 @@ export function MessageList({
   );
   const activeTurnStartTime = useMemo(() => {
     return (
+      (activeConversationTurn
+        ? getConversationTurnTiming(activeConversationTurn).startedAt
+        : undefined) ??
+      (activeConversationTurn
+        ? localTurnTimings[activeConversationTurn.id]?.startedAt
+        : undefined) ??
       getMessagesHistoryStartTime(
         groupedMessages[lastGroupIndex]?.messages ?? [],
-      ) ?? turnStartTime
+      ) ??
+      turnStartTime
     );
-  }, [groupedMessages, lastGroupIndex, turnStartTime]);
+  }, [
+    activeConversationTurn,
+    groupedMessages,
+    lastGroupIndex,
+    localTurnTimings,
+    turnStartTime,
+  ]);
   const subtaskUpdates = useMemo<SubtaskUpdate[]>(() => {
     const updates: SubtaskUpdate[] = [];
     for (const [groupIndex, group] of groupedMessages.entries()) {
@@ -796,7 +977,9 @@ export function MessageList({
 
   const handleReviewTurnClick = useCallback(
     (event: MouseEvent<HTMLButtonElement>) => {
-      const turnElement = event.currentTarget.closest("[data-assistant-turn]");
+      const turnElement = event.currentTarget.closest(
+        "[data-conversation-turn]",
+      );
       if (turnElement instanceof HTMLElement) {
         turnElement.scrollIntoView({ behavior: "smooth", block: "start" });
       }
@@ -972,361 +1155,481 @@ export function MessageList({
 
   return (
     <Conversation
-      className={cn("flex size-full flex-col justify-center", className)}
+      className={cn("flex size-full flex-col", className)}
       resize={thread.isLoading ? "smooth" : undefined}
     >
-      <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+      <ConversationContent
+        data-conversation-content
+        className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8"
+      >
         <LoadMoreHistoryIndicator
+          historyPrependRef={historyPrependRef}
           isLoading={isHistoryLoading}
           hasMore={hasMoreHistory}
           loadMore={loadMoreHistory}
         />
-        {groupedMessages.map((group, groupIndex) => {
-          const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
-          const groupIsLoading =
-            thread.isLoading && groupIndex === lastGroupIndex;
-          const groupKey = getMessageGroupKey(group, groupIndex);
-
-          if (group.type === "human" || group.type === "assistant") {
-            return (
-              <div
-                key={groupKey}
-                data-assistant-turn={
-                  group.type === "assistant" ? true : undefined
-                }
-                className={cn(
-                  "w-full",
-                  group.type === "assistant" && "group/assistant-turn",
-                )}
-              >
-                {group.messages.map((msg) => {
-                  const messageIsLoading = isMessageActivelyStreaming(
-                    msg,
-                    groupIsLoading,
-                    activeHistoryRunIds,
-                  );
-                  return (
-                    <MessageListItem
-                      key={`${group.id}/${msg.id}`}
-                      message={msg}
-                      isLoading={messageIsLoading}
-                      threadId={threadId}
-                      showCopyButton={group.type !== "assistant"}
-                      hideThinkingUi={hideThinkingUi}
-                      turnStartTime={
-                        messageIsLoading ? activeTurnStartTime : null
-                      }
-                    />
-                  );
-                })}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                })}
-                {group.type === "assistant" &&
-                  renderAssistantActions(
-                    group.messages,
-                    isAssistantMessageGroupStreaming(
-                      group.messages,
-                      streamingMessages,
-                    ),
-                    group.id === latestAssistantGroupId,
-                    group.id === latestAssistantGroupId
-                      ? contextSnapshot
-                      : null,
-                  )}
-              </div>
-            );
-          } else if (group.type === "assistant:clarification") {
-            const message = group.messages[0];
-            if (message && hasContent(message)) {
-              return (
-                <div key={groupKey} className="w-full">
-                  <MarkdownContent
-                    content={extractContentFromMessage(message)}
-                    isLoading={thread.isLoading}
-                    rehypePlugins={rehypePlugins}
-                  />
-                  {renderTokenUsage({
-                    messages: group.messages,
-                    turnUsageMessages,
-                  })}
-                </div>
+        {conversationTurns.map((turn) => {
+          const turnTiming = getConversationTurnTiming(turn);
+          const isActiveTurn = turn.id === activeConversationTurn?.id;
+          const localTurnTiming = localTurnTimings[turn.id];
+          const displayTurnStartTime =
+            turnTiming.startedAt ?? localTurnTiming?.startedAt;
+          const completedAt =
+            turnTiming.completedAt ?? localTurnTiming?.completedAt;
+          const isStreamingTurn = isActiveTurn && thread.isLoading;
+          const localDurationSeconds = isStreamingTurn
+            ? (liveElapsedSeconds ?? undefined)
+            : displayTurnStartTime !== undefined && completedAt !== undefined
+              ? Math.max(
+                  0,
+                  Math.floor((completedAt - displayTurnStartTime) / 1000),
+                )
+              : undefined;
+          const durationSeconds =
+            turnTiming.durationSeconds ?? localDurationSeconds;
+          const turnNumber = turnNumbers.get(turn.id);
+          const hasTerminalAssistantOutput = turn.groups.some(
+            (group) =>
+              group.type === "assistant" ||
+              group.type === "assistant:clarification" ||
+              group.type === "assistant:present-files",
+          );
+          const isFailedTurn =
+            isActiveTurn && !thread.isLoading && Boolean(thread.error);
+          const footerParts: string[] = [];
+          if (isStreamingTurn) {
+            footerParts.push(t.conversation.inProgress);
+          } else {
+            if (isFailedTurn) {
+              footerParts.push(t.conversation.failed);
+            }
+            if (
+              completedAt !== undefined &&
+              (hasTerminalAssistantOutput || isFailedTurn)
+            ) {
+              footerParts.push(
+                t.conversation.completedAt(
+                  formatConversationTime(completedAt, locale),
+                ),
               );
             }
-            return null;
-          } else if (group.type === "assistant:present-files") {
-            const files: string[] = [];
-            for (const message of group.messages) {
-              if (hasPresentFiles(message)) {
-                const presentFiles = extractPresentFilesFromMessage(message);
-                files.push(...presentFiles);
-              }
-            }
-            return (
-              <div className="w-full" key={groupKey}>
-                {group.messages[0] && hasContent(group.messages[0]) && (
-                  <MarkdownContent
-                    content={extractContentFromMessage(group.messages[0])}
-                    isLoading={thread.isLoading}
-                    rehypePlugins={rehypePlugins}
-                    className="mb-4"
-                  />
-                )}
-                <ArtifactFileList files={files} threadId={threadId} />
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                })}
-              </div>
-            );
-          } else if (group.type === "assistant:subagent") {
-            const tasks = new Set<Subtask>();
-            for (const message of group.messages) {
-              if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
-                  if (toolCall.name === "task") {
-                    const taskId = toolCall.id;
-                    if (!taskId) {
-                      continue;
-                    }
-                    const runId = getMessageRunId(message);
-                    if (!runId) {
-                      continue;
-                    }
-                    const roundId = getMessageRoundId(message);
-                    const matchingTerminal = findMatchingTerminalSubtaskForTask(
-                      contextSubtasks,
-                      {
-                        threadId,
-                        runId,
-                        taskId,
-                        roundId,
-                      },
+          }
+          if (
+            durationSeconds !== undefined &&
+            (isStreamingTurn || isFailedTurn || hasTerminalAssistantOutput)
+          ) {
+            const minutes = Math.floor(durationSeconds / 60);
+            const seconds = Math.floor(durationSeconds % 60);
+            footerParts.push(t.conversation.elapsed(minutes, seconds));
+          }
+
+          return (
+            <section
+              key={turn.id}
+              data-conversation-turn
+              data-conversation-turn-id={turn.id}
+              className="border-border/60 border-t pt-6 first:border-t-0"
+            >
+              {turn.hasHumanMessage && turnNumber !== undefined && (
+                <div
+                  data-conversation-scroll-anchor
+                  className="text-muted-foreground mb-3 text-xs font-medium"
+                >
+                  {t.conversation.turn(turnNumber)}
+                  {displayTurnStartTime !== undefined &&
+                    ` · ${formatConversationTime(displayTurnStartTime, locale)}`}
+                </div>
+              )}
+              {turn.groups.map((group, turnGroupIndex) => {
+                const groupIndex = groupIndexes.get(group);
+                if (groupIndex === undefined) {
+                  return null;
+                }
+                const turnUsageMessages =
+                  turnUsageMessagesByGroupIndex[groupIndex];
+                const groupIsLoading =
+                  thread.isLoading && groupIndex === lastGroupIndex;
+                const groupKey = group.id
+                  ? getMessageGroupKey(group, groupIndex)
+                  : `${group.type}-${turn.id}-${turnGroupIndex}`;
+
+                if (group.type === "human" || group.type === "assistant") {
+                  return (
+                    <div
+                      key={groupKey}
+                      data-conversation-scroll-anchor
+                      data-assistant-turn={
+                        group.type === "assistant" ? true : undefined
+                      }
+                      className={cn(
+                        "w-full",
+                        group.type === "assistant" && "group/assistant-turn",
+                      )}
+                    >
+                      {group.messages.map((msg) => {
+                        const messageIsLoading = isMessageActivelyStreaming(
+                          msg,
+                          groupIsLoading,
+                          activeHistoryRunIds,
+                        );
+                        return (
+                          <MessageListItem
+                            key={`${group.id}/${msg.id}`}
+                            message={msg}
+                            isLoading={messageIsLoading}
+                            threadId={threadId}
+                            showCopyButton={group.type !== "assistant"}
+                            hideThinkingUi={hideThinkingUi}
+                            turnStartTime={
+                              messageIsLoading ? activeTurnStartTime : null
+                            }
+                          />
+                        );
+                      })}
+                      {renderTokenUsage({
+                        messages: group.messages,
+                        turnUsageMessages,
+                      })}
+                      {group.type === "assistant" &&
+                        renderAssistantActions(
+                          group.messages,
+                          isAssistantMessageGroupStreaming(
+                            group.messages,
+                            streamingMessages,
+                          ),
+                          group.id === latestAssistantGroupId,
+                          group.id === latestAssistantGroupId
+                            ? contextSnapshot
+                            : null,
+                        )}
+                    </div>
+                  );
+                } else if (group.type === "assistant:clarification") {
+                  const message = group.messages[0];
+                  if (message && hasContent(message)) {
+                    return (
+                      <div
+                        key={groupKey}
+                        data-conversation-scroll-anchor
+                        className="w-full"
+                      >
+                        <MarkdownContent
+                          content={extractContentFromMessage(message)}
+                          isLoading={thread.isLoading}
+                          rehypePlugins={rehypePlugins}
+                        />
+                        {renderTokenUsage({
+                          messages: group.messages,
+                          turnUsageMessages,
+                        })}
+                      </div>
                     );
-                    const effectiveRoundId =
-                      roundId ?? matchingTerminal?.roundId;
-                    const status = derivePendingSubtaskStatus(
-                      taskId,
-                      group.messages,
-                      groupIsLoading,
+                  }
+                  return null;
+                } else if (group.type === "assistant:present-files") {
+                  const files: string[] = [];
+                  for (const message of group.messages) {
+                    if (hasPresentFiles(message)) {
+                      const presentFiles =
+                        extractPresentFilesFromMessage(message);
+                      files.push(...presentFiles);
+                    }
+                  }
+                  return (
+                    <div
+                      className="w-full"
+                      data-conversation-scroll-anchor
+                      key={groupKey}
+                    >
+                      {group.messages[0] && hasContent(group.messages[0]) && (
+                        <MarkdownContent
+                          content={extractContentFromMessage(group.messages[0])}
+                          isLoading={thread.isLoading}
+                          rehypePlugins={rehypePlugins}
+                          className="mb-4"
+                        />
+                      )}
+                      <ArtifactFileList files={files} threadId={threadId} />
+                      {renderTokenUsage({
+                        messages: group.messages,
+                        turnUsageMessages,
+                      })}
+                    </div>
+                  );
+                } else if (group.type === "assistant:subagent") {
+                  const tasks = new Set<Subtask>();
+                  for (const message of group.messages) {
+                    if (message.type === "ai") {
+                      for (const toolCall of message.tool_calls ?? []) {
+                        if (toolCall.name === "task") {
+                          const taskId = toolCall.id;
+                          if (!taskId) {
+                            continue;
+                          }
+                          const runId = getMessageRunId(message);
+                          if (!runId) {
+                            continue;
+                          }
+                          const roundId = getMessageRoundId(message);
+                          const matchingTerminal =
+                            findMatchingTerminalSubtaskForTask(
+                              contextSubtasks,
+                              {
+                                threadId,
+                                runId,
+                                taskId,
+                                roundId,
+                              },
+                            );
+                          const effectiveRoundId =
+                            roundId ?? matchingTerminal?.roundId;
+                          const status = derivePendingSubtaskStatus(
+                            taskId,
+                            group.messages,
+                            groupIsLoading,
+                          );
+                          const startedAt = getMessageHistoryTime(message);
+                          if (
+                            !shouldKeepInferredSubtask({
+                              status,
+                              hasMatchingTerminal: Boolean(matchingTerminal),
+                              hasTerminalInOtherRun: hasTerminalSubtaskForTask(
+                                contextSubtasks,
+                                {
+                                  threadId,
+                                  runId,
+                                  taskId,
+                                  roundId: effectiveRoundId,
+                                },
+                              ),
+                              isVisibleRunning: isInferredRunningSubtaskVisible(
+                                {
+                                  runId,
+                                  startedAt,
+                                  groupIsLoading,
+                                  activeRunIds: activeHistoryRunIds,
+                                  turnStartTime: activeTurnStartTime,
+                                },
+                              ),
+                            })
+                          ) {
+                            continue;
+                          }
+                          const task: Subtask = {
+                            id: taskId,
+                            threadId,
+                            runId,
+                            roundId: effectiveRoundId,
+                            subagent_type: toolCall.args.subagent_type,
+                            description: toolCall.args.description,
+                            prompt: toolCall.args.prompt,
+                            status,
+                            ...(startedAt !== undefined ? { startedAt } : {}),
+                            ...(status === "failed"
+                              ? { error: t.subtasks.failed }
+                              : {}),
+                          };
+                          tasks.add(task);
+                        }
+                      }
+                    }
+                  }
+
+                  const results: React.ReactNode[] = [];
+                  const subagentDebugMessageIds: string[] = [];
+                  if (!hideProtocolUi && groupIsLoading && tasks.size > 0) {
+                    results.push(
+                      <div
+                        key="subtask-count"
+                        className="text-muted-foreground pt-2 text-sm font-normal"
+                      >
+                        {t.subtasks.executing(tasks.size)}
+                      </div>,
                     );
-                    const startedAt = getMessageHistoryTime(message);
+                  }
+                  for (const message of group.messages.filter(
+                    (message) => message.type === "ai",
+                  )) {
                     if (
-                      !shouldKeepInferredSubtask({
-                        status,
-                        hasMatchingTerminal: Boolean(matchingTerminal),
-                        hasTerminalInOtherRun: hasTerminalSubtaskForTask(
-                          contextSubtasks,
-                          {
+                      !hideProtocolUi &&
+                      !hideThinkingUi &&
+                      hasReasoning(message)
+                    ) {
+                      results.push(
+                        <MessageGroup
+                          key={"thinking-group-" + message.id}
+                          messages={[message]}
+                          isLoading={groupIsLoading}
+                          tokenDebugSteps={tokenDebugSteps.filter(
+                            (step) => step.messageId === message.id,
+                          )}
+                          showTokenDebugSummaries={
+                            tokenUsageInlineMode === "step_debug"
+                          }
+                        />,
+                      );
+                    } else if (message.id) {
+                      subagentDebugMessageIds.push(message.id);
+                    }
+                    const taskIds = message.tool_calls?.flatMap((toolCall) =>
+                      toolCall.name === "task" && toolCall.id
+                        ? [toolCall.id]
+                        : [],
+                    );
+                    const runId = getMessageRunId(message);
+                    const roundId = getMessageRoundId(message);
+                    if (runId) {
+                      for (const taskId of taskIds ?? []) {
+                        const matchingTerminal =
+                          findMatchingTerminalSubtaskForTask(contextSubtasks, {
                             threadId,
                             runId,
                             taskId,
-                            roundId: effectiveRoundId,
-                          },
-                        ),
-                        isVisibleRunning: isInferredRunningSubtaskVisible({
-                          runId,
-                          startedAt,
-                          groupIsLoading,
-                          activeRunIds: activeHistoryRunIds,
-                          turnStartTime: activeTurnStartTime,
-                        }),
-                      })
-                    ) {
-                      continue;
-                    }
-                    const task: Subtask = {
-                      id: taskId,
-                      threadId,
-                      runId,
-                      roundId: effectiveRoundId,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
-                      status,
-                      ...(startedAt !== undefined ? { startedAt } : {}),
-                      ...(status === "failed"
-                        ? { error: t.subtasks.failed }
-                        : {}),
-                    };
-                    tasks.add(task);
-                  }
-                }
-              }
-            }
-
-            const results: React.ReactNode[] = [];
-            const subagentDebugMessageIds: string[] = [];
-            if (!hideProtocolUi && groupIsLoading && tasks.size > 0) {
-              results.push(
-                <div
-                  key="subtask-count"
-                  className="text-muted-foreground pt-2 text-sm font-normal"
-                >
-                  {t.subtasks.executing(tasks.size)}
-                </div>,
-              );
-            }
-            for (const message of group.messages.filter(
-              (message) => message.type === "ai",
-            )) {
-              if (!hideProtocolUi && !hideThinkingUi && hasReasoning(message)) {
-                results.push(
-                  <MessageGroup
-                    key={"thinking-group-" + message.id}
-                    messages={[message]}
-                    isLoading={groupIsLoading}
-                    tokenDebugSteps={tokenDebugSteps.filter(
-                      (step) => step.messageId === message.id,
-                    )}
-                    showTokenDebugSummaries={
-                      tokenUsageInlineMode === "step_debug"
-                    }
-                  />,
-                );
-              } else if (message.id) {
-                subagentDebugMessageIds.push(message.id);
-              }
-              const taskIds = message.tool_calls?.flatMap((toolCall) =>
-                toolCall.name === "task" && toolCall.id ? [toolCall.id] : [],
-              );
-              const runId = getMessageRunId(message);
-              const roundId = getMessageRoundId(message);
-              if (runId) {
-                for (const taskId of taskIds ?? []) {
-                  const matchingTerminal = findMatchingTerminalSubtaskForTask(
-                    contextSubtasks,
-                    {
-                      threadId,
-                      runId,
-                      taskId,
-                      roundId,
-                    },
-                  );
-                  const effectiveRoundId = roundId ?? matchingTerminal?.roundId;
-                  const status = derivePendingSubtaskStatus(
-                    taskId,
-                    group.messages,
-                    groupIsLoading,
-                  );
-                  const startedAt = getMessageHistoryTime(message);
-                  if (
-                    !shouldKeepInferredSubtask({
-                      status,
-                      hasMatchingTerminal: Boolean(matchingTerminal),
-                      hasTerminalInOtherRun: hasTerminalSubtaskForTask(
-                        contextSubtasks,
-                        {
-                          threadId,
-                          runId,
+                            roundId,
+                          });
+                        const effectiveRoundId =
+                          roundId ?? matchingTerminal?.roundId;
+                        const status = derivePendingSubtaskStatus(
                           taskId,
-                          roundId: effectiveRoundId,
-                        },
-                      ),
-                      isVisibleRunning: isInferredRunningSubtaskVisible({
-                        runId,
-                        startedAt,
-                        groupIsLoading,
-                        activeRunIds: activeHistoryRunIds,
-                        turnStartTime: activeTurnStartTime,
-                      }),
-                    })
-                  ) {
-                    continue;
-                  }
-                  results.push(
-                    <SubtaskCard
-                      key={getSubtaskCardKey(taskId, runId, effectiveRoundId)}
-                      runId={runId}
-                      roundId={effectiveRoundId}
-                      taskId={taskId}
-                      threadId={threadId}
-                      isLoading={
-                        groupIsLoading &&
-                        messages.some(
-                          (message) => getMessageRunId(message) === runId,
-                        )
+                          group.messages,
+                          groupIsLoading,
+                        );
+                        const startedAt = getMessageHistoryTime(message);
+                        if (
+                          !shouldKeepInferredSubtask({
+                            status,
+                            hasMatchingTerminal: Boolean(matchingTerminal),
+                            hasTerminalInOtherRun: hasTerminalSubtaskForTask(
+                              contextSubtasks,
+                              {
+                                threadId,
+                                runId,
+                                taskId,
+                                roundId: effectiveRoundId,
+                              },
+                            ),
+                            isVisibleRunning: isInferredRunningSubtaskVisible({
+                              runId,
+                              startedAt,
+                              groupIsLoading,
+                              activeRunIds: activeHistoryRunIds,
+                              turnStartTime: activeTurnStartTime,
+                            }),
+                          })
+                        ) {
+                          continue;
+                        }
+                        results.push(
+                          <SubtaskCard
+                            key={getSubtaskCardKey(
+                              taskId,
+                              runId,
+                              effectiveRoundId,
+                            )}
+                            runId={runId}
+                            roundId={effectiveRoundId}
+                            taskId={taskId}
+                            threadId={threadId}
+                            isLoading={
+                              groupIsLoading &&
+                              messages.some(
+                                (message) => getMessageRunId(message) === runId,
+                              )
+                            }
+                          />,
+                        );
                       }
-                    />,
+                    }
+                    if (hasContent(message)) {
+                      const messageIsLoading = isMessageActivelyStreaming(
+                        message,
+                        groupIsLoading,
+                        activeHistoryRunIds,
+                      );
+                      results.push(
+                        <MessageListItem
+                          key={`subagent-final-${message.id}`}
+                          message={message}
+                          isLoading={messageIsLoading}
+                          threadId={threadId}
+                          showCopyButton={false}
+                          hideThinkingUi={hideThinkingUi}
+                          turnStartTime={
+                            messageIsLoading ? activeTurnStartTime : null
+                          }
+                        />,
+                      );
+                    }
+                  }
+                  return (
+                    <div
+                      key={"subtask-group-" + groupKey}
+                      data-conversation-scroll-anchor
+                      className="relative z-1 flex flex-col gap-2"
+                    >
+                      {results}
+                      {renderTokenUsage({
+                        messages: group.messages,
+                        turnUsageMessages,
+                        debugMessageIds: subagentDebugMessageIds,
+                      })}
+                    </div>
                   );
                 }
-              }
-              if (hasContent(message)) {
-                const messageIsLoading = isMessageActivelyStreaming(
-                  message,
-                  groupIsLoading,
-                  activeHistoryRunIds,
+                return (
+                  <div
+                    key={"group-" + groupKey}
+                    data-conversation-scroll-anchor
+                    className="w-full"
+                  >
+                    <MessageGroup
+                      messages={group.messages}
+                      isLoading={thread.isLoading}
+                      hideThinkingUi={hideThinkingUi}
+                      tokenDebugSteps={tokenDebugSteps.filter((step) =>
+                        group.messages.some(
+                          (message) => message.id === step.messageId,
+                        ),
+                      )}
+                      showTokenDebugSummaries={
+                        tokenUsageInlineMode === "step_debug"
+                      }
+                    />
+                    {renderTokenUsage({
+                      messages: group.messages,
+                      turnUsageMessages,
+                      inlineDebug: false,
+                    })}
+                  </div>
                 );
-                results.push(
-                  <MessageListItem
-                    key={`subagent-final-${message.id}`}
-                    message={message}
-                    isLoading={messageIsLoading}
-                    threadId={threadId}
-                    showCopyButton={false}
-                    hideThinkingUi={hideThinkingUi}
-                    turnStartTime={
-                      messageIsLoading ? activeTurnStartTime : null
-                    }
-                  />,
-                );
-              }
-            }
-            return (
-              <div
-                key={"subtask-group-" + groupKey}
-                className="relative z-1 flex flex-col gap-2"
-              >
-                {results}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                  debugMessageIds: subagentDebugMessageIds,
-                })}
-              </div>
-            );
-          }
-          return (
-            <div key={"group-" + groupKey} className="w-full">
-              <MessageGroup
-                messages={group.messages}
-                isLoading={thread.isLoading}
-                hideThinkingUi={hideThinkingUi}
-                tokenDebugSteps={tokenDebugSteps.filter((step) =>
-                  group.messages.some(
-                    (message) => message.id === step.messageId,
-                  ),
-                )}
-                showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
-              />
-              {renderTokenUsage({
-                messages: group.messages,
-                turnUsageMessages,
-                inlineDebug: false,
               })}
-            </div>
+              {isActiveTurn && runtimeOnlySubtasks.length > 0 && (
+                <div className="relative z-1 flex flex-col gap-2">
+                  {!hideProtocolUi && (
+                    <div className="text-muted-foreground pt-2 text-sm font-normal">
+                      {t.subtasks.executing(runtimeOnlySubtasks.length)}
+                    </div>
+                  )}
+                  {runtimeOnlySubtasks.map((task) => (
+                    <SubtaskCard
+                      key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                      runId={task.runId!}
+                      roundId={task.roundId}
+                      taskId={task.id}
+                      threadId={threadId}
+                      isLoading={true}
+                    />
+                  ))}
+                </div>
+              )}
+              {footerParts.length > 0 && (
+                <div className="text-muted-foreground mt-3 text-xs">
+                  {footerParts.join(" · ")}
+                </div>
+              )}
+            </section>
           );
         })}
-        {runtimeOnlySubtasks.length > 0 && (
-          <div className="relative z-1 flex flex-col gap-2">
-            {!hideProtocolUi && (
-              <div className="text-muted-foreground pt-2 text-sm font-normal">
-                {t.subtasks.executing(runtimeOnlySubtasks.length)}
-              </div>
-            )}
-            {runtimeOnlySubtasks.map((task) => (
-              <SubtaskCard
-                key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
-                runId={task.runId!}
-                roundId={task.roundId}
-                taskId={task.id}
-                threadId={threadId}
-                isLoading={true}
-              />
-            ))}
-          </div>
-        )}
         {thread.isLoading &&
           !hideProtocolUi &&
           !hideThinkingUi &&
@@ -1349,6 +1652,12 @@ export function MessageList({
         )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
+      <ConversationTurnScrollController
+        historyPrependRef={historyPrependRef}
+        threadId={threadId}
+        activeTurnId={activeConversationTurn?.id}
+        isStreaming={thread.isLoading}
+      />
     </Conversation>
   );
 }

@@ -639,7 +639,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
  * Build a minimal SSE stream that the LangGraph SDK can parse.
  * The stream returns a single AI message: "Hello from DeerFlow!".
  */
-export function handleRunStream(route: Route) {
+export function handleRunStream(
+  route: Route,
+  { messages = mockStreamMessages() }: { messages?: unknown[] } = {},
+) {
   const events = [
     {
       event: "metadata",
@@ -648,7 +651,7 @@ export function handleRunStream(route: Route) {
     {
       event: "values",
       data: {
-        messages: mockStreamMessages(),
+        messages,
       },
     },
     { event: "end", data: {} },

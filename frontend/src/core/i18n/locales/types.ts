@@ -235,6 +235,12 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    turn: (number: number) => string;
+    completedAt: (time: string) => string;
+    elapsed: (minutes: number, seconds: number) => string;
+    inProgress: string;
+    failed: string;
+    returnToCurrentReply: string;
   };
 
   // Chats

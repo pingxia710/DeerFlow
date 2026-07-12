@@ -292,6 +292,12 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    turn: (number) => `第 ${number} 轮`,
+    completedAt: (time) => `完成于 ${time}`,
+    elapsed: (minutes, seconds) => `用时 ${minutes}分${seconds}秒`,
+    inProgress: "进行中",
+    failed: "已失败",
+    returnToCurrentReply: "回到当前回复",
   },
 
   // Chats

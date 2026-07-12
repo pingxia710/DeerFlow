@@ -26,6 +26,21 @@ export type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
+export const HISTORY_CREATED_AT_KEY = "history_created_at";
+
+export type ConversationTurn = {
+  id: string;
+  runId?: string;
+  groups: MessageGroup[];
+  hasHumanMessage: boolean;
+};
+
+export type ConversationTurnTiming = {
+  startedAt?: number;
+  completedAt?: number;
+  durationSeconds?: number;
+};
+
 const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "summary",
   "loop_warning",
@@ -120,6 +135,88 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   return groups;
+}
+
+function messageRunId(message: Message) {
+  const runId =
+    message.additional_kwargs?.deerflow_run_id ??
+    message.additional_kwargs?.run_id;
+  return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+function groupRunId(group: MessageGroup) {
+  return group.messages.map(messageRunId).find(Boolean);
+}
+
+function groupStableId(
+  group: MessageGroup,
+  index: number,
+  prefix: string,
+  runId?: string,
+) {
+  return `${prefix}:${group.id ?? group.messages[0]?.id ?? runId ?? index}`;
+}
+
+export function getConversationTurns(
+  groups: MessageGroup[],
+): ConversationTurn[] {
+  const turns: ConversationTurn[] = [];
+  let currentTurn: ConversationTurn | undefined;
+
+  for (const [index, group] of groups.entries()) {
+    const runId = groupRunId(group);
+    if (group.type === "human" || !currentTurn) {
+      currentTurn = {
+        id: groupStableId(
+          group,
+          index,
+          group.type === "human" ? "human" : "orphan",
+          runId,
+        ),
+        ...(runId ? { runId } : {}),
+        groups: [group],
+        hasHumanMessage: group.type === "human",
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+
+    currentTurn.groups.push(group);
+    currentTurn.runId ??= runId;
+  }
+
+  return turns;
+}
+
+export function getConversationTurnTiming(
+  turn: ConversationTurn,
+): ConversationTurnTiming {
+  const timing: ConversationTurnTiming = {};
+
+  for (const group of turn.groups) {
+    for (const message of group.messages) {
+      const createdAt = message.additional_kwargs?.[HISTORY_CREATED_AT_KEY];
+      if (typeof createdAt === "string") {
+        const timestamp = Date.parse(createdAt);
+        if (Number.isFinite(timestamp)) {
+          timing.startedAt ??= timestamp;
+          timing.completedAt = timestamp;
+        }
+      }
+
+      const duration = message.additional_kwargs?.turn_duration;
+      if (
+        message.type === "ai" &&
+        typeof duration === "number" &&
+        Number.isFinite(duration) &&
+        duration >= 0
+      ) {
+        timing.durationSeconds = duration;
+      }
+    }
+  }
+
+  return timing;
 }
 
 export function groupMessages<T>(

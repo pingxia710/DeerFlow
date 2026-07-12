@@ -309,6 +309,12 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    turn: (number) => `Round ${number}`,
+    completedAt: (time) => `Completed at ${time}`,
+    elapsed: (minutes, seconds) => `${minutes}m ${seconds}s`,
+    inProgress: "In progress",
+    failed: "Failed",
+    returnToCurrentReply: "Return to current reply",
   },
 
   // Chats

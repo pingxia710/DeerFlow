@@ -2,11 +2,14 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  HISTORY_CREATED_AT_KEY,
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
+  getConversationTurnTiming,
+  getConversationTurns,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
@@ -79,6 +82,194 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+describe("conversation turn projection", () => {
+  test("keeps one user request and its tool work in one persisted run turn", () => {
+    const messages = [
+      {
+        id: "human-1",
+        type: "human",
+        content: "Research this",
+        additional_kwargs: { deerflow_run_id: "run-1" },
+      },
+      {
+        id: "ai-tool-1",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+        additional_kwargs: { deerflow_run_id: "run-1" },
+      },
+      {
+        id: "tool-result-1",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "[]",
+        additional_kwargs: { deerflow_run_id: "run-1" },
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Here is the result.",
+        additional_kwargs: { deerflow_run_id: "run-1" },
+      },
+    ] as Message[];
+
+    const turns = getConversationTurns(getMessageGroups(messages));
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      runId: "run-1",
+      hasHumanMessage: true,
+    });
+    expect(turns[0]?.groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant",
+    ]);
+  });
+
+  test("uses a human boundary when legacy messages have no run id", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First" },
+      { id: "ai-1", type: "ai", content: "First answer" },
+      { id: "human-2", type: "human", content: "Second" },
+      { id: "ai-2", type: "ai", content: "Second answer" },
+    ] as Message[];
+
+    const turns = getConversationTurns(getMessageGroups(messages));
+
+    expect(turns).toHaveLength(2);
+    expect(turns.map((turn) => turn.hasHumanMessage)).toEqual([true, true]);
+    expect(turns.map((turn) => turn.groups[0]?.id)).toEqual([
+      "human-1",
+      "human-2",
+    ]);
+  });
+
+  test("does not change a human turn key when a later group adds its run id", () => {
+    const legacyGroups = getMessageGroups([
+      { id: "human-1", type: "human", content: "Continue" },
+      { id: "ai-1", type: "ai", content: "Answer" },
+    ] as Message[]);
+    const enrichedGroups = getMessageGroups([
+      { id: "human-1", type: "human", content: "Continue" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Answer",
+        additional_kwargs: { deerflow_run_id: "run-late" },
+      },
+    ] as Message[]);
+
+    const legacyTurn = getConversationTurns(legacyGroups)[0];
+    const enrichedTurn = getConversationTurns(enrichedGroups)[0];
+
+    expect(enrichedTurn?.id).toBe(legacyTurn?.id);
+    expect(enrichedTurn?.runId).toBe("run-late");
+  });
+
+  test("keeps a persisted run key stable when older id-less history is prepended", () => {
+    const latestGroups = getMessageGroups([
+      {
+        type: "human",
+        content: "Newest request",
+        additional_kwargs: { deerflow_run_id: "run-latest" },
+      },
+      {
+        type: "ai",
+        content: "Newest answer",
+        additional_kwargs: { deerflow_run_id: "run-latest" },
+      },
+    ] as Message[]);
+    const prependedGroups = getMessageGroups([
+      {
+        type: "human",
+        content: "Older request",
+        additional_kwargs: { deerflow_run_id: "run-older" },
+      },
+      {
+        type: "ai",
+        content: "Older answer",
+        additional_kwargs: { deerflow_run_id: "run-older" },
+      },
+      ...latestGroups.flatMap((group) => group.messages),
+    ] as Message[]);
+
+    const before = getConversationTurns(latestGroups)[0];
+    const after = getConversationTurns(prependedGroups).find(
+      (turn) => turn.runId === "run-latest",
+    );
+
+    expect(after?.id).toBe(before?.id);
+  });
+
+  test("retains an assistant-only legacy fragment as an orphan turn", () => {
+    const groups = getMessageGroups([
+      { id: "ai-1", type: "ai", content: "Partial history" },
+    ] as Message[]);
+
+    const turns = getConversationTurns(groups);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ hasHumanMessage: false });
+    expect(turns[0]?.groups).toEqual(groups);
+  });
+
+  test("selects factual persisted times and final AI duration", () => {
+    const turns = getConversationTurns(
+      getMessageGroups([
+        {
+          id: "human-1",
+          type: "human",
+          content: "When?",
+          additional_kwargs: {
+            [HISTORY_CREATED_AT_KEY]: "2026-07-12T06:22:00.000Z",
+          },
+        },
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Done",
+          additional_kwargs: {
+            [HISTORY_CREATED_AT_KEY]: "2026-07-12T06:24:18.000Z",
+            turn_duration: 138,
+          },
+        },
+      ] as Message[]),
+    );
+
+    expect(getConversationTurnTiming(turns[0]!)).toEqual({
+      startedAt: Date.parse("2026-07-12T06:22:00.000Z"),
+      completedAt: Date.parse("2026-07-12T06:24:18.000Z"),
+      durationSeconds: 138,
+    });
+  });
+
+  test("omits invalid timestamps and durations instead of inventing them", () => {
+    const turns = getConversationTurns(
+      getMessageGroups([
+        {
+          id: "human-1",
+          type: "human",
+          content: "When?",
+          additional_kwargs: { [HISTORY_CREATED_AT_KEY]: "not-a-date" },
+        },
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Done",
+          additional_kwargs: {
+            [HISTORY_CREATED_AT_KEY]: "also-not-a-date",
+            turn_duration: -1,
+          },
+        },
+      ] as Message[]),
+    );
+
+    expect(getConversationTurnTiming(turns[0]!)).toEqual({});
+  });
 });
 
 describe("inline <think> tag splitting", () => {

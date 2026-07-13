@@ -13,6 +13,7 @@ from deerflow.uploads.manager import (
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
+    open_upload_file_no_symlink,
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
@@ -135,23 +136,46 @@ class TestWriteUploadFileNoSymlink:
         assert result == tmp_path / "notes.txt"
         assert (tmp_path / "notes.txt").read_bytes() == b"hello"
 
-    def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
+    def test_stream_open_uses_nonblocking_flag_when_available(self, tmp_path):
         if not hasattr(os, "O_NONBLOCK"):
             pytest.skip("O_NONBLOCK not available on this platform")
-        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(errno.ENXIO, "no reader")) as open_mock:
-            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
-                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+        real_open = os.open
 
-        flags = open_mock.call_args.args[1]
+        def fail_final_open(path, flags, mode=0o777, **kwargs):
+            if path == "pipe.txt":
+                raise OSError(errno.ENXIO, "no reader")
+            return real_open(path, flags, mode, **kwargs)
+
+        with patch("deerflow.uploads.manager.os.open", side_effect=fail_final_open) as open_mock:
+            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
+                directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    open_upload_file_no_symlink(tmp_path, "pipe.txt", directory_fd=directory_fd)
+                finally:
+                    os.close(directory_fd)
+
+        final_open = next(call for call in open_mock.call_args_list if call.args[0] == "pipe.txt")
+        flags = final_open.args[1]
         assert flags & os.O_NONBLOCK
 
     @pytest.mark.parametrize("open_errno", [errno.ENXIO, errno.EAGAIN])
-    def test_nonblocking_special_file_open_errors_are_unsafe(self, tmp_path, open_errno):
+    def test_stream_nonblocking_special_file_open_errors_are_unsafe(self, tmp_path, open_errno):
         if not hasattr(os, "O_NONBLOCK"):
             pytest.skip("O_NONBLOCK not available on this platform")
-        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(open_errno, "would block")):
+        real_open = os.open
+
+        def fail_final_open(path, flags, mode=0o777, **kwargs):
+            if path == "pipe.txt":
+                raise OSError(open_errno, "would block")
+            return real_open(path, flags, mode, **kwargs)
+
+        with patch("deerflow.uploads.manager.os.open", side_effect=fail_final_open):
             with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
-                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+                directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    open_upload_file_no_symlink(tmp_path, "pipe.txt", directory_fd=directory_fd)
+                finally:
+                    os.close(directory_fd)
 
         assert not (tmp_path / "pipe.txt").exists()
 

@@ -554,6 +554,30 @@ class TestRegistryCustomAgentLookup:
         assert config.system_prompt == "Use local fact finder."
         assert config.skills == []
 
+    def test_custom_command_room_role_keeps_its_own_timeout_and_turn_limit(self):
+        from deerflow.subagents.registry import get_subagent_config
+
+        load_subagents_config_from_dict(
+            {
+                "timeout_seconds": 1800,
+                "max_turns": 120,
+                "custom_agents": {
+                    "fact-finder": {
+                        "description": "Local fact finder",
+                        "system_prompt": "Use local fact finder.",
+                        "max_turns": 80,
+                        "timeout_seconds": 300,
+                    },
+                },
+            }
+        )
+
+        config = get_subagent_config("fact-finder")
+
+        assert config is not None
+        assert config.timeout_seconds == 300
+        assert config.max_turns == 80
+
     def test_custom_agent_with_override(self):
         """Per-agent overrides also apply to custom agents."""
         from deerflow.subagents.registry import get_subagent_config

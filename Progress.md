@@ -14,6 +14,14 @@
 - TDD coverage first reproduced both failures: the Command Room channel default was `100`, and an `error` stream frame was discarded. Focused regressions then passed, followed by the complete channel suite and Ruff checks.
 - Deliberately skipped: no Gateway restart, no active-run cancellation, no configuration/credential change, no main-worktree modification, no commit/push, and no live Feishu validation before integration.
 
+## 2026-07-13 — Command Room custom-role timeout precedence correction
+
+- Removed three unconfirmed Command Room policies introduced in the local timeout fix: a mandatory direct-inspection rule for project reviews, a two-task total cap, and a shared five-minute delegation window. The existing per-response concurrency cap remains unchanged.
+- Fixed custom Command Room role resolution so a locally configured `fact-finder` keeps its own timeout and turn limit; global defaults apply only when the selected configuration is genuinely built-in, while explicit per-agent overrides still take precedence.
+- TDD first reproduced the failure: a custom 300-second `fact-finder` was incorrectly resolved to the global 1800-second timeout. The regression passes after the precedence fix.
+- Validation: focused registry/task-tool/prompt suites passed `132`; full backend suite passed `6353` with `20` conditional skips; Ruff check and format check passed.
+- Deliberately skipped: no service restart, active-run cancellation, config/credential change, deployment, push, or live-data mutation.
+
 ## 2026-07-13 — Command Room stale-goal loop correction
 
 - Traced the repeated full-audit behavior to two live inputs: an owner-scoped legacy Command Room `SOUL.md` that required opposition/Round Card behavior, and a full 100-fact memory where equal-confidence old goals crowded out later corrections.

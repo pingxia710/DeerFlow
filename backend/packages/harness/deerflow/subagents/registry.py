@@ -78,14 +78,18 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     """
     # Step 1: Look up built-in, then fall back to custom_agents. Allow selected
     # Command Room roles to keep local custom definitions when present.
+    uses_builtin_config = False
     if name in _CUSTOM_OVERRIDABLE_BUILTINS:
         config = _build_custom_subagent_config(name, app_config=app_config)
         if config is None:
             config = BUILTIN_SUBAGENTS.get(name)
+            uses_builtin_config = config is not None
     else:
         config = BUILTIN_SUBAGENTS.get(name)
         if config is None:
             config = _build_custom_subagent_config(name, app_config=app_config)
+        else:
+            uses_builtin_config = True
     if config is None:
         return None
 
@@ -95,7 +99,6 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     # but must NOT override custom agents' own values — custom agents define
     # their own defaults in the custom_agents section.
     subagents_config = _resolve_subagents_app_config(app_config)
-    is_builtin = name in BUILTIN_SUBAGENTS
     agent_override = subagents_config.agents.get(name)
 
     overrides = {}
@@ -105,7 +108,7 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
         if agent_override.timeout_seconds != config.timeout_seconds:
             logger.debug("Subagent '%s': timeout overridden (%ss -> %ss)", name, config.timeout_seconds, agent_override.timeout_seconds)
             overrides["timeout_seconds"] = agent_override.timeout_seconds
-    elif is_builtin and subagents_config.timeout_seconds != config.timeout_seconds:
+    elif uses_builtin_config and subagents_config.timeout_seconds != config.timeout_seconds:
         logger.debug("Subagent '%s': timeout from global default (%ss -> %ss)", name, config.timeout_seconds, subagents_config.timeout_seconds)
         overrides["timeout_seconds"] = subagents_config.timeout_seconds
 
@@ -114,7 +117,7 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
         if agent_override.max_turns != config.max_turns:
             logger.debug("Subagent '%s': max_turns overridden (%s -> %s)", name, config.max_turns, agent_override.max_turns)
             overrides["max_turns"] = agent_override.max_turns
-    elif is_builtin and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
+    elif uses_builtin_config and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
         logger.debug("Subagent '%s': max_turns from global default (%s -> %s)", name, config.max_turns, subagents_config.max_turns)
         overrides["max_turns"] = subagents_config.max_turns
 

@@ -922,12 +922,7 @@ def apply_prompt_template(
 
     # Add subagent reminder to critical_reminders if enabled
     if subagent_enabled and is_command_room:
-        subagent_reminder = (
-            "- **AI Dispatch**: Use LLM judgment to dispatch useful sub-AIs with `task`; "
-            "run independent clear-bounded lanes in parallel up to "
-            f"max {n} `task` calls per response; a single delegation is allowed when only one lane has value; "
-            "synthesize returned AI results.\n"
-        )
+        subagent_reminder = f"- **AI Dispatch**: Use LLM judgment to dispatch useful sub-AIs with `task`; max {n} `task` calls per response; a single delegation is allowed when only one lane has value; synthesize returned AI results.\n"
     elif subagent_enabled:
         subagent_reminder = (
             "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "

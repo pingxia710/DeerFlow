@@ -1103,8 +1103,8 @@ test.describe("Thread history", () => {
 
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
     await expect(page.getByText(marker)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText("运行已终止")).toBeVisible();
-    await expect(page.getByText("终止原因：success")).toBeVisible();
+    await expect(page.getByText("Run terminated")).toBeVisible();
+    await expect(page.getByText("Termination reason: success")).toBeVisible();
     await expect
       .poll(() => staleRunQueries, { timeout: 15_000 })
       .toBeGreaterThan(0);

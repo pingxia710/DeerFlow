@@ -37,6 +37,17 @@ export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
 }
 
+export type RunMessageDisplayType =
+  | "visible_chat_message"
+  | "task_event"
+  | "action_result"
+  | "subagent_finding"
+  | "round_summary"
+  | "system_internal_state"
+  | "artifact_reference";
+
+export type RunMessagePayloadType = "action_result" | "artifact_reference";
+
 export interface RunMessage {
   run_id: string;
   seq?: number;
@@ -49,6 +60,8 @@ export interface RunMessage {
     visible_in_chat: boolean;
     surface?: "chat" | "control" | "audit" | "hidden";
     reason: string;
+    message_type?: RunMessageDisplayType;
+    payload_types?: RunMessagePayloadType[];
   };
   created_at: string;
 }

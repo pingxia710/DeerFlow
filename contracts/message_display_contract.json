@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "schema_version": "deerflow.message-display/v1",
+  "description": "Cross-component contract for classifying persisted run messages before they reach chat UI, control replay, or audit surfaces.",
+  "display_fields": [
+    "visible_in_chat",
+    "surface",
+    "reason",
+    "message_type",
+    "payload_types"
+  ],
+  "surfaces": ["chat", "control", "audit", "hidden"],
+  "message_types": [
+    "visible_chat_message",
+    "task_event",
+    "action_result",
+    "subagent_finding",
+    "round_summary",
+    "system_internal_state",
+    "artifact_reference"
+  ],
+  "payload_types": ["action_result", "artifact_reference"],
+  "current_mapping": {
+    "visible_chat_message": {
+      "surface": "chat",
+      "visible_in_chat": true
+    },
+    "task_event": {
+      "surface": "control",
+      "visible_in_chat": false
+    },
+    "system_internal_state": {
+      "surface": "control_or_hidden",
+      "visible_in_chat": false
+    },
+    "subagent_finding": {
+      "surface": "control_or_audit",
+      "visible_in_chat": false
+    },
+    "round_summary": {
+      "surface": "audit",
+      "visible_in_chat": false
+    }
+  },
+  "compatibility_notes": [
+    "visible_in_chat remains the hard chat bubble gate.",
+    "message_type is the primary row classification; payload_types lists secondary structured payloads carried by that row.",
+    "Terminal task_event rows may carry action_result and artifact_reference payloads.",
+    "Frontend may fall back to legacy caller/name/type/hide_from_ui rules only when display.message_type is absent."
+  ]
+}

@@ -1153,6 +1153,72 @@ test("task event run messages update subtask state without entering visible hist
   ).toEqual(["ai-1"]);
 });
 
+test("task event replay honors the backend message type contract", () => {
+  const taskEventRow = {
+    run_id: "run-1",
+    seq: 1,
+    content: {
+      type: "task_completed",
+      task_id: "call-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+      action_result: {
+        status: "completed",
+        summary: "contract result",
+      },
+    },
+    metadata: { caller: "lead_agent" },
+    display: {
+      visible_in_chat: false,
+      surface: "control",
+      reason: "task_event",
+      message_type: "task_event",
+      payload_types: ["action_result"],
+    },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+  const updates: unknown[] = [];
+
+  expect(isTaskEventRunMessage(taskEventRow)).toBe(true);
+  expect(isVisibleHistoryRunMessage(taskEventRow)).toBe(false);
+  applyTaskEventRunMessages([taskEventRow], (update) => updates.push(update));
+
+  expect(updates).toEqual([
+    {
+      id: "call-1",
+      threadId: "thread-1",
+      runId: "run-1",
+      notify: true,
+      status: "completed",
+      actionResultStatus: "completed",
+      result: "contract result",
+    },
+  ]);
+});
+
+test("backend non-task message type prevents legacy task-event guessing", () => {
+  const row = {
+    run_id: "run-1",
+    content: {
+      type: "task_completed",
+      task_id: "call-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+    },
+    metadata: { caller: "task_event" },
+    display: {
+      visible_in_chat: false,
+      surface: "control",
+      reason: "control_message",
+      message_type: "system_internal_state",
+      payload_types: [],
+    },
+    created_at: "2026-05-22T00:00:00Z",
+  } as RunMessage;
+
+  expect(isTaskEventRunMessage(row)).toBe(false);
+});
+
 test("mixed task event replay preserves each event identity", () => {
   const rows = [
     {

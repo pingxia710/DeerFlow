@@ -1760,24 +1760,60 @@ def _is_slash_skill_activation_only(message: Any) -> bool:
     return public_text == ""
 
 
+def _message_payload_types(content: Any) -> list[str]:
+    if not isinstance(content, dict):
+        return []
+    payload_types: list[str] = []
+    action_result = content.get("action_result")
+    if isinstance(action_result, dict) and action_result:
+        payload_types.append("action_result")
+    artifact_refs = content.get("artifact_refs")
+    if isinstance(artifact_refs, list) and any(isinstance(ref, str) and ref for ref in artifact_refs):
+        payload_types.append("artifact_reference")
+    return payload_types
+
+
+def _display(
+    *,
+    visible_in_chat: bool,
+    surface: str,
+    reason: str,
+    message_type: str,
+    payload_types: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "visible_in_chat": visible_in_chat,
+        "surface": surface,
+        "reason": reason,
+        "message_type": message_type,
+        "payload_types": payload_types or [],
+    }
+
+
 def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     caller = str(metadata.get("caller") or "")
     if caller == "task_event":
-        return {"visible_in_chat": False, "surface": "control", "reason": "task_event"}
+        return _display(
+            visible_in_chat=False,
+            surface="control",
+            reason="task_event",
+            message_type="task_event",
+            payload_types=_message_payload_types(content),
+        )
     if caller.startswith("middleware:"):
-        return {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"}
+        return _display(visible_in_chat=False, surface="control", reason="middleware_message", message_type="system_internal_state")
     if caller.startswith("subagent:"):
-        return {"visible_in_chat": False, "surface": "control", "reason": "subagent_message"}
+        return _display(visible_in_chat=False, surface="control", reason="subagent_message", message_type="subagent_finding")
     additional_kwargs = _message_additional_kwargs(content)
     if additional_kwargs.get("hide_from_ui") is True:
-        return {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"}
+        return _display(visible_in_chat=False, surface="hidden", reason="hide_from_ui", message_type="system_internal_state")
     if _message_type(content) == "remove":
-        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
+        return _display(visible_in_chat=False, surface="control", reason="control_message", message_type="system_internal_state")
     name = _message_name(content)
     if name is not None and name in HIDDEN_CONTROL_MESSAGE_NAMES:
-        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
+        return _display(visible_in_chat=False, surface="control", reason="control_message", message_type="system_internal_state")
     if _is_slash_skill_activation_only(content):
-        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
+        return _display(visible_in_chat=False, surface="control", reason="control_message", message_type="system_internal_state")
 
     message_type = _message_type(content)
     caller = str(metadata.get("caller") or "")
@@ -1786,10 +1822,10 @@ def _message_display(content: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     elif message_type == "ai":
         reason = "lead_ai_response"
     elif message_type == "tool":
-        return {"visible_in_chat": False, "surface": "control", "reason": "tool_message"}
+        return _display(visible_in_chat=False, surface="control", reason="tool_message", message_type="system_internal_state")
     else:
-        return {"visible_in_chat": False, "surface": "control", "reason": "control_message"}
-    return {"visible_in_chat": True, "surface": "chat", "reason": reason}
+        return _display(visible_in_chat=False, surface="control", reason="control_message", message_type="system_internal_state")
+    return _display(visible_in_chat=True, surface="chat", reason=reason, message_type="visible_chat_message")
 
 
 def attach_message_display(rows: list[dict]) -> list[dict]:

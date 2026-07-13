@@ -103,6 +103,8 @@ def test_run_messages_returns_display_contract():
         "visible_in_chat": True,
         "surface": "chat",
         "reason": "lead_ai_response",
+        "message_type": "visible_chat_message",
+        "payload_types": [],
     }
 
 
@@ -137,11 +139,15 @@ def test_run_messages_marks_internal_rows_hidden_from_chat():
             "visible_in_chat": False,
             "surface": "control",
             "reason": "middleware_message",
+            "message_type": "system_internal_state",
+            "payload_types": [],
         },
         {
             "visible_in_chat": False,
             "surface": "control",
             "reason": "tool_message",
+            "message_type": "system_internal_state",
+            "payload_types": [],
         },
     ]
 

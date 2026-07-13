@@ -124,8 +124,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   Legacy rows without `metadata.caller` may still be treated as task events when
   their content matches the pinned task-event schema.
 - History run messages should honor backend `display.visible_in_chat` when
-  present; only fall back to local `caller`/`name`/`type`/`hide_from_ui` checks
-  for older rows without the display contract.
+  present, and use `display.message_type` / `display.payload_types` for typed
+  replay state. Only fall back to local `caller`/`name`/`type`/`hide_from_ui`
+  checks for older rows without the display contract.
 - Initial thread reload should hydrate from
   `/api/threads/{thread_id}/runtime-snapshot` before falling back to individual
   run-list/message endpoints. Snapshot rows use the same `display` contract and

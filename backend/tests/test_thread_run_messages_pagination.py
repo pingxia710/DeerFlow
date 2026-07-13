@@ -335,6 +335,8 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
         "visible_in_chat": False,
         "surface": "control",
         "reason": "middleware_message",
+        "message_type": "system_internal_state",
+        "payload_types": [],
     }
     assert body["run_messages"][1]["data"][0]["content"]["content"] == "older question"
     assert body["rounds"][0]["round_id"] == "round-1"
@@ -573,6 +575,8 @@ def test_returns_middleware_message_rows_as_control_rows():
         "visible_in_chat": False,
         "surface": "control",
         "reason": "middleware_message",
+        "message_type": "system_internal_state",
+        "payload_types": [],
     }
 
 
@@ -629,9 +633,16 @@ def test_list_run_messages_attaches_display_visibility_contract():
         {
             "seq": 7,
             "run_id": "run-1",
-            "event_type": "task_running",
+            "event_type": "task_completed",
             "category": "message",
-            "content": {"type": "task_running", "task_id": "call-1", "thread_id": "thread-1", "run_id": "run-1"},
+            "content": {
+                "type": "task_completed",
+                "task_id": "call-1",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "artifact_refs": ["outputs/report.md"],
+                "action_result": {"status": "completed", "summary": "done"},
+            },
             "metadata": {"caller": "task_event"},
         },
         {
@@ -658,15 +669,21 @@ def test_list_run_messages_attaches_display_visibility_contract():
     assert response.status_code == 200
     displays = [row["display"] for row in response.json()["data"]]
     assert displays == [
-        {"visible_in_chat": True, "surface": "chat", "reason": "human_message"},
-        {"visible_in_chat": True, "surface": "chat", "reason": "lead_ai_response"},
-        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"},
-        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message"},
-        {"visible_in_chat": False, "surface": "control", "reason": "tool_message"},
-        {"visible_in_chat": False, "surface": "control", "reason": "control_message"},
-        {"visible_in_chat": False, "surface": "control", "reason": "task_event"},
-        {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui"},
-        {"visible_in_chat": False, "surface": "control", "reason": "control_message"},
+        {"visible_in_chat": True, "surface": "chat", "reason": "human_message", "message_type": "visible_chat_message", "payload_types": []},
+        {"visible_in_chat": True, "surface": "chat", "reason": "lead_ai_response", "message_type": "visible_chat_message", "payload_types": []},
+        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message", "message_type": "system_internal_state", "payload_types": []},
+        {"visible_in_chat": False, "surface": "control", "reason": "middleware_message", "message_type": "system_internal_state", "payload_types": []},
+        {"visible_in_chat": False, "surface": "control", "reason": "tool_message", "message_type": "system_internal_state", "payload_types": []},
+        {"visible_in_chat": False, "surface": "control", "reason": "control_message", "message_type": "system_internal_state", "payload_types": []},
+        {
+            "visible_in_chat": False,
+            "surface": "control",
+            "reason": "task_event",
+            "message_type": "task_event",
+            "payload_types": ["action_result", "artifact_reference"],
+        },
+        {"visible_in_chat": False, "surface": "hidden", "reason": "hide_from_ui", "message_type": "system_internal_state", "payload_types": []},
+        {"visible_in_chat": False, "surface": "control", "reason": "control_message", "message_type": "system_internal_state", "payload_types": []},
     ]
 
 
@@ -1255,11 +1272,15 @@ def test_list_thread_messages_attaches_display_visibility_contract():
         "visible_in_chat": True,
         "surface": "chat",
         "reason": "lead_ai_response",
+        "message_type": "visible_chat_message",
+        "payload_types": [],
     }
     assert data[1]["display"] == {
         "visible_in_chat": False,
         "surface": "control",
         "reason": "task_event",
+        "message_type": "task_event",
+        "payload_types": [],
     }
 
 

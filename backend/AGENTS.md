@@ -302,8 +302,10 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 
 Message rows returned by messages endpoints carry `display.visible_in_chat`
-and `display.reason`; frontend chat visibility should consume that contract
-instead of guessing from `caller`, `name`, or `hide_from_ui` when present.
+and `display.reason`; newer rows also carry `display.message_type` and
+`display.payload_types` from `contracts/message_display_contract.json`.
+Frontend chat visibility should consume that contract instead of guessing from
+`caller`, `name`, or `hide_from_ui` when present.
 Chat-visible rows are user messages and lead-agent user-facing AI responses;
 task events, raw tool rows, middleware rows, and subagent rows are persisted
 control/history rows but should stay out of chat bubbles.

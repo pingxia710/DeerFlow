@@ -293,6 +293,9 @@ function applyActionResultMetadata(
 }
 
 export function isTaskEventRunMessage(message: RunMessage) {
+  if (message.display?.message_type) {
+    return message.display.message_type === "task_event";
+  }
   return (
     message.metadata?.caller === TASK_EVENT_CALLER ||
     asTaskEvent(message.content) !== null

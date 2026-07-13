@@ -20,6 +20,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
+from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.path_utils import get_request_storage_user_id
@@ -551,13 +552,13 @@ async def apply_checkpoint_to_run_config(
     if not checkpoint_id:
         return
 
-    read_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": str(checkpoint_id),
-        }
-    }
+    owner_user_id = get_request_storage_user_id(request)
+    read_config = owner_checkpoint_config(
+        thread_id,
+        owner_user_id,
+        checkpoint_ns=checkpoint_ns,
+        checkpoint_id=str(checkpoint_id),
+    )
     if checkpoint_map is not None:
         read_config["configurable"]["checkpoint_map"] = checkpoint_map
 
@@ -570,14 +571,13 @@ async def apply_checkpoint_to_run_config(
     if checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
 
-    configurable = config.setdefault("configurable", {})
+    configurable = config.get("configurable")
+    if configurable is None:
+        configurable = {}
     if not isinstance(configurable, dict):
         raise HTTPException(status_code=400, detail="request config configurable must be an object")
-    configurable["thread_id"] = thread_id
-    configurable["checkpoint_ns"] = checkpoint_ns
-    configurable["checkpoint_id"] = str(checkpoint_id)
-    if checkpoint_map is not None:
-        configurable["checkpoint_map"] = checkpoint_map
+    configurable.update(read_config["configurable"])
+    config["configurable"] = configurable
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +754,13 @@ async def start_run(
     else:
         graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    # LangGraph's saver receives an owner-qualified physical key while the
+    # external thread id remains available to tools and runtime events.
+    config.setdefault("context", {}).setdefault("thread_id", thread_id)
+    config["configurable"] = {
+        **(config.get("configurable") if isinstance(config.get("configurable"), dict) else {}),
+        **owner_checkpoint_config(thread_id, owner_user_id)["configurable"],
+    }
     await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
     merge_run_context_overrides(config, getattr(body, "context", None))
     inject_authenticated_user_context(config, request)

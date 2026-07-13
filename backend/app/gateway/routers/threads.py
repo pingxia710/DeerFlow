@@ -26,6 +26,7 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
+from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import get_request_storage_user_id
@@ -538,11 +539,12 @@ async def _write_initial_checkpoint(
     checkpointer: Any,
     *,
     thread_id: str,
+    user_id: str,
     metadata: dict[str, Any],
     created_at: str,
     only_if_missing: bool,
 ) -> None:
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config = owner_checkpoint_config(thread_id, user_id, checkpoint_ns="")
     if only_if_missing:
         get_checkpoint = getattr(checkpointer, "aget_tuple", None)
         if get_checkpoint is None:
@@ -688,8 +690,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
 
     await _cleanup_thread_runtime_state(thread_id, request, user_id=storage_user_id)
 
-    # Checkpoints are not owner-keyed. Their deletion is the critical gate
-    # before the owner boundary may be removed.
+    # Delete only this owner's physical checkpoint key before removing the
+    # external owner boundary.
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is None:
         logger.error("Checkpointer unavailable while deleting thread %s", sanitize_log_param(thread_id))
@@ -698,7 +700,11 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         delete_checkpoints = getattr(checkpointer, "adelete_thread", None)
         if delete_checkpoints is None:
             raise RuntimeError("checkpointer does not support adelete_thread")
-        await delete_checkpoints(thread_id)
+        checkpoint_thread_id = owner_checkpoint_config(
+            thread_id,
+            storage_user_id,
+        )["configurable"]["thread_id"]
+        await delete_checkpoints(checkpoint_thread_id)
     except Exception as exc:
         logger.exception("Could not delete checkpoints for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints") from exc
@@ -883,6 +889,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
                 await _write_initial_checkpoint(
                     checkpointer,
                     thread_id=thread_id,
+                    user_id=storage_user_id,
                     metadata=existing_record.get("metadata", {}),
                     created_at=coerce_iso(existing_record.get("created_at", now)),
                     only_if_missing=True,
@@ -934,6 +941,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             await _write_initial_checkpoint(
                 checkpointer,
                 thread_id=thread_id,
+                user_id=storage_user_id,
                 metadata=create_result.get("metadata", body.metadata),
                 created_at=coerce_iso(create_result.get("created_at", now)),
                 only_if_missing=not created_metadata,
@@ -1067,7 +1075,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     record: dict | None = await thread_store.get(thread_id, user_id=storage_user_id)
 
     # Derive accurate status from the checkpointer
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config = owner_checkpoint_config(thread_id, storage_user_id, checkpoint_ns="")
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)
     except Exception:
@@ -1137,8 +1145,9 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     are converted to JSON-safe dicts.
     """
     checkpointer = get_checkpointer(request)
+    storage_user_id = get_request_storage_user_id(request)
 
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config = owner_checkpoint_config(thread_id, storage_user_id, checkpoint_ns="")
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)
     except Exception:
@@ -1198,14 +1207,13 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     # checkpoint_ns must be present in the config for aput — default to ""
     # (the root graph namespace).  checkpoint_id is optional; omitting it
     # fetches the latest checkpoint for the thread.
-    read_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
-    if body.checkpoint_id:
-        read_config["configurable"]["checkpoint_id"] = body.checkpoint_id
+    storage_user_id = get_request_storage_user_id(request)
+    read_config = owner_checkpoint_config(
+        thread_id,
+        storage_user_id,
+        checkpoint_ns="",
+        checkpoint_id=body.checkpoint_id,
+    )
 
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(read_config)
@@ -1247,12 +1255,11 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     # persist and echo back checkpoint["id"] verbatim — none mint their own — so
     # the new_config below carries the uuid6 we assigned here. (Regression-locked
     # by test_update_thread_state_inserts_new_checkpoint_each_call.)
-    write_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
+    write_config = owner_checkpoint_config(
+        thread_id,
+        storage_user_id,
+        checkpoint_ns="",
+    )
     run_manager = get_run_manager(request)
     try:
         await run_manager.begin_thread_write(thread_id)
@@ -1313,22 +1320,21 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     avoid duplicating them across every entry.
     """
     checkpointer = get_checkpointer(request)
+    storage_user_id = get_request_storage_user_id(request)
 
-    config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
+    config: dict[str, Any] = owner_checkpoint_config(
+        thread_id,
+        storage_user_id,
+        checkpoint_ns="",
+    )
     before_config: dict[str, Any] | None = None
     if body.before:
-        before_config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "",
-                "checkpoint_id": body.before,
-            }
-        }
+        before_config = owner_checkpoint_config(
+            thread_id,
+            storage_user_id,
+            checkpoint_ns="",
+            checkpoint_id=body.before,
+        )
 
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True

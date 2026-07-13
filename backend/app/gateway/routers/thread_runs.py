@@ -29,6 +29,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from app.gateway.authz import require_permission
+from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.deps import (
     get_checkpointer,
     get_config,
@@ -1923,7 +1924,7 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
 
 async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
     checkpointer = get_checkpointer(request)
-    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    base_config = owner_checkpoint_config(thread_id, get_request_storage_user_id(request), checkpoint_ns="")
     try:
         checkpoints = [item async for item in checkpointer.alist(base_config, limit=REGENERATE_HISTORY_SCAN_LIMIT)]
     except Exception as exc:
@@ -1959,7 +1960,7 @@ async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: s
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
     checkpointer = get_checkpointer(request)
-    latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    latest_config = owner_checkpoint_config(thread_id, get_request_storage_user_id(request), checkpoint_ns="")
     try:
         latest_checkpoint = await checkpointer.aget_tuple(latest_config)
     except Exception as exc:
@@ -2074,7 +2075,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         record = await run_mgr.get(record.run_id, user_id=user_id) or record
     if completed and record.status == RunStatus.success:
         checkpointer = get_checkpointer(request)
-        config = {"configurable": {"thread_id": thread_id}}
+        config = owner_checkpoint_config(thread_id, user_id)
         try:
             checkpoint_tuple = await checkpointer.aget_tuple(config)
             if checkpoint_tuple is not None:

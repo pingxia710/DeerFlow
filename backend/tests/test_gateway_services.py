@@ -493,17 +493,19 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
 
     asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
 
+    from app.gateway.checkpoint_owner import owner_checkpoint_thread_id
+
     assert checkpointer.seen_config == {
         "configurable": {
-            "thread_id": "thread-1",
+            "thread_id": owner_checkpoint_thread_id("thread-1", "test-user-autouse"),
+            "user_id": "test-user-autouse",
             "checkpoint_ns": "",
             "checkpoint_id": "ckpt-1",
             "checkpoint_map": {"": "ckpt-1"},
         }
     }
-    assert config["configurable"]["checkpoint_id"] == "ckpt-1"
-    assert config["configurable"]["checkpoint_ns"] == ""
-    assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
+    assert config["configurable"] == checkpointer.seen_config["configurable"]
+    assert config["configurable"]["thread_id"] != "thread-1"
 
 
 def test_apply_checkpoint_to_run_config_does_not_treat_run_id_as_checkpoint_key():
@@ -534,18 +536,19 @@ def test_apply_checkpoint_to_run_config_does_not_treat_run_id_as_checkpoint_key(
 
     asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
 
+    from app.gateway.checkpoint_owner import owner_checkpoint_thread_id
+
     assert checkpointer.seen_config == {
         "configurable": {
-            "thread_id": "thread-1",
+            "thread_id": owner_checkpoint_thread_id("thread-1", "test-user-autouse"),
+            "user_id": "test-user-autouse",
             "checkpoint_ns": "",
             "checkpoint_id": "ckpt-1",
         }
     }
-    assert config["configurable"] == {
-        "thread_id": "thread-1",
-        "checkpoint_ns": "",
-        "checkpoint_id": "ckpt-1",
-    }
+    assert config["configurable"] == checkpointer.seen_config["configurable"]
+    assert config["configurable"]["thread_id"] != "thread-1"
+    assert "run_id" not in config["configurable"]
 
 
 def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
@@ -1845,10 +1848,13 @@ def test_resolve_thread_run_allows_ownerless_legacy_run_fallback():
                 auth_source=AUTH_SOURCE_SESSION,
             ),
         )
-        return await resolve_thread_run("thread-legacy-ownerless", record.run_id, request)
+        return await resolve_thread_run(
+            "thread-legacy-ownerless",
+            record.run_id,
+            request,
+        )
 
     resolved = asyncio.run(_scenario())
-
     assert resolved.user_id is None
 
 

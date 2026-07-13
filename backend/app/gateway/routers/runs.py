@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
+from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id
@@ -107,7 +108,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
         record = await run_mgr.get(record.run_id, user_id=user_id) or record
     if completed and record.status == RunStatus.success:
         checkpointer = get_checkpointer(request)
-        config = {"configurable": {"thread_id": thread_id}}
+        config = owner_checkpoint_config(thread_id, get_request_storage_user_id(request))
         try:
             checkpoint_tuple = await checkpointer.aget_tuple(config)
             if checkpoint_tuple is not None:

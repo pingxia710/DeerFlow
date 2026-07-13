@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.runtime import RunStatus
+from deerflow.runtime.checkpoint_owner import owner_checkpoint_thread_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
@@ -30,8 +31,11 @@ class FakeCheckpointer:
         self.history = history
         self.latest = latest
         self.alist_limits = []
+        self.aget_configs = []
+        self.alist_configs = []
 
     async def aget_tuple(self, config):
+        self.aget_configs.append(config)
         checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
         if checkpoint_id:
             return next((item for item in self.history if item.config["configurable"]["checkpoint_id"] == checkpoint_id), None)
@@ -39,6 +43,7 @@ class FakeCheckpointer:
 
     async def alist(self, config, limit=200):
         self.alist_limits.append(limit)
+        self.alist_configs.append(config)
         for item in self.history[:limit]:
             yield item
 
@@ -115,6 +120,14 @@ def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
         "regenerate_from_run_id": "run-old",
         "regenerate_checkpoint_id": "ckpt-base",
     }
+    latest_config = checkpointer.aget_configs[0]["configurable"]
+    assert latest_config["thread_id"] == owner_checkpoint_thread_id("thread-1", "user-1")
+    assert latest_config["thread_id"] != "thread-1"
+    assert latest_config["checkpoint_ns"] == ""
+    assert latest_config["user_id"] == "user-1"
+    history_config = checkpointer.alist_configs[0]["configurable"]
+    assert history_config["thread_id"] == owner_checkpoint_thread_id("thread-1", "user-1")
+
     regenerated_human = response.input["messages"][0]
     assert regenerated_human["id"] == "human-1"
     assert regenerated_human["content"] == [{"type": "text", "text": "/data-analysis analyze data.csv"}]

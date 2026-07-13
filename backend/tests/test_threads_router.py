@@ -15,6 +15,7 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
 from app.gateway.authz import AuthContext, Permissions
+from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaCreateResult
@@ -67,7 +68,9 @@ def _build_thread_app(*, user_factory=None) -> tuple[FastAPI, InMemoryStore, InM
 
     Returns ``(app, store, checkpointer)`` for direct seeding/inspection.
     """
-    app = make_authed_test_app(user_factory=user_factory)
+    app = make_authed_test_app(
+        user_factory=user_factory or (lambda: _make_user(_HISTORY_USER_ID)),
+    )
     store = InMemoryStore()
     checkpointer = InMemorySaver()
     app.state.store = store
@@ -385,12 +388,11 @@ def test_thread_history_lists_only_root_checkpoint_namespace():
         checkpoint["channel_versions"]["messages"] = "1"
         asyncio.run(
             checkpointer.aput(
-                {
-                    "configurable": {
-                        "thread_id": thread_id,
-                        "checkpoint_ns": namespace,
-                    }
-                },
+                owner_checkpoint_config(
+                    thread_id,
+                    owner_id,
+                    checkpoint_ns=namespace,
+                ),
                 checkpoint,
                 {"created_at": "2026-01-01T00:00:00+00:00", "step": 0},
                 {"messages": "1"},
@@ -425,7 +427,11 @@ def test_thread_history_before_returns_strictly_older_page():
             checkpoint = empty_checkpoint()
             checkpoint["id"] = checkpoint_id
             await checkpointer.aput(
-                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+                owner_checkpoint_config(
+                    thread_id,
+                    str(_HISTORY_USER_ID),
+                    checkpoint_ns="",
+                ),
                 checkpoint,
                 {"created_at": f"2026-01-01T00:00:0{checkpoint_id[-1]}+00:00"},
                 {},
@@ -1242,7 +1248,16 @@ async def test_concurrent_same_owner_checkpoint_failure_keeps_successful_metadat
     assert row is not None
     assert row["user_id"] == "same-owner"
     assert checkpointer.calls == 2
-    assert await checkpointer.aget_tuple({"configurable": {"thread_id": "same-owner-race", "checkpoint_ns": ""}}) is not None
+    assert (
+        await checkpointer.aget_tuple(
+            owner_checkpoint_config(
+                "same-owner-race",
+                "same-owner",
+                checkpoint_ns="",
+            )
+        )
+        is not None
+    )
 
 
 @pytest.mark.asyncio
@@ -1282,7 +1297,13 @@ async def test_existing_same_owner_post_heals_missing_initial_checkpoint():
 
     assert first_error.value.status_code == 500
     assert second.thread_id == "retry-initial-checkpoint"
-    checkpoint = await checkpointer.aget_tuple({"configurable": {"thread_id": "retry-initial-checkpoint", "checkpoint_ns": ""}})
+    checkpoint = await checkpointer.aget_tuple(
+        owner_checkpoint_config(
+            "retry-initial-checkpoint",
+            "same-owner",
+            checkpoint_ns="",
+        )
+    )
     assert checkpoint is not None
     assert checkpointer.calls == 2
 
@@ -1734,7 +1755,7 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     ``new Date(...)`` parser does not break — same root cause as the
     thread-record bug fixed in #2594, but on the checkpoint side.
     """
-    app, _store, checkpointer = _build_thread_app()
+    app, _store, checkpointer = _build_thread_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
     thread_id = "legacy-state"
 
     async def _seed() -> None:
@@ -1755,6 +1776,24 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     with TestClient(app) as client:
         response = client.get(f"/api/threads/{thread_id}/state")
 
+    # Bare legacy physical keys are fail-closed for ordinary users.
+    assert response.status_code == 404, response.text
+
+    async def _seed_owned() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        from app.gateway.checkpoint_owner import owner_checkpoint_config
+
+        await checkpointer.aput(
+            owner_checkpoint_config(thread_id, str(_HISTORY_USER_ID), checkpoint_ns=""),
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    asyncio.run(_seed_owned())
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
     assert response.status_code == 200, response.text
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
@@ -1766,7 +1805,7 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     checkpoint. Each entry's ``created_at`` must come out as ISO even if
     older checkpoints stored a unix-second float in their metadata.
     """
-    app, _store, checkpointer = _build_thread_app()
+    app, _store, checkpointer = _build_thread_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
     thread_id = "legacy-history"
 
     async def _seed() -> None:
@@ -1787,9 +1826,28 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
 
+    # A normal user must not obtain a legacy bare-key checkpoint by fallback.
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+    async def _seed_owned() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        from app.gateway.checkpoint_owner import owner_checkpoint_config
+
+        await checkpointer.aput(
+            owner_checkpoint_config(thread_id, str(_HISTORY_USER_ID), checkpoint_ns=""),
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    asyncio.run(_seed_owned())
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
     assert response.status_code == 200, response.text
     entries = response.json()
-    assert entries, "expected at least one history entry"
+    assert entries, "expected owner-qualified history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
 
@@ -1860,7 +1918,11 @@ def test_get_thread_history_scopes_turn_duration_to_current_user() -> None:
 
     class FakeCheckpointer:
         async def alist(self, config, limit=None):
-            assert config == {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+            assert config == owner_checkpoint_config(
+                thread_id,
+                current_user_id,
+                checkpoint_ns="",
+            )
             assert limit == 10
             yield SimpleNamespace(
                 config={"configurable": {"checkpoint_id": "checkpoint-a"}},
@@ -2157,7 +2219,7 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     overwrote the existing row and history never grew. The fix assigns a
     fresh uuid6 to checkpoint["id"] before aput.
     """
-    app, _store, checkpointer = _build_thread_app()
+    app, _store, checkpointer = _build_thread_app(user_factory=lambda: _make_user(_HISTORY_USER_ID))
 
     with TestClient(app) as client:
         created = client.post("/api/threads", json={"metadata": {}})
@@ -2172,7 +2234,9 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     import asyncio
 
     async def _collect():
-        return [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
+        from app.gateway.checkpoint_owner import owner_checkpoint_config
+
+        return [cp async for cp in checkpointer.alist(owner_checkpoint_config(thread_id, str(_HISTORY_USER_ID)))]
 
     history = asyncio.run(_collect())
 

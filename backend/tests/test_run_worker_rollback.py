@@ -12,6 +12,10 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.persistence.round_state import MemoryRoundStateStore
+from deerflow.runtime.checkpoint_owner import (
+    owner_checkpoint_config,
+    owner_checkpoint_thread_id,
+)
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -1134,7 +1138,10 @@ async def test_run_agent_does_not_write_checkpoint_or_thread_meta_after_terminal
     )
     store = CompetingTerminalStore()
     run_manager = RunManager(store=store)
-    record = await run_manager.create_or_reject("thread-terminal-side-effect-race")
+    record = await run_manager.create_or_reject(
+        "thread-terminal-side-effect-race",
+        user_id="owner-1",
+    )
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
@@ -1376,7 +1383,10 @@ async def test_run_agent_does_not_start_with_expired_unrecovered_lease():
 @pytest.mark.anyio
 async def test_rollback_cancelled_during_snapshot_capture_fails_without_deleting_thread():
     run_manager = RunManager()
-    record = await run_manager.create("thread-rollback-capture")
+    record = await run_manager.create(
+        "thread-rollback-capture",
+        user_id="owner-1",
+    )
     record.abort_action = "rollback"
     checkpointer = SimpleNamespace(
         aget_tuple=AsyncMock(side_effect=[asyncio.CancelledError(), None]),
@@ -1512,11 +1522,18 @@ async def test_run_agent_defaults_root_run_name_from_configurable_agent_name():
 
 @pytest.mark.anyio
 async def test_rollback_restores_snapshot_without_deleting_thread():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+    restored_config = owner_checkpoint_config(
+        "thread-1",
+        "owner-1",
+        checkpoint_ns="",
+        checkpoint_id="restored-1",
+    )
+    checkpointer = FakeCheckpointer(put_result=restored_config)
 
     await _rollback_to_pre_run_checkpoint(
         checkpointer=checkpointer,
         thread_id="thread-1",
+        user_id="owner-1",
         run_id="run-1",
         pre_run_checkpoint_id="ckpt-1",
         pre_run_snapshot={
@@ -1539,7 +1556,11 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
     checkpointer.adelete_thread.assert_not_awaited()
     checkpointer.aput.assert_awaited_once()
     restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
-    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restore_config == owner_checkpoint_config(
+        "thread-1",
+        "owner-1",
+        checkpoint_ns="",
+    )
     assert restored_checkpoint["id"] != "ckpt-1"
     assert "channel_versions" in restored_checkpoint
     assert "channel_values" in restored_checkpoint
@@ -1549,12 +1570,12 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
     assert new_versions == {"messages": 3}
     assert checkpointer.aput_writes.await_args_list == [
         call(
-            {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+            restored_config,
             [("messages", {"content": "first"}), ("status", "done")],
             task_id="task-a",
         ),
         call(
-            {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+            restored_config,
             [("events", {"type": "tool"})],
             task_id="task-b",
         ),
@@ -1564,7 +1585,11 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
 @pytest.mark.anyio
 async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointer():
     checkpointer = InMemorySaver()
-    thread_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    thread_config = owner_checkpoint_config(
+        "thread-1",
+        "owner-1",
+        checkpoint_ns="",
+    )
     before_checkpoint = _make_checkpoint("0001", ["before"], 1)
     before_config = checkpointer.put(thread_config, before_checkpoint, {"step": 1}, {"messages": 1})
     after_checkpoint = _make_checkpoint("0002", ["after"], 2)
@@ -1574,6 +1599,7 @@ async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointe
     await _rollback_to_pre_run_checkpoint(
         checkpointer=checkpointer,
         thread_id="thread-1",
+        user_id="owner-1",
         run_id="run-1",
         pre_run_checkpoint_id="0001",
         pre_run_snapshot={
@@ -1602,25 +1628,33 @@ async def test_rollback_deletes_thread_when_no_snapshot_exists():
     await _rollback_to_pre_run_checkpoint(
         checkpointer=checkpointer,
         thread_id="thread-1",
+        user_id="owner-1",
         run_id="run-1",
         pre_run_checkpoint_id=None,
         pre_run_snapshot=None,
         snapshot_capture_failed=False,
     )
 
-    checkpointer.adelete_thread.assert_awaited_once_with("thread-1")
+    checkpointer.adelete_thread.assert_awaited_once_with(owner_checkpoint_thread_id("thread-1", "owner-1"))
     checkpointer.aput.assert_not_awaited()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
 async def test_rollback_raises_when_restore_config_has_no_checkpoint_id():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}})
+    checkpointer = FakeCheckpointer(
+        put_result=owner_checkpoint_config(
+            "thread-1",
+            "owner-1",
+            checkpoint_ns="",
+        )
+    )
 
     with pytest.raises(RuntimeError, match="did not return checkpoint_id"):
         await _rollback_to_pre_run_checkpoint(
             checkpointer=checkpointer,
             thread_id="thread-1",
+            user_id="owner-1",
             run_id="run-1",
             pre_run_checkpoint_id="ckpt-1",
             pre_run_snapshot={
@@ -1639,11 +1673,19 @@ async def test_rollback_raises_when_restore_config_has_no_checkpoint_id():
 
 @pytest.mark.anyio
 async def test_rollback_normalizes_none_checkpoint_ns_to_root_namespace():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+    checkpointer = FakeCheckpointer(
+        put_result=owner_checkpoint_config(
+            "thread-1",
+            "owner-1",
+            checkpoint_ns="",
+            checkpoint_id="restored-1",
+        )
+    )
 
     await _rollback_to_pre_run_checkpoint(
         checkpointer=checkpointer,
         thread_id="thread-1",
+        user_id="owner-1",
         run_id="run-1",
         pre_run_checkpoint_id="ckpt-1",
         pre_run_snapshot={
@@ -1657,7 +1699,11 @@ async def test_rollback_normalizes_none_checkpoint_ns_to_root_namespace():
 
     checkpointer.aput.assert_awaited_once()
     restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
-    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restore_config == owner_checkpoint_config(
+        "thread-1",
+        "owner-1",
+        checkpoint_ns="",
+    )
     assert restored_checkpoint["id"] != "ckpt-1"
     assert restored_checkpoint["channel_versions"] == {}
     assert restored_metadata == {}
@@ -1673,6 +1719,7 @@ async def test_rollback_raises_on_malformed_pending_write_not_a_tuple():
         await _rollback_to_pre_run_checkpoint(
             checkpointer=checkpointer,
             thread_id="thread-1",
+            user_id="owner-1",
             run_id="run-1",
             pre_run_checkpoint_id="ckpt-1",
             pre_run_snapshot={
@@ -1701,6 +1748,7 @@ async def test_rollback_raises_on_malformed_pending_write_non_string_channel():
         await _rollback_to_pre_run_checkpoint(
             checkpointer=checkpointer,
             thread_id="thread-1",
+            user_id="owner-1",
             run_id="run-1",
             pre_run_checkpoint_id="ckpt-1",
             pre_run_snapshot={
@@ -1729,6 +1777,7 @@ async def test_rollback_propagates_aput_writes_failure():
         await _rollback_to_pre_run_checkpoint(
             checkpointer=checkpointer,
             thread_id="thread-1",
+            user_id="owner-1",
             run_id="run-1",
             pre_run_checkpoint_id="ckpt-1",
             pre_run_snapshot={

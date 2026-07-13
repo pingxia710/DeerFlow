@@ -30,6 +30,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.checkpoint_owner import owner_checkpoint_config
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
@@ -190,6 +191,21 @@ async def _publish_stream_frame(
     await bridge.publish(run_id, event, data)
 
 
+def _owner_checkpoint_config(
+    thread_id: str,
+    user_id: str | None,
+    *,
+    checkpoint_ns: str = "",
+) -> dict[str, dict[str, str]]:
+    if user_id is None:
+        raise ValueError("owner-qualified checkpoint access requires a run owner")
+    return owner_checkpoint_config(
+        thread_id,
+        user_id,
+        checkpoint_ns=checkpoint_ns,
+    )
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -276,7 +292,10 @@ async def run_agent(
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
             try:
-                config_for_check = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                config_for_check = _owner_checkpoint_config(
+                    thread_id,
+                    record.user_id,
+                )
                 ckpt_tuple = await checkpointer.aget_tuple(config_for_check)
                 if ckpt_tuple is not None:
                     ckpt_config = getattr(ckpt_tuple, "config", {}).get("configurable", {})
@@ -455,6 +474,7 @@ async def run_agent(
                     bridge,
                     checkpointer=checkpointer,
                     thread_id=thread_id,
+                    user_id=record.user_id,
                     run_id=run_id,
                     pre_run_checkpoint_id=pre_run_checkpoint_id,
                     pre_run_snapshot=pre_run_snapshot,
@@ -488,6 +508,7 @@ async def run_agent(
                 bridge,
                 checkpointer=checkpointer,
                 thread_id=thread_id,
+                user_id=record.user_id,
                 run_id=run_id,
                 pre_run_checkpoint_id=pre_run_checkpoint_id,
                 pre_run_snapshot=pre_run_snapshot,
@@ -774,6 +795,7 @@ async def _finalize_rollback(
     *,
     checkpointer: Any,
     thread_id: str,
+    user_id: str | None,
     run_id: str,
     pre_run_checkpoint_id: str | None,
     pre_run_snapshot: dict[str, Any] | None,
@@ -783,6 +805,7 @@ async def _finalize_rollback(
         await _rollback_to_pre_run_checkpoint(
             checkpointer=checkpointer,
             thread_id=thread_id,
+            user_id=user_id,
             run_id=run_id,
             pre_run_checkpoint_id=pre_run_checkpoint_id,
             pre_run_snapshot=pre_run_snapshot,
@@ -854,7 +877,7 @@ async def _close_stream_for_recovery(bridge: StreamBridge, run_id: str) -> None:
 
 
 async def _sync_checkpoint_title_to_thread_store(checkpointer, thread_store, thread_id: str, *, user_id: str | None = None) -> None:
-    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    ckpt_config = _owner_checkpoint_config(thread_id, user_id)
     ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
     if ckpt_tuple is None:
         return
@@ -885,21 +908,32 @@ async def _rollback_to_pre_run_checkpoint(
     *,
     checkpointer: Any,
     thread_id: str,
+    user_id: str | None,
     run_id: str,
     pre_run_checkpoint_id: str | None,
     pre_run_snapshot: dict[str, Any] | None,
     snapshot_capture_failed: bool,
 ) -> None:
-    """Restore thread state to the checkpoint snapshot captured before run start."""
+    """Restore state only through the persisted run owner's physical key."""
+    if user_id is None:
+        raise RuntimeError(f"Run {run_id} rollback restore skipped: missing persisted owner")
     if checkpointer is None:
-        logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
-        return
+        raise RuntimeError(f"Run {run_id} rollback failed: no checkpointer is configured")
 
     if snapshot_capture_failed:
         raise RuntimeError(f"Run {run_id} rollback failed: pre-run checkpoint snapshot capture failed")
 
     if pre_run_snapshot is None:
-        await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
+        checkpoint_thread_id = _owner_checkpoint_config(
+            thread_id,
+            user_id,
+        )["configurable"]["thread_id"]
+        await _call_checkpointer_method(
+            checkpointer,
+            "adelete_thread",
+            "delete_thread",
+            checkpoint_thread_id,
+        )
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
         return
 
@@ -928,7 +962,11 @@ async def _rollback_to_pre_run_checkpoint(
     channel_versions = checkpoint_to_restore.get("channel_versions")
     new_versions = dict(channel_versions) if isinstance(channel_versions, dict) else {}
 
-    restore_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+    restore_config = _owner_checkpoint_config(
+        thread_id,
+        user_id,
+        checkpoint_ns=checkpoint_ns,
+    )
     restored_config = await _call_checkpointer_method(
         checkpointer,
         "aput",

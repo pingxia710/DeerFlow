@@ -74,36 +74,36 @@ class SubagentsAppConfig(BaseModel):
     """Configuration for the subagent system."""
 
     timeout_seconds: int = Field(
-        default=1800,
+        default=3600,
         ge=1,
-        description="Default timeout in seconds for built-in subagents (default: 1800 = 30 minutes); custom agents use their own timeout_seconds unless given a per-agent override",
+        description="Default timeout in seconds for delegated Codex CLI tasks (default: 3600 = 60 minutes)",
     )
     max_turns: int | None = Field(
         default=None,
         ge=1,
-        description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+        description="Legacy child-LangGraph setting; ignored by direct Codex CLI tasks",
     )
     reasoning_effort: ReasoningEffort | None = Field(
         default=None,
-        description="Optional reasoning effort for all subagents (None = inherit the lead agent's resolved effort)",
+        description="Optional reasoning effort passed to every delegated Codex CLI task",
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
-        description="Per-agent configuration overrides keyed by agent name",
+        description="Compatibility overrides keyed by task label; only model affects direct Codex CLI tasks",
     )
     custom_agents: dict[str, CustomSubagentConfig] = Field(
         default_factory=dict,
-        description="User-defined subagent types keyed by agent name",
+        description="Legacy child-LangGraph definitions; ignored by direct Codex CLI tasks",
     )
     process_wide_max_concurrent: int = Field(
         default=12,
         ge=1,
-        description="Process-wide maximum number of admitted background subagent executions",
+        description="Legacy background-executor setting; ignored by direct Codex CLI tasks",
     )
     process_wide_queue_size: int = Field(
         default=64,
         ge=0,
-        description="Process-wide queue size for background subagent executions waiting for capacity",
+        description="Legacy background-executor setting; ignored by direct Codex CLI tasks",
     )
 
     def get_timeout_for(self, agent_name: str) -> int:

@@ -38,10 +38,8 @@ deer-flow/
 │   │           │   ├── sandbox.py     # Abstract Sandbox interface
 │   │           │   ├── tools.py       # bash, ls, read/write/str_replace
 │   │           │   └── middleware.py  # Sandbox lifecycle management
-│   │           ├── subagents/         # Subagent delegation system
-│   │           │   ├── builtins/      # general-purpose, bash agents
-│   │           │   ├── executor.py    # Background execution engine
-│   │           │   └── registry.py    # Agent registry
+│   │           ├── subagents/         # Delegation support and direct Codex CLI runner
+│   │           │   └── codex_cli.py   # One-shot Codex CLI process lifecycle
 │   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image)
 │   │           ├── mcp/               # MCP integration (tools, cache, client)
 │   │           ├── models/            # Model factory with thinking/vision support
@@ -215,7 +213,7 @@ from deerflow.config import get_app_config
 
 Lead-agent middlewares are assembled in strict order across three functions: the shared base in `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`_build_runtime_middlewares`, exposed via `build_lead_runtime_middlewares`), then the lead-only middlewares appended in `packages/harness/deerflow/agents/lead_agent/agent.py` (`build_middlewares`). Items marked *(optional)* are appended only when their config/runtime condition holds, so the live chain length varies.
 
-**Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
+**Shared runtime base** (`build_lead_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages
 2. **ToolOutputBudgetMiddleware** - Caps ordinary tool output size (per app config) before it re-enters the model context; `task` is exempt so the lead AI receives the complete sub-AI result
@@ -234,7 +232,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 12. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
 13. **SummarizationMiddleware** - *(optional, if enabled)* Context reduction when approaching token limits
 14. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with the `write_todos` tool
-15. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position. Cache subagent usage by `(run_id, tool_call_id)`, never by process-global `tool_call_id` alone, so concurrent conversations cannot consume each other's accounting.
+15. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records lead-agent token usage metrics. Direct Codex CLI task usage is not merged until the CLI exposes a stable machine-readable usage contract.
 16. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model
 17. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 18. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects base64 image data before the LLM call
@@ -515,19 +513,16 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
-**Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
-**Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model` and adds a model-visible warning; six is the maximum per-response release, not a process-wide cap). `SubagentExecutor` also applies a process-wide admitted execution cap (`subagents.process_wide_max_concurrent`, default 12) with a pending queue (`subagents.process_wide_queue_size`, default 64); queued tasks remain `PENDING` until capacity frees up. Default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
-**Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
-**AI-AI result boundary**: The subagent is a one-shot AI call whose final natural-language result is determined by the lead-authored `task` prompt. The complete result returns as the `task` ToolMessage; generic tool-output preview/truncation must not rewrite it before the next lead model call.
+**Execution**: `task()` starts one installed `codex exec` process with the task prompt and the thread workspace. Codex CLI owns planning, tool use, and completion; DeerFlow does not create a child LangGraph agent, inject a role prompt, impose a turn cap, or poll child messages. It may pass through the explicitly configured child model and reasoning effort.
+**Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` remains enforced by `SubagentLimitMiddleware` as the maximum per-response release. Default task timeout is `subagents.timeout_seconds=3600` (60 min). The `subagent_type` argument is an audit/display label, except that an existing `subagents.agents.<name>.model` override selects the Codex CLI model for compatibility.
+**Flow**: `task()` tool → `codex exec --ephemeral --sandbox workspace-write` → terminal SSE/audit event → result
+**AI-AI result boundary**: The Codex worker receives the lead-authored natural-language task and returns its complete final message as the `task` ToolMessage; generic tool-output preview/truncation must not rewrite it before the next lead model call.
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_cancelled`/`task_timed_out`; task event/action_result fields are a frontend-backend contract pinned in `contracts/task_event_contract.json`, must be emitted to the live stream, and must be persisted through `RunJournal.record_task_event` so conversation switches can replay subtask state. Root run completion also writes a `run.terminal` lifecycle event with `status` and `terminal_reason` as the replay/timeline terminal anchor.
 **Handoff audit**: `task()` appends compact records to `audit/subagent_handoffs.jsonl` under the thread directory when possible. Records keep prompt/result/error hashes, character counts, usage, status, and compact extracted fields; raw prompts, worker output, and errors are intentionally omitted.
 
 **Command-room audit**: `command-room` runs may append compact internal records to `audit/command_room_rounds.jsonl`. AI-authored quality signals are stored separately in `audit/quality_signals.jsonl`, AI-authored review invocation records are stored in `audit/review_invocations.jsonl`, and AI-authored account update proposals plus Chair decisions are stored in `audit/account_ledger.jsonl`. Chair Operating Brief is a read model/context packet over existing facts, not a durable decision record. Phase 7 wires that compact brief into the internal command-room lead runtime context via `CommandRoomRoundContextMiddleware` when thread/run/round facts are available; it is not a gate and does not choose the next step. These are backend evidence for debugging and AI review only; they must not drive visible chat UI, force user-facing response format, choose the next role, emit PASS/FAIL, trigger rework, auto-apply account changes, or update AGENTS/README/rules. API reads must resolve the owner from the request storage owner so trusted internal channel calls read the bound user's thread audit, not the synthetic internal/default bucket.
 
 **Command-room quality boundary**: Command Room is the main development AI, not a workflow system. Quality judgment belongs to the lead AI brain, not to the Round/program layer. `Round`, `ActionResult`, task-tool results, and their metadata should expose hard gaps, evidence links, status, and boundary signals only. They must not automatically judge success, trigger rework, or ask subagents/review subagents to self-certify completion. Opposition is a triggered, stateless short check, not a second command room; do not turn it into an always-on gate, AI Jira, default reviewer, dashboard, form flow, or subtask-review workflow.
-**Deferred MCP tools** (if `tool_search.enabled`): `SubagentExecutor._build_initial_state` assembles deferral after policy filtering via the shared `assemble_deferred_tools` (fail-closed), appends the `tool_search` tool, injects the `<available-deferred-tools>` section into the subagent's `SystemMessage`, and threads the setup to `_create_agent`, which attaches `DeferredToolFilterMiddleware` through `build_subagent_runtime_middlewares(deferred_setup=...)`. Subagents thus withhold full MCP schemas until promotion, same as the lead agent; each task run gets a fresh `ThreadState` so promotion is isolated per run
-**Checkpointer isolation**: Subagent graphs are compiled with `checkpointer=False` to avoid inheriting the parent run's checkpointer, since subagents are one-shot and never resume.
 
 ### Tool System (`packages/harness/deerflow/tools/`)
 

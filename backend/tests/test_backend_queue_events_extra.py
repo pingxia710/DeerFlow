@@ -1,78 +1,9 @@
-"""Focused regression tests for pending timeout, queue-full event surfacing, and SSE durable replay."""
+"""Focused regression tests for durable SSE task-event replay."""
 
-import asyncio
-import importlib
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
-
-
-def test_task_tool_queue_full_surfaces_task_failed_event(monkeypatch):
-    task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
-    from deerflow.subagents.config import SubagentConfig
-
-    class FakeStatus:
-        PENDING = SimpleNamespace(value="pending", is_terminal=False)
-        RUNNING = SimpleNamespace(value="running", is_terminal=False)
-        COMPLETED = SimpleNamespace(value="completed", is_terminal=True)
-        FAILED = SimpleNamespace(value="failed", is_terminal=True)
-        CANCELLED = SimpleNamespace(value="cancelled", is_terminal=True)
-        TIMED_OUT = SimpleNamespace(value="timed_out", is_terminal=True)
-
-    config = SubagentConfig(name="general-purpose", description="d", system_prompt="p", model="test-model", timeout_seconds=1)
-    events = []
-
-    class DummyExecutor:
-        def __init__(self, **_kwargs):
-            pass
-
-        def execute_async(self, _prompt, task_id=None):
-            return task_id or "tc-full"
-
-    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeStatus)
-    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
-    monkeypatch.setattr(
-        task_tool_module,
-        "get_background_task_result",
-        lambda _task_id: SimpleNamespace(
-            status=FakeStatus.FAILED,
-            error="Subagent queue is full; try again later",
-            ai_messages=[],
-            token_usage_records=[],
-            usage_reported=False,
-        ),
-    )
-    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
-    monkeypatch.setattr(task_tool_module, "record_subagent_handoff", lambda **_kwargs: None)
-    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _delay: asyncio.sleep(0))
-    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
-
-    async def run():
-        return await task_tool_module.task_tool.coroutine(
-            runtime=SimpleNamespace(
-                state={},
-                context={"thread_id": "thread-q", "run_id": "run-q"},
-                config={"metadata": {}},
-            ),
-            description="queue pressure",
-            prompt="work",
-            subagent_type="general-purpose",
-            tool_call_id="tc-full",
-        )
-
-    output = asyncio.run(run())
-    assert output.content == "Task failed. Error: Subagent queue is full; try again later"
-    assert output.name == "task"
-    assert output.tool_call_id == "tc-full"
-    assert output.additional_kwargs["subagent_status"] == "failed"
-    assert [event["type"] for event in events] == ["task_started", "task_failed"]
-    assert events[-1]["status"] == "failed"
-    assert "queue is full" in events[-1]["error_preview"]
-    assert events[-1]["action_result"]["status"] == "failed"
 
 
 @pytest.mark.asyncio

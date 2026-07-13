@@ -6,7 +6,6 @@ Covers:
 - load_subagents_config_from_dict() and get_subagents_app_config() singleton
 - registry.get_subagent_config() applies config overrides
 - registry.list_subagents() applies overrides for all agents
-- Polling timeout calculation in task_tool is consistent with config
 """
 
 import pytest
@@ -17,7 +16,6 @@ from deerflow.config.subagents_config import (
     get_subagents_app_config,
     load_subagents_config_from_dict,
 )
-from deerflow.subagents.config import SubagentConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,7 +97,7 @@ class TestSubagentOverrideConfig:
 class TestSubagentsAppConfigDefaults:
     def test_default_timeout(self):
         config = SubagentsAppConfig()
-        assert config.timeout_seconds == 1800
+        assert config.timeout_seconds == 3600
 
     def test_default_max_turns_override_is_none(self):
         config = SubagentsAppConfig()
@@ -293,7 +291,7 @@ class TestLoadSubagentsConfig:
     def test_load_empty_dict_uses_defaults(self):
         load_subagents_config_from_dict({})
         cfg = get_subagents_app_config()
-        assert cfg.timeout_seconds == 1800
+        assert cfg.timeout_seconds == 3600
         assert cfg.max_turns is None
         assert cfg.reasoning_effort is None
         assert cfg.agents == {}
@@ -353,7 +351,7 @@ class TestRegistryGetSubagentConfig:
         load_subagents_config_from_dict({})  # no subagents config -> model defaults
         config = get_subagent_config("general-purpose")
         assert config.max_turns == 150
-        assert config.timeout_seconds == 1800
+        assert config.timeout_seconds == 3600
         # Pin bash too so the config.example.yaml "bash=60" doc cannot drift.
         assert get_subagent_config("bash").max_turns == 60
 
@@ -574,45 +572,3 @@ class TestRegistryListSubagents:
         assert by_name["bash"].timeout_seconds == 60
         assert by_name["general-purpose"].max_turns == 200
         assert by_name["bash"].max_turns == 80
-
-
-# ---------------------------------------------------------------------------
-# Polling timeout calculation (logic extracted from task_tool)
-# ---------------------------------------------------------------------------
-
-
-class TestPollingTimeoutCalculation:
-    """Verify the formula (timeout_seconds + 60) // 5 is correct for various inputs."""
-
-    @pytest.mark.parametrize(
-        "timeout_seconds, expected_max_polls",
-        [
-            (900, 192),  # default 15 min → (900+60)//5 = 192
-            (300, 72),  # 5 min → (300+60)//5 = 72
-            (1800, 372),  # 30 min → (1800+60)//5 = 372
-            (60, 24),  # 1 min → (60+60)//5 = 24
-            (1, 12),  # minimum → (1+60)//5 = 12
-        ],
-    )
-    def test_polling_timeout_formula(self, timeout_seconds: int, expected_max_polls: int):
-        dummy_config = SubagentConfig(
-            name="test",
-            description="test",
-            system_prompt="test",
-            timeout_seconds=timeout_seconds,
-        )
-        max_poll_count = (dummy_config.timeout_seconds + 60) // 5
-        assert max_poll_count == expected_max_polls
-
-    def test_polling_timeout_exceeds_execution_timeout(self):
-        """Safety-net polling window must always be longer than the execution timeout."""
-        for timeout_seconds in [60, 300, 900, 1800]:
-            dummy_config = SubagentConfig(
-                name="test",
-                description="test",
-                system_prompt="test",
-                timeout_seconds=timeout_seconds,
-            )
-            max_poll_count = (dummy_config.timeout_seconds + 60) // 5
-            polling_window_seconds = max_poll_count * 5
-            assert polling_window_seconds > timeout_seconds

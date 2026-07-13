@@ -57,7 +57,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 const COMMAND_ROOM_AGENT = "command-room";
-const COMMAND_ROOM_DEFAULT_MODEL = "deepseek-command-room";
+const COMMAND_ROOM_DEFAULT_MODEL = "gpt-5.6";
 
 export function getAgentChatRuntimeKey(
   agentName: string,

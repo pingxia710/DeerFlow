@@ -121,7 +121,7 @@ test.describe("Agent chat", () => {
         {
           name: "command-room",
           description: "Command Room",
-          model: "deepseek-command-room",
+          model: "gpt-5.6",
         },
       ],
       models: [
@@ -135,11 +135,11 @@ test.describe("Agent chat", () => {
           supports_reasoning_effort: true,
         },
         {
-          id: "deepseek-command-room",
-          name: "deepseek-command-room",
-          provider: "DeepSeek",
-          model: "deepseek-v4-pro",
-          display_name: "DeepSeek V4 Pro",
+          id: "gpt-5.6",
+          name: "gpt-5.6",
+          provider: "Codex CLI",
+          model: "gpt-5.6-sol",
+          display_name: "GPT-5.6 Sol",
           supports_thinking: true,
         },
       ],
@@ -162,19 +162,17 @@ test.describe("Agent chat", () => {
     );
     const agentResponse = await agentResponsePromise;
     await expect(agentResponse.json()).resolves.toMatchObject({
-      model: "deepseek-command-room",
+      model: "gpt-5.6",
     });
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
-    await expect(
-      page.getByRole("button", { name: /DeepSeek V4 Pro/i }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /5.6 Sol/i })).toBeVisible();
     await textarea.fill("Verify the configured model");
     await textarea.press("Enter");
 
     await expect
       .poll(() => submittedModel, { timeout: 10_000 })
-      .toBe("deepseek-command-room");
+      .toBe("gpt-5.6");
   });
 
   test("agent chat page shows agent badge", async ({ page }) => {

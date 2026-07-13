@@ -118,7 +118,8 @@ class TestTruncateTaskCalls:
         updated_msg = result["messages"][0]
         assert "Planning work." in updated_msg.content
         assert "1 task() call(s) were not dispatched" in updated_msg.content
-        assert "per-turn limit is 2" in updated_msg.content
+        assert "per-response limit is 2" in updated_msg.content
+        assert "re-issue" not in updated_msg.content
 
     def test_non_task_calls_preserved(self):
         mw = SubagentLimitMiddleware(max_concurrent=2)

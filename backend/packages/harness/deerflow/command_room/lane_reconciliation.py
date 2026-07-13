@@ -62,9 +62,6 @@ def build_lane_reconciliation_facts(
     handoffs = [_as_dict(row) for row in pending_handoffs or []]
 
     facts: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    unknowns: list[str] = []
-
     tasks_by_id = {task_id: row for row in tasks if (task_id := _text(row, "task_id", "id"))}
     linked_task_ids: set[str] = set()
     planned_by_lane_id = {lane_id: row for row in planned if (lane_id := _text(row, "lane_id", "id"))}
@@ -78,7 +75,6 @@ def build_lane_reconciliation_facts(
         task = tasks_by_id.get(linked_task_id)
         if task is None:
             facts.append({"type": "planned_lane_linked_task_missing", "lane_id": lane_id, "linked_task_id": linked_task_id})
-            warnings.append(f"Planned lane {lane_id or '<unknown>'} links missing task lane {linked_task_id}.")
             continue
         lane_role = _role(lane)
         task_role = _role(task)
@@ -92,15 +88,21 @@ def build_lane_reconciliation_facts(
                     "task_role": task_role,
                 }
             )
-            warnings.append(f"Planned lane {lane_id or '<unknown>'} role does not match task lane {linked_task_id} role.")
         elif not lane_role or not task_role:
-            unknowns.append(f"Role comparison unknown for planned lane {lane_id or '<unknown>'} and task lane {linked_task_id}.")
+            facts.append(
+                {
+                    "type": "planned_task_role_not_comparable",
+                    "lane_id": lane_id,
+                    "linked_task_id": linked_task_id,
+                    "planned_role": lane_role,
+                    "task_role": task_role,
+                }
+            )
 
     for task in tasks:
         task_id = _text(task, "task_id", "id")
         if task_id and task_id not in linked_task_ids:
             facts.append({"type": "task_lane_without_linked_planned_lane", "task_id": task_id, "task_role": _role(task)})
-            warnings.append(f"Task lane {task_id} has no planned lane linked_task_id reference.")
 
     for handoff in handoffs:
         handoff_id = _text(handoff, "handoff_id", "id")
@@ -108,11 +110,23 @@ def build_lane_reconciliation_facts(
         lane_id = _text(handoff, "lane_id", "planned_lane_id", "linked_lane_id")
         if not lane_id:
             if target_role:
-                unknowns.append(f"Pending handoff {handoff_id or '<unknown>'} cannot be reliably linked to a planned lane.")
+                facts.append(
+                    {
+                        "type": "pending_handoff_without_planned_lane_link",
+                        "handoff_id": handoff_id,
+                        "target_role": target_role,
+                    }
+                )
             continue
         lane = planned_by_lane_id.get(lane_id)
         if lane is None:
-            unknowns.append(f"Pending handoff {handoff_id or '<unknown>'} references unknown planned lane {lane_id}.")
+            facts.append(
+                {
+                    "type": "pending_handoff_planned_lane_missing",
+                    "handoff_id": handoff_id,
+                    "lane_id": lane_id,
+                }
+            )
             continue
         lane_role = _role(lane)
         if target_role and lane_role and target_role != lane_role:
@@ -125,11 +139,18 @@ def build_lane_reconciliation_facts(
                     "planned_role": lane_role,
                 }
             )
-            warnings.append(f"Pending handoff {handoff_id or '<unknown>'} target role does not match planned lane {lane_id} role.")
         elif not target_role or not lane_role:
-            unknowns.append(f"Role comparison unknown for pending handoff {handoff_id or '<unknown>'} and planned lane {lane_id}.")
+            facts.append(
+                {
+                    "type": "pending_handoff_planned_lane_role_not_comparable",
+                    "handoff_id": handoff_id,
+                    "lane_id": lane_id,
+                    "handoff_target_role": target_role,
+                    "planned_role": lane_role,
+                }
+            )
 
-    return LaneReconciliationFacts(facts=facts, warnings=warnings, unknowns=unknowns)
+    return LaneReconciliationFacts(facts=facts)
 
 
 __all__ = ["LaneReconciliationFacts", "build_lane_reconciliation_facts"]

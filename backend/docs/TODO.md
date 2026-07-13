@@ -11,7 +11,7 @@
 - [x] Add Plan Mode with TodoList middleware
 - [x] Add vision model support with ViewImageMiddleware
 - [x] Skills system with SKILL.md format
-- [x] Replace `time.sleep(5)` with `asyncio.sleep()` in `packages/harness/deerflow/tools/builtins/task_tool.py` (subagent polling)
+- [x] Replace the subagent polling loop with one asynchronous, cancellable Codex CLI process per `task()` call
 
 ## Planned Features
 

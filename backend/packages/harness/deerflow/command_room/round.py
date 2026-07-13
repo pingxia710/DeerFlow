@@ -57,7 +57,7 @@ class ActionResult:
 
     action_id: str
     description: str = ""
-    status: RoundItemStatus = RoundItemStatus.COMPLETED
+    status: RoundItemStatus = RoundItemStatus.PENDING
     terminal_reason: str | None = None
     summary: str = ""
     evidence_refs: list[str] = field(default_factory=list)
@@ -116,12 +116,7 @@ class Round:
         return any(ref.strip() for ref in self.evidence_refs)
 
     def evidence_signals(self) -> dict[str, object]:
-        """Return aggregate evidence strength/weakness hints for summaries.
-
-        The result is mechanical signal metadata only: it does not make a
-        PASS/FAIL quality verdict, does not mark the round complete, and does
-        not trigger rework.
-        """
+        """Return evidence-reference counts without judging their adequacy."""
         return summarize_evidence_refs(self.evidence_refs)
 
     @property
@@ -172,22 +167,14 @@ class Round:
     add_action_result = record_action_result
 
     @property
-    def next_round_is_safe(self) -> bool:
-        """Whether the proposed next round appears inside the current boundary."""
-        if self.next_round is None:
-            return True
-        return self.next_round.within_current_boundary and not self.next_round.needs_user_confirmation
+    def next_round_is_safe(self) -> None:
+        """Deprecated compatibility field; only an AI may make this judgment."""
+        return None
 
     @property
-    def is_complete(self) -> bool:
-        """Conservative local completion hint.
-
-        This is a mechanical readiness signal for the main AI, not an automatic
-        PASS/FAIL or rework decision. The hint stays false without evidence, with
-        unresolved/open questions, when user confirmation is needed, or when the
-        proposed next round is outside the current boundary.
-        """
-        return self.has_evidence and not self.has_open_questions and not self.has_risks_or_conflicts and not self.needs_user_confirmation and self.next_round_is_safe
+    def is_complete(self) -> None:
+        """Deprecated compatibility field; completion is decided by an AI."""
+        return None
 
 
 def _clean(items: list[str]) -> list[str]:
@@ -232,15 +219,9 @@ def summarize_round(round_: Round) -> str:
         if facts:
             basis = facts[:1] + basis
         parts.append("依据是" + "；".join(basis) + "。")
-        evidence_summary = round_.evidence_signals()
-        strong_count = evidence_summary["strong_count"]
-        weak_count = evidence_summary["weak_count"]
-        if strong_count:
-            parts.append(f"证据信号：{strong_count} 条强引用。")
-        elif weak_count:
-            parts.append(f"证据信号：{weak_count} 条弱引用，需主 AI 结合上下文判断。")
+        parts.append(f"记录了 {len(evidence)} 条证据引用，质量由 AI 判断。")
     else:
-        parts.append("目前依据不足，不能判定完成。")
+        parts.append("尚未记录证据引用。")
 
     if round_.verdict.strip():
         parts.append(f"结论：{round_.verdict.strip()}。")
@@ -258,14 +239,12 @@ def summarize_round(round_: Round) -> str:
         parts.append("仍有风险/冲突：" + "；".join(blockers[:2]) + "。")
 
     if round_.needs_user_confirmation or (round_.next_round is not None and round_.next_round.needs_user_confirmation):
-        parts.append("本轮尚未完成，下一步触及红线/授权边界，需要用户确认。")
+        parts.append("下一轮提案被明确标记为需要用户确认。")
     elif round_.next_round is not None and not round_.next_round.within_current_boundary:
-        parts.append("本轮尚未完成，下一轮建议已越过当前边界，需要先确认边界。")
+        parts.append("下一轮提案被明确标记为超出当前边界。")
     elif round_.next_round is not None and round_.next_round.proposal.strip():
-        prefix = "本轮尚未完成但可继续自主排查：" if not round_.is_complete else "下一步可继续："
-        parts.append(f"{prefix}{round_.next_round.proposal.strip()}。")
+        parts.append(f"下一轮提案：{round_.next_round.proposal.strip()}。")
     elif round_.next_step.strip():
-        prefix = "本轮尚未完成但可继续自主排查：" if not round_.is_complete else "下一步可继续："
-        parts.append(f"{prefix}{round_.next_step.strip()}。")
+        parts.append(f"记录的下一步：{round_.next_step.strip()}。")
 
     return "".join(parts)

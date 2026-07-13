@@ -70,16 +70,6 @@ export function CommandRoomCapabilities({
     : { status: "warning" as const, issueCount: query.error ? 1 : 0 };
   const warning = health.status === "warning";
 
-  const mcpValue = runtime
-    ? runtime.delegated.mcp_servers_configured.length === 0
-      ? t.capabilities.notConfigured
-      : runtime.delegated.mcp_cache.last_error_type
-        ? `${t.capabilities.loadFailed}: ${runtime.delegated.mcp_cache.last_error_type}`
-        : runtime.delegated.mcp_cache.initialized
-          ? `${runtime.delegated.mcp_servers_configured.length} / ${runtime.delegated.mcp_cache.tool_count} ${t.capabilities.tools}`
-          : t.capabilities.configuredNotLoaded
-    : t.capabilities.unavailable;
-
   return (
     <DropdownMenu>
       <Tooltip content={t.capabilities.title}>
@@ -143,21 +133,24 @@ export function CommandRoomCapabilities({
             />
           )}
           <FactRow
-            label={t.capabilities.mcp}
-            value={mcpValue}
-            warning={Boolean(runtime?.delegated.mcp_cache.last_error_type)}
-          />
-          <FactRow
-            label={t.capabilities.mcpAccess}
+            label={t.capabilities.childModel}
             value={
-              runtime?.direct.include_mcp
-                ? t.capabilities.direct
-                : t.capabilities.delegatedOnly
+              runtime?.task_transport.model ??
+              runtime?.task_transport.configured_model ??
+              "-"
             }
           />
           <FactRow
-            label={t.capabilities.delegatedTools}
-            value={String(runtime?.delegated.configured_tools.length ?? 0)}
+            label={t.capabilities.reasoningEffort}
+            value={runtime?.task_transport.reasoning_effort ?? "-"}
+          />
+          <FactRow
+            label={t.capabilities.timeout}
+            value={runtime ? `${runtime.task_transport.timeout_seconds}s` : "-"}
+          />
+          <FactRow
+            label={t.capabilities.sandbox}
+            value={runtime?.task_transport.sandbox_mode ?? "-"}
           />
         </div>
       </DropdownMenuContent>

@@ -1,134 +1,97 @@
 ---
 title: Lead Agent
-description: Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+description: Lead Agent 负责会话连续性和最终判断；在指挥室中，它保持脑袋清醒，由一次性 Codex 子 AI 执行、核对和反向审查。
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Lead Agent
 
-<Callout type="info" emoji="🧠">
-  Lead Agent 是每个 DeerFlow
-  线程中的主要推理和编排单元。它决定要做什么、调用工具、委派子
-  Agent，并返回产出物。
+<Callout type="info">
+  Lead Agent 保留用户目标、方案、进度、上下文、边界和最终判断。
+  `command-room` 会把执行交给子 AI，让这个脑袋能持续指挥大型项目。
 </Callout>
 
-Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+## 职责
 
-## Lead Agent 的职责
+Lead Agent 接收用户消息、维护会话状态、判断需要什么工作、编写完整交接
+prompt、阅读各 AI 返回的自然结果，并给出最终回复。LangGraph/LangChain
+负责状态、流式传输、检查点、中间件和工具调用，但这些机制不代替 AI 判断。
 
-Lead Agent 负责：
+默认 Agent 和普通自定义 Agent 可以使用配置的直接工具；`command-room`
+有意采用不同边界：
 
-- 接收用户消息并维护对话状态
-- 推断接下来要做什么（规划、工具选择、委派）
-- 调用工具——内置工具、社区工具、MCP 工具或技能工具
-- 通过 `task` 工具将子任务委派给子 Agent
-- 管理产出物（文件、输出、交付物）
-- 在计划模式下更新待办列表
-- 向用户返回最终响应或产出物
+- 不获得文件、Shell、网页、MCP、图像检查或 skill 管理等直接执行工具；
+- 即使客户端发送 `subagent_enabled: false`，`task()` 也始终启用；
+- 直接工具只保留委派、必要的用户澄清和呈现已经完成的文件；
+- 每个 worker 结果必须交给另一个核对 AI，并取得独立反方结果后再裁决。
 
-Lead Agent 不硬编码特定的工作流。它使用模型的推理能力来适应用户提供的任何任务，由系统提示和当前范围内的技能引导。
+专业角色是开发者写入 prompt 的上下文，不授予 DeerFlow 工具。每个任务只
+启动一个临时 Codex CLI AI，由它自主规划和选择原生工具，返回完整自然语言
+结果后结束。
 
-## 运行时基础
-
-Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
-
-- `langchain.agents` 的 [`create_agent`](https://python.langchain.com/docs/concepts/agents/) 将 LLM 封装成工具调用 Agent 循环。
-- LangGraph 管理 `ThreadState`，提供检查点、流式传输和图执行模型。
-- **中间件链**包裹 Agent 循环的每一轮，提供记忆、摘要和澄清等跨领域能力。
-
-## 执行流程
+## 指挥室流程
 
 <Steps>
 
-### 接收消息
+### 接收并定位
 
-用户消息到达并添加到 `ThreadState.messages`。`ThreadState` 保存完整的对话历史、任何活跃的待办列表、累积的产出物和运行时元数据。
+在主会话中保持用户目标、确认过的上下文、当前边界和进度。
 
-### 中间件前处理
+### 委派执行
 
-在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`MemoryMiddleware` 将持久化的记忆事实注入到系统提示中，`SummarizationMiddleware` 在 token 预算超出时可能压缩旧消息。
+给一次性子 AI 写全专业角色、目标、相关事实和路径、权限、禁止事项、完成
+标准及返回要求。独立工作可以并行，一条 lead 模型响应最多六个 `task()`。
 
-### LLM 推理
+### 核对与反方
 
-模型接收当前消息（包括带有活跃技能指令的系统提示），并产生直接回复或一个或多个工具调用请求。
+把每个 worker 的完整结果交给不同的核对 AI；再让独立 opposition AI 从另
+一个方向寻找遗漏假设、相反证据和风险。
 
-### 工具执行
+### 裁决
 
-如果请求了工具调用，它们会被分发到相应的处理器——用于文件和命令操作的沙箱工具、用于网络访问的社区工具，或用于子 Agent 委派的 `task` 工具。
+阅读 worker、核对 AI 和反方的自然语言结果，判断目标是否完成、是否需要
+另一个有边界的任务，或者是否必须让用户授权边界变化。程序元数据不做裁决。
 
-### 中间件后处理
+### 持久化并回复
 
-工具结果返回后、下一次模型调用之前，中间件再次运行。`TitleMiddleware` 可能在第一次交互后生成线程标题，`TodoMiddleware` 可能更新任务列表。
-
-### 循环或响应
-
-如果模型需要更多信息（例如，工具返回了部分结果），循环继续。当模型决定任务完成时，它产生最终消息，循环结束。
-
-### 状态更新
-
-`ThreadState` 更新为新消息、产出物和记忆队列。如果配置了检查点，状态将被持久化。
+配置检查点后，LangGraph 保存消息和客观运行状态。向用户返回自然结论，并
+在需要时呈现已经完成的产出物。
 
 </Steps>
 
 ## 模型选择
 
-Lead Agent 在运行时使用以下优先级顺序解析要使用的模型：
+Lead Agent 模型按以下顺序解析：
 
-1. 每次请求配置中的 `model_name`（或 `model`），如果提供且有效。
-2. 活跃自定义 Agent 配置中的 `model` 字段，如果指定了 Agent。
-3. `config.yaml` 中 `models:` 列表的第一个模型（全局默认值）。
+1. 有效的请求级 `model_name` / `model`；
+2. 当前自定义 Agent 配置的模型；
+3. `config.yaml` 中第一个模型。
 
-如果请求的模型名称在配置中找不到，系统回退到默认模型并记录警告。
+子任务模型独立配置，不继承 Lead Agent：
 
 ```yaml
-models:
-  - name: my-primary-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-
-  - name: my-fast-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
+subagents:
+  model: gpt-5.6-terra
+  reasoning_effort: xhigh
+  timeout_seconds: 3600
 ```
 
-第一个条目（`my-primary-model`）成为默认值。任何不指定模型或指定未知模型名称的请求都将使用它。
+## 思考与计划模式
 
-## 思考模式
+`thinking_enabled` 控制 Lead Agent 支持的推理能力。普通 Agent 可以通过
+`is_plan_mode` 启用 `TodoMiddleware`。指挥室不把程序 todo list 当作工作流；
+进度由主 AI 保持，执行和审查通过 prompt 委派。
 
-如果模型支持扩展思考（例如 DeepSeek Reasoner、启用思考的 Doubao、Anthropic Claude 思考模式），Lead Agent 可以在**思考模式**下运行。在此模式下，模型的内部推理步骤在响应流中可见。
+## 自定义 Agent 与 Bootstrap
 
-思考模式通过每次请求的 `thinking_enabled` 标志控制。如果启用了思考但配置的模型不支持，系统会优雅地回退并记录警告。
+普通自定义 Agent 可以配置名称、指令、skills、直接工具组和默认 lead 模型。
+它与 `subagents.custom_agents` 不同，后者只定义一次性专业角色的 prompt 上下文
+和可选 Codex 模型。
 
-## 计划模式
-
-当请求配置中将 `is_plan_mode` 设为 `true` 时，`TodoMiddleware` 被激活。Agent 然后维护一个结构化的任务列表，在处理复杂任务时将条目标记为 `in_progress`、`completed` 或 `pending`。这为用户提供了 Agent 进度的可见性。
-
-计划模式适用于显示增量进度有价值的复杂、多步骤任务。对于简单请求，最好禁用它以避免不必要的开销。
-
-## 自定义 Agent
-
-相同的 Lead Agent 运行时同时为默认 Agent 和你创建的任何自定义 Agent 提供服务。自定义 Agent 的区别仅在于：
-
-- 其**名称**（ASCII slug，从 `display_name` 自动派生）
-- 其**系统提示**或 Agent 特定指令
-- 它有权访问的**技能**
-- 它可以使用的**工具组**
-- 它默认使用的**模型**
-
-自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
-
-<Callout type="tip">
-  当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定
-  Agent 切换模型或技能不需要重启服务器。
-</Callout>
+Bootstrap 是创建普通自定义 Agent 时使用的最小设置模式，不是指挥室任务运行时。
 
 <Cards num={2}>
-  <Cards.Card title="中间件" href="/docs/harness/middlewares" />
+  <Cards.Card title="子 Agent" href="/docs/harness/subagents" />
   <Cards.Card title="工具" href="/docs/harness/tools" />
 </Cards>

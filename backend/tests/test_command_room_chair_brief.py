@@ -97,7 +97,8 @@ def test_chair_operating_brief_compacts_existing_facts_without_verdicts() -> Non
     assert payload["handoff_count"] == 1
     assert payload["latest_handoff"]["target_role"] == "Chair"
     assert payload["evidence_summary"]["total"] == 1
-    assert payload["evidence_summary"]["by_strength"] == {"Strong": 1, "Weak": 0, "Unverified": 0}
+    assert payload["evidence_summary"]["by_source_kind"] == {"command_output": 1}
+    assert "by_strength" not in payload["evidence_summary"]
     assert payload["source_counts"] == {
         "handoffs": 1,
         "evidence_refs": 1,
@@ -115,11 +116,10 @@ def test_chair_operating_brief_compacts_existing_facts_without_verdicts() -> Non
     assert "auto_rework" not in public_json
 
 
-def test_chair_operating_brief_known_gaps_are_mechanical_only() -> None:
+def test_chair_operating_brief_does_not_invent_known_gaps() -> None:
     brief = build_chair_operating_brief(thread_id="thread-1", run_id="run-1")
 
-    assert brief.known_gaps == ["no_capability_snapshot", "no_evidence_refs", "no_quality_signals"]
-    assert set(brief.known_gaps) <= {"no_capability_snapshot", "no_evidence_refs", "no_quality_signals"}
+    assert brief.known_gaps == []
 
     text = format_chair_operating_brief_for_model(brief)
     assert text is not None

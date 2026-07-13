@@ -20,7 +20,7 @@ A useful progress memory should be short and boring. Prefer these fields only:
 - `changed files`: files intentionally touched or expected to contain the current work;
 - `last working command`: the most recent useful command, including whether it passed, failed, or was interrupted;
 - `current blocker`: the concrete reason progress stopped, if any;
-- `next step`: the next safe action for the human or lead AI.
+- `next step`: an AI-authored proposed continuation, not a program-certified safe action.
 
 Optional notes may be added only when they reduce recovery risk, such as an important constraint, redline, or command that must not be rerun blindly.
 
@@ -29,9 +29,9 @@ Optional notes may be added only when they reduce recovery risk, such as an impo
 Progress memory sits above the runtime evidence layer and below a full project plan:
 
 - Progress memory is a lightweight continuation summary for humans and new AI sessions. It is optimized for readability and safe resumption, not completeness.
-- `RoundRecord` is the lead AI's round-level working memory: goal, boundary, evidence seen, unresolved risk, and useful signals for the next step.
+- `RoundRecord` is passive compatibility memory for explicit AI-authored notes and objective task, event, artifact, or status references. It does not derive risk, readiness, completion, or a next step.
 - `audit` and `action_result` are bottom-layer facts and evidence: commands, files, logs, terminal/tool events, artifacts, statuses, hashes, and compact runtime metadata.
-- `roundBrief` is the short model-injected summary derived from conversation and audit signals so the lead AI can continue inside the active Command Room flow.
+- `roundBrief` may carry explicit AI-authored notes and objective references into context. It does not turn conversation or audit data into a quality, safety, gap, or next-action judgment.
 
 A progress memory may point to `RoundRecord`, audit entries, test logs, commits, or changed files, but it must not replace them. It is a reading aid, not a source of truth.
 
@@ -62,13 +62,13 @@ For small single-session documentation or code edits, the git diff, commit messa
 
 ## Resume protocol
 
-When resuming, the lead AI should read the progress memory early, then verify it before acting:
+When resuming, the Command Room should pass the progress memory and target paths to a one-shot sub-AI, then use separate checking and opposition AIs before it decides:
 
 1. Read the progress memory for intended changed files, last command, blocker, and next step.
-2. Run `git status --short` and inspect relevant diffs before modifying files.
-3. Check tests, logs, audit, or `action_result` records that the memory references.
+2. Ask the worker AI to run `git status --short`, inspect relevant diffs, and check referenced tests, logs, audit, or `action_result` records before modifying files.
+3. Pass the worker's complete natural result to a different checking AI and an independent opposition AI.
 4. Treat stale or conflicting memory as a signal to investigate, not as authority.
-5. Continue only from a verified safe next action.
+5. Let the Command Room decide the continuation from those natural-language results and the user's current authorization.
 
 In short: read it first, but do not blindly trust it.
 

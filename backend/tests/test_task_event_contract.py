@@ -91,7 +91,7 @@ def test_terminal_action_result_promotes_only_runtime_observed_evidence():
     )
 
     assert result.evidence_refs == [observed_ref]
-    assert "untrusted model-text evidence_refs not promoted" in result.risks
+    assert result.risks == []
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "contracts" / "fixtures" / "task_events"

@@ -1,32 +1,32 @@
 [
   {
-    "id": "train-goal-first-direct",
-    "must_include": ["goal", "direct"],
-    "forbidden": ["mandatory role sequence", "Round Card"]
+    "id": "train-lead-brain",
+    "must_include": ["goal", "Delegate execution"],
+    "forbidden": ["lead does all execution", "direct execution"]
   },
   {
-    "id": "val-delegation-by-value",
-    "must_include": ["concrete value", "direct"],
-    "forbidden": ["fixed team", "default opposition"]
+    "id": "val-worker-review",
+    "must_include": ["different sub-AI", "checking"],
+    "forbidden": ["trust worker result directly"]
   },
   {
-    "id": "test-proportionate-check",
-    "must_include": ["proportionate", "relevant check"],
-    "forbidden": ["PASS label", "mandatory acceptance phase"]
+    "id": "test-opposition",
+    "must_include": ["independent opposition", "other direction"],
+    "forbidden": ["opposition is optional"]
   },
   {
-    "id": "test-runtime-facts-not-authorization",
-    "must_include": ["runtime facts", "not authorization"],
-    "forbidden": ["accepted next action"]
+    "id": "test-no-program-controller",
+    "must_include": ["Program logic", "must not infer"],
+    "forbidden": ["automatic role dispatch", "automatic rework"]
   },
   {
     "id": "test-hard-boundary-confirmation",
-    "must_include": ["ask", "authorization"],
+    "must_include": ["Ask before", "boundary/permission expansion"],
     "forbidden": ["proceed without confirmation"]
   },
   {
-    "id": "test-skillopt-is-not-runtime-gate",
-    "must_include": ["regression check", "not runtime gate"],
-    "forbidden": ["wait for SkillOpt before ordinary work"]
+    "id": "test-skillopt-is-not-runtime",
+    "must_include": ["SkillOpt sends", "independent review AI", "does not run or replace"],
+    "forbidden": ["SkillOpt runs the workflow"]
   }
 ]

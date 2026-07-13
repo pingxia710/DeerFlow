@@ -1,11 +1,3 @@
-export interface McpCacheStatus {
-  initialized: boolean;
-  stale: boolean;
-  tool_count: number;
-  tool_names: readonly string[];
-  last_error_type: string | null;
-}
-
 export interface CommandRoomRuntimeSnapshot {
   agent_config: {
     status: string;
@@ -19,8 +11,6 @@ export interface CommandRoomRuntimeSnapshot {
     loaded: readonly string[];
     missing: readonly string[];
     disabled: readonly string[];
-    delegated_loaded: readonly string[];
-    role_skills: readonly string[];
   };
   direct: {
     tool_groups: readonly string[] | null;
@@ -28,12 +18,19 @@ export interface CommandRoomRuntimeSnapshot {
     include_mcp: boolean;
     mcp_access: string;
   };
-  delegated: {
-    tool_groups: readonly string[] | null;
-    configured_tools: readonly string[];
-    include_mcp: boolean;
-    mcp_servers_configured: readonly string[];
-    mcp_cache: McpCacheStatus;
+  task_transport: {
+    runtime: "codex-cli-one-shot";
+    model: string | null;
+    configured_model: string | null;
+    reasoning_effort: string | null;
+    timeout_seconds: number;
+    sandbox_mode: "workspace-write" | "danger-full-access";
+    workspace_source: string;
+    inherits_deerflow_tools: false;
+    inherits_deerflow_skills: false;
+    inherits_deerflow_mcp: false;
+    programmatic_turn_loop: false;
+    process_ends_after_result: true;
   };
 }
 

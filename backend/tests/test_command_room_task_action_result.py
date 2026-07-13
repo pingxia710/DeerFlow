@@ -10,13 +10,13 @@ def test_task_terminal_string_result_becomes_summary_not_evidence():
         task_id="task-1",
         status="completed",
         description="check files",
-        result="Task Succeeded. Result: done",
+        result="done",
     )
 
     assert result.action_id == "task-1"
     assert result.description == "check files"
     assert result.status == RoundItemStatus.COMPLETED
-    assert result.summary == "Task Succeeded. Result: done"
+    assert result.summary == "done"
     assert result.evidence_refs == []
 
 
@@ -78,7 +78,7 @@ def test_task_terminal_dict_result_does_not_trust_model_claimed_evidence():
 
     assert result.summary == "I ran everything and it passed"
     assert result.evidence_refs == []
-    assert "untrusted model-text evidence_refs not promoted" in result.risks
+    assert result.risks == []
 
 
 def test_task_terminal_summary_only_dict_does_not_become_strong_evidence():
@@ -106,4 +106,20 @@ def test_task_terminal_dict_drops_self_claimed_verification_fields():
 
     assert result.summary == "verified=true; tests passed"
     assert result.evidence_refs == []
-    assert "untrusted model-text evidence_refs not promoted" in result.risks
+    assert result.risks == []
+
+
+def test_task_terminal_runtime_identity_overrides_model_claims():
+    result = task_action_result_from_terminal_event(
+        task_id="runtime-task",
+        status="completed",
+        description="runtime description",
+        result={
+            "action_id": "claimed-task",
+            "description": "claimed description",
+            "summary": "done",
+        },
+    )
+
+    assert result.action_id == "runtime-task"
+    assert result.description == "runtime description"

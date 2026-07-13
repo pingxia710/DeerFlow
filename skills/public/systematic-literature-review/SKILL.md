@@ -100,26 +100,9 @@ Instead, you MUST call the `task` tool to spawn subagents. The reason: extractin
 
 Split papers into batches of ~5, then for each batch, call the `task` tool with `subagent_type: "general-purpose"`. Each subagent receives the paper abstracts as text and returns structured JSON.
 
-**Concurrency limit: at most 3 subagents per turn.** The DeerFlow runtime enforces `MAX_CONCURRENT_SUBAGENTS = 3` and will silently drop any extra dispatches in the same turn — the LLM will not be told this happened, so strictly follow the round strategy below.
+**Response limit: at most 6 `task` calls in one Lead Agent response.** Dispatch up to six independent batches together. If more batches remain, wait for the natural results and issue the rest in a later response. The middleware omits excess calls with a model-visible warning; it does not silently queue or schedule them.
 
-**Round strategy — use this decision table, do not compute the split yourself**:
-
-| Paper count | Batches of ~5 papers | Rounds | Per-round subagent count |
-|---|---|---|---|
-| 1–5 | 1 batch | 1 round | 1 subagent |
-| 6–10 | 2 batches | 1 round | 2 subagents |
-| 11–15 | 3 batches | 1 round | 3 subagents |
-| 16–20 | 4 batches | 2 rounds | 3 + 1 |
-| 21–25 | 5 batches | 2 rounds | 3 + 2 |
-| 26–30 | 6 batches | 2 rounds | 3 + 3 |
-| 31–35 | 7 batches | 3 rounds | 3 + 3 + 1 |
-| 36–40 | 8 batches | 3 rounds | 3 + 3 + 2 |
-| 41–45 | 9 batches | 3 rounds | 3 + 3 + 3 |
-| 46–50 | 10 batches | 4 rounds | 3 + 3 + 3 + 1 |
-
-**Never dispatch more than 3 subagents in the same turn.** When a row says "2 rounds (3 + 1)", that means: first turn dispatches 3 subagents in parallel, wait for all 3 to complete, then second turn dispatches 1 subagent. Rounds are strictly sequential at the main-agent level.
-
-If the paper count lands between rows (e.g. 23 papers), round up to the next row's layout but only dispatch as many batches as you actually need — the decision table gives you the shape, not a rigid prescription.
+After extraction, give the complete worker results to a different sub-AI for checking before synthesis. Ask an independent opposition sub-AI to challenge the emerging themes from the other direction, then let the Lead Agent make the final synthesis judgment.
 
 **Do the batching at the main-agent level**: you already have every paper's abstract from Phase 2, so each subagent receives pure text input. Subagents should not need to access the network or the sandbox — their only job is to read text and return JSON. Do not ask subagents to re-run `arxiv_search.py`; that would waste tokens and risk rate-limiting.
 
@@ -156,7 +139,7 @@ order as the input. Do not include any text outside the JSON — no
 preamble, no markdown fences, just the array.
 ```
 
-**Parsing subagent results**: the task tool returns strings with a fixed prefix like `Task Succeeded. Result: [...JSON...]`. Strip the `Task Succeeded. Result: ` prefix (or `Task failed.` / `Task timed out.` prefixes) before trying to parse JSON. If a batch fails or returns unparseable JSON, log it, note which papers were affected, and continue with the remaining batches — do not fail the whole synthesis on one bad batch.
+**Parsing subagent results**: a successful task returns the worker's natural result unchanged, so parse the requested JSON array directly. Task lifecycle status is separate metadata. If a batch fails or returns unparseable JSON, note which papers were affected and continue with the remaining batches rather than failing the whole synthesis.
 
 After all rounds complete, flatten the per-batch arrays into a single list of paper metadata objects, preserving order.
 
@@ -228,8 +211,8 @@ This is a single-paper peer review, not a literature survey. Do not use this ski
 
 - **Prerequisite: `subagent_enabled` must be `true`**. Phase 3 requires the `task` tool for parallel metadata extraction. This tool is only loaded when `subagent_enabled` is set to `true` in the runtime config (`config.configurable.subagent_enabled`). Without it, the `task` tool will not appear in the available tools and Phase 3 cannot execute as designed.
 - **arXiv only, by design**. This skill does not query Semantic Scholar, PubMed, or Google Scholar. arXiv covers the bulk of CS/ML/physics/math preprints, which is what DeerFlow users most often want to survey. Multi-source academic search belongs in a dedicated MCP server, not inside this skill.
-- **Hard upper bound of 50 papers**. This is tied to the Phase 3 concurrency strategy (max 3 subagents per round, ~5 papers each, at most ~3 rounds). Surveys larger than 50 papers degrade in synthesis quality and are better done by splitting into sub-topics.
+- **Hard upper bound of 50 papers**. At roughly five papers per worker this is at most ten one-shot extraction tasks, normally dispatched in two Lead Agent responses. Larger surveys degrade synthesis quality and are better split into sub-topics.
 - **Phase 3 requires subagents to be enabled**. This skill's parallel extraction step hard-requires the `task` tool, which is only available when `subagent_enabled=true` at runtime. If subagents are unavailable, do not claim to execute the Phase 3 parallel plan; instead, tell the user that subagents must be enabled for the full workflow, or offer to narrow/split the request into a smaller manual review.
-- **Subagent results are strings, not objects**. Always strip the `Task Succeeded. Result: ` / `Task failed.` / `Task timed out.` prefixes before parsing the JSON payload.
+- **Subagent results are natural text**. When the prompt requests JSON-only output, parse that returned text directly; do not expect or strip a success prefix.
 - **The `id` field is a bare arXiv id** (e.g. `1706.03762`), not a URL and not with a version suffix. `abs_url` / `pdf_url` hold the full URLs if you need them.
 - **Synthesis, not listing**. The final report must identify themes and compare findings across papers. A report that only lists papers one after another is a failure mode — if you cannot find themes, say so explicitly instead of faking them.

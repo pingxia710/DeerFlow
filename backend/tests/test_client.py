@@ -17,10 +17,10 @@ from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusRespons
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.uploads import UploadResponse
+from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS
 from deerflow.client import DeerFlowClient
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import Paths
-from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -992,7 +992,7 @@ class TestEnsureAgent:
     def test_command_room_client_uses_agent_config_boundaries(self, client):
         mock_agent = MagicMock()
         client._agent_name = "command-room"
-        client._subagent_enabled = True
+        client._subagent_enabled = False
         config = client._get_runnable_config("t1")
 
         captured_model: dict[str, object] = {}
@@ -1023,11 +1023,31 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
         assert captured_model["name"] == "safe-model"
-        assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
+        assert mock_get_tools.call_args.kwargs["groups"] == []
         assert mock_get_tools.call_args.kwargs["include_mcp"] is False
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
         assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
         assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
+
+    def test_rebuilds_agent_when_normalized_subagent_limit_changes(self, client):
+        mock_agent = MagicMock()
+        config = client._get_runnable_config("t1")
+        config["configurable"]["max_concurrent_subagents"] = 1
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
+        ):
+            client._ensure_agent(config)
+            config["configurable"]["max_concurrent_subagents"] = 7
+            client._ensure_agent(config)
+
+        assert mock_create_agent.call_count == 2
+        assert [call.kwargs["max_concurrent_subagents"] for call in mock_apply_prompt.call_args_list] == [2, 6]
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -1094,7 +1114,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None)
+        client._agent_config_key = (None, True, False, False, MAX_CONCURRENT_SUBAGENTS, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)

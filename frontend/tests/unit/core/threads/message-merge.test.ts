@@ -11,6 +11,7 @@ import {
   applyNativeRoundsToSnapshotRuns,
   applySnapshotRunMessagePageState,
   applyTaskEventRunMessages,
+  applyTaskToolResultRunMessages,
   applyBackgroundRunProbeResult,
   buildRunMessagesUrl,
   buildThreadRuntimeSnapshotUrl,
@@ -1151,6 +1152,74 @@ test("task event run messages update subtask state without entering visible hist
       [],
     ).map((message) => message.id),
   ).toEqual(["ai-1"]);
+});
+
+test("hidden task ToolMessage restores the complete raw result after preview replay", () => {
+  const fullResult = `  ${"complete result line\n".repeat(40)}  `;
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        type: "task_completed",
+        task_id: "call-1",
+        thread_id: "thread-1",
+        run_id: "run-1",
+        round_id: "round-1",
+        result_preview: "complete result line...",
+      },
+      metadata: { caller: "task_event" },
+      display: {
+        visible_in_chat: false,
+        reason: "task_event",
+      },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "tool-1",
+        type: "tool",
+        name: "task",
+        tool_call_id: "call-1",
+        content: fullResult,
+        additional_kwargs: {
+          subagent_status: "completed",
+          round_id: "round-1",
+        },
+      },
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: false,
+        reason: "tool_message",
+      },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+  ] as unknown as RunMessage[];
+  let tasks: Record<string, Subtask> = {};
+  const update = (value: Parameters<typeof applySubtaskUpdateInState>[1]) => {
+    tasks = applySubtaskUpdateInState(tasks, value);
+  };
+
+  applyTaskEventRunMessages(rows, update, "thread-1");
+  update({
+    id: "call-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    roundId: "round-1",
+    status: "completed",
+    result: "lane preview",
+  });
+  applyTaskToolResultRunMessages(rows, update, "thread-1");
+
+  expect(Object.values(tasks)).toHaveLength(1);
+  expect(Object.values(tasks)[0]).toMatchObject({
+    status: "completed",
+    result: fullResult,
+    roundId: "round-1",
+  });
+  expect(buildVisibleHistoryMessages(rows, new Set(), [])).toEqual([]);
 });
 
 test("task event replay honors the backend message type contract", () => {

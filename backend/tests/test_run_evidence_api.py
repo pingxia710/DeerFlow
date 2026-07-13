@@ -110,14 +110,17 @@ def test_run_evidence_api_extracts_normalized_refs_without_quality_verdict() -> 
     assert body["thread_id"] == "thread-1"
     assert body["run_id"] == "run-1"
     assert body["round_id"] == "round-1"
-    assert by_kind["command_output"]["strength"] == "Strong"
-    assert by_kind["artifact"]["strength"] == "Strong"
-    assert by_kind["self_claim"]["strength"] == "Weak"
-    assert by_kind["output_ref"]["strength"] == "Weak"
-    assert by_kind["log"]["strength"] == "Strong"
+    assert {ref["source_kind"] for ref in refs} == {
+        "unknown",
+        "output_ref",
+        "artifact",
+        "command_output",
+        "log",
+    }
+    assert all(ref["strength"] is None for ref in refs)
     assert body["summary"]["quality_verdict"] is None
     assert body["summary"]["auto_rework"] is False
-    assert body["summary"]["by_strength"]["Weak"] == 2
+    assert "by_strength" not in body["summary"]
 
     public_json = json.dumps(body)
     assert "sk-123456789012345" not in public_json

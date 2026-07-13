@@ -50,10 +50,7 @@ DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
-# This is independent of subagent depth: a `task()` dispatch runs the whole
-# subagent inside ONE lead tools-node step, and subagents enforce their own
-# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
-# 100 with the general-purpose subagent's max_turns.
+# A `task()` dispatch is one Codex CLI process inside one lead tools-node step.
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 # The Command Room's browser client uses the same ceiling for multi-round work.
 COMMAND_ROOM_DEFAULT_RECURSION_LIMIT = 1000

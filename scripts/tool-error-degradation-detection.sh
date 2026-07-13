@@ -37,10 +37,6 @@ from langchain_core.messages import ToolMessage
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.config import get_app_config
-from deerflow.sandbox.middleware import SandboxMiddleware
-
-from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-
 HANDSHAKE_ERROR = "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)"
 logging.getLogger("deerflow.agents.middlewares.tool_error_handling_middleware").setLevel(logging.CRITICAL)
 
@@ -148,17 +144,6 @@ def _validate_outputs(label, outputs):
     print(f"[INFO] {label}: no crash, outputs preserved (error + success).")
 
 
-def _build_sub_middlewares():
-    try:
-        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
-    except Exception:
-        return [
-            ThreadDataMiddleware(lazy_init=True),
-            SandboxMiddleware(lazy_init=True),
-        ]
-    return build_subagent_runtime_middlewares()
-
-
 def _run_sync_sequence(executor):
     outputs = []
     try:
@@ -189,11 +174,10 @@ if not model_name:
     raise SystemExit(8)
 
 lead_middlewares = build_middlewares({"configurable": {}}, model_name=model_name)
-sub_middlewares = _build_sub_middlewares()
 
 print("[STEP 3] Simulate two sequential tool calls and check whether conversation flow aborts.")
 any_crash = False
-for label, middlewares in [("lead", lead_middlewares), ("subagent", sub_middlewares)]:
+for label, middlewares in [("lead", lead_middlewares)]:
     sync_exec = _compose_sync(_collect_sync_wrappers(middlewares))
     sync_outputs, sync_exc = _run_sync_sequence(sync_exec)
     if sync_exc is not None:

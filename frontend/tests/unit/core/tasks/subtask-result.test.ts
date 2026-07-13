@@ -213,6 +213,19 @@ describe("derivePendingSubtaskStatus", () => {
  * from the content string.
  */
 describe("parseSubtaskResult — structured additional_kwargs (preferred path)", () => {
+  it("preserves raw natural-language worker output when structured status is completed", () => {
+    const parsed = parseSubtaskResult(
+      "  complete worker result\nwith details\n",
+      {
+        [SUBAGENT_STATUS_KEY]: "completed",
+      },
+    );
+    expect(parsed).toEqual({
+      status: "completed",
+      result: "  complete worker result\nwith details\n",
+    });
+  });
+
   it("uses additional_kwargs.subagent_status when present", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: foo", {
       [SUBAGENT_STATUS_KEY]: "completed",
@@ -269,10 +282,7 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.error).toContain("renamed_in_v3");
   });
 
-  it("structured status overrides legacy text — opposite content", () => {
-    // Defence: if backend sends `failed` structured but the content
-    // accidentally starts with "Task Succeeded.", we must trust the
-    // structured field. The structured field is the source of truth.
+  it("structured failure status overrides legacy success text", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: this is a lie", {
       [SUBAGENT_STATUS_KEY]: "failed",
     });
@@ -284,26 +294,26 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.error).toBeUndefined();
   });
 
-  it("back-fills `result` from the success-prefixed content when structured says completed", () => {
-    // The backend currently stamps `subagent_status: completed` but the
-    // success body still lives in `content`. Without back-fill the card
-    // would render an empty completed pill (regression flagged in PR #3154
-    // Copilot review).
+  it("does not reinterpret a current raw result that resembles a legacy success prefix", () => {
     const parsed = parseSubtaskResult(
       "Task Succeeded. Result: investigated and produced a 3-page report",
       { [SUBAGENT_STATUS_KEY]: "completed" },
     );
     expect(parsed.status).toBe("completed");
-    expect(parsed.result).toBe("investigated and produced a 3-page report");
+    expect(parsed.result).toBe(
+      "Task Succeeded. Result: investigated and produced a 3-page report",
+    );
   });
 
-  it("back-fills `result` from suggested-receiver success content when structured says completed", () => {
+  it("does not reinterpret a current raw result that resembles a legacy receiver prefix", () => {
     const parsed = parseSubtaskResult(
       "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
       { [SUBAGENT_STATUS_KEY]: "completed" },
     );
     expect(parsed.status).toBe("completed");
-    expect(parsed.result).toBe("reviewed files");
+    expect(parsed.result).toBe(
+      "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
+    );
   });
 
   it("back-fills `error` from a wrapped-error body when structured says failed and no subagent_error", () => {

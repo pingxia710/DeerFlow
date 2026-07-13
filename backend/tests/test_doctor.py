@@ -28,6 +28,59 @@ class TestCheckPython:
         assert result.status == "ok"
 
 
+class TestCheckCodexCli:
+    def test_missing_cli_fails(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _name: None)
+
+        result = doctor.check_codex_cli()
+
+        assert result.status == "fail"
+        assert result.fix is not None
+        assert "@openai/codex" in result.fix
+
+    def test_installed_cli_reports_version(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/codex")
+        monkeypatch.setattr(doctor, "_run", lambda _command: "codex-cli 0.144.1")
+
+        result = doctor.check_codex_cli()
+
+        assert result.status == "ok"
+        assert result.detail == "codex-cli 0.144.1"
+
+    def test_auth_status_is_checked_without_reading_credentials(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/codex")
+        monkeypatch.setattr(doctor, "_run", lambda command: "Logged in using ChatGPT" if command[-2:] == ["login", "status"] else None)
+
+        result = doctor.check_codex_auth()
+
+        assert result.status == "ok"
+        assert result.detail == "Logged in using ChatGPT"
+
+    def test_auth_env_is_accepted_without_printing_value(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/codex")
+        monkeypatch.setattr(doctor, "_run", lambda _command: None)
+        monkeypatch.setenv("OPENAI_API_KEY", "secret-value")
+
+        result = doctor.check_codex_auth()
+
+        assert result.status == "ok"
+        assert result.detail == "environment credential is set"
+        assert "secret-value" not in result.detail
+
+    def test_native_codex_api_key_is_accepted_without_printing_value(self, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/codex")
+        monkeypatch.setattr(doctor, "_run", lambda _command: None)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("CODEX_ACCESS_TOKEN", raising=False)
+        monkeypatch.setenv("CODEX_API_KEY", "native-secret-value")
+
+        result = doctor.check_codex_auth()
+
+        assert result.status == "ok"
+        assert result.detail == "environment credential is set"
+        assert "native-secret-value" not in result.detail
+
+
 class TestCheckRuntimeHome:
     def test_source_checkout_uses_backend_runtime_home(self, tmp_path, monkeypatch):
         _make_source_checkout(tmp_path)

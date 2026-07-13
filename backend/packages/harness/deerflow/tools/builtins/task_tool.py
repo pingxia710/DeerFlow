@@ -17,10 +17,13 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
+from deerflow.config.paths import ensure_directory_no_symlinks
 from deerflow.config.subagents_config import get_subagents_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.security import is_unrestricted_host_access_allowed
 from deerflow.subagents.audit import record_subagent_handoff
-from deerflow.subagents.codex_cli import CodexCliError, CodexCliTimeoutError, run_codex_cli_task
+from deerflow.subagents.codex_cli import CodexSandboxMode, run_codex_cli_task
+from deerflow.subagents.registry import get_subagent_config
 from deerflow.subagents.status_contract import SubagentStatusValue, make_subagent_additional_kwargs
 from deerflow.tools.types import Runtime
 
@@ -246,8 +249,22 @@ def _artifact_refs(action_result: Any) -> list[str]:
     return refs
 
 
-def _terminal_task_message(content: str, *, tool_call_id: str, status: SubagentStatusValue) -> ToolMessage:
-    return ToolMessage(content=content, name="task", tool_call_id=tool_call_id, additional_kwargs=make_subagent_additional_kwargs(status))
+def _terminal_task_message(
+    content: str,
+    *,
+    tool_call_id: str,
+    status: SubagentStatusValue,
+    round_id: str | None,
+) -> ToolMessage:
+    additional_kwargs = make_subagent_additional_kwargs(status)
+    if round_id:
+        additional_kwargs["round_id"] = round_id
+    return ToolMessage(
+        content=content,
+        name="task",
+        tool_call_id=tool_call_id,
+        additional_kwargs=additional_kwargs,
+    )
 
 
 def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
@@ -283,8 +300,68 @@ def _task_model_options(app_config: AppConfig | None, subagent_type: str) -> tup
     subagents = getattr(app_config, "subagents", None) if app_config is not None else get_subagents_app_config()
     get_model_for = getattr(subagents, "get_model_for", None)
     model = get_model_for(subagent_type) if callable(get_model_for) else None
+    if app_config is not None and isinstance(model, str):
+        get_model_config = getattr(app_config, "get_model_config", None)
+        model_config = get_model_config(model) if callable(get_model_config) else None
+        raw_model_id = getattr(model_config, "model", None)
+        if isinstance(raw_model_id, str) and raw_model_id:
+            model = raw_model_id
     reasoning_effort = getattr(subagents, "reasoning_effort", None)
     return model, reasoning_effort if isinstance(reasoning_effort, str) else None
+
+
+def _task_sandbox_mode(app_config: AppConfig | None) -> CodexSandboxMode:
+    return "danger-full-access" if is_unrestricted_host_access_allowed(app_config) else "workspace-write"
+
+
+def _task_worker_prompt(
+    app_config: AppConfig | None,
+    subagent_type: str,
+    prompt: str,
+    task_paths: dict[str, str],
+) -> str:
+    role = get_subagent_config(subagent_type, app_config=app_config)
+    role_prompt = getattr(role, "system_prompt", None) or getattr(role, "description", None)
+    if not isinstance(role_prompt, str) or not role_prompt.strip():
+        role_prompt = f'Work as the professional role "{subagent_type}" selected by the lead AI.'
+    sections = [f"# Professional role: {subagent_type}\n\n{role_prompt.strip()}"]
+    sections.append(f"# Command Room task\n\n{prompt}")
+    sections.append(
+        "# Applicable project instructions\n\n"
+        "Before working on any target path, locate and read the complete AGENTS.md instruction chain "
+        "that applies to that path, including ancestor, project, and nearer subdirectory files. Follow "
+        "the nearest applicable rules when instructions conflict. Do not edit an AGENTS.md file unless "
+        "this task explicitly authorizes that edit."
+    )
+    path_lines = [
+        f"- Workspace: {task_paths['workspace_path']}",
+    ]
+    if uploads_path := task_paths.get("uploads_path"):
+        path_lines.append(f"- Uploaded files (read): {uploads_path}")
+    if outputs_path := task_paths.get("outputs_path"):
+        path_lines.append(f"- Output artifacts (write): {outputs_path}")
+    path_lines.append("- Any /mnt/user-data paths in the handoff refer to the matching host paths above.")
+    sections.append("# DeerFlow task paths\n\n" + "\n".join(path_lines))
+    return "\n\n".join(sections)
+
+
+def _task_paths(thread_data: dict[str, Any]) -> dict[str, str]:
+    workspace_path = thread_data.get("workspace_path")
+    if not isinstance(workspace_path, str) or not workspace_path:
+        raise RuntimeError("No thread workspace is available for the Codex CLI task.")
+    paths = {"workspace_path": workspace_path}
+    for key in ("uploads_path", "outputs_path"):
+        value = thread_data.get(key)
+        if isinstance(value, str) and value:
+            paths[key] = value
+    return paths
+
+
+def _ensure_task_paths(task_paths: dict[str, str]) -> dict[str, str]:
+    try:
+        return {key: str(ensure_directory_no_symlinks(value, mode=0o777)) for key, value in task_paths.items()}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Codex CLI task paths could not be prepared: {exc}") from exc
 
 
 async def _record_terminal_task(
@@ -366,16 +443,17 @@ async def task_tool(
 ) -> ToolMessage:
     """Delegate one natural-language task to the installed Codex CLI.
 
-    DeerFlow records lifecycle events and returns the final answer to the lead
-    agent. Codex CLI owns planning, tool use, and task completion. The
-    ``subagent_type`` remains a display/audit label for compatibility. It does
-    not select a DeerFlow role, prompt, tool allowlist, or turn limit; an
-    existing per-label model override is passed through to Codex CLI.
+    DeerFlow combines the selected developer-authored professional role context
+    with the lead AI's task prompt, records factual lifecycle events, and
+    returns the complete final answer unchanged. Codex CLI owns planning, tool
+    use, and task completion. ``subagent_type`` selects natural-language role
+    context and may select a Codex model override; it never selects a tool
+    allowlist, turn loop, quality gate, reviewer, or rework policy.
 
     Args:
         description: A short task label for the user interface and audit log.
         prompt: Complete instructions for the Codex CLI worker.
-        subagent_type: A compatibility display label for the delegated task.
+        subagent_type: The professional role label selected by the lead AI.
     """
     state = getattr(runtime, "state", None)
     state = state if isinstance(state, dict) else {}
@@ -393,45 +471,57 @@ async def task_tool(
     trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
     user_id = resolve_runtime_user_id(runtime)
     task_id = tool_call_id
+    round_id = _runtime_round_id(runtime)
     started_at = _utc_now_iso()
     started_monotonic = time.monotonic()
     writer = get_stream_writer()
     runtime_app_config = _get_runtime_app_config(runtime)
     timeout_seconds = _task_timeout_seconds(runtime_app_config)
     model, reasoning_effort = _task_model_options(runtime_app_config, subagent_type)
-
-    await _record_subagent_handoff_async(
-        thread_id=thread_id,
-        run_id=run_id,
-        task_id=task_id,
-        trace_id=trace_id,
-        user_id=user_id,
-        subagent_type=subagent_type,
-        description=description,
-        prompt=prompt,
-        status="started",
-    )
-    _emit_task_event(
-        writer,
-        runtime,
-        {
-            **_task_event_base("task_started", task_id, thread_id=thread_id, run_id=run_id, started_at=started_at),
-            "description": description,
-            "subagent_type": subagent_type,
-            "status": "in_progress",
-            "summary": _redacted_preview(description, fallback="Task started"),
-        },
-    )
+    sandbox_mode = _task_sandbox_mode(runtime_app_config)
+    worker_prompt = prompt
 
     try:
-        cli_result = await run_codex_cli_task(
-            prompt,
-            workspace_path=thread_data.get("workspace_path"),
+        prepared_paths = _ensure_task_paths(_task_paths(thread_data))
+        worker_prompt = _task_worker_prompt(runtime_app_config, subagent_type, prompt, prepared_paths)
+        await _record_subagent_handoff_async(
+            thread_id=thread_id,
+            run_id=run_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            subagent_type=subagent_type,
+            description=description,
+            prompt=worker_prompt,
+            status="started",
+        )
+        _emit_task_event(
+            writer,
+            runtime,
+            {
+                **_task_event_base(
+                    "task_started",
+                    task_id,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    started_at=started_at,
+                ),
+                "description": description,
+                "subagent_type": subagent_type,
+                "status": "in_progress",
+                "summary": _redacted_preview(description, fallback="Task started"),
+            },
+        )
+        result = await run_codex_cli_task(
+            worker_prompt,
+            workspace_path=prepared_paths["workspace_path"],
             timeout_seconds=timeout_seconds,
             model=model,
             reasoning_effort=reasoning_effort,
+            sandbox_mode=sandbox_mode,
+            additional_writable_paths=([prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []),
         )
-    except CodexCliTimeoutError as exc:
+    except TimeoutError as exc:
         error = str(exc)
         await _record_terminal_task(
             writer=writer,
@@ -443,14 +533,19 @@ async def task_tool(
             user_id=user_id,
             subagent_type=subagent_type,
             description=description,
-            prompt=prompt,
+            prompt=worker_prompt,
             status="timed_out",
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
         )
-        return _terminal_task_message(f"Task timed out. Error: {_redacted_tool_text(error)}", tool_call_id=tool_call_id, status="timed_out")
-    except CodexCliError as exc:
+        return _terminal_task_message(
+            f"Task timed out. Error: {_redacted_tool_text(error)}",
+            tool_call_id=tool_call_id,
+            status="timed_out",
+            round_id=round_id,
+        )
+    except RuntimeError as exc:
         error = str(exc)
         await _record_terminal_task(
             writer=writer,
@@ -462,13 +557,18 @@ async def task_tool(
             user_id=user_id,
             subagent_type=subagent_type,
             description=description,
-            prompt=prompt,
+            prompt=worker_prompt,
             status="failed",
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
         )
-        return _terminal_task_message(f"Task failed. Error: {_redacted_tool_text(error)}", tool_call_id=tool_call_id, status="failed")
+        return _terminal_task_message(
+            f"Task failed. Error: {_redacted_tool_text(error)}",
+            tool_call_id=tool_call_id,
+            status="failed",
+            round_id=round_id,
+        )
     except asyncio.CancelledError:
         error = "Parent run cancelled"
         await _record_terminal_task(
@@ -481,7 +581,7 @@ async def task_tool(
             user_id=user_id,
             subagent_type=subagent_type,
             description=description,
-            prompt=prompt,
+            prompt=worker_prompt,
             status="cancelled",
             started_at=started_at,
             started_monotonic=started_monotonic,
@@ -489,7 +589,6 @@ async def task_tool(
         )
         raise
 
-    result = cli_result.result
     await _record_terminal_task(
         writer=writer,
         runtime=runtime,
@@ -500,14 +599,15 @@ async def task_tool(
         user_id=user_id,
         subagent_type=subagent_type,
         description=description,
-        prompt=prompt,
+        prompt=worker_prompt,
         status="completed",
         started_at=started_at,
         started_monotonic=started_monotonic,
         result=result,
     )
     return _terminal_task_message(
-        f"Task Succeeded. Result: {_redacted_tool_text(result)}",
+        result,
         tool_call_id=tool_call_id,
         status="completed",
+        round_id=round_id,
     )

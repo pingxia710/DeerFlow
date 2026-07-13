@@ -177,7 +177,6 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
             custom_agents={
                 "researcher": CustomSubagentConfig(
                     description="Research agent\nwith details",
-                    system_prompt="You research.",
                 )
             }
         ),
@@ -202,7 +201,9 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     prompt = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=explicit_config)
 
     assert "**researcher**: Research agent" in prompt
-    assert "**bash**" not in prompt
+    assert "**bash**" in prompt
+    assert "role label only" in prompt
+    assert "does not grant DeerFlow tools" in prompt
 
 
 def test_command_room_prompt_allows_live_discussion_without_implicit_intervention():
@@ -221,7 +222,7 @@ def test_command_room_prompt_allows_live_discussion_without_implicit_interventio
     assert "create a new task or ask when needed" in section
 
 
-def test_command_room_prompt_prefers_direct_safe_work_and_bounds_delegation():
+def test_command_room_prompt_keeps_lead_context_and_delegates_execution():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -232,10 +233,10 @@ def test_command_room_prompt_prefers_direct_safe_work_and_bounds_delegation():
 
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
-    assert "complete safe, ordinary, reversible technical work directly" in section
-    assert "Use your own reasoning and available tools to inspect" in section
-    assert "Dispatch sub-AIs only when they provide concrete value" in section
-    assert "Make ordinary technical choices yourself within the user's stated scope" in section
+    assert "You are the lead brain" in section
+    assert "Keep the goal, plan, progress, context, and final judgment" in section
+    assert "Delegate execution work to one-shot sub-AIs" in section
+    assert "Do not perform delegated execution work in the lead context" in section
     assert "Stop and ask before destructive or irreversible actions" in section
 
 
@@ -259,7 +260,7 @@ def test_command_room_prompt_requires_a_self_contained_one_shot_handoff():
     assert "Do not require a fixed handoff form" in section
 
 
-def test_command_room_prompt_has_no_required_governance_workflow():
+def test_command_room_prompt_uses_ai_review_and_opposition_without_programmatic_workflow():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -270,12 +271,11 @@ def test_command_room_prompt_has_no_required_governance_workflow():
 
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
-    assert "Do not maintain a fixed role roster" in section
-    assert "do not require default evidence formats, test suites, verdict labels, or adversarial review for routine work" in section
-    assert "A single sub-AI is fine when it is genuinely useful" in section
-    assert "Chair Activation Check" not in section
-    assert "Evidence Strength" not in section
-    assert "PASS" not in section
+    assert "professional role" in section
+    assert "Pass each worker result to a different sub-AI" in section
+    assert "independent opposition sub-AI" in section
+    assert "The lead reads those natural-language results and makes the final judgment" in section
+    assert "Program metadata must never choose" in section
 
 
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
@@ -518,8 +518,8 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     reviewers flagged. The numeric cap lives in the server-side guard
     (see test_write_file_tool_size_guard.py), which is where it belongs.
     """
-    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
-    # Section anchor — keeps the rule discoverable in the assembled prompt.
+    template = prompt_module._build_file_editing_reminder(is_command_room=False)
+    # Section anchor — keeps the rule discoverable in the ordinary-agent prompt.
     assert "File Editing Workflow" in template
     # Behavioural anchors — if either of these disappears, the model will
     # silently regress to single-shot write_file calls for long content.
@@ -527,21 +527,20 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     assert "append=True" in template
 
 
-def test_command_room_clarification_system_is_goal_first():
+def test_command_room_clarification_system_keeps_ai_ai_ai_boundary():
     template = prompt_module.COMMAND_ROOM_CLARIFICATION_SYSTEM
 
-    assert "WORK FROM THE USER'S GOAL" in template
-    assert "Complete ordinary safe, reversible work directly" in template
+    assert "COMMAND ROOM AI-AI-AI" in template
+    assert "Keep the user's goal, plan, progress, and final judgment" in template
+    assert "Delegate execution to one-shot sub-AIs" in template
     assert "Make normal technical choices within the stated scope yourself" in template
-    assert "Match validation to the action and risk" in template
-    assert "Do not create a separate final verification, opposition, temporary-commit, or acceptance phase" in template
+    assert "another sub-AI check each worker result" in template
+    assert "independent opposition view" in template
     assert "MANDATORY Clarification Scenarios" not in template
     assert "Clarification ALWAYS comes BEFORE action" not in template
-    assert "PASS" not in template
-    assert "NEEDS_MORE" not in template
 
 
-def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatch):
+def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -553,7 +552,7 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
-        acp_agents={},
+        acp_agents={"codex": object()},
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
@@ -566,16 +565,25 @@ def test_command_room_subagent_prompt_allows_single_sub_ai_delegation(monkeypatc
         app_config=explicit_config,
     )
 
-    assert "AI DISPATCH MODE" in prompt
-    assert "Start with the user's goal and complete safe, ordinary, reversible technical work directly" in prompt
-    assert "A single sub-AI is fine when it is genuinely useful" in prompt
-    assert "dispatch them in parallel" in prompt
-    assert "Make ordinary technical choices yourself within the user's stated scope" in prompt
+    assert "AI-AI-AI" in prompt
+    assert "You are the lead brain" in prompt
+    assert "Delegate execution work to one-shot sub-AIs" in prompt
+    assert "Pass each worker result to a different sub-AI" in prompt
+    assert "independent opposition sub-AI" in prompt
+    assert "Delegated Local Sandbox Paths" in prompt
+    assert "Command Room lead does not inspect them directly" in prompt
+    assert "You may use direct host absolute paths" not in prompt
+    assert "Use `read_file`" not in prompt
+    assert "immediately call `read_file`" not in prompt
+    assert "`str_replace` over `write_file`" not in prompt
+    assert "`bash cp`" not in prompt
+    assert "Use web_search" not in prompt
+    assert "The Command Room does not call ACP or file tools directly" in prompt
     assert "maximum 2 `task` calls per response" in prompt
     assert "PRIORITY CHECK: If anything is unclear" not in prompt
     assert "A Round is the command-room execution cadence" not in prompt
     assert "Before execution, make the round's acceptance/evidence standard concrete" not in prompt
-    assert "Maintain long-running AI-AI governance roles across rounds" not in prompt
+    assert "persistent child workflow" not in prompt
     assert "Chair Code Reading Policy" not in prompt
     assert "required Evidence Signal fields" not in prompt
     assert "Single task = No value from subagents = Execute directly" not in prompt
@@ -607,7 +615,43 @@ def test_command_room_subagent_prompt_default_limit_is_six(monkeypatch):
     )
 
     assert "maximum 6 `task` calls per response" in prompt
-    assert "max 6 `task` calls per response" in prompt
+    assert "maximum 6 `task` calls per response" in prompt
+
+
+def test_command_room_subagent_prompt_clamps_limit_to_runtime_range(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(custom_agents={}),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    below_minimum = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=1,
+        agent_name="command-room",
+        app_config=explicit_config,
+    )
+    above_maximum = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=7,
+        agent_name="command-room",
+        app_config=explicit_config,
+    )
+
+    assert "maximum 2 `task` calls per response" in below_minimum
+    assert "maximum 6 `task` calls per response" in above_maximum
+    assert "maximum 1 `task` calls per response" not in below_minimum
+    assert "maximum 7 `task` calls per response" not in above_maximum
 
 
 def test_system_prompt_template_preserves_placeholders():
@@ -626,7 +670,15 @@ def test_system_prompt_template_preserves_placeholders():
         "{skills_section}",
         "{deferred_tools_section}",
         "{subagent_section}",
+        "{working_directory_guidance}",
         "{acp_section}",
+        "{citations_intro}",
+        "{citations_when_to_use}",
+        "{citations_workflow}",
+        "{clarification_reminder}",
+        "{skill_reminder}",
+        "{file_editing_reminder}",
+        "{multi_task_reminder}",
         "{subagent_reminder}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"

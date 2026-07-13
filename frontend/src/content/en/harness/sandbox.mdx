@@ -1,6 +1,6 @@
 ---
 title: Sandbox
-description: The sandbox gives the Lead Agent a controlled environment where it can read files, write outputs, run shell commands, and produce artifacts. Without a sandbox, the agent can only generate text. With a sandbox, it can write and execute code, process data files, generate charts, and build deliverables.
+description: The sandbox gives ordinary agents and delegated workers a controlled environment for file and command work. The Command Room delegates execution through one-shot Codex tasks instead of using sandbox tools directly.
 ---
 
 import { Callout, Tabs } from "nextra/components";
@@ -13,7 +13,7 @@ import { Callout, Tabs } from "nextra/components";
   conversation.
 </Callout>
 
-The sandbox gives the Lead Agent a controlled environment where it can read files, write outputs, run shell commands, and produce artifacts. Without a sandbox, the agent can only generate text. With a sandbox, it can write and execute code, process data files, generate charts, and build deliverables.
+The sandbox gives ordinary agent profiles a controlled environment where they can read files, write outputs, run shell commands, and produce artifacts. The Command Room profile is different: it passes paths and boundaries to one-shot Codex sub-AIs through `task()` and does not use sandbox file or shell tools in the lead context.
 
 ## Sandbox modes
 
@@ -139,7 +139,7 @@ sandbox:
   allow_host_bash: true # Dangerous: grants the agent shell access to your machine
 ```
 
-Even without `bash`, the agent can still read and write files through the dedicated file tools.
+Even without `bash`, an ordinary agent profile can still read and write files through the dedicated file tools. The Command Room delegates both file and shell work through `task()`.
 
 ### Container sandbox
 
@@ -147,7 +147,7 @@ Container-based sandboxes provide filesystem and process isolation. The agent ca
 
 ### Audit middleware
 
-`SandboxAuditMiddleware` runs on every agent turn and records all sandbox operations. This provides an audit trail of what files were accessed and what commands were run during a session.
+`SandboxAuditMiddleware` inspects `bash` tool calls and records classified command audit events. It does not observe every dedicated file-tool read or write, so treat it as command auditing rather than a complete filesystem access log.
 
 <Cards num={2}>
   <Cards.Card title="Tools" href="/docs/harness/tools" />

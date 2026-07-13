@@ -15,8 +15,6 @@ from typing import Any
 from .action_result_adapter import action_result_from_value
 from .round import Round, summarize_round
 
-_FORBIDDEN_BRIEF_TERMS = ("gate", "verdict", "pass", "fail")
-
 
 @dataclass(frozen=True)
 class RoundContextSignals:
@@ -31,8 +29,8 @@ class RoundContextSignals:
     summary: str
     needs_user_confirmation: bool = False
     requires_confirmation: bool = False
-    round_complete: bool = False
-    next_round_is_safe: bool = True
+    round_complete: None = None
+    next_round_is_safe: None = None
     quality_verdict: None = None
     auto_rework: bool = False
 
@@ -47,8 +45,8 @@ class RoundContextSignals:
             "summary": self.summary,
             "needs_user_confirmation": self.needs_user_confirmation,
             "requires_confirmation": self.requires_confirmation,
-            "round_complete": self.round_complete,
-            "next_round_is_safe": self.next_round_is_safe,
+            "round_complete": None,
+            "next_round_is_safe": None,
             "quality_verdict": None,
             "auto_rework": False,
         }
@@ -81,10 +79,6 @@ class RoundBrief:
 
 def _brief_text(value: str, *, limit: int = 180) -> str:
     text = " ".join(str(value or "").split())
-    lowered = text.lower()
-    for term in _FORBIDDEN_BRIEF_TERMS:
-        lowered = lowered.replace(term, "")
-    text = lowered.strip(" :-;,.，。") if lowered != text.lower() else text
     return text[:limit].rstrip() if len(text) > limit else text
 
 
@@ -187,22 +181,19 @@ def extract_action_result(event_or_metadata: Mapping[str, Any] | None) -> Any | 
 def round_context_signals(round_: Round) -> RoundContextSignals:
     """Build lightweight mechanical signals for the main AI.
 
-    ``quality_verdict`` is deliberately always None and ``auto_rework`` is
-    deliberately always False; evidence strength is only a hint.
+    Completion, evidence quality, and next-step safety remain AI judgments.
     """
 
     evidence_signals = round_.evidence_signals()
     needs_user_confirmation = round_.needs_user_confirmation or (round_.next_round is not None and round_.next_round.needs_user_confirmation)
     unresolved = list(round_.unresolved)
-    if needs_user_confirmation and not any(item.strip() for item in unresolved):
-        unresolved.append("requires user confirmation before next step")
     evidence_signals = {
         **evidence_signals,
         "needs_user_confirmation": needs_user_confirmation,
         "requires_confirmation": needs_user_confirmation,
         "unresolved": unresolved,
-        "round_complete": round_.is_complete,
-        "next_round_is_safe": round_.next_round_is_safe,
+        "round_complete": None,
+        "next_round_is_safe": None,
         "quality_verdict": None,
         "auto_rework": False,
     }
@@ -221,8 +212,8 @@ def round_context_signals(round_: Round) -> RoundContextSignals:
         summary=summarize_round(round_),
         needs_user_confirmation=needs_user_confirmation,
         requires_confirmation=needs_user_confirmation,
-        round_complete=round_.is_complete,
-        next_round_is_safe=round_.next_round_is_safe,
+        round_complete=None,
+        next_round_is_safe=None,
     )
 
 

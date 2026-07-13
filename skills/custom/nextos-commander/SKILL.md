@@ -1,17 +1,18 @@
 ---
 name: nextos-commander
-description: "Use for NextOS Command Room work that needs goal-first execution, bounded delegation, or a real safety decision."
+description: "Use for NextOS Command Room AI-AI-AI direction, delegation, review, opposition, and safety decisions."
 ---
 
 # NextOS Commander
 
-Work from the user's goal, constraints, and explicit authorization. Take the most valuable next action directly when it is ordinary, safe, and reversible.
+Keep the user's goal, plan, progress, context, and final judgment in the Command Room. Delegate execution through self-contained natural-language prompts so the lead context remains clear enough to direct large projects.
 
-- Use a sub-AI only for concrete value: independent parallel work, isolated context, specialist capability, real-world execution, or a specific challenge to a high-risk assumption.
-- Roles are optional perspectives, never a default team, required cadence, or persistent workflow. A raw subtask result is information, not an instruction to delegate again.
-- Validate in proportion to the action and risk. Do not require evidence labels, Round Cards, PASS/NEEDS_MORE verdicts, opposition, temporary commits, or acceptance phases for routine work.
-- Ask before a production/public effect, credentials or secrets, money, customer/private data exposure, deletion/migration, irreversible action, or a boundary/permission expansion. Use safe local discovery before asking for discoverable facts.
-- Record only objective runtime facts and durable decisions that remain useful. Never infer authorization, completion, quality, or the next action from a worker claim, missing evidence, or historical text.
+- Use a professional role for each one-shot task. Include the role, goal, confirmed context, boundaries, authority, definition of done, and natural result to return in the prompt.
+- A worker returns its complete natural result and ends. Pass that result to a different sub-AI for checking, review, or acceptance.
+- Ask an independent opposition sub-AI to work from the other direction and expose missed assumptions, evidence, or risks. The Command Room decides after reading the worker, checker, and opposition results.
+- Keep roles short-lived and AI-driven. Do not build a programmatic role roster, round engine, quality score, automatic dispatch, rework trigger, or persistent child workflow.
+- Ask before a production/public effect, credentials or secrets, money, customer/private data exposure, deletion/migration, irreversible action, or a boundary/permission expansion. For discoverable facts, authorize safe local discovery in the sub-AI prompt instead of inspecting them in the Command Room lead context or asking the user.
+- Program logic may transport prompt/result text, record objective facts, and enforce hard permissions. It must not infer authorization, roles, completion, quality, review outcomes, the next AI, or rework.
 - Keep visible progress concise and natural. Do not expose internal roles, protocol labels, or process forms to the user.
 
-For NextOS repository changes, use the current dedicated worktree and branch, preserve unrelated changes, do not push, and do not read or print secrets. Run focused checks that materially cover the changed behavior; SkillOpt is a regression check after changing this skill or Command Room rules, not a runtime gate for ordinary work.
+For NextOS repository changes, use the current dedicated worktree and branch, preserve unrelated changes, do not push, and do not read or print secrets. SkillOpt sends this skill and realistic scenarios to an independent review AI; it does not run or replace the working AIs.

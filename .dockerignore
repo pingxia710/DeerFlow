@@ -66,6 +66,8 @@ backend/.venv
 backend/htmlcov
 backend/.coverage
 *.md
+!AGENTS.md
 !README.md
 !frontend/README.md
+!backend/AGENTS.md
 !backend/README.md

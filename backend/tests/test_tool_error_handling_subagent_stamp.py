@@ -132,6 +132,24 @@ def test_preserves_existing_additional_kwargs():
     assert result.additional_kwargs.get(SUBAGENT_STATUS_KEY) == "completed"
 
 
+def test_preserves_structured_completion_when_raw_result_looks_like_legacy_error():
+    """Current producer status wins over legacy content-prefix fallback."""
+    middleware = ToolErrorHandlingMiddleware()
+    request = _FakeRequest("task")
+
+    def handler(_req):
+        return ToolMessage(
+            content="Error analysis: the API correctly returns a typed error object.",
+            tool_call_id="call-1",
+            name="task",
+            additional_kwargs={SUBAGENT_STATUS_KEY: "completed"},
+        )
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert result.additional_kwargs.get(SUBAGENT_STATUS_KEY) == "completed"
+
+
 def test_additional_kwargs_round_trip_via_json():
     """Pydantic dump → JSON → restore must keep the stamp intact.
 

@@ -107,7 +107,7 @@ def test_quality_signal_api_saves_and_quality_context_reads_it(tmp_path, monkeyp
     assert created_body["auto_rework"] is False
     assert created_body["recommendation"] == "needs_more_evidence"
     assert created_body["evidence_refs"] == ["worker says tests passed"]
-    assert created_body["capability_snapshot_version"] == 1
+    assert created_body["capability_snapshot_version"] == 2
 
     assert context.status_code == 200
     body = context.json()

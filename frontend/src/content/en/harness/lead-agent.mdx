@@ -1,156 +1,113 @@
 ---
 title: Lead Agent
-description: The Lead Agent is the central executor in a DeerFlow thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+description: The Lead Agent owns conversation continuity and judgment. In Command Room it stays the brain while one-shot Codex sub-AIs execute, check, and challenge the work.
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Lead Agent
 
-<Callout type="info" emoji="🧠">
-  The Lead Agent is the primary reasoning and orchestration unit in every
-  DeerFlow thread. It decides what to do, calls tools, delegates to subagents,
-  and returns artifacts.
+<Callout type="info">
+  The Lead Agent keeps the user's goal, plan, progress, context, boundaries, and
+  final judgment. The `command-room` profile delegates execution so this brain
+  remains clear enough to direct large projects.
 </Callout>
 
-The Lead Agent is the central executor in a DeerFlow thread. Every conversation, task, and workflow flows through it. Understanding how it works helps you configure it effectively and extend it when needed.
+## Responsibilities
 
-## What the Lead Agent does
+The Lead Agent receives user messages, maintains conversation state, decides
+what work is needed, writes self-contained handoffs, reads returned AI results,
+and gives the final response. Runtime is built on LangGraph/LangChain for state,
+streaming, checkpoints, middleware, and tool calls; those mechanisms do not
+replace model judgment.
 
-The Lead Agent is responsible for:
+The default and ordinary custom-agent profiles may use configured direct tools.
+The `command-room` profile is intentionally different:
 
-- receiving user messages and maintaining conversation state,
-- reasoning about what to do next (planning, tool selection, delegation),
-- calling tools — built-in, community, MCP, or skill tools,
-- delegating subtasks to subagents via the `task` tool,
-- managing artifacts (files, outputs, deliverables),
-- updating the todo list in plan mode, and
-- returning final responses or artifacts to the user.
+- it receives no configured file, shell, web, MCP, image-inspection, or
+  skill-management execution tools;
+- `task()` is always enabled, even if a client sends
+  `subagent_enabled: false`;
+- direct tools are limited to delegation, necessary user clarification, and
+  presenting completed files;
+- each worker result goes to a different checking sub-AI and an independent
+  opposition sub-AI before the Lead Agent decides.
 
-The Lead Agent does not hardcode a specific workflow. It uses the model's reasoning to adapt to whatever task the user provides, guided by the system prompt and the skills currently in scope.
+Professional role context is developer-authored prompt text. It does not grant
+DeerFlow tools. Each task is one ephemeral Codex CLI AI that owns its plan and
+native tools, returns complete natural-language text, and ends.
 
-## Runtime foundation
-
-The Lead Agent is built on **LangGraph** and **LangChain Agent** primitives. Specifically:
-
-- [`create_agent`](https://python.langchain.com/docs/concepts/agents/) from `langchain.agents` wraps the LLM into a tool-calling agent loop.
-- LangGraph manages the `ThreadState` and provides the checkpointing, streaming, and graph execution model.
-- A **middleware chain** wraps every turn of the agent loop, providing cross-cutting capabilities like memory, summarization, and clarification.
-
-## Execution flow
+## Command Room Flow
 
 <Steps>
 
-### Receive message
+### Receive and orient
 
-The user message arrives and is added to `ThreadState.messages`. The `ThreadState` holds the full conversation history, any active todo list, accumulated artifacts, and runtime metadata.
+Keep the user goal, confirmed context, current boundary, and progress in the
+lead conversation.
 
-### Middleware pre-processing
+### Delegate execution
 
-Before the model is called, each active middleware has a chance to modify the state. For example, the `MemoryMiddleware` injects persisted memory facts into the system prompt, and the `SummarizationMiddleware` may condense old messages if the token budget is exceeded.
+Send a one-shot sub-AI its professional role, goal, relevant facts and paths,
+authority, forbidden changes, definition of done, and requested natural result.
+Independent work can run together, up to six `task()` calls in one model
+response.
 
-### LLM reasoning
+### Check and oppose
 
-The model receives the current messages (including system prompt with active skill instructions) and produces either a direct reply or one or more tool call requests.
+Pass each complete worker result to a different checking AI. Ask an independent
+opposition AI to start from the other direction and expose missed assumptions,
+contrary evidence, or risk.
 
-### Tool execution
+### Adjudicate
 
-If tool calls are requested, they are dispatched to the appropriate handlers — sandbox tools for file and command work, community tools for web access, or the `task` tool for subagent delegation.
+Read the worker, checker, and opposition text. Decide whether the goal is met,
+another bounded task is needed, or the user must authorize a boundary change.
+Program metadata never makes that decision.
 
-### Middleware post-processing
+### Persist and respond
 
-After tool results are returned and before the next model call, middlewares run again. The `TitleMiddleware` may generate a thread title on the first exchange, and the `TodoMiddleware` may update the task list.
-
-### Loop or respond
-
-If the model needs more information (e.g., a tool returned partial results), the loop continues. When the model decides the task is complete, it produces a final message and the loop ends.
-
-### State update
-
-`ThreadState` is updated with new messages, artifacts, and memory queues. If a checkpointer is configured, the state is persisted.
+LangGraph persists messages and factual runtime state when configured. Return a
+natural user-facing conclusion and present completed artifacts when needed.
 
 </Steps>
 
-## Model selection
+## Model Selection
 
-The Lead Agent resolves which model to use at runtime using the following priority order:
+The Lead Agent model resolves in this order:
 
-1. `model_name` (or `model`) from the per-request configuration, if provided and valid.
-2. The `model` field of the active custom agent's config, if an agent is specified.
-3. The first model in the `models:` list in `config.yaml` (the global default).
+1. valid per-request `model_name` / `model`;
+2. the active custom agent's configured model;
+3. the first model in `config.yaml`.
 
-If the requested model name is not found in the config, the system falls back to the default model and logs a warning.
-
-```yaml
-models:
-  - name: my-primary-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-
-  - name: my-fast-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
-```
-
-The first entry (`my-primary-model`) becomes the default. Any request that does not specify a model, or specifies an unknown model name, will use it.
-
-## Thinking mode
-
-If the model supports extended thinking (e.g., DeepSeek Reasoner, Doubao with thinking enabled, Anthropic Claude with thinking), the Lead Agent can run in **thinking mode**. In this mode, the model's internal reasoning steps are visible in the response stream.
-
-Thinking mode is controlled per-request through the `thinking_enabled` flag. If thinking is enabled but the configured model does not support it, the system falls back gracefully and logs a warning.
+Delegated task models are independent. Configure them under `subagents.model`
+and `subagents.reasoning_effort`; they do not inherit the Lead Agent model.
 
 ```yaml
-models:
-  - name: deepseek-v3
-    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-    model: deepseek-reasoner
-    api_key: $DEEPSEEK_API_KEY
-    supports_thinking: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-    when_thinking_disabled:
-      extra_body:
-        thinking:
-          type: disabled
+subagents:
+  model: gpt-5.6-terra
+  reasoning_effort: xhigh
+  timeout_seconds: 3600
 ```
 
-## Plan mode
+## Thinking And Plan Modes
 
-When `is_plan_mode` is set to `true` in the request configuration, the `TodoMiddleware` is activated. The agent then maintains a structured task list, marking items as `in_progress`, `completed`, or `pending` as it works through a complex task. This provides visibility into the agent's progress for the user.
+`thinking_enabled` controls supported Lead Agent reasoning features. Ordinary
+agents may enable `TodoMiddleware` with `is_plan_mode`. Command Room does not
+use the program todo list as its workflow: it keeps progress in the lead AI and
+delegates execution/review through prompts.
 
-Plan mode is appropriate for complex, multi-step tasks where showing incremental progress is valuable. For simple requests, it is better left disabled to avoid unnecessary overhead.
+## Custom Agents And Bootstrap
 
-## Custom agents
+Ordinary custom agents can configure their name, instructions, skills, direct
+tool groups, and default lead model. This is separate from
+`subagents.custom_agents`, which defines professional context and an optional
+Codex model for one-shot roles.
 
-The same Lead Agent runtime powers both the default agent and any custom agents you create. A custom agent differs only in:
-
-- its **name** (ASCII slug, auto-derived from `display_name`),
-- its **system prompt** or agent-specific instructions,
-- which **skills** it has access to,
-- which **tool groups** it can use, and
-- which **model** it defaults to.
-
-Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Their configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
-
-<Callout type="tip">
-  When a custom agent is selected in a thread, the Lead Agent loads that agent's
-  config at runtime. Switching models or skills for a specific agent does not
-  require restarting the server.
-</Callout>
-
-## Bootstrap mode
-
-DeerFlow includes a special **bootstrap mode** for the initial setup of custom agents. When `is_bootstrap: true` is passed in the request config, the Lead Agent runs with a minimal system prompt and only the core setup tools exposed. This is used internally to guide the first-run agent configuration flow.
+Bootstrap mode remains a minimal setup profile used to create ordinary custom
+agents. It is not the Command Room task runtime.
 
 <Cards num={2}>
-  <Cards.Card title="Middlewares" href="/docs/harness/middlewares" />
+  <Cards.Card title="Subagents" href="/docs/harness/subagents" />
   <Cards.Card title="Tools" href="/docs/harness/tools" />
 </Cards>

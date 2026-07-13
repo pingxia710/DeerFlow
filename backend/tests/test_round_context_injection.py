@@ -142,7 +142,7 @@ Next: continue bounded review
     text = latest_round_context_for_thread(thread_id, user_id)
     assert text is not None
     assert "Persisted user goal fact: text fingerprint recorded" in text
-    assert "Explicit boundary: read-only" in text
+    assert "Explicit boundary: read-only" not in text
     assert "Action occurred:" in text
     assert "task task-1" in text
     assert "status completed" in text

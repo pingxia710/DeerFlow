@@ -7,7 +7,7 @@ from deerflow.subagents.audit import record_subagent_handoff
 from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
 
 
-def test_command_room_prompt_has_no_generic_clarification_gate(monkeypatch):
+def test_command_room_prompt_uses_ai_ai_ai_without_generic_clarification_gate(monkeypatch):
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
     monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
@@ -17,8 +17,10 @@ def test_command_room_prompt_has_no_generic_clarification_gate(monkeypatch):
 
     prompt = prompt_module.apply_prompt_template(agent_name="command-room")
 
-    assert "WORK FROM THE USER'S GOAL" in prompt
-    assert "Do not create a separate final verification, opposition, temporary-commit, or acceptance phase" in prompt
+    assert "COMMAND ROOM AI-AI-AI" in prompt
+    assert "Delegate execution to one-shot sub-AIs" in prompt
+    assert "another sub-AI check each worker result" in prompt
+    assert "independent opposition view" in prompt
     assert "Do not defer an in-scope safe next action to a later turn" in prompt
     assert "MANDATORY Clarification Scenarios" not in prompt
     assert "CLARIFY → PLAN → ACT" not in prompt
@@ -65,8 +67,9 @@ def test_subagent_audit_does_not_infer_a_verdict_from_worker_prose(tmp_path):
     assert record["result_sha256"]
 
 
-def test_command_room_role_helpers_do_not_expand_into_a_review_process():
-    prompt = COMMAND_ROOM_ROLE_CONFIGS["opposition"].system_prompt
+def test_command_room_role_catalog_does_not_install_program_workflows():
+    role = COMMAND_ROOM_ROLE_CONFIGS["opposition"]
 
-    assert "not a workflow role" in prompt
-    assert "do not expand the bounded task into a plan, audit, acceptance, or review process" in prompt.lower()
+    assert "Opposition role" in role.description
+    assert role.system_prompt == role.description
+    assert not hasattr(role, "skills")

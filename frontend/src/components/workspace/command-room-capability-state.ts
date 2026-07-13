@@ -8,13 +8,6 @@ export function getCommandRoomCapabilityHealth(
   if (runtime.agent_config.model_fallback) issueCount += 1;
   if (runtime.skills.missing.length > 0) issueCount += 1;
   if (runtime.skills.disabled.length > 0) issueCount += 1;
-  if (
-    runtime.delegated.mcp_servers_configured.length > 0 &&
-    runtime.delegated.mcp_cache.last_error_type
-  ) {
-    issueCount += 1;
-  }
-  if (runtime.delegated.mcp_cache.stale) issueCount += 1;
   return {
     status: issueCount > 0 ? ("warning" as const) : ("ready" as const),
     issueCount,

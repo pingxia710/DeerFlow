@@ -9,9 +9,10 @@ bash scripts/skillopt-probe.sh
 ```
 
 The entrypoint first checks static rule coverage, then runs a read-only,
-model-backed behavioral rollout for three high-signal decisions: stop after
-strong implementation evidence, use the smallest path for a small fact, and
-request confirmation at the bottom boundary. The behavior gate writes
+model-backed behavioral rollout for three high-signal decisions: require a
+different checking AI and independent opposition before relying on worker
+output, delegate even a small fact out of the lead context, and request
+confirmation at the bottom boundary. The behavior gate writes
 `behavior_report.json` and fails the command on semantic drift.
 
 Use `SKILLOPT_STATIC_ONLY=1` only when model execution is intentionally

@@ -48,9 +48,9 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 
 # Prefix table — ordered most-specific-first because some prefixes are
 # substrings of others ("Task timed out" vs "Task polling timed out", "Task
-# failed" vs "Task failed. Error: ..."). The "Task " prefixes come from
-# ``task_tool.py``'s normal-return strings; the bare ``Error:`` prefix catches
-# both its pre-execution returns and the wrapper produced by
+# failed" vs "Task failed. Error: ..."). These prefixes are retained for
+# historical messages; current successful task content is raw worker text.
+# The bare ``Error:`` prefix also catches the wrapper produced by
 # ``ToolErrorHandlingMiddleware`` for a task tool exception.
 _PREFIX_TO_STATUS: tuple[tuple[str, SubagentStatusValue], ...] = (
     ("Task Succeeded. Suggested next receiver", "completed"),

@@ -719,7 +719,7 @@ class PendingHandoffResponse(BaseModel):
     task_or_question: str
     status: PendingHandoffStatus
     handoff: dict[str, Any] = Field(default_factory=dict)
-    evidence_strength: str = "Unverified"
+    evidence_strength: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     output_refs: list[str] = Field(default_factory=list)
@@ -1473,9 +1473,7 @@ def _append_tool_result_evidence(
     text = _message_content_text(content)
     if not text:
         return
-    lower = text.lower()
-    looks_like_command_output = tool_name in {"bash", "bash_tool"} or any(marker in lower for marker in ("stdout", "stderr", "std error", "exit code", "exit_code", "returncode"))
-    if not looks_like_command_output:
+    if tool_name not in {"bash", "bash_tool"}:
         return
     _append_evidence_ref(
         refs,
@@ -1529,17 +1527,12 @@ def _append_log_evidence(
 
 def _run_evidence_summary(refs: list[dict[str, Any]]) -> dict[str, Any]:
     by_source_kind: dict[str, int] = {}
-    by_strength = {"Strong": 0, "Weak": 0, "Unverified": 0}
     for ref in refs:
         source_kind = str(ref.get("source_kind") or "unknown")
-        strength = str(ref.get("strength") or "Unverified")
         by_source_kind[source_kind] = by_source_kind.get(source_kind, 0) + 1
-        if strength in by_strength:
-            by_strength[strength] += 1
     return {
         "total": len(refs),
         "by_source_kind": by_source_kind,
-        "by_strength": by_strength,
         "quality_verdict": None,
         "auto_rework": False,
     }

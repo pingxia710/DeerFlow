@@ -189,6 +189,43 @@ def check_pnpm() -> CheckResult:
     )
 
 
+def check_codex_cli() -> CheckResult:
+    """Verify the one-shot task runtime dependency is installed."""
+    if not shutil.which("codex"):
+        return CheckResult(
+            "Codex CLI",
+            "fail",
+            "not found",
+            fix="npm install -g @openai/codex",
+        )
+    out = _run(["codex", "--version"])
+    if not out:
+        return CheckResult(
+            "Codex CLI",
+            "fail",
+            "installed but not executable",
+            fix="Reinstall with: npm install -g @openai/codex",
+        )
+    return CheckResult("Codex CLI", "ok", out)
+
+
+def check_codex_auth() -> CheckResult:
+    """Check Codex authentication without reading or printing credentials."""
+    if not shutil.which("codex"):
+        return CheckResult("Codex CLI authentication", "skip", "Codex CLI is not installed")
+    status = _run(["codex", "login", "status"])
+    if status:
+        return CheckResult("Codex CLI authentication", "ok", status)
+    if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_ACCESS_TOKEN"):
+        return CheckResult("Codex CLI authentication", "ok", "environment credential is set")
+    return CheckResult(
+        "Codex CLI authentication",
+        "fail",
+        "no usable login was detected",
+        fix="Run `codex login`, set CODEX_API_KEY/OPENAI_API_KEY/CODEX_ACCESS_TOKEN, or opt into the read-only Docker CLI-auth overlay.",
+    )
+
+
 def check_uv() -> CheckResult:
     if not shutil.which("uv"):
         return CheckResult(
@@ -791,6 +828,7 @@ def main() -> int:
         check_python(),
         check_node(),
         check_pnpm(),
+        check_codex_cli(),
         check_uv(),
         check_nginx(),
     ]
@@ -809,6 +847,7 @@ def main() -> int:
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
     llm_checks: list[CheckResult] = [
+        check_codex_auth(),
         *check_llm_api_key(config_path),
         *check_llm_auth(config_path),
         *check_llm_package(config_path),

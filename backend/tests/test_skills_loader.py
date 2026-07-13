@@ -94,7 +94,7 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
 
 
 def test_bundled_command_room_role_skills_are_loadable_from_project_root(monkeypatch):
-    """Built-in Command Room roles reference skills that must exist in bundled storage."""
+    """Command Room role prompts and the chair skill are bundled."""
     from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
 
     skills_root = Path(__file__).resolve().parents[2] / "skills"
@@ -103,8 +103,7 @@ def test_bundled_command_room_role_skills_are_loadable_from_project_root(monkeyp
     skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=True)
     by_name = {skill.name: skill for skill in skills}
 
-    role_skill_names = {skill for cfg in COMMAND_ROOM_ROLE_CONFIGS.values() for skill in (cfg.skills or [])}
     assert "command-room-chair" in by_name
-    assert role_skill_names <= set(by_name)
-    for skill_name in role_skill_names:
-        assert "Command Room" in by_name[skill_name].skill_file.read_text(encoding="utf-8")
+    assert "Command Room" in by_name["command-room-chair"].skill_file.read_text(encoding="utf-8")
+    assert all(config.system_prompt or config.description for config in COMMAND_ROOM_ROLE_CONFIGS.values())
+    assert all(not hasattr(config, "skills") for config in COMMAND_ROOM_ROLE_CONFIGS.values())

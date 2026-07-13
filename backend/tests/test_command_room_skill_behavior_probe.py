@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "command-room-skill-behavior-probe.py"
@@ -10,60 +11,57 @@ probe = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(probe)
 
 
-def _valid_payload():
+def _review_payload(*, passed: bool) -> dict:
     return {
-        "decisions": [
-            {
-                "id": "stop-after-observed-implementation",
-                "next_action": "finish",
-                "dispatch_roles": [],
-                "ask_user": False,
-                "rationale": "Acceptance evidence is already strong.",
-            },
-            {
-                "id": "small-fact-minimal-path",
-                "next_action": "single_subagent",
-                "dispatch_roles": ["fact-finder"],
-                "ask_user": False,
-                "rationale": "One bounded lookup is enough.",
-            },
-            {
-                "id": "bottom-boundary-confirmation",
-                "next_action": "stop_confirm",
-                "dispatch_roles": [],
-                "ask_user": True,
-                "rationale": "The requested live change needs confirmation.",
-            },
-        ]
+        "passed": passed,
+        "assessment": "Independent AI assessment.",
+        "scenario_reviews": [{"id": scenario["id"], "assessment": "Reviewed.", "concerns": []} for scenario in probe.SCENARIOS],
     }
 
 
-def test_behavior_probe_accepts_minimal_risk_graded_decisions():
-    assert probe.evaluate_decisions(_valid_payload()) == []
+def test_behavior_probe_uses_the_review_ai_verdict(tmp_path, monkeypatch):
+    skill = tmp_path / "SKILL.md"
+    schema = tmp_path / "schema.json"
+    report = tmp_path / "report.json"
+    skill.write_text("# Skill\n", encoding="utf-8")
+    schema.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(probe, "run_codex", lambda *_args, **_kwargs: _review_payload(passed=True))
+
+    exit_code = probe.main(["--skill", str(skill), "--schema", str(schema), "--out", str(report)])
+
+    assert exit_code == 0
+    saved = json.loads(report.read_text(encoding="utf-8"))
+    assert saved["passed"] is True
+    assert saved["reviewer_response"]["assessment"] == "Independent AI assessment."
 
 
-def test_behavior_probe_rejects_process_loop_and_unconfirmed_boundary_change():
-    payload = _valid_payload()
-    payload["decisions"][0]["next_action"] = "multi_subagent"
-    payload["decisions"][0]["dispatch_roles"] = ["evidence", "opposition"]
-    payload["decisions"][2]["ask_user"] = False
+def test_behavior_probe_propagates_a_negative_review_ai_verdict(tmp_path, monkeypatch):
+    skill = tmp_path / "SKILL.md"
+    schema = tmp_path / "schema.json"
+    report = tmp_path / "report.json"
+    skill.write_text("# Skill\n", encoding="utf-8")
+    schema.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(probe, "run_codex", lambda *_args, **_kwargs: _review_payload(passed=False))
 
-    failures = probe.evaluate_decisions(payload)
+    exit_code = probe.main(["--skill", str(skill), "--schema", str(schema), "--out", str(report)])
 
-    assert any("stop-after-observed-implementation" in failure for failure in failures)
-    assert any("bottom-boundary-confirmation" in failure for failure in failures)
+    assert exit_code == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["passed"] is False
 
 
 def test_behavior_probe_extracts_json_from_fenced_output():
-    payload = probe.parse_response('```json\n{"decisions": []}\n```\n')
-    assert payload == {"decisions": []}
+    payload = probe.parse_response('```json\n{"passed": true}\n```\n')
+    assert payload == {"passed": True}
 
 
 def test_behavior_prompt_contains_skill_and_all_scenarios():
-    prompt = probe.build_prompt("# NextOS Commander\nStop dispatching when evidence is strong.")
+    prompt = probe.build_prompt("# NextOS Commander\nKeep the lead brain clear.")
 
     assert "# NextOS Commander" in prompt
-    assert "stop-after-observed-implementation" in prompt
-    assert "small-fact-minimal-path" in prompt
+    assert "review-observed-implementation" in prompt
+    assert "small-fact-delegation" in prompt
     assert "bottom-boundary-confirmation" in prompt
+    assert "independent review AI" in prompt
+    assert "Set `passed` from your own semantic review" in prompt
+    assert "Treat either one as optional" in prompt
     assert "Do not execute tools" in prompt

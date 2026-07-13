@@ -28,7 +28,7 @@ def test_records_task_completed_event_metadata_action_result_into_round():
     assert len(updated.action_results) == 1
     assert updated.action_results[0].action_id == "task-1"
     assert signals.action_count == 1
-    assert signals.evidence_signals["has_strong_signal"] is True
+    assert signals.evidence_signals["total"] == 1
 
 
 def test_plain_string_action_result_is_summary_only_weak_not_evidence():
@@ -46,10 +46,8 @@ def test_plain_string_action_result_is_summary_only_weak_not_evidence():
 
     assert updated.action_results[0].summary == "I checked it and it is done."
     assert updated.evidence_refs == []
-    assert signals.evidence_signals["strong_count"] == 0
-    assert signals.evidence_signals["weak_count"] == 0
-    assert signals.evidence_signals["has_strong_signal"] is False
-    assert updated.is_complete is False
+    assert signals.evidence_signals["total"] == 0
+    assert updated.is_complete is None
 
 
 def test_task_failed_error_action_becomes_unresolved_and_blocks_completion():
@@ -73,11 +71,11 @@ def test_task_failed_error_action_becomes_unresolved_and_blocks_completion():
 
     assert updated.action_results[0].status == "failed"
     assert "boom" in updated.unresolved
-    assert updated.is_complete is False
+    assert updated.is_complete is None
     assert "boom" in signals.unresolved
 
 
-def test_tests_passed_alone_is_weak_signal_only():
+def test_tests_passed_text_is_recorded_without_strength_classification():
     round_ = create_round_context("weak evidence")
     updated = record_action_result_from_event(
         round_,
@@ -94,13 +92,13 @@ def test_tests_passed_alone_is_weak_signal_only():
 
     signals = round_context_signals(updated).as_dict()
 
-    assert signals["evidence_signals"]["strong_count"] == 0
-    assert signals["evidence_signals"]["weak_count"] == 1
+    assert signals["evidence_signals"]["total"] == 1
+    assert signals["evidence_signals"]["refs"] == ["tests passed"]
     assert signals["quality_verdict"] is None
     assert signals["auto_rework"] is False
 
 
-def test_command_output_exit_code_evidence_is_strong_without_quality_verdict():
+def test_command_output_text_is_not_classified_by_context_helper():
     round_ = create_round_context("strong evidence")
     updated = record_action_result_from_event(
         round_,
@@ -117,7 +115,7 @@ def test_command_output_exit_code_evidence_is_strong_without_quality_verdict():
     signals = round_context_signals(updated)
 
     assert updated.action_results[0].action_id == "task-cmd"
-    assert signals.evidence_signals["has_strong_signal"] is True
+    assert signals.evidence_signals["total"] == 1
     assert signals.evidence_signals["quality_verdict"] is None
     assert signals.evidence_signals["auto_rework"] is False
     assert signals.quality_verdict is None
@@ -143,11 +141,11 @@ def test_output_ref_is_not_evidence():
 
     assert updated.evidence_refs == []
     assert updated.action_results[0].output_ref == "outputs/report.md"
-    assert signals.evidence_signals["strong_count"] == 0
-    assert updated.is_complete is False
+    assert signals.evidence_signals["total"] == 0
+    assert updated.is_complete is None
 
 
-def test_worker_output_evidence_ref_is_self_attestation_only():
+def test_worker_output_reference_is_preserved_without_classification():
     round_ = create_round_context("worker output")
     updated = record_action_result_from_event(
         round_,
@@ -163,14 +161,8 @@ def test_worker_output_evidence_ref_is_self_attestation_only():
     )
 
     signals = round_context_signals(updated)
-    evidence_signal = signals.evidence_signals["signals"][0]
-
-    assert evidence_signal.ref == "worker-output:task-worker-output"
-    assert evidence_signal.strong is False
-    assert evidence_signal.trusted_source is False
-    assert evidence_signal.source_kind == "self_claim"
-    assert signals.evidence_signals["strong_count"] == 0
-    assert signals.evidence_signals["weak_count"] == 1
+    assert signals.evidence_signals["refs"] == ["worker-output:task-worker-output"]
+    assert signals.evidence_signals["total"] == 1
     assert signals.quality_verdict is None
     assert signals.auto_rework is False
 
@@ -231,20 +223,19 @@ def test_incomplete_round_requiring_human_confirmation_is_explicit_signal():
     signals = round_context_signals(updated)
     data = signals.as_dict()
 
-    assert updated.is_complete is False
+    assert updated.is_complete is None
     assert signals.needs_user_confirmation is True
     assert signals.requires_confirmation is True
-    assert signals.round_complete is False
-    assert signals.next_round_is_safe is False
-    assert "requires user confirmation before next step" in signals.unresolved
+    assert signals.round_complete is None
+    assert signals.next_round_is_safe is None
     assert data["evidence_signals"]["needs_user_confirmation"] is True
     assert data["evidence_signals"]["requires_confirmation"] is True
-    assert data["evidence_signals"]["round_complete"] is False
+    assert data["evidence_signals"]["round_complete"] is None
     assert data["quality_verdict"] is None
     assert data["auto_rework"] is False
 
 
-def test_read_only_diagnostics_next_round_is_safe_without_human_confirmation():
+def test_read_only_diagnostics_are_reported_without_programmatic_safety_judgment():
     round_ = create_round_context("diagnose lock")
     updated = record_action_result_from_event(
         round_,
@@ -282,12 +273,12 @@ def test_read_only_diagnostics_next_round_is_safe_without_human_confirmation():
 
     signals = round_context_signals(updated)
 
-    assert signals.round_complete is False
+    assert signals.round_complete is None
     assert signals.needs_user_confirmation is False
     assert signals.requires_confirmation is False
-    assert signals.next_round_is_safe is True
+    assert signals.next_round_is_safe is None
     assert "requires user confirmation before next step" not in signals.unresolved
-    assert "本轮尚未完成但可继续自主排查" in signals.summary
+    assert "下一轮提案：read-only check PID" in signals.summary
 
 
 def test_destructive_next_round_is_human_confirmation_boundary():
@@ -327,9 +318,27 @@ def test_destructive_next_round_is_human_confirmation_boundary():
 
     signals = round_context_signals(updated)
 
-    assert signals.round_complete is False
+    assert signals.round_complete is None
     assert signals.needs_user_confirmation is True
     assert signals.requires_confirmation is True
-    assert signals.next_round_is_safe is False
-    assert "requires user confirmation before next step" in signals.unresolved
-    assert "触及红线/授权边界，需要用户确认" in signals.summary
+    assert signals.next_round_is_safe is None
+    assert "下一轮提案被明确标记为需要用户确认" in signals.summary
+
+
+def test_round_brief_preserves_ai_words_instead_of_filtering_substrings():
+    round_ = create_round_context("preserve compassion and failure analysis")
+    updated = record_action_result_from_event(
+        round_,
+        {
+            "task_id": "task-words",
+            "action_result": {
+                "action_id": "task-words",
+                "description": "surrogate gate review",
+                "summary": "PASS/FAIL verdict wording belongs to the AI",
+            },
+        },
+    )
+
+    brief = round_context_signals(updated).evidence_signals["round_brief"]
+    assert brief["goal"] == "preserve compassion and failure analysis"
+    assert brief["handoff_signals"] == ["surrogate gate review: PASS/FAIL verdict wording belongs to the AI"]

@@ -8,19 +8,24 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
-from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
 # Valid range for max_concurrent_subagents
 MIN_SUBAGENT_LIMIT = 2
 MAX_SUBAGENT_LIMIT = 6
-_LIMIT_WARNING = "Subagent limit: {dropped_count} task() call(s) were not dispatched because the per-turn limit is {max_concurrent}. Wait for current task results, then re-issue only omitted work if still needed."
+MAX_CONCURRENT_SUBAGENTS = MAX_SUBAGENT_LIMIT
+_LIMIT_WARNING = "Subagent limit: {dropped_count} task() call(s) were not dispatched because the per-response limit is {max_concurrent}."
+
+
+def normalize_subagent_limit(value: int) -> int:
+    """Clamp subagent limit to valid range [2, 6]."""
+    return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [2, 6]."""
-    return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
+    """Compatibility alias for older imports."""
+    return normalize_subagent_limit(value)
 
 
 def _append_limit_warning(content: object, *, dropped_count: int, max_concurrent: int) -> object:
@@ -46,7 +51,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     def __init__(self, max_concurrent: int = MAX_CONCURRENT_SUBAGENTS):
         super().__init__()
-        self.max_concurrent = _clamp_subagent_limit(max_concurrent)
+        self.max_concurrent = normalize_subagent_limit(max_concurrent)
 
     def _truncate_task_calls(self, state: AgentState) -> dict | None:
         messages = state.get("messages", [])

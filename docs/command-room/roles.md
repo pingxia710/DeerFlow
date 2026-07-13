@@ -1,14 +1,20 @@
-# Optional Command Room capabilities
+# Command Room Professional Roles
 
-Command Room remains responsible for the task. It may use any of these perspectives when useful, or none of them for a straightforward task.
+Roles are developer-authored prompt context for short-lived intelligent agents,
+not program states or tool grants. The lead AI selects the role that best fits
+each handoff. Every execution result is checked by a different sub-AI, an
+independent opposition sub-AI provides the other direction, and the lead makes
+the final judgment.
 
-| Capability label | Useful question |
+| Role angle | Useful question |
 | --- | --- |
-| planning | What is the smallest safe route to the goal? |
+| planner | What route, assumptions, and alternatives best serve the goal? |
 | boundary | What is out of scope or needs authorization? |
-| evidence | What observable result would settle the question? |
-| opposition | What concrete high-risk or disputed assumption could make this unsafe or wrong? |
-| recording | Is there a durable fact worth preserving? |
-| project stewardship, debt, freshness, learning, conflict mapping, capability review | Is this specialized perspective actually needed now? |
+| evidence / fact-finder | What observable facts support or contradict the result? |
+| opposition | What missed angle could make the current conclusion wrong? |
+| recorder | Which confirmed decision or fact belongs in durable project memory? |
+| stewardship/debt/freshness/learning/conflict/capability | Which specialized project risk needs an independent view? |
 
-These labels do not impose a handoff format, a fixed order, separate ownership, or a completion gate. A helper's output is input to the lead AI, not an approval.
+These labels do not impose a fixed form or sequence beyond worker checking and
+independent opposition. A role prompt returns natural language and ends. Its
+result is input to the lead AI, never a program-level approval.

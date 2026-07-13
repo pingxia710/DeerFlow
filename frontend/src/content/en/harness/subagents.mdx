@@ -1,6 +1,6 @@
 ---
 title: Subagents
-description: When a task is too broad for a single reasoning thread, or when parts of it can be done in parallel, the Lead Agent delegates work to **subagents**. A subagent is a self-contained agent invocation that receives a specific task, executes it, and returns the result.
+description: The Lead Agent keeps the goal, plan, progress, and final judgment clear while one-shot Codex AIs execute work from self-contained prompts.
 ---
 
 import { Callout } from "nextra/components";
@@ -13,33 +13,26 @@ import { Callout } from "nextra/components";
   parallel or specialized work.
 </Callout>
 
-When a task is too broad for a single reasoning thread, or when parts of it can be done in parallel, the Lead Agent delegates work to **subagents**. A subagent is a self-contained agent invocation that receives a specific task, executes it, and returns the result.
+The Lead Agent is the Command Room brain. It keeps the goal, plan, progress, context, and final judgment clear while one-shot **sub-AIs** execute work from self-contained natural-language prompts.
 
 ## Why subagents matter
 
-Subagents solve two key problems in long-horizon workflows:
+Sub-AIs solve two key problems in long-horizon work:
 
 1. **Context isolation**: a subagent only sees the information it needs for its piece of the task, not the entire parent conversation. This keeps each agent's working context focused and tractable.
 2. **Parallelism**: multiple subagents can run concurrently, allowing independent parts of a task (e.g., researching multiple topics simultaneously) to be processed in parallel.
 
-## Built-in subagents
+## Professional role labels
 
-DeerFlow ships with two built-in subagents:
+DeerFlow exposes `general-purpose`, `bash`, and Command Room roles such as `planner`, `evidence`, `fact-finder`, and `opposition`. A role label selects developer-authored context that DeerFlow prepends to the task: a configured `system_prompt`, otherwise the role description. It does not grant DeerFlow tools, create a turn loop, or install a quality rule; the one-shot Codex AI owns its native tools and decisions.
 
 ### general-purpose
 
-A general-purpose reasoning and execution agent. Suitable for delegating complex subtasks that require multi-step reasoning, web search, file operations, and artifact production.
-
-- **Default timeout**: 900 seconds (15 minutes)
-- **Default max turns**: 160
+A general execution role for exploration, implementation, commands, checks, and other delegated work.
 
 ### bash
 
-A subagent specialized for command-line task execution inside the sandbox. Suitable for scripting, data processing, file transformation, and environment setup tasks.
-
-- **Default timeout**: 900 seconds (15 minutes)
-- **Default max turns**: 80
-- **Availability**: only exposed when the sandbox's `bash` tool is available (either `allow_host_bash: true` or a container sandbox is configured)
+A command-execution role for builds, tests, diagnostics, and verbose terminal work. The label does not grant shell access; Codex CLI uses its own configured tools and permissions.
 
 ## Delegation flow
 
@@ -47,55 +40,55 @@ The Lead Agent delegates work to a subagent using the built-in `task` tool:
 
 ```
 task(
-  agent="general-purpose",
-  task="Research the top 5 competitors of Acme Corp and summarize their pricing",
-  context="Focus on B2B SaaS pricing models"
+  description="Research competitor pricing",
+  prompt="""You are a B2B SaaS pricing researcher. Find Acme Corp's top five
+competitors, verify their current pricing from primary sources, and return a
+concise natural-language comparison with source links and any uncertainty.""",
+  subagent_type="fact-finder"
 )
 ```
 
 The runtime then:
 
-1. Looks up the subagent configuration from the registry, applying any `config.yaml` overrides.
-2. Creates a new agent invocation with the subagent's own prompt and tools.
-3. Runs the subagent to completion (or until timeout / max turns).
-4. Returns the subagent's final output to the Lead Agent as the tool result.
+1. Assembles the developer-authored role context, the Lead Agent's task prompt, applicable instruction guidance, and real task paths, then passes that self-contained prompt to one ephemeral Codex CLI process.
+2. Lets that Codex AI plan, use its tools, and complete the task autonomously.
+3. Returns the complete natural-language result unchanged to the Lead Agent.
+4. Ends the child process. The Lead Agent sends the complete result to a different checking sub-AI and obtains an independent opposition result before deciding.
 
 ## Configuration
 
-Subagent timeouts and max turns are controlled through the `subagents:` section in `config.yaml`:
+Codex task transport is configured through the `subagents:` section in `config.yaml`:
 
 ```yaml
 subagents:
-  # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
-  timeout_seconds: 900
-
-  # Optional: override max turns for all subagents
-  # max_turns: 120
-
-  # Optional: per-agent overrides
-  agents:
-    general-purpose:
-      timeout_seconds: 1800 # 30 minutes for complex tasks
-      max_turns: 160
-    bash:
-      timeout_seconds: 300 # 5 minutes for quick commands
-      max_turns: 80
+  # Lifecycle timeout for each Codex task (default: 3600 = 60 minutes)
+  timeout_seconds: 3600
+  # Explicit default model and reasoning effort for delegated tasks
+  model: gpt-5.6-terra
+  reasoning_effort: xhigh
+  # Optional professional role names shown to the Lead Agent
+  custom_agents:
+    contract-reviewer:
+      description: Reviews API contracts and reports concrete mismatches.
+      system_prompt: Act as an independent professional API contract reviewer.
 ```
 
-Per-agent overrides take priority over the global `timeout_seconds` and `max_turns` settings.
+There is no DeerFlow turn loop, tool allowlist, score, or programmatic completion rule for child AIs. The assembled natural-language prompt is the task contract; the timeout only owns process lifecycle.
+
+Delegation also requires the pinned `@openai/codex` CLI and `codex login`, or a supported Codex authentication environment. This remains true when the Lead Agent uses a different model provider. Docker images install the CLI but do not include personal credentials by default.
 
 ## Concurrency limits
 
-The `SubagentLimitMiddleware` controls how many subagents the Lead Agent can invoke in parallel in a single turn. This is controlled through the per-request configuration:
+The `SubagentLimitMiddleware` controls how many `task()` calls the Lead Agent can emit in one model response. This is controlled through the per-request configuration:
 
 - `subagent_enabled`: whether subagent delegation is active for this session
-- `max_concurrent_subagents`: maximum parallel task calls in one turn (default: 3)
+- `max_concurrent_subagents`: maximum task calls in one model response (default: 6)
 
-If the agent tries to call more subagents than the limit allows, the middleware trims the excess calls.
+If a response contains more calls than the configured limit, the middleware omits only the excess and reports that objective fact to the Lead Agent. It does not recommend a next step, queue calls, or silently schedule them; the Lead Agent decides from the returned AI results.
 
 ## Handoff audit
 
-Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps dispatch metadata, status, usage, hashes, character counts, and compact action-result facts, while omitting raw prompts, worker output, and error text. It does not infer a verdict, evidence strength, or next action from worker prose.
+Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps factual dispatch identity, status, hashes, and character counts while omitting raw prompts, worker output, and error text. It does not parse worker prose or infer a verdict, evidence strength, or next action.
 
 ## ACP agents (external agents)
 
@@ -121,7 +114,7 @@ acp_agents:
     model: null
 ```
 
-The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
+Ordinary agent profiles may invoke ACP agents through the `invoke_acp_agent` built-in tool. The Command Room profile exposes only `task`, necessary clarification, and result presentation; it delegates equivalent execution through one-shot Codex tasks instead of calling ACP directly.
 
 <Callout type="tip">
   ACP agents run as child processes managed by DeerFlow. They communicate over
@@ -130,9 +123,9 @@ The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
   listed above or a compatible ACP wrapper.
 </Callout>
 
-## Custom agents as subagents
+## Custom professional roles
 
-Custom agents created through the DeerFlow App UI can also be invoked as subagents using the `task` tool. When you specify `agent="my-custom-agent"`, the runtime loads that agent's configuration (skills, tool groups, model) and runs it as a subagent for the delegated task.
+`subagents.custom_agents` can add a role name, description, developer-authored `system_prompt`, and optional Codex model override. Invoke it through `subagent_type="my-role"`; DeerFlow prepends that role context, then the Lead Agent's task-specific goal, context, boundaries, authority, definition of done, and requested result. Skills, tool groups, turn limits, and per-role timeouts do not control the one-shot Codex process.
 
 <Cards num={2}>
   <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />

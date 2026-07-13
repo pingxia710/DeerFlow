@@ -1,22 +1,24 @@
 {
-  "project": "nextos-command-room-goal-first",
+  "project": "nextos-command-room-ai-ai-ai",
   "skill_path": "skills/custom/nextos-commander/SKILL.md",
   "rules": {
-    "goal-first-direct": "Take the most valuable next action directly",
-    "bounded-delegation": "Use a sub-AI only for concrete value",
-    "no-default-process": "Roles are optional perspectives, never a default team, required cadence, or persistent workflow. A raw subtask result is information, not an instruction to delegate again.",
-    "proportionate-validation": "Validate in proportion to the action and risk",
+    "lead-brain": "Keep the user's goal, plan, progress, context, and final judgment in the Command Room.",
+    "prompt-contract": "Delegate execution through self-contained natural-language prompts.",
+    "professional-roles": "Use a professional role for each one-shot task.",
+    "ai-review": "Pass that result to a different sub-AI for checking, review, or acceptance.",
+    "opposition": "Ask an independent opposition sub-AI to work from the other direction.",
+    "no-program-control": "Program logic may transport prompt/result text and record objective facts, but must not decide AI work.",
     "hard-boundaries": "Ask before a production/public effect, credentials or secrets, money, customer/private data exposure, deletion/migration, irreversible action, or a boundary/permission expansion.",
-    "factual-runtime": "Record only objective runtime facts and durable decisions that remain useful. Never infer authorization, completion, quality, or the next action from a worker claim, missing evidence, or historical text.",
-    "skillopt-regression": "SkillOpt is a regression check after changing this skill or Command Room rules, not a runtime gate for ordinary work."
+    "skillopt-regression": "SkillOpt sends the skill and scenarios to an independent review AI; it does not run or replace the working AIs."
   },
   "aliases": {
-    "goal-first-direct": [["Take the most valuable next action directly"]],
-    "bounded-delegation": [["Use a sub-AI only for concrete value"]],
-    "no-default-process": [["Roles are optional perspectives", "not a default team"], ["Do not require evidence labels", "Round Cards"]],
-    "proportionate-validation": [["Validate in proportion to the action and risk"]],
+    "lead-brain": [["goal, plan, progress, context, and final judgment", "Command Room"]],
+    "prompt-contract": [["Delegate execution", "self-contained natural-language prompts"]],
+    "professional-roles": [["professional role", "one-shot task"]],
+    "ai-review": [["Pass that result to a different sub-AI", "checking, review, or acceptance"]],
+    "opposition": [["independent opposition sub-AI", "other direction"]],
+    "no-program-control": [["Program logic may transport prompt/result text", "must not infer authorization, roles, completion, quality"]],
     "hard-boundaries": [["Ask before a production/public effect", "boundary/permission expansion"]],
-    "factual-runtime": [["Record only objective runtime facts", "Never infer authorization, completion, quality, or the next action"]],
-    "skillopt-regression": [["SkillOpt is a regression check", "not a runtime gate for ordinary work"]]
+    "skillopt-regression": [["SkillOpt sends this skill", "independent review AI", "does not run or replace the working AIs"]]
   }
 }

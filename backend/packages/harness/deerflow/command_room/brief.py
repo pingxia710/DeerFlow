@@ -17,7 +17,6 @@ from deerflow.command_room.review import compact_review_invocations
 _TEXT_LIMIT = 240
 _REF_LIMIT = 3
 _COMPACT_LIMIT = 3
-_KNOWN_GAPS = frozenset({"no_capability_snapshot", "no_evidence_refs", "no_quality_signals"})
 _CHAIR_BRIEF_HEADER = "[Internal Chair Operating Brief]"
 
 
@@ -99,11 +98,9 @@ def _compact_handoff(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "target_role": handoff.get("targetRole") or handoff.get("target_role"),
         "task_or_question": _clip(handoff.get("taskOrQuestion") or handoff.get("task_or_question")),
         "expected_output": _clip(handoff.get("expectedOutput") or handoff.get("expected_output")),
-        "evidence_strength": handoff.get("evidenceStrength") or handoff.get("evidence_strength"),
         "evidence_refs": _clean_list(handoff.get("evidenceRefs") or handoff.get("evidence_refs")),
         "handoff_file": handoff.get("handoffFile") or handoff.get("handoff_file"),
         "artifact_refs": _clean_list(handoff.get("artifactRefs") or handoff.get("artifact_refs")),
-        "recommended_next_decision": _clip(handoff.get("recommendedNextDecision") or handoff.get("recommended_next_decision")),
     }
 
 
@@ -119,27 +116,21 @@ def _evidence_refs(evidence: Mapping[str, Any] | None, *, round_id: str | None, 
 
 def _evidence_summary(refs: list[dict[str, Any]]) -> dict[str, Any]:
     by_source_kind: dict[str, int] = {}
-    by_strength = {"Strong": 0, "Weak": 0, "Unverified": 0}
     recent_refs: list[dict[str, Any]] = []
     for ref in refs:
         source_kind = str(ref.get("source_kind") or "unknown")
-        strength = str(ref.get("strength") or "Unverified")
         by_source_kind[source_kind] = by_source_kind.get(source_kind, 0) + 1
-        if strength in by_strength:
-            by_strength[strength] += 1
         if len(recent_refs) < _REF_LIMIT:
             recent_refs.append(
                 {
                     "ref_id": ref.get("ref_id"),
                     "source_kind": source_kind,
-                    "strength": strength,
                     "ref": _clip(ref.get("ref")),
                 }
             )
     return {
         "total": len(refs),
         "by_source_kind": by_source_kind,
-        "by_strength": by_strength,
         "recent_refs": recent_refs,
     }
 
@@ -191,17 +182,6 @@ def _compact_account_decisions(rows: list[dict[str, Any]], *, limit: int) -> lis
     ]
 
 
-def _known_gaps(*, capability_snapshot_version: int | None, evidence_count: int, quality_count: int) -> list[str]:
-    gaps: list[str] = []
-    if capability_snapshot_version is None:
-        gaps.append("no_capability_snapshot")
-    if evidence_count == 0:
-        gaps.append("no_evidence_refs")
-    if quality_count == 0:
-        gaps.append("no_quality_signals")
-    return [gap for gap in gaps if gap in _KNOWN_GAPS]
-
-
 def build_chair_operating_brief(
     *,
     thread_id: str,
@@ -244,7 +224,7 @@ def build_chair_operating_brief(
         review_invocations=compact_review_invocations(review_rows, limit=compact_limit),
         account_proposals=_compact_account_proposals(proposal_rows, limit=compact_limit),
         account_decisions=_compact_account_decisions(decision_rows, limit=compact_limit),
-        known_gaps=_known_gaps(capability_snapshot_version=snapshot_version, evidence_count=len(evidence_rows), quality_count=len(quality_rows)),
+        known_gaps=[],
         source_counts={
             "handoffs": len(handoff_rows),
             "evidence_refs": len(evidence_rows),
@@ -282,14 +262,13 @@ def format_chair_operating_brief_for_model(brief: ChairOperatingBrief | Mapping[
                 for item in (
                     f"target={latest_handoff.get('target_role')}",
                     f"task={latest_handoff.get('task_or_question')}",
-                    f"evidence_strength={latest_handoff.get('evidence_strength')}",
                 )
                 if not item.endswith("=None") and not item.endswith("=")
             )
         )
     evidence = data.get("evidence_summary") if isinstance(data.get("evidence_summary"), Mapping) else {}
     if evidence:
-        lines.append(f"evidence: total={evidence.get('total', 0)}; by_strength={evidence.get('by_strength', {})}")
+        lines.append(f"evidence: total={evidence.get('total', 0)}; by_source_kind={evidence.get('by_source_kind', {})}")
     for signal in data.get("quality_signals") or []:
         if isinstance(signal, Mapping):
             lines.append(f"quality_signal: author={signal.get('author_role')}; recommendation={signal.get('recommendation')}; target={signal.get('target_role') or 'Chair'}")

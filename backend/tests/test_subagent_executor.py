@@ -401,6 +401,42 @@ class TestAgentConstruction:
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
+    def test_create_agent_prefers_subagent_reasoning_effort_over_parent(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        base_config.reasoning_effort = "xhigh"
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        captured: dict[str, dict] = {}
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: captured.setdefault("model", kwargs))
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: kwargs)
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **_kwargs: [],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+            parent_reasoning_effort="max",
+        )
+
+        executor._create_agent()
+
+        assert captured["model"]["reasoning_effort"] == "xhigh"
+
     @pytest.mark.anyio
     async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
         self,

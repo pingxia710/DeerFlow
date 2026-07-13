@@ -1042,6 +1042,9 @@ sandbox:
 #   # Optional global max-turn override for all subagents.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
+#   # Optional child-only reasoning effort. Leave unset to inherit the lead agent.
+#   # Codex labels `xhigh` as "Extra high"; this config uses provider identifiers.
+#   # reasoning_effort: xhigh
 #
 #   # Process-wide admitted background subagent executions. Extra tasks stay
 #   # pending until capacity frees up.

@@ -127,6 +127,17 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
         logger.debug("Subagent '%s': model overridden (%s -> %s)", name, config.model, effective_model)
         overrides["model"] = effective_model
 
+    # Reasoning effort is a child-only global default. Unlike timeout and
+    # max_turns, it applies equally to built-in and custom subagents.
+    if subagents_config.reasoning_effort is not None and subagents_config.reasoning_effort != config.reasoning_effort:
+        logger.debug(
+            "Subagent '%s': reasoning effort overridden (%s -> %s)",
+            name,
+            config.reasoning_effort,
+            subagents_config.reasoning_effort,
+        )
+        overrides["reasoning_effort"] = subagents_config.reasoning_effort
+
     # Skills: per-agent override only (no global default for skills)
     effective_skills = subagents_config.get_skills_for(name)
     if effective_skills is not None and effective_skills != config.skills:

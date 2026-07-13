@@ -28,6 +28,7 @@ def _reset_subagents_config(
     timeout_seconds: int = 900,
     *,
     max_turns: int | None = None,
+    reasoning_effort: str | None = None,
     agents: dict | None = None,
 ) -> None:
     """Reset global subagents config to a known state."""
@@ -35,6 +36,7 @@ def _reset_subagents_config(
         {
             "timeout_seconds": timeout_seconds,
             "max_turns": max_turns,
+            "reasoning_effort": reasoning_effort,
             "agents": agents or {},
         }
     )
@@ -103,14 +105,23 @@ class TestSubagentsAppConfigDefaults:
         config = SubagentsAppConfig()
         assert config.max_turns is None
 
+    def test_default_reasoning_effort_is_none(self):
+        config = SubagentsAppConfig()
+        assert config.reasoning_effort is None
+
     def test_default_agents_empty(self):
         config = SubagentsAppConfig()
         assert config.agents == {}
 
     def test_custom_global_runtime_overrides(self):
-        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120)
+        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120, reasoning_effort="xhigh")
         assert config.timeout_seconds == 1800
         assert config.max_turns == 120
+        assert config.reasoning_effort == "xhigh"
+
+    def test_rejects_unknown_reasoning_effort(self):
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(reasoning_effort="extra-high")
 
     def test_rejects_zero_timeout(self):
         with pytest.raises(ValueError):
@@ -228,9 +239,10 @@ class TestLoadSubagentsConfig:
         _reset_subagents_config()
 
     def test_load_global_timeout(self):
-        load_subagents_config_from_dict({"timeout_seconds": 300, "max_turns": 120})
+        load_subagents_config_from_dict({"timeout_seconds": 300, "max_turns": 120, "reasoning_effort": "xhigh"})
         assert get_subagents_app_config().timeout_seconds == 300
         assert get_subagents_app_config().max_turns == 120
+        assert get_subagents_app_config().reasoning_effort == "xhigh"
 
     def test_load_with_per_agent_overrides(self):
         load_subagents_config_from_dict(
@@ -283,6 +295,7 @@ class TestLoadSubagentsConfig:
         cfg = get_subagents_app_config()
         assert cfg.timeout_seconds == 1800
         assert cfg.max_turns is None
+        assert cfg.reasoning_effort is None
         assert cfg.agents == {}
 
     def test_load_replaces_previous_config(self):
@@ -351,6 +364,22 @@ class TestRegistryGetSubagentConfig:
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 1800
         assert config.max_turns == 140
+
+    def test_global_reasoning_effort_applies_to_builtin_and_custom_agents(self):
+        from deerflow.subagents.registry import get_subagent_config
+
+        app_config = SubagentsAppConfig(
+            reasoning_effort="xhigh",
+            custom_agents={
+                "researcher": {
+                    "description": "Research delegated questions",
+                    "system_prompt": "Investigate and report evidence.",
+                }
+            },
+        )
+
+        assert get_subagent_config("bash", app_config=app_config).reasoning_effort == "xhigh"
+        assert get_subagent_config("researcher", app_config=app_config).reasoning_effort == "xhigh"
 
     def test_per_agent_runtime_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config

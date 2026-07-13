@@ -4,6 +4,8 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from deerflow.config.model_config import ReasoningEffort
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +82,10 @@ class SubagentsAppConfig(BaseModel):
         default=None,
         ge=1,
         description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+    )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Optional reasoning effort for all subagents (None = inherit the lead agent's resolved effort)",
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
@@ -181,11 +187,12 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
 
     custom_agents_names = list(_subagents_config.custom_agents.keys())
 
-    if overrides_summary or custom_agents_names:
+    if _subagents_config.reasoning_effort is not None or overrides_summary or custom_agents_names:
         logger.info(
-            "Subagents config loaded: default timeout=%ss, default max_turns=%s, process_wide_max_concurrent=%s, process_wide_queue_size=%s, per-agent overrides=%s, custom_agents=%s",
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, reasoning_effort=%s, process_wide_max_concurrent=%s, process_wide_queue_size=%s, per-agent overrides=%s, custom_agents=%s",
             _subagents_config.timeout_seconds,
             _subagents_config.max_turns,
+            _subagents_config.reasoning_effort,
             _subagents_config.process_wide_max_concurrent,
             _subagents_config.process_wide_queue_size,
             overrides_summary or "none",

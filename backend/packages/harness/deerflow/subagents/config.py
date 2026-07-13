@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from deerflow.config.model_config import ReasoningEffort
+
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
@@ -20,6 +22,8 @@ class SubagentConfig:
         skills: Optional list of skill names to load. If None, inherits all enabled skills.
                 If an empty list, no skills are loaded.
         model: Model to use - 'inherit' uses parent's model.
+        reasoning_effort: Optional provider reasoning effort. When unset, inherits
+            the lead agent's resolved effort.
         max_turns: Maximum agent turns before stopping. Built-in agents use the
             value set here (general-purpose=150, bash=60) unless the global
             ``subagents.max_turns`` is set.
@@ -36,6 +40,7 @@ class SubagentConfig:
     disallowed_tools: list[str] | None = field(default_factory=lambda: ["task"])
     skills: list[str] | None = None
     model: str = "inherit"
+    reasoning_effort: ReasoningEffort | None = None
     max_turns: int = 50
     timeout_seconds: int = 900
 

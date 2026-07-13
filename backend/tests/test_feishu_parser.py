@@ -491,6 +491,35 @@ def test_feishu_plain_reply_consumes_pending_clarification_topic():
         assert channel._pending_key("chat_1", "user_1") not in channel._pending_clarifications
 
 
+def test_feishu_command_room_plain_message_starts_new_topic_instead_of_consuming_pending():
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "session": {"assistant_id": "command-room"},
+        },
+    )
+    key = channel._pending_key("chat_1", "user_1")
+    channel._pending_clarifications[key] = [_pending("om_original", thread_id="deer-thread-1")]
+
+    created: list[InboundMessage] = []
+
+    def fake_make_inbound(**kwargs):
+        inbound = InboundMessage(channel_name="feishu", **kwargs)
+        created.append(inbound)
+        return inbound
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(channel, "_make_inbound", fake_make_inbound)
+        channel._on_message(_make_text_event("new task", message_id="msg_new"))
+
+    assert created[0].topic_id == "msg_new"
+    assert key in channel._pending_clarifications
+    assert created[0].metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+
+
 def test_feishu_pending_clarification_is_consumed_once():
     bus = MessageBus()
     channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})

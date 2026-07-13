@@ -55,6 +55,8 @@ CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 # limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
 # 100 with the general-purpose subagent's max_turns.
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# The Command Room's browser client uses the same ceiling for multi-round work.
+COMMAND_ROOM_DEFAULT_RECURSION_LIMIT = 1000
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -894,11 +896,14 @@ class ChannelManager:
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
-        run_config = _merge_dicts(
-            DEFAULT_RUN_CONFIG,
+        configured_run_layers = (
             self._default_session.get("config"),
             channel_layer.get("config"),
             user_layer.get("config"),
+        )
+        run_config = _merge_dicts(
+            DEFAULT_RUN_CONFIG,
+            *configured_run_layers,
         )
 
         configurable = run_config.get("configurable")
@@ -940,6 +945,9 @@ class ChannelManager:
         if assistant_id != DEFAULT_ASSISTANT_ID:
             run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
             assistant_id = DEFAULT_ASSISTANT_ID
+
+        if run_context.get("agent_name") == "command-room" and not any(isinstance(layer, Mapping) and "recursion_limit" in layer for layer in configured_run_layers):
+            run_config["recursion_limit"] = COMMAND_ROOM_DEFAULT_RECURSION_LIMIT
 
         return assistant_id, run_config, run_context
 
@@ -1486,6 +1494,7 @@ class ChannelManager:
         last_published_text = ""
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        stream_terminal_error: str | None = None
         stream_kwargs: dict[str, Any] = {
             "input": {"messages": [human_message]},
             "config": run_config,
@@ -1514,6 +1523,10 @@ class ChannelManager:
                     snapshot_text = _extract_response_text(data)
                     if snapshot_text:
                         latest_text = snapshot_text
+                elif event == "error" and isinstance(data, Mapping):
+                    message = data.get("message")
+                    if isinstance(message, str) and message.strip():
+                        stream_terminal_error = message.strip()
 
                 if not latest_text or latest_text == last_published_text:
                     continue
@@ -1561,6 +1574,8 @@ class ChannelManager:
             if not response_text:
                 if attachments:
                     response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+                elif stream_terminal_error:
+                    response_text = stream_terminal_error
                 elif stream_error:
                     if _is_thread_busy_error(stream_error):
                         response_text = THREAD_BUSY_MESSAGE

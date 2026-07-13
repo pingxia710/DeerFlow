@@ -1419,6 +1419,43 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_command_room_channel_defaults_to_high_recursion_limit(self):
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(
+            bus=MessageBus(),
+            store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            channel_sessions={"feishu": {"assistant_id": "command-room"}},
+        )
+        assistant_id, run_config, run_context = manager._resolve_run_params(
+            InboundMessage(channel_name="feishu", chat_id="chat1", user_id="user1", text="hi"),
+            "thread-1",
+        )
+
+        assert assistant_id == "lead_agent"
+        assert run_context["agent_name"] == "command-room"
+        assert run_config["recursion_limit"] == 1000
+
+    def test_command_room_channel_preserves_explicit_recursion_limit(self):
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(
+            bus=MessageBus(),
+            store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            channel_sessions={
+                "feishu": {
+                    "assistant_id": "command-room",
+                    "config": {"recursion_limit": 321},
+                }
+            },
+        )
+        _, run_config, _ = manager._resolve_run_params(
+            InboundMessage(channel_name="feishu", chat_id="chat1", user_id="user1", text="hi"),
+            "thread-1",
+        )
+
+        assert run_config["recursion_limit"] == 321
+
     def test_clarification_follow_up_preserves_history(self, monkeypatch):
         """Conversation should continue after ask_clarification instead of resetting history."""
         from app.channels.manager import ChannelManager
@@ -1888,6 +1925,51 @@ class TestChannelManager:
             final_msgs = [m for m in outbound_received if m.is_final]
             assert len(final_msgs) == 1
             assert final_msgs[0].thread_ts == "om-source-1"
+
+        _run(go())
+
+    def test_handle_feishu_stream_terminal_error_sends_error_message(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(
+                return_value=_make_async_iterator(
+                    [
+                        _make_stream_part(
+                            "error",
+                            {"message": "Run failed due to an internal error.", "name": "InternalError"},
+                        )
+                    ]
+                )
+            )
+            manager._client = mock_client
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="hi",
+                    thread_ts="om-source-1",
+                )
+            )
+            await _wait_for(lambda: any(msg.is_final for msg in outbound_received))
+            await manager.stop()
+
+            final_messages = [msg for msg in outbound_received if msg.is_final]
+            assert len(final_messages) == 1
+            assert final_messages[0].text == "Run failed due to an internal error."
 
         _run(go())
 

@@ -1,5 +1,19 @@
 # Progress
 
+## 2026-07-13 — Feishu Command Room independent top-level tasks
+
+- Command Room 的飞书顶层消息不再消费旧的 pending clarification 状态，因此每条新任务保留自己的 `message_id` / `topic_id`，可与其他任务并行；原飞书回复串仍沿用已有 DeerFlow thread。
+- 非 Command Room Feishu 的 plain-message clarification 兼容行为保持不变；复用现有 manager 并发上限 5，没有新增队列、配置项、数据库字段或依赖。
+- TDD 先复现顶层消息被旧 topic 劫持的失败，再通过 Command Room 专用路由条件修复；完整 parser/channel 共 259 个测试通过，Ruff 与 Command Room contract check 也已通过。
+- Deliberately skipped: no Gateway restart, no active-run cancellation, no configuration/credential change, no main-worktree modification, no live Feishu validation before integration.
+
+## 2026-07-13 — Feishu Command Room long-run/error response correction
+
+- Channel-triggered Command Room runs now receive the same `recursion_limit: 1000` default as the browser Command Room; an explicit default, channel, or user limit still wins.
+- Channel streaming now relays Gateway's public terminal error payload instead of incorrectly returning `(No response from agent)` when a run ends without an AI final message.
+- TDD coverage first reproduced both failures: the Command Room channel default was `100`, and an `error` stream frame was discarded. Focused regressions then passed, followed by the complete channel suite and Ruff checks.
+- Deliberately skipped: no Gateway restart, no active-run cancellation, no configuration/credential change, no main-worktree modification, no commit/push, and no live Feishu validation before integration.
+
 ## 2026-07-13 — Command Room stale-goal loop correction
 
 - Traced the repeated full-audit behavior to two live inputs: an owner-scoped legacy Command Room `SOUL.md` that required opposition/Round Card behavior, and a full 100-fact memory where equal-confidence old goals crowded out later corrections.

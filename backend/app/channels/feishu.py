@@ -93,6 +93,10 @@ class FeishuChannel(Channel):
     def _pending_key(chat_id: str, user_id: str) -> tuple[str, str]:
         return (chat_id, user_id)
 
+    def _is_command_room_session(self) -> bool:
+        session = self.config.get("session")
+        return isinstance(session, dict) and session.get("assistant_id") == "command-room"
+
     @property
     def supports_streaming(self) -> bool:
         return True
@@ -999,7 +1003,7 @@ class FeishuChannel(Channel):
                 thread_id=feishu_thread_id,
             )
             resolved_from_pending = False
-            if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping:
+            if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping and not self._is_command_room_session():
                 pending = self._consume_pending_clarification(chat_id, sender_id)
                 pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
                 if pending_topic_id:

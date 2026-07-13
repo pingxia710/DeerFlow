@@ -39,6 +39,25 @@ def test_format_memory_sorts_facts_by_confidence_desc() -> None:
     assert result.index("High confidence fact") < result.index("Low confidence fact")
 
 
+def test_format_memory_prefers_newer_fact_when_confidence_ties(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+    memory_data = {
+        "facts": [
+            {"content": "old-goal", "category": "goal", "confidence": 0.99, "createdAt": "2026-01-01T00:00:00Z"},
+            {"content": "new-goal", "category": "goal", "confidence": 0.99, "createdAt": "2026-07-13T00:00:00Z"},
+        ],
+    }
+    one_fact_budget = len("Facts:\n- [goal | 0.99] new-goal")
+
+    result = format_memory_for_injection(memory_data, max_tokens=one_fact_budget)
+
+    assert "new-goal" in result
+    assert "old-goal" not in result
+
+
 def test_format_memory_respects_budget_when_adding_facts(monkeypatch) -> None:
     # Make token counting deterministic for this test by counting characters.
     monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text))

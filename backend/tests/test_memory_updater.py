@@ -203,6 +203,46 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     assert result["facts"][1]["source"] == "thread-9"
 
 
+def test_apply_updates_prefers_newer_facts_when_confidence_ties() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_oldest",
+                "content": "Oldest goal",
+                "category": "goal",
+                "confidence": 0.99,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_newer",
+                "content": "Newer goal",
+                "category": "goal",
+                "confidence": 0.99,
+                "createdAt": "2026-02-01T00:00:00Z",
+                "source": "thread-a",
+            },
+        ]
+    )
+    update_data = {
+        "newFacts": [
+            {"content": "Current bounded step", "category": "correction", "confidence": 0.99},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-b")
+
+    assert [fact["content"] for fact in result["facts"]] == [
+        "Current bounded step",
+        "Newer goal",
+    ]
+
+
 def test_apply_updates_preserves_source_error() -> None:
     updater = MemoryUpdater()
     current_memory = _make_memory()

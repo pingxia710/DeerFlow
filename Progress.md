@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-13 — Command Room stale-goal loop correction
+
+- Traced the repeated full-audit behavior to two live inputs: an owner-scoped legacy Command Room `SOUL.md` that required opposition/Round Card behavior, and a full 100-fact memory where equal-confidence old goals crowded out later corrections.
+- Restored the active owner-scoped Command Room SOUL to natural goal-first behavior: the latest user turn wins, “继续/下一步” advances one previously identified bounded action, and routine work does not reopen full audits or review rounds.
+- Changed memory retention and prompt selection to rank by confidence first and `createdAt` newest-first on ties, preserving newer explicit corrections without deleting historical memory records.
+- Added a direct no-deferral prompt rule: identify a requested next step plainly, execute it only when requested, and do not postpone in-scope safe work to a future round.
+- Validation: RED tests reproduced both stale-fact failures; GREEN memory suites passed 90 tests, Command Room prompt suites passed 30 tests, active SOUL assertions passed 3 checks, and the live AI-native probe passed all six behavior checks with no sub-AI/opposition dispatch or next-round deferral.
+- Deliberately skipped: no Gateway/frontend restart, no current-run cancellation, no memory-history deletion, no database/config/credential change, no commit/push, and no full-repository audit.
+
 ## 2026-07-12 — Stable conversation-turn documentation
 
 - Preserved the implemented single-conversation turn and reader-controlled scroll contract as a focused design record.

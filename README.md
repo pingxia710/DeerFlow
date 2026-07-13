@@ -729,7 +729,7 @@ Most agents forget everything the moment a conversation ends. DeerFlow remembers
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
 
-Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
+Memory updates skip duplicate fact entries at apply time. When equally confident facts compete for retention or prompt space, newer facts win so stale goals do not crowd out later corrections.
 
 ## Recommended Models
 

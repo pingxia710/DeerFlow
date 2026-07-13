@@ -325,6 +325,14 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
+def _fact_rank_key(fact: dict[str, Any]) -> tuple[float, str]:
+    created_at = fact.get("createdAt")
+    return (
+        _coerce_confidence(fact.get("confidence"), default=0.0),
+        created_at if isinstance(created_at, str) else "",
+    )
+
+
 def _format_fact_line(fact: dict[str, Any]) -> str | None:
     """Build a single formatted fact line, or return ``None`` for invalid facts.
 
@@ -412,7 +420,7 @@ def _fallback_format_facts(
     tokens already consumed by user-context / history sections (used to derive
     the remaining budget).
     """
-    ranked = sorted(valid_facts, key=lambda f: _coerce_confidence(f.get("confidence"), default=0.0), reverse=True)
+    ranked = sorted(valid_facts, key=_fact_rank_key, reverse=True)
 
     header = "Facts:\n"
     overhead = _count_tokens(header, use_tiktoken=use_tiktoken)
@@ -555,9 +563,6 @@ def format_memory_for_injection(
             # a guaranteed pool whose operator configured
             # ``guaranteed_categories=["context"]``.  Missing-category facts
             # always fall through to the regular path.
-            def _confidence_key(fact: dict[str, Any]) -> float:
-                return _coerce_confidence(fact.get("confidence"), default=0.0)
-
             if effective_guaranteed:
 
                 def _category_match(fact: dict[str, Any]) -> bool:
@@ -569,17 +574,17 @@ def format_memory_for_injection(
 
                 guaranteed = sorted(
                     [f for f in valid_facts if _category_match(f)],
-                    key=_confidence_key,
+                    key=_fact_rank_key,
                     reverse=True,
                 )
                 regular = sorted(
                     [f for f in valid_facts if not _category_match(f)],
-                    key=_confidence_key,
+                    key=_fact_rank_key,
                     reverse=True,
                 )
             else:
                 guaranteed = []
-                regular = sorted(valid_facts, key=_confidence_key, reverse=True)
+                regular = sorted(valid_facts, key=_fact_rank_key, reverse=True)
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
             header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)

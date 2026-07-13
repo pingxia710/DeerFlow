@@ -650,7 +650,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:
-- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), and atomic file I/O
+- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), confidence-first/newest-on-tie retention, and atomic file I/O
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time); captures `user_id` at enqueue time so it survives the `threading.Timer` boundary
 - `prompt.py` - Prompt templates for memory updates
 - `storage.py` - File-based storage with per-user isolation; cache keyed by `(user_id, agent_name)` tuple
@@ -681,7 +681,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 2. Queue debounces (30s default), batches updates, deduplicates per-thread
 3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
 4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
-5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
+5. Next interaction injects the highest-confidence facts + context into `<memory>` tags; equally confident facts prefer the newest `createdAt` so stale goals cannot crowd out later corrections
 
 **Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
 - `_count_tokens` budgets the injection. In default `tiktoken` mode, the encoding is loaded lazily and cached.

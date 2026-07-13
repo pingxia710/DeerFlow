@@ -19,6 +19,7 @@ def test_command_room_prompt_has_no_generic_clarification_gate(monkeypatch):
 
     assert "WORK FROM THE USER'S GOAL" in prompt
     assert "Do not create a separate final verification, opposition, temporary-commit, or acceptance phase" in prompt
+    assert "Do not defer an in-scope safe next action to a later turn" in prompt
     assert "MANDATORY Clarification Scenarios" not in prompt
     assert "CLARIFY → PLAN → ACT" not in prompt
     assert "Clarification ALWAYS comes BEFORE action" not in prompt

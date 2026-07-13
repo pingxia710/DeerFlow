@@ -679,10 +679,14 @@ class MemoryUpdater:
 
         # Enforce max facts limit
         if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
+            # Prefer newer facts when confidence ties so stale goals cannot
+            # permanently crowd out an equally explicit correction.
             current_memory["facts"] = sorted(
                 current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
+                key=lambda f: (
+                    f.get("confidence", 0),
+                    f.get("createdAt", "") if isinstance(f.get("createdAt"), str) else "",
+                ),
                 reverse=True,
             )[: config.max_facts]
 

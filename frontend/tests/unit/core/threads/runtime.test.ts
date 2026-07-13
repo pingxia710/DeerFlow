@@ -7,7 +7,9 @@ import {
   normalizeThreadRuntimeKey,
   resolveThreadRuntimeSlotId,
   shouldCollectThreadRuntimeSlot,
+  shouldEmitRuntimeSnapshot,
   shouldResetThreadRuntimeSlot,
+  type ThreadRuntimeSnapshot,
 } from "@/core/threads/runtime";
 
 const chatContext = { mode: "ultra" as const };
@@ -15,6 +17,51 @@ const agentContext = { mode: "ultra" as const, agent_name: "alpha" };
 
 afterEach(() => {
   __threadRuntimeTestUtils.reset();
+});
+
+function runtimeSnapshotWithMessage(
+  message: Record<string, unknown>,
+): ThreadRuntimeSnapshot {
+  return {
+    thread: {
+      values: { title: "", artifacts: [], todos: [] },
+      messages: [message],
+    },
+    pendingUsageMessages: [],
+    historyRuns: [],
+  } as unknown as ThreadRuntimeSnapshot;
+}
+
+test("shouldEmitRuntimeSnapshot observes every renderable top-level message field", () => {
+  const baseMessage = {
+    id: "message-1",
+    type: "ai",
+    content: "Working",
+    additional_kwargs: {},
+    tool_calls: [{ id: "call-1", name: "search", args: { q: "old" } }],
+    tool_call_id: "call-1",
+    name: "assistant",
+    response_metadata: { model: "old-model" },
+  };
+  const previous = runtimeSnapshotWithMessage(baseMessage);
+
+  expect(shouldEmitRuntimeSnapshot(previous, previous)).toBe(false);
+  for (const changedMessage of [
+    {
+      ...baseMessage,
+      tool_calls: [{ id: "call-1", name: "search", args: { q: "updated" } }],
+    },
+    { ...baseMessage, tool_call_id: "call-2" },
+    { ...baseMessage, name: "research-assistant" },
+    { ...baseMessage, response_metadata: { model: "new-model" } },
+  ]) {
+    expect(
+      shouldEmitRuntimeSnapshot(
+        previous,
+        runtimeSnapshotWithMessage(changedMessage),
+      ),
+    ).toBe(true);
+  }
 });
 
 test("normalizeThreadRuntimeKey trims blank runtime keys", () => {

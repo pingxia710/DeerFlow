@@ -1,11 +1,16 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export interface SuggestionsConfigResponse {
   enabled: boolean;
 }
 
 export async function loadSuggestionsConfig(): Promise<SuggestionsConfigResponse> {
+  if (isStaticWebsiteOnly()) {
+    return { enabled: false };
+  }
+
   const response = await fetch(`${getBackendBaseURL()}/api/suggestions/config`);
   if (!response.ok) {
     if (response.status === 404) {

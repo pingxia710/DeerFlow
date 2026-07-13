@@ -1508,6 +1508,9 @@ export function InputBox({
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             <PromptInputSubmit
+              aria-label={
+                status === "streaming" ? t.common.stop : t.common.submit
+              }
               className="rounded-full"
               disabled={disabled}
               variant="outline"
@@ -1627,6 +1630,7 @@ function AddAttachmentsButton({ className }: { className?: string }) {
   return (
     <Tooltip content={t.inputBox.addAttachments}>
       <PromptInputButton
+        aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
         onClick={() => attachments.openFileDialog()}
       >

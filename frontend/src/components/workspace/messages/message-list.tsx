@@ -519,18 +519,19 @@ function RunRecoveryNotice({
   status: NonNullable<ThreadRecoveryStatus>;
   onRetry?: () => void;
 }) {
+  const { t } = useI18n();
   const isRepairing = status.state === "repairing";
   const isFailed = status.state === "failed";
   const title = isRepairing
-    ? "正在恢复运行状态"
+    ? t.chats.runRecoveryRepairingTitle
     : isFailed
-      ? "恢复失败"
-      : "运行已终止";
+      ? t.chats.runRecoveryFailedTitle
+      : t.chats.runRecoveryTerminalTitle;
   const description = isRepairing
-    ? "正在从中断连接恢复运行状态，当前不会标记为业务成功。"
+    ? t.chats.runRecoveryRepairingDescription
     : isFailed
       ? status.reason
-      : `终止原因：${status.reason ?? "unknown"}`;
+      : t.chats.runRecoveryTerminalDescription(status.reason);
   return (
     <div
       role="status"
@@ -556,7 +557,7 @@ function RunRecoveryNotice({
       {isFailed && onRetry ? (
         <Button type="button" variant="outline" size="sm" onClick={onRetry}>
           <RefreshCcwIcon className="mr-1 size-3.5" />
-          重试恢复
+          {t.chats.retryRecovery}
         </Button>
       ) : null}
     </div>
@@ -1011,7 +1012,7 @@ export function MessageList({
       return (
         <div className="mt-2 flex items-center justify-end gap-1">
           {hasHoverActions && (
-            <div className="flex gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+            <div className="flex gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
               {clipboardData && <CopyButton clipboardData={clipboardData} />}
               {hasRegenerateAction && (
                 <Tooltip content={t.common.regenerate}>
@@ -1071,7 +1072,7 @@ export function MessageList({
             onClick={handleReviewTurnClick}
           >
             <ChevronUpIcon className="mr-1 size-3.5" />
-            看一下
+            {t.chats.reviewTurn}
           </Button>
         </div>
       );
@@ -1083,6 +1084,7 @@ export function MessageList({
       regeneratingMessageId,
       t.contextUsage.label,
       t.common.regenerate,
+      t.chats.reviewTurn,
     ],
   );
 

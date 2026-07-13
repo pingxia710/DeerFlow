@@ -214,6 +214,11 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   switches unless a per-thread draft store is implemented.
 - Agent chat pages must pass `isMock` through `ThreadContext` and disable the
   prompt input for mock/static demo threads, matching the normal chat page.
+- Static website mode must not issue direct Gateway requests for runtime
+  snapshots, context usage, channels, skills, or suggestions; return the
+  corresponding empty/disabled read model locally.
+- Icon-only chat controls need accessible labels, and hover-revealed message
+  actions must remain visible on keyboard focus and touch-only devices.
 - Agent chat pages must wire assistant-message regeneration through the same
   `useThreadStream.regenerateMessage` path as normal chat pages.
 

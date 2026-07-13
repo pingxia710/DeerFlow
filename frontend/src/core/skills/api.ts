@@ -1,5 +1,6 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type { Skill } from "./type";
 
@@ -25,6 +26,10 @@ async function readErrorDetail(response: Response, fallback: string) {
 }
 
 export async function loadSkills() {
+  if (isStaticWebsiteOnly()) {
+    return [];
+  }
+
   const response = await fetch(`${getBackendBaseURL()}/api/skills`);
   if (!response.ok) {
     throw new SkillRequestError(

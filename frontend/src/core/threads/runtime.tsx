@@ -530,7 +530,7 @@ function publishRuntimeSnapshot(
   }
 }
 
-function shouldEmitRuntimeSnapshot(
+export function shouldEmitRuntimeSnapshot(
   previous: ThreadRuntimeSnapshot | null,
   next: ThreadRuntimeSnapshot,
 ) {
@@ -594,11 +594,7 @@ function areSameRuntimeMessage<
   if (!right || left.id !== right.id || left.type !== right.type) {
     return false;
   }
-  return (
-    stableStringify(left.content) === stableStringify(right.content) &&
-    stableStringify(left.additional_kwargs) ===
-      stableStringify(right.additional_kwargs)
-  );
+  return stableStringify(left) === stableStringify(right);
 }
 
 function areSameHistoryRuns(

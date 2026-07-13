@@ -3,6 +3,7 @@ import {
   fetch as fetchWithAuth,
 } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type {
   ThreadContextUsageResponse,
@@ -33,6 +34,10 @@ export async function fetchThreadTokenUsage(
 export async function fetchThreadContextUsage(
   threadId: string,
 ): Promise<ThreadContextUsageResponse | null> {
+  if (isStaticWebsiteOnly()) {
+    return null;
+  }
+
   const response = await fetchWithAuth(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/context-usage`,
     {

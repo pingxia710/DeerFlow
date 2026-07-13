@@ -42,6 +42,8 @@ export interface Translations {
     exportSuccess: string;
     regenerate: string;
     retry: string;
+    submit: string;
+    stop: string;
   };
 
   home: {
@@ -257,6 +259,13 @@ export interface Translations {
     historyLoadFailedDescription: string;
     runTerminalNoticeTitle: string;
     runTerminalNoticeDescription: (status: string, reason?: string) => string;
+    runRecoveryRepairingTitle: string;
+    runRecoveryFailedTitle: string;
+    runRecoveryTerminalTitle: string;
+    runRecoveryRepairingDescription: string;
+    runRecoveryTerminalDescription: (reason?: string) => string;
+    retryRecovery: string;
+    reviewTurn: string;
   };
 
   // Channels

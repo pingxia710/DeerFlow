@@ -28,6 +28,7 @@ import {
   shouldKeepStreamErrorRecoveryRun,
   shouldCommitStreamStartFromError,
   shouldReleaseQueuedThreadMessage,
+  shouldEnableThreadRuntimeSnapshotQuery,
   threadRunsQueryKey,
   threadRuntimeSnapshotQueryKey,
   stopBackgroundRunProbeRecovery,
@@ -1087,5 +1088,34 @@ describe("background run probe policy", () => {
     expect(client.getQueryState(["threads", "search"])?.isInvalidated).toBe(
       true,
     );
+  });
+});
+
+describe("runtime snapshot query policy", () => {
+  test("disables Gateway recovery reads in static mode and for deleted threads", () => {
+    expect(
+      shouldEnableThreadRuntimeSnapshotQuery({
+        enabled: true,
+        threadId: "thread-1",
+        staticMode: false,
+        deleted: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldEnableThreadRuntimeSnapshotQuery({
+        enabled: true,
+        threadId: "thread-1",
+        staticMode: true,
+        deleted: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldEnableThreadRuntimeSnapshotQuery({
+        enabled: true,
+        threadId: "thread-1",
+        staticMode: false,
+        deleted: true,
+      }),
+    ).toBe(false);
   });
 });

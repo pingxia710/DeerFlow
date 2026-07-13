@@ -32,6 +32,7 @@ import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { clearThreadModelName } from "../settings/store";
+import { isStaticWebsiteOnly } from "../static-mode";
 import {
   useClearSubtasksForThread,
   useSettleRunningSubtasksForRun,
@@ -3856,10 +3857,25 @@ export {
 } from "./command-room-read-model";
 export { getSnapshotHistoryContinuationState } from "./message-history";
 
+export function shouldEnableThreadRuntimeSnapshotQuery({
+  enabled,
+  threadId,
+  staticMode,
+  deleted,
+}: {
+  enabled: boolean;
+  threadId?: string;
+  staticMode: boolean;
+  deleted: boolean;
+}) {
+  return enabled && Boolean(threadId) && !staticMode && !deleted;
+}
+
 function useThreadRuntimeSnapshot(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const staticMode = isStaticWebsiteOnly();
   return useQuery<ThreadRuntimeSnapshotResponse>({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
     queryFn: async () => {
@@ -3876,8 +3892,12 @@ function useThreadRuntimeSnapshot(
         timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
       }).then(readThreadRuntimeSnapshotResponse);
     },
-    enabled:
-      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
+    enabled: shouldEnableThreadRuntimeSnapshotQuery({
+      enabled,
+      threadId,
+      staticMode,
+      deleted: isDeletedThreadTombstoned(threadId),
+    }),
     retry: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,

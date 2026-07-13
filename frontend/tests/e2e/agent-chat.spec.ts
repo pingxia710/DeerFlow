@@ -403,10 +403,10 @@ test.describe("Agent chat", () => {
 
     const notice = page.getByTestId("run-recovery-notice");
     await expect(notice).toBeVisible({ timeout: 15_000 });
-    await expect(notice.getByText("恢复失败")).toBeVisible();
+    await expect(notice.getByText("Recovery failed")).toBeVisible();
     await expect(notice.getByText("Thread not found")).toBeVisible();
     await expect(
-      notice.getByRole("button", { name: "重试恢复" }),
+      notice.getByRole("button", { name: "Retry recovery" }),
     ).toBeVisible();
   });
 });

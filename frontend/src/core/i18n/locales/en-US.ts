@@ -53,6 +53,8 @@ export const enUS: Translations = {
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
     retry: "Retry",
+    submit: "Submit",
+    stop: "Stop",
   },
 
   // Home
@@ -334,6 +336,15 @@ export const enUS: Translations = {
     runTerminalNoticeTitle: "Run ended without a visible reply",
     runTerminalNoticeDescription: (status, reason) =>
       `Latest run ended as ${reason ?? status}. You can retry or continue from here.`,
+    runRecoveryRepairingTitle: "Restoring run state",
+    runRecoveryFailedTitle: "Recovery failed",
+    runRecoveryTerminalTitle: "Run terminated",
+    runRecoveryRepairingDescription:
+      "Restoring run state after the connection was interrupted. This is not treated as a successful run.",
+    runRecoveryTerminalDescription: (reason) =>
+      `Termination reason: ${reason ?? "unknown"}`,
+    retryRecovery: "Retry recovery",
+    reviewTurn: "Review turn",
   },
 
   // Channels

@@ -1,5 +1,6 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type {
   ChannelConnectResponse,
@@ -26,6 +27,10 @@ async function throwChannelApiError(
 }
 
 export async function listChannelProviders(): Promise<ChannelProvidersResponse> {
+  if (isStaticWebsiteOnly()) {
+    return { enabled: false, providers: [] };
+  }
+
   const response = await fetch(channelsUrl("/providers"));
   if (!response.ok) {
     await throwChannelApiError(

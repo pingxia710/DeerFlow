@@ -53,6 +53,8 @@ export const zhCN: Translations = {
     exportSuccess: "对话已导出",
     regenerate: "重新生成",
     retry: "重试",
+    submit: "提交",
+    stop: "停止",
   },
 
   // Home
@@ -315,6 +317,14 @@ export const zhCN: Translations = {
     runTerminalNoticeTitle: "运行已结束，但没有可见回复",
     runTerminalNoticeDescription: (status, reason) =>
       `最近一次运行结束状态：${reason ?? status}。可以重试，或从这里继续。`,
+    runRecoveryRepairingTitle: "正在恢复运行状态",
+    runRecoveryFailedTitle: "恢复失败",
+    runRecoveryTerminalTitle: "运行已终止",
+    runRecoveryRepairingDescription:
+      "正在从中断连接恢复运行状态，当前不会标记为业务成功。",
+    runRecoveryTerminalDescription: (reason) => `终止原因：${reason ?? "未知"}`,
+    retryRecovery: "重试恢复",
+    reviewTurn: "查看本轮",
   },
 
   // Channels

@@ -38,20 +38,12 @@ def task_action_result_from_terminal_event(
     if isinstance(result, dict):
         payload = dict(result)
         payload.setdefault("summary", result.get("summary", ""))
-        claimed_evidence = payload.pop("evidence_refs", None)
-        if claimed_evidence:
-            risks = payload.get("risks")
-            if isinstance(risks, list):
-                payload["risks"] = [*risks, "untrusted model-text evidence_refs not promoted"]
-            elif risks:
-                payload["risks"] = [str(risks), "untrusted model-text evidence_refs not promoted"]
-            else:
-                payload["risks"] = ["untrusted model-text evidence_refs not promoted"]
+        payload.pop("evidence_refs", None)
     else:
         payload = {"summary": "" if result is None else str(result)}
     payload["evidence_refs"] = list(dict.fromkeys(ref.strip() for ref in observed_evidence_refs or [] if isinstance(ref, str) and ref.strip()))
-    payload.setdefault("action_id", task_id)
-    payload.setdefault("description", description)
+    payload["action_id"] = task_id
+    payload["description"] = description
     payload["status"] = status
     if terminal_reason:
         payload["terminal_reason"] = terminal_reason

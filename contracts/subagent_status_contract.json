@@ -1,25 +1,25 @@
 {
   "version": 1,
-  "description": "Cross-language contract test fixture for the subagent status field. The backend stamps ToolMessage.additional_kwargs.subagent_status using these prefixes; the frontend reads the structured field and falls back to the same prefixes. Both sides' tests load this file and must agree.",
+  "description": "Historical task-prefix compatibility fixture. Current task results carry lifecycle in ToolMessage.additional_kwargs.subagent_status and preserve successful worker content unchanged; both sides still parse old stored messages consistently.",
   "valid_status_values": ["completed", "failed", "cancelled", "timed_out", "polling_timed_out"],
   "cases": [
     {
       "name": "succeeded",
-      "origin": "task_tool.py succeeded path",
+      "origin": "legacy succeeded message",
       "content": "Task Succeeded. Result: investigated and produced a 3-page report",
       "expected_status": "completed",
       "expected_error_contains": null
     },
     {
       "name": "succeeded_with_runtime_observed_evidence",
-      "origin": "task_tool.py succeeded path with runtime-observed tool evidence",
+      "origin": "legacy succeeded message with runtime-observed tool evidence",
       "content": "Task Succeeded. Runtime-observed evidence:\n- tool: write_file; path: /mnt/user-data/outputs/evidence.txt; status: success; output_sha256: abc\nResult: wrote evidence",
       "expected_status": "completed",
       "expected_error_contains": "wrote evidence"
     },
     {
       "name": "succeeded_with_suggested_receiver",
-      "origin": "task_tool.py succeeded path with advisory next receiver",
+      "origin": "legacy succeeded message with advisory next receiver",
       "content": "Task Succeeded. Suggested next receiver (advisory only): fact-finder. Chair/main AI decides. Result: reviewed files",
       "expected_status": "completed",
       "expected_error_contains": "reviewed files"
@@ -47,7 +47,7 @@
     },
     {
       "name": "polling_timed_out",
-      "origin": "task_tool.py polling timeout safety-net path",
+      "origin": "legacy polling timeout safety-net path",
       "content": "Task polling timed out after 15 minutes. This may indicate the background task is stuck. Status: RUNNING",
       "expected_status": "polling_timed_out",
       "expected_error_contains": "15"
@@ -61,21 +61,21 @@
     },
     {
       "name": "pre_unknown_subagent",
-      "origin": "task_tool.py pre-execution Error path (unknown subagent type)",
+      "origin": "legacy pre-execution compatibility message (unknown subagent type; not emitted by current one-shot task_tool)",
       "content": "Error: Unknown subagent type 'foo'. Available: bash, general-purpose",
       "expected_status": "failed",
       "expected_error_contains": "Unknown subagent"
     },
     {
       "name": "pre_bash_disabled",
-      "origin": "task_tool.py pre-execution Error path (host bash disabled)",
+      "origin": "legacy pre-execution compatibility message (host bash disabled; not emitted by current one-shot task_tool)",
       "content": "Error: Host bash subagent is disabled by configuration",
       "expected_status": "failed",
       "expected_error_contains": "disabled"
     },
     {
       "name": "pre_task_disappeared",
-      "origin": "task_tool.py pre-execution Error path (background task disappeared)",
+      "origin": "legacy polling compatibility message (background task disappeared; not emitted by current one-shot task_tool)",
       "content": "Error: Task 1234 disappeared from background tasks",
       "expected_status": "failed",
       "expected_error_contains": "disappeared"

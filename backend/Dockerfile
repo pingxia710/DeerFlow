@@ -11,6 +11,7 @@ FROM ${UV_IMAGE} AS uv-source
 FROM python:3.12-slim-bookworm AS builder
 
 ARG NODE_MAJOR=22
+ARG CODEX_CLI_VERSION=0.144.1
 ARG APT_MIRROR
 ARG UV_INDEX_URL
 # Optional extras to install (e.g. "postgres" for PostgreSQL support)
@@ -27,6 +28,7 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
+    git \
     gnupg \
     ca-certificates \
     && mkdir -p /etc/apt/keyrings \
@@ -36,11 +38,20 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# One-shot DeerFlow tasks execute through Codex CLI. Pin the runtime dependency
+# so Docker and local behavior do not silently diverge.
+RUN npm install --global "@openai/codex@${CODEX_CLI_VERSION}" \
+    && codex --version
+
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
 
 # Set working directory
 WORKDIR /app
+
+# Root and backend AGENTS.md files form the instruction chain inherited by
+# delegated Codex tasks under /app/backend/.deer-flow.
+COPY AGENTS.md ./AGENTS.md
 
 # Copy backend source code
 COPY backend ./backend
@@ -78,11 +89,18 @@ ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
 ENV DEER_FLOW_PUBLIC_BIND_HOST=0.0.0.0
 
+# Delegated Codex tasks may receive a repository in their task workspace and
+# need objective status, diff, and history evidence.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy Node.js runtime from builder (provides npx for MCP servers)
 COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx \
+    && ln -s ../lib/node_modules/@openai/codex/bin/codex.js /usr/bin/codex \
+    && codex --version
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
@@ -92,6 +110,9 @@ COPY --from=uv-source /uv /uvx /usr/local/bin/
 
 # Set working directory
 WORKDIR /app
+
+# Keep the project-level instruction chain in the production image too.
+COPY --from=builder /app/AGENTS.md ./AGENTS.md
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend

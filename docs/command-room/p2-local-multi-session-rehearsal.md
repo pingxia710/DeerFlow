@@ -16,15 +16,6 @@ Backend journal replay (`tests/test_task_event_journal.py`):
 - Terminal task events (`task_completed` / `task_failed`) retain correct task/thread/run metadata.
 - Wrong thread/run lookups return empty results.
 
-Backend deterministic executor pressure (`tests/test_subagent_executor_limiter.py::test_p2_local_five_session_rehearsal_cap_round_robin_and_run_scoping`):
-
-- 5 fake command-room sessions × 6 fake subagent tasks.
-- Process-wide admitted cap stays at 12, with 18 queued/pending tasks.
-- Pending drain is session-fair round-robin after the first admitted wave completes.
-- Reused `task_id` values are isolated by `run_id`; unscoped/wrong-run lookup does not replay another session.
-- Terminal completion is idempotent: a second terminal attempt cannot overwrite the first terminal result, and late fake-future callbacks do not double-release capacity.
-- The fake submit path replaces isolated event-loop execution, so no real provider is invoked.
-
 ## What it does not validate
 
 This rehearsal intentionally does **not** cover real LLMs, external APIs, providers, SSE, browsers, Playwright/E2E, service startup, production behavior, or production concurrency. It is a pure fake/deterministic local test of journal persistence and replay/session isolation.
@@ -35,17 +26,9 @@ This rehearsal intentionally does **not** cover real LLMs, external APIs, provid
 cd backend && python -m pytest tests/test_task_event_journal.py -q
 ```
 
-If executor-related changes are made in the same patch, also run:
-
-```bash
-cd backend && python -m pytest tests/test_subagent_executor_limiter.py tests/test_task_event_journal.py -q
-```
-
-For the 5×6 deterministic executor pressure rehearsal only:
-
-```bash
-cd backend && python -m pytest tests/test_subagent_executor_limiter.py::test_p2_local_five_session_rehearsal_cap_round_robin_and_run_scoping -q
-```
+One-shot Codex transport behavior is covered separately by
+`tests/test_codex_cli_subagent.py` and `tests/test_task_tool_core_logic.py`; this
+rehearsal intentionally does not simulate a global executor queue or scheduler.
 
 
 ## P2-b Frontend Offline Replay/Merge Rehearsal

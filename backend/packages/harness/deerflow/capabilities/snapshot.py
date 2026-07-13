@@ -120,7 +120,6 @@ def _model_facts(app_config: AppConfig) -> list[dict[str, Any]]:
         "default_reasoning_effort",
         "supports_vision",
         "stream_chunk_timeout",
-        "subagents_inherit",
     }
     facts: list[dict[str, Any]] = []
     for model in app_config.models:
@@ -233,13 +232,10 @@ def _subagent_facts(app_config: AppConfig) -> list[dict[str, Any]]:
                 "description": subagent.description,
                 "available": subagent.name in available,
                 "source": "built-in" if subagent.name in BUILTIN_SUBAGENTS else "config.subagents.custom_agents",
-                "tools": subagent.tools,
-                "disallowed_tools": subagent.disallowed_tools,
-                "skills": subagent.skills,
-                "model": subagent.model,
-                "max_turns": subagent.max_turns,
-                "timeout_seconds": subagent.timeout_seconds,
-                "system_prompt_available": bool(subagent.system_prompt),
+                "model": app_config.subagents.get_model_for(subagent.name),
+                "execution": "codex-cli-one-shot",
+                "prompt_source": "lead-task-plus-developer-role-context" if subagent.system_prompt else "lead-authored-task",
+                "has_developer_role_context": bool(subagent.system_prompt),
             }
         )
     return facts
@@ -251,16 +247,13 @@ def _command_room_runtime_facts(
     user_id: str,
     skills: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Describe the Command Room's actual direct/delegated routing contract."""
+    """Describe the Command Room and one-shot Codex transport from current facts."""
     from deerflow.agents.lead_agent.agent import (
         _resolve_agent_tool_groups,
         _resolve_command_room_available_skills,
-        _resolve_subagent_available_skills,
-        _resolve_subagent_tool_groups,
     )
     from deerflow.config.agents_config import load_agent_config
-    from deerflow.mcp.cache import get_mcp_cache_status
-    from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
+    from deerflow.sandbox.security import is_unrestricted_host_access_allowed
 
     config_status = "loaded"
     config_error_type: str | None = None
@@ -281,30 +274,19 @@ def _command_room_runtime_facts(
     configured_skills = agent_config.skills if agent_config is not None else []
     if configured_skills is None:
         direct_skill_names = sorted(enabled_skill_names)
-        delegated_allowlist: set[str] | None = None
     else:
         lead_allowlist = _resolve_command_room_available_skills("command-room", set(configured_skills)) or set()
         direct_skill_names = sorted(lead_allowlist & enabled_skill_names)
-        delegated_allowlist = _resolve_subagent_available_skills("command-room", set(configured_skills))
 
     missing_skills = sorted(set(configured_skills or []) - all_skill_names)
     disabled_skills = sorted((set(configured_skills or []) & all_skill_names) - enabled_skill_names)
-    role_skill_names = sorted({skill for config in COMMAND_ROOM_ROLE_CONFIGS.values() for skill in (config.skills or [])})
-    delegated_loaded_skills = sorted(enabled_skill_names if delegated_allowlist is None else enabled_skill_names & delegated_allowlist)
 
     direct_groups = _resolve_agent_tool_groups("command-room", agent_config)
-    delegated_groups = _resolve_subagent_tool_groups("command-room", agent_config)
     direct_tools = [tool.name for tool in app_config.tools if direct_groups is None or tool.group in direct_groups]
     direct_tools.extend(["present_files", "ask_clarification", "task"])
-    resolved_model_config = app_config.get_model_config(resolved_model) if resolved_model else None
-    if resolved_model_config is not None and resolved_model_config.supports_vision:
-        direct_tools.append("view_image")
-
-    enabled_mcp_servers = sorted(name for name, server in app_config.extensions.mcp_servers.items() if server.enabled)
-    delegated_tools = [tool.name for tool in app_config.tools]
-    delegated_tools.extend(["present_files", "ask_clarification"])
-    if resolved_model_config is not None and resolved_model_config.supports_vision:
-        delegated_tools.append("view_image")
+    configured_child_model = app_config.subagents.get_model_for("general-purpose")
+    configured_child_model_config = app_config.get_model_config(configured_child_model) if configured_child_model else None
+    resolved_child_model = configured_child_model_config.model if configured_child_model_config is not None else configured_child_model
 
     return {
         "agent_config": {
@@ -319,21 +301,26 @@ def _command_room_runtime_facts(
             "loaded": direct_skill_names,
             "missing": missing_skills,
             "disabled": disabled_skills,
-            "delegated_loaded": delegated_loaded_skills,
-            "role_skills": role_skill_names,
         },
         "direct": {
             "tool_groups": direct_groups,
             "configured_tools": sorted(set(direct_tools)),
             "include_mcp": False,
-            "mcp_access": "delegated_only" if enabled_mcp_servers else "not_configured",
+            "mcp_access": "not_exposed_to_command_room",
         },
-        "delegated": {
-            "tool_groups": delegated_groups,
-            "configured_tools": sorted(set(delegated_tools)),
-            "include_mcp": True,
-            "mcp_servers_configured": enabled_mcp_servers,
-            "mcp_cache": get_mcp_cache_status(),
+        "task_transport": {
+            "runtime": "codex-cli-one-shot",
+            "model": resolved_child_model,
+            "configured_model": configured_child_model,
+            "reasoning_effort": app_config.subagents.reasoning_effort,
+            "timeout_seconds": app_config.subagents.timeout_seconds,
+            "sandbox_mode": "danger-full-access" if is_unrestricted_host_access_allowed(app_config) else "workspace-write",
+            "workspace_source": "thread_data.workspace_path",
+            "inherits_deerflow_tools": False,
+            "inherits_deerflow_skills": False,
+            "inherits_deerflow_mcp": False,
+            "programmatic_turn_loop": False,
+            "process_ends_after_result": True,
         },
     }
 
@@ -555,7 +542,7 @@ def build_capability_snapshot(
     )
 
     return {
-        "version": 1,
+        "version": 2,
         "user_id": effective_user_id,
         "thread_id": thread_id,
         "models": _model_facts(app_config),
@@ -595,14 +582,6 @@ def build_capability_snapshot(
             _profile(
                 agent_name="command-room",
                 role="chair",
-                tools=tools,
-                skills=profile_skills,
-                middleware_stack=middleware_stack,
-                filesystem_permissions=filesystem_permissions,
-            ).model_dump(),
-            _profile(
-                agent_name="subagent",
-                role="worker",
                 tools=tools,
                 skills=profile_skills,
                 middleware_stack=middleware_stack,

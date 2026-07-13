@@ -46,11 +46,11 @@ You have access to the `write_todos` tool to help you manage and track complex m
 - Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
 - Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
 - Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
-- DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
+- Use this only when a visible task list helps preserve the lead AI's plan and progress
 </todo_list_system>
 """
 
-_TODO_TOOL_DESCRIPTION = "Use this tool to create and manage a structured task list for complex work sessions.  Only use for complex tasks (3+ steps)."
+_TODO_TOOL_DESCRIPTION = "Use this tool to track the lead AI's plan and delegated work when a visible task list is useful."
 
 
 # ---------------------------------------------------------------------------

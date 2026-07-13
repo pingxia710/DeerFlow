@@ -147,10 +147,10 @@ def test_runtime_snapshot_includes_read_only_close_gate_facts(tmp_path, monkeypa
     assert close_gate["auto_dispatch"] is False
     assert close_gate["quality_verdict"] is None
     assert close_gate["facts"]
-    assert "open_pending_handoffs=1" in close_gate["facts"]
-    assert "active_task_lanes=1" in close_gate["facts"]
-    assert close_gate["unknowns"]
-    assert close_gate["warnings"]
+    assert "pending_handoffs=1" in close_gate["facts"]
+    assert "task_lanes=1" in close_gate["facts"]
+    assert close_gate["unknowns"] == []
+    assert close_gate["warnings"] == []
     assert close_gate["open_pending_handoffs"][0]["handoff_id"] == handoff.handoff_id
 
     assert len(round_store.rounds) == before_rounds

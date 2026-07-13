@@ -47,7 +47,10 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 _LEASE_CONTROL_INTERVAL_SECONDS = 2.0
 _STREAM_FRAME_CATEGORY = "stream"
-_RUN_NO_PROGRESS_TIMEOUT_SECONDS = 30 * 60.0
+# A one-shot Codex task may legitimately stay inside one tool call for the full
+# 60-minute child timeout. Keep the parent stream watchdog above that budget so
+# it catches a truly stalled run instead of cancelling a healthy child first.
+_RUN_NO_PROGRESS_TIMEOUT_SECONDS = 65 * 60.0
 _RUN_HARD_TIMEOUT_SECONDS = 4 * 60 * 60.0
 _STREAM_CLOSE_TIMEOUT_SECONDS = 5.0
 _STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"

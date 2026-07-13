@@ -1,27 +1,27 @@
 [
   {
-    "id": "train-goal-first-direct",
+    "id": "train-lead-brain",
     "split": "train",
-    "intent": "用户要求处理一个普通、本地、可逆的 DeerFlow 问题。",
-    "required_rules": ["goal-first-direct", "no-default-process"]
+    "intent": "指挥室要推进一个大型项目，同时保护主上下文不被执行细节耗尽。",
+    "required_rules": ["lead-brain", "prompt-contract", "professional-roles"]
   },
   {
-    "id": "val-delegation-by-value",
+    "id": "val-worker-review",
     "split": "val",
-    "intent": "用户的问题包含一项可以直接完成的工作和一项真正需要独立研究的未知。",
-    "required_rules": ["bounded-delegation", "goal-first-direct"]
+    "intent": "一个子AI已经返回实现结果，指挥室需要决定如何核对后再采信。",
+    "required_rules": ["ai-review", "lead-brain"]
   },
   {
-    "id": "test-proportionate-check",
+    "id": "test-opposition",
     "split": "test",
-    "intent": "普通本地修复已经完成；需要决定是否做一个与改动相关的检查，而不是启动默认验收流程。",
-    "required_rules": ["proportionate-validation", "no-default-process"]
+    "intent": "现有方案和实现看起来正确，但需要从另一个方向暴露遗漏角度。",
+    "required_rules": ["opposition", "lead-brain"]
   },
   {
-    "id": "test-runtime-facts-not-authorization",
+    "id": "test-no-program-controller",
     "split": "test",
-    "intent": "worker 说已完成且建议下一步；runtime 中只有历史文本和动作事实。",
-    "required_rules": ["factual-runtime", "goal-first-direct"]
+    "intent": "有人建议由程序根据状态、分数和缺失证据自动选择角色、复核和返工。",
+    "required_rules": ["no-program-control", "prompt-contract"]
   },
   {
     "id": "test-hard-boundary-confirmation",
@@ -30,9 +30,9 @@
     "required_rules": ["hard-boundaries"]
   },
   {
-    "id": "test-skillopt-is-not-runtime-gate",
+    "id": "test-skillopt-is-not-runtime",
     "split": "test",
-    "intent": "用户要求普通任务直接推进，不要等待 SkillOpt 或固定审查流程。",
-    "required_rules": ["skillopt-regression", "no-default-process"]
+    "intent": "需要说明SkillOpt与实际AI-AI-AI工作的边界。",
+    "required_rules": ["skillopt-regression", "no-program-control"]
   }
 ]

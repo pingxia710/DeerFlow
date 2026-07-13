@@ -18,8 +18,6 @@ const healthyRuntime = {
     loaded: ["nextos-commander"],
     missing: [],
     disabled: [],
-    delegated_loaded: ["nextos-commander", "command-room-planner"],
-    role_skills: ["command-room-planner"],
   },
   direct: {
     tool_groups: ["file:read"],
@@ -27,18 +25,19 @@ const healthyRuntime = {
     include_mcp: false,
     mcp_access: "not_configured",
   },
-  delegated: {
-    tool_groups: null,
-    configured_tools: ["read_file", "write_file"],
-    include_mcp: true,
-    mcp_servers_configured: [],
-    mcp_cache: {
-      initialized: false,
-      stale: false,
-      tool_count: 0,
-      tool_names: [],
-      last_error_type: null,
-    },
+  task_transport: {
+    runtime: "codex-cli-one-shot",
+    model: "gpt-5.6-terra",
+    configured_model: "gpt-5.6-terra",
+    reasoning_effort: "xhigh",
+    timeout_seconds: 3600,
+    sandbox_mode: "workspace-write",
+    workspace_source: "thread_data.workspace_path",
+    inherits_deerflow_tools: false,
+    inherits_deerflow_skills: false,
+    inherits_deerflow_mcp: false,
+    programmatic_turn_loop: false,
+    process_ends_after_result: true,
   },
 } as const;
 
@@ -49,21 +48,13 @@ test("capability health stays ready when MCP is intentionally unconfigured", () 
   });
 });
 
-test("capability health reports missing skills and MCP load failures", () => {
+test("capability health reports missing skills", () => {
   expect(
     getCommandRoomCapabilityHealth({
       ...healthyRuntime,
       skills: { ...healthyRuntime.skills, missing: ["missing-skill"] },
-      delegated: {
-        ...healthyRuntime.delegated,
-        mcp_servers_configured: ["github"],
-        mcp_cache: {
-          ...healthyRuntime.delegated.mcp_cache,
-          last_error_type: "ConnectionError",
-        },
-      },
     }),
-  ).toEqual({ status: "warning", issueCount: 2 });
+  ).toEqual({ status: "warning", issueCount: 1 });
 });
 
 test("capability health reports model fallback and names the resolved model", () => {

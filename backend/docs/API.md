@@ -103,12 +103,11 @@ Content-Type: application/json
 
 **Recursion Limit:**
 
-`config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The unified Gateway path defaults to `100` in
-`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
-starting point for plan-mode or subagent-heavy runs. Clients can still set
-`recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs.
+`config.recursion_limit` caps the number of lead-agent graph steps LangGraph
+will execute in a single run. The unified Gateway path defaults to `100` in
+`build_run_config` (see `backend/app/gateway/services.py`). Delegated `task()`
+workers are separate one-shot Codex CLI processes, not nested LangGraph graphs,
+so this value does not control their internal work.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model

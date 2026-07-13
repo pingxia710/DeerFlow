@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, override
+from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -13,12 +13,11 @@ from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.status_contract import (
+    SUBAGENT_STATUS_KEY,
+    SUBAGENT_STATUS_VALUES,
     extract_subagent_status,
     make_subagent_additional_kwargs,
 )
-
-if TYPE_CHECKING:
-    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,9 @@ def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: 
     """
     if tool_name != _TASK_TOOL_NAME:
         return message
+    existing = dict(message.additional_kwargs or {})
+    if existing.get(SUBAGENT_STATUS_KEY) in SUBAGENT_STATUS_VALUES:
+        return message
     content = message.content if isinstance(message.content, str) else ""
     status = extract_subagent_status(content)
     if status is None:
@@ -46,7 +48,6 @@ def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: 
         # placeholder until a real terminal frame arrives.
         return message
     stamp = make_subagent_additional_kwargs(status, error=error)
-    existing = dict(message.additional_kwargs or {})
     existing.update(stamp)
     message.additional_kwargs = existing
     return message
@@ -196,61 +197,3 @@ def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = T
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
-
-
-def build_subagent_runtime_middlewares(
-    *,
-    app_config: AppConfig | None = None,
-    model_name: str | None = None,
-    lazy_init: bool = True,
-    deferred_setup: "DeferredToolSetup | None" = None,
-    max_model_calls: int | None = None,
-) -> list[AgentMiddleware]:
-    """Middlewares shared by subagent runtime before subagent-only middlewares."""
-    if app_config is None:
-        from deerflow.config import get_app_config
-
-        app_config = get_app_config()
-
-    middlewares = _build_runtime_middlewares(
-        app_config=app_config,
-        include_uploads=False,
-        include_dangling_tool_call_patch=True,
-        lazy_init=lazy_init,
-    )
-
-    if model_name is None and app_config.models:
-        model_name = app_config.models[0].name
-
-    model_config = app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
-        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-
-        middlewares.append(ViewImageMiddleware())
-
-    # Hide deferred (MCP) tool schemas from the subagent's model binding until
-    # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
-    # set + catalog hash come from the build-time setup (assembled after
-    # tool-policy filtering); promotion is read from graph state. Empty/None
-    # setup (deferral disabled or no MCP tool survived) is a pure no-op.
-    if deferred_setup is not None and deferred_setup.deferred_names:
-        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
-
-        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-
-    if max_model_calls is not None:
-        from langchain.agents.middleware import ModelCallLimitMiddleware
-
-        middlewares.append(ModelCallLimitMiddleware(run_limit=max_model_calls, exit_behavior="end"))
-
-    # Same provider safety-termination guard the lead agent uses — subagents
-    # are equally exposed to truncated tool_calls returned with
-    # finish_reason=content_filter (and friends), and the bad call would then
-    # propagate back to the lead agent via the task tool result.
-    safety_config = app_config.safety_finish_reason
-    if safety_config.enabled:
-        from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-
-        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
-
-    return middlewares

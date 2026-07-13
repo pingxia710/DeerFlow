@@ -196,7 +196,7 @@ make down   # 停止并移除容器
 
 1. **检查依赖环境**：
    ```bash
-   make check  # 校验 Node.js 22+、pnpm、uv、nginx
+   make check  # 校验 Node.js 22+、pnpm、uv、Codex CLI、nginx
    ```
 
 2. **安装依赖**：
@@ -478,21 +478,21 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 复杂任务通常不可能一次完成，DeerFlow 会先拆解，再执行。
 
-lead agent 可以按需动态拉起 sub-agents。每个 sub-agent 都有自己独立的上下文、工具和终止条件。只要条件允许，它们就会并行运行，返回结构化结果，最后再由 lead agent 汇总成一份完整输出。
+lead agent 通过 `task()` 拉起一次性 sub-agent。每次调用把包含开发者所写专业角色上下文的完整自然语言 prompt 交给一个临时 Codex CLI AI；Codex 自主规划和选择原生工具，返回完整自然结果后退出。单次 lead 模型响应最多发出六个 `task()` 调用，更多工作在结果返回后继续分批，不使用程序队列控制 AI。
 
-在 `command-room` 运行中，DeerFlow 以用户目标为先：lead agent 能直接完成的普通、安全工作就直接做；只有并行、上下文隔离、专门能力、现实环境执行或具体风险确实有价值时，才调用 sub-agent。sub-agent 的自然语言结果仍交给 lead agent 综合，而不是把原始 MCP/工具事件塞回对话。运行时可以保留来自实际配对工具结果的脱敏事实，例如命令、退出码、文件路径、状态和输出哈希，让高风险完成结论不只依赖 worker 自述。
+无论 lead 模型使用哪个 provider，委派都要求安装项目锁定版本的 `@openai/codex` CLI，并完成 `codex login` 或提供 Codex 支持的认证环境。Docker 镜像会安装 CLI，但默认不会把个人 Codex 凭证烘焙进镜像或自动挂载；需要在运行时主动提供认证。
+
+在 `command-room` 运行中，DeerFlow 遵循 AI-AI-AI。指挥室是脑袋，保留目标、方案、进度、上下文和最终裁决；一次性专业 sub-agent 根据完整 prompt 执行工作。每个 worker 返回自然结果后结束，另一 sub-agent 负责核对、审查或验收，独立反方从另一个方向暴露遗漏，最后由指挥室阅读这些自然语言结果并裁决。程序只传递 prompt/结果、记录客观生命周期事实和执行硬权限，不选择角色、不判断质量、不自动派审查或触发返工。
 
 系统可以为恢复保留紧凑的 owner/thread 级审计事实和子任务进度，但不会把它们变成聊天流程。原生轮次和任务 lane 状态只记录生命周期关联、当前意图、artifact、错误和观察到的动作；程序不会据此判断质量、指定下一角色、授权下一动作，或自动产生 PASS/FAIL/返工。后续用户消息从新的用户意图开始，不会把上一条 AI 回答或历史 `next_action` 当成已接受的任务。
 
-用户看到的 Command Room 回复保持自然、直接、面向行动；内部审计只是运行记录，不是必填报告、固定治理团队或质量仪表盘。Command Room 的 Loop 是 AI-AI 协作：一个子 AI 返回后，由主 AI 判断是否需要另一个 AI 继续。一次性子 AI 不再受主 AI 工具频次 Loop 检测器中断；1800 秒超时、取消、模型调用和结构递归限制仍然保留。
-
-这也是 DeerFlow 能处理从几分钟到几小时任务的原因。比如一个研究任务，可以拆成十几个 sub-agents，分别探索不同方向，最后合并成一份报告，或者一个网站，或者一套带生成视觉内容的演示文稿。一个 harness，多路并行。
+用户看到的 Command Room 回复保持自然、直接、面向行动；内部审计只是运行记录，不是 AI 协作本身或质量仪表盘。Command Room 的 Loop 是 AI-AI 协作：worker、核对 AI 和反方都通过 prompt 接收任务、返回自然结果后结束，由主 AI 最终裁决。
 
 ### Sandbox 与文件系统
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
+Lead Agent 工具使用 `config.yaml` 选择的 sandbox provider；本地默认可以是受信任的 host 路径，`AioSandboxProvider` 才使用隔离容器。一次性 `task()` worker 由 Codex CLI 的显式 sandbox/path 边界管理，不应把角色标签或 DeerFlow 工具列表误认为 Codex 的工具权限。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 

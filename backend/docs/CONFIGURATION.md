@@ -482,9 +482,9 @@ To keep this off the default attack surface:
   boundary: run it on a dedicated host, and consider a scoped Docker API proxy
   instead of the raw socket.
 
-> Note: the gateway bind-mounts `$HOME/.claude` and `$HOME/.codex` (read-only)
-> for CLI auto-auth in **all** modes. These hold long-lived CLI credentials;
-> scope or omit them when the gateway runs untrusted workloads.
+> Note: the default Compose stack does **not** mount `$HOME/.claude` or
+> `$HOME/.codex`. Use an explicit credential path or the opt-in CLI-auth overlay
+> only when the selected CLI integration needs it.
 
 ### CLI Credential Mounts (Claude Code / Codex)
 
@@ -503,6 +503,7 @@ with the least exposure that fits your setup:
 |------|-----|----------|
 | Claude model provider | env `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` (via `.env`), or `CLAUDE_CODE_CREDENTIALS_PATH` → a single mounted `.credentials.json` | none / one file |
 | Codex model provider | env `CODEX_AUTH_PATH` pointing at a single mounted `auth.json` | one file |
+| Delegated `task()` worker | native `codex login` state under `CODEX_HOME`, native `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_ACCESS_TOKEN`, or the opt-in `docker-compose.cli-auth.yaml` overlay | selected dir / env |
 | ACP agent | the adapter's own auth — many ACP adapters take an env API key (e.g. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and need no mount; use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only if your adapter reads the full CLI config dir | none / full dir |
 
 The Gateway credential loader checks environment variables **before** the
@@ -514,6 +515,16 @@ its config directory, so it needs no `~/.claude` mount at all. Prefer the
 adapter's documented env auth, and reach for the
 `docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
 genuinely reads the full CLI config directory.
+
+The pinned `@openai/codex` CLI plus working Codex authentication is a hard
+runtime dependency for `task()`, even if the lead model is not a Codex model.
+DeerFlow sends one prompt to one ephemeral Codex process; it cannot fall back to
+the lead provider when Codex authentication is absent.
+
+`CODEX_AUTH_PATH` in the table is interpreted by DeerFlow's Codex model
+provider. The native `codex exec` process used by `task()` does not consume that
+path; use its login directory or one of the native environment credentials
+listed above.
 
 
 ## Best Practices

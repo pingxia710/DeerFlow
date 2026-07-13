@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -347,14 +348,13 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_command_room_allows_direct_file_read_tool_group_without_bash():
+def test_command_room_has_no_direct_execution_tool_groups():
     agent_config = AgentConfig(
         name="command-room",
         tool_groups=["file:write", "web", "bash"],
     )
 
-    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == ["file:read"]
-    assert lead_agent_module._resolve_subagent_tool_groups("command-room", agent_config) is None
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == []
     assert lead_agent_module._can_update_self("command-room") is False
 
     ordinary_config = AgentConfig(
@@ -362,7 +362,6 @@ def test_command_room_allows_direct_file_read_tool_group_without_bash():
         tool_groups=["sandbox"],
     )
     assert lead_agent_module._resolve_agent_tool_groups("builder", ordinary_config) == ["sandbox"]
-    assert lead_agent_module._resolve_subagent_tool_groups("builder", ordinary_config) == ["sandbox"]
     assert lead_agent_module._can_update_self("builder") is True
     assert lead_agent_module._uses_todo_list("command-room", True) is False
     assert lead_agent_module._uses_todo_list("builder", True) is True
@@ -372,16 +371,8 @@ def test_command_room_allows_direct_file_read_tool_group_without_bash():
     assert lead_agent_module._resolve_command_room_available_skills("command-room", set()) == set()
     assert lead_agent_module._resolve_command_room_available_skills("builder", {"safe-skill"}) == {"safe-skill"}
 
-    delegated_skills = lead_agent_module._resolve_subagent_available_skills("command-room", {"nextos-commander"})
-    assert delegated_skills is not None
-    assert "nextos-commander" in delegated_skills
-    assert "command-room-planner" in delegated_skills
-    assert "command-room-evidence" in delegated_skills
-    assert "command-room-opposition" in delegated_skills
-    assert lead_agent_module._resolve_subagent_available_skills("builder", {"safe-skill"}) == {"safe-skill"}
 
-
-def test_make_lead_agent_command_room_uses_direct_file_read_tool_group_without_bash(monkeypatch):
+def test_make_lead_agent_command_room_keeps_only_coordination_tools(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -414,17 +405,34 @@ def test_make_lead_agent_command_room_uses_direct_file_read_tool_group_without_b
         "configurable": {
             "agent_name": "command-room",
             "model_name": "safe-model",
-            "subagent_enabled": True,
+            "subagent_enabled": False,
         }
     }
 
     result = lead_agent_module._make_lead_agent(config, app_config=app_config)
 
-    assert captured_tools_kwargs["groups"] == ["file:read"]
+    assert captured_tools_kwargs["groups"] == []
     assert captured_tools_kwargs["include_mcp"] is False
-    assert config["metadata"]["tool_groups"] == ["file:read"]
-    assert config["metadata"]["subagent_tool_groups"] is None
+    assert captured_tools_kwargs["subagent_enabled"] is True
+    assert config["metadata"]["tool_groups"] == []
+    assert "subagent_tool_groups" not in config["metadata"]
+    assert "subagent_available_skills" not in config["metadata"]
     assert result["tools"] == []
+
+
+def test_command_room_filters_non_coordination_builtin_tools():
+    tools = [
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(name="view_image"),
+        SimpleNamespace(name="task"),
+        SimpleNamespace(name="ask_clarification"),
+        SimpleNamespace(name="present_files"),
+    ]
+
+    filtered = lead_agent_module._filter_coordinator_tools("command-room", tools)
+
+    assert [tool.name for tool in filtered] == ["task", "ask_clarification", "present_files"]
+    assert lead_agent_module._filter_coordinator_tools("builder", tools) == tools
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
@@ -559,6 +567,50 @@ def test_build_middlewares_uses_loop_detection_config(monkeypatch):
     assert loop_detection.max_tracked_threads == 40
     assert loop_detection.tool_freq_warn == 50
     assert loop_detection.tool_freq_hard_limit == 60
+
+
+def test_build_middlewares_always_limits_command_room_task_calls(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+                "max_concurrent_subagents": 4,
+            }
+        },
+        model_name="safe-model",
+        agent_name="command-room",
+        app_config=app_config,
+    )
+
+    limiter = next(m for m in middlewares if isinstance(m, lead_agent_module.SubagentLimitMiddleware))
+    assert limiter.max_concurrent == 4
+
+
+def test_build_middlewares_does_not_programmatically_stop_command_room(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=True),
+    )
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": True}},
+        model_name="safe-model",
+        agent_name="command-room",
+        app_config=app_config,
+    )
+
+    assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
 
 
 def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):

@@ -21,7 +21,7 @@ def test_can_create_round():
     assert round_.boundaries == ["不改运行时", "不触碰密钥"]
     assert round_.allowed_actions == ["读取相关文件", "运行最小测试"]
     assert round_.evidence_standard == ["测试通过", "状态变化可追溯"]
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_round_records_facts_and_open_questions_not_only_actions():
@@ -47,7 +47,7 @@ def test_completed_subtasks_do_not_complete_whole_round():
     )
 
     assert round_.actions_completed is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_missing_evidence_cannot_be_complete():
@@ -59,7 +59,7 @@ def test_missing_evidence_cannot_be_complete():
     )
 
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_open_questions_cannot_be_complete():
@@ -70,7 +70,7 @@ def test_open_questions_cannot_be_complete():
     )
 
     assert round_.has_evidence is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_user_confirmation_marks_round_incomplete():
@@ -82,7 +82,7 @@ def test_user_confirmation_marks_round_incomplete():
     )
 
     assert round_.needs_user_confirmation is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_next_round_out_of_boundary_cannot_be_complete():
@@ -96,8 +96,8 @@ def test_next_round_out_of_boundary_cannot_be_complete():
         ),
     )
 
-    assert round_.next_round_is_safe is False
-    assert round_.is_complete is False
+    assert round_.next_round_is_safe is None
+    assert round_.is_complete is None
 
 
 def test_next_round_needing_confirmation_cannot_be_complete():
@@ -111,11 +111,11 @@ def test_next_round_needing_confirmation_cannot_be_complete():
         ),
     )
 
-    assert round_.next_round_is_safe is False
-    assert round_.is_complete is False
+    assert round_.next_round_is_safe is None
+    assert round_.is_complete is None
 
 
-def test_evidence_without_open_questions_and_safe_next_round_can_complete():
+def test_evidence_and_next_round_facts_do_not_create_programmatic_completion():
     round_ = Round(
         goal="完成轮次契约修正",
         evidence_refs=["pytest tests/test_command_room_round.py passed"],
@@ -130,8 +130,8 @@ def test_evidence_without_open_questions_and_safe_next_round_can_complete():
 
     assert round_.has_evidence is True
     assert round_.has_open_questions is False
-    assert round_.next_round_is_safe is True
-    assert round_.is_complete is True
+    assert round_.next_round_is_safe is None
+    assert round_.is_complete is None
 
 
 def test_summary_is_short_and_natural():
@@ -153,7 +153,7 @@ def test_summary_is_short_and_natural():
     assert "本轮围绕“落地轮次 MVP”推进" in summary
     assert "推进了补充已知事实和未解问题字段" in summary
     assert "依据是轮次是目标和边界内的状态推进；tests/test_command_room_round.py" in summary
-    assert "下一步可继续：运行最小测试" in summary
+    assert "下一轮提案：运行最小测试" in summary
     assert "|" not in summary
     assert len(summary) < 220
 
@@ -163,10 +163,10 @@ def test_completed_action_result_without_evidence_cannot_complete():
 
     assert round_.action_results[0].is_done is True
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
-def test_action_result_with_evidence_and_no_questions_can_complete():
+def test_action_result_with_evidence_still_has_no_programmatic_completion():
     round_ = Round(goal="验证动作结果").record_action_result(
         ActionResult(
             action_id="a1",
@@ -177,7 +177,7 @@ def test_action_result_with_evidence_and_no_questions_can_complete():
     )
 
     assert round_.evidence_refs == ["pytest tests/test_command_room_round.py passed"]
-    assert round_.is_complete is True
+    assert round_.is_complete is None
 
 
 def test_action_result_open_questions_block_completion():
@@ -191,7 +191,7 @@ def test_action_result_open_questions_block_completion():
     )
 
     assert round_.has_open_questions is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_action_result_conflicts_and_risks_block_completion():
@@ -206,7 +206,7 @@ def test_action_result_conflicts_and_risks_block_completion():
     )
 
     assert round_.has_risks_or_conflicts is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_action_result_output_ref_is_not_evidence_but_is_summarized():
@@ -222,7 +222,7 @@ def test_action_result_output_ref_is_not_evidence_but_is_summarized():
     summary = summarize_round(round_)
 
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
     assert round_.action_results[0].output_ref == "outputs/report.md"
     assert "outputs/report.md" in summary
 
@@ -246,39 +246,40 @@ def test_action_result_summary_is_short_and_natural():
     assert len(summary) < 220
 
 
-def test_round_summarizes_evidence_strength_signals_without_verdict():
+def test_round_summarizes_evidence_count_without_strength_or_verdict():
     round_ = Round(goal="汇总证据信号", evidence_refs=["tests passed"])
 
     signals = round_.evidence_signals()
     summary = summarize_round(round_)
 
-    assert signals["strong_count"] == 0
-    assert signals["weak_count"] == 1
+    assert signals["total"] == 1
+    assert signals["refs"] == ["tests passed"]
     assert signals["quality_verdict"] is None
     assert signals["auto_rework"] is False
-    assert "弱引用" in summary
-    assert round_.is_complete is True
+    assert "质量由 AI 判断" in summary
+    assert "弱引用" not in summary
+    assert round_.is_complete is None
 
 
 def test_tests_passed_alone_does_not_complete_without_evidence_ref():
     round_ = Round(goal="测试通过自述不等于完成").record_action_result(ActionResult(action_id="run-tests", summary="tests passed"))
 
+    assert round_.action_results[0].status == RoundItemStatus.PENDING
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
-def test_command_output_evidence_is_strong_but_not_quality_verdict():
+def test_command_output_text_is_not_classified_by_program():
     round_ = Round(goal="记录强证据信号", evidence_refs=["command: python -m pytest tests/test_command_room_round.py; exit code: 0; stdout: passed"])
 
     signals = round_.evidence_signals()
     summary = summarize_round(round_)
 
-    assert signals["has_strong_signal"] is True
-    assert signals["strong_count"] == 1
+    assert signals["total"] == 1
     assert signals["quality_verdict"] is None
     assert signals["auto_rework"] is False
-    assert "强引用" in summary
-    assert round_.is_complete is True
+    assert "强引用" not in summary
+    assert round_.is_complete is None
 
 
 def test_output_ref_does_not_contribute_to_evidence_signals():
@@ -287,10 +288,9 @@ def test_output_ref_does_not_contribute_to_evidence_signals():
     signals = round_.evidence_signals()
 
     assert round_.evidence_refs == []
-    assert signals["strong_count"] == 0
-    assert signals["weak_count"] == 0
+    assert signals["total"] == 0
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_summary_user_confirmation_states_round_not_complete():
@@ -303,8 +303,8 @@ def test_summary_user_confirmation_states_round_not_complete():
 
     summary = summarize_round(round_)
 
-    assert round_.is_complete is False
-    assert "本轮尚未完成，下一步触及红线/授权边界，需要用户确认" in summary
+    assert round_.is_complete is None
+    assert "下一轮提案被明确标记为需要用户确认" in summary
 
 
 def test_read_only_diagnostics_next_round_can_continue_autonomously():
@@ -322,10 +322,10 @@ def test_read_only_diagnostics_next_round_can_continue_autonomously():
 
     summary = summarize_round(round_)
 
-    assert round_.is_complete is False
+    assert round_.is_complete is None
     assert round_.needs_user_confirmation is False
-    assert round_.next_round_is_safe is True
-    assert "本轮尚未完成但可继续自主排查" in summary
+    assert round_.next_round_is_safe is None
+    assert "下一轮提案：只读查询 PID" in summary
     assert "需要用户确认" not in summary
 
 
@@ -343,7 +343,7 @@ def test_destructive_boundary_next_round_requires_user_confirmation():
 
     summary = summarize_round(round_)
 
-    assert round_.is_complete is False
+    assert round_.is_complete is None
     assert round_.needs_user_confirmation is False
-    assert round_.next_round_is_safe is False
-    assert "触及红线/授权边界，需要用户确认" in summary
+    assert round_.next_round_is_safe is None
+    assert "下一轮提案被明确标记为需要用户确认" in summary

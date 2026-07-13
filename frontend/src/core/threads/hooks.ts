@@ -134,6 +134,7 @@ import {
 import {
   applyTaskEventRunMessages,
   applyTaskEventToSubtask,
+  applyTaskToolResultRunMessages,
   asRunTerminalEvent,
   asTaskEvent,
   resolveVisibleTaskRunningThreadId,
@@ -872,6 +873,7 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
 export {
   applyTaskEventRunMessages,
   applyTaskEventToSubtask,
+  applyTaskToolResultRunMessages,
   asRunTerminalEvent,
   asTaskEvent,
   isTaskEventRunMessage,
@@ -4084,6 +4086,11 @@ export function useThreadHistory(
           requestThreadId,
           appliedTaskEventKeysRef.current,
         );
+        applyTaskToolResultRunMessages(
+          result.data,
+          updateSubtaskRef.current,
+          requestThreadId,
+        );
         const visibleMessageCount = result.data.filter(
           isVisibleHistoryRunMessage,
         ).length;
@@ -4231,6 +4238,9 @@ export function useThreadHistory(
     ]) {
       updateSubtaskRef.current(taskLaneSubtaskUpdate(lane));
     }
+    // Hidden task ToolMessages carry the complete natural result. Apply them
+    // after lane/event previews so a refresh cannot truncate a completed card.
+    applyTaskToolResultRunMessages(rows, updateSubtaskRef.current, threadId);
     for (const page of snapshotPages) {
       pendingRefreshRunIdsRef.current.delete(page.run_id);
     }

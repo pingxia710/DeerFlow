@@ -140,15 +140,6 @@ def _handoff_facts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_action_fact(record) for record in records]
 
 
-def _explicit_boundary(records: list[dict[str, Any]]) -> list[dict[str, str]]:
-    boundaries: list[dict[str, str]] = []
-    for record in records:
-        packet = record.get("handoff_packet")
-        if isinstance(packet, dict) and packet.get("boundary"):
-            boundaries.append({"taskId": str(record.get("task_id") or ""), "value": _truncate(packet["boundary"])})
-    return boundaries
-
-
 def _round_file(thread_id: str, user_id: str | None, base_dir: Path | None = None) -> Path:
     if base_dir is not None:
         return base_dir / "command_room_rounds.jsonl"
@@ -192,7 +183,7 @@ def record_command_room_round(
         "hide_from_ui": True,
         "timestamp": datetime.now(UTC).isoformat(),
         "userGoal": _text_fingerprint(user_message),
-        "explicitBoundary": _explicit_boundary(audit_records),
+        "explicitBoundary": [],
         "actionResults": _handoff_facts(audit_records),
         "artifacts": {
             "finalText": _text_fingerprint(final_text),

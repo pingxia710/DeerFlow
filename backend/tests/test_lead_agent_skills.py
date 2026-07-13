@@ -71,6 +71,38 @@ def test_get_skills_prompt_section_includes_slash_activation_guidance(monkeypatc
     assert "do not call `read_file` for that SKILL.md again" in result
 
 
+def test_get_skills_prompt_section_uses_physical_paths_for_delegation(monkeypatch, tmp_path):
+    skill_dir = tmp_path / "public" / "delegated-skill"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("# Delegated skill\n", encoding="utf-8")
+    skill = Skill(
+        name="delegated-skill",
+        description="Physical path check",
+        license="MIT",
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=Path("delegated-skill"),
+        category="public",
+        enabled=True,
+    )
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [skill])
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=False),
+        ),
+    )
+
+    result = get_skills_prompt_section(delegate_only=True)
+
+    assert str(skill_file.resolve()) in result
+    assert skill_file.is_file()
+    assert "/mnt/skills" not in result
+    assert "Do not call file tools from the Command Room lead context" in result
+
+
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)

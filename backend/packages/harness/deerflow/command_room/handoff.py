@@ -6,9 +6,7 @@ import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
-
-EvidenceStrength = Literal["Strong", "Weak", "Unverified"]
+from typing import Any
 
 _LIST_SPLIT_RE = re.compile(r"[;\n]+")
 _EMPTY_ITEM_VALUES = {"", "none", "no", "n/a", "null", "无"}
@@ -26,7 +24,7 @@ class HandoffEnvelope:
     expected_evidence: str = ""
     expected_output: str = ""
     evidence_refs: list[str] | None = None
-    evidence_strength: EvidenceStrength = "Unverified"
+    evidence_strength: str = ""
     output_refs: list[str] | None = None
     handoff_file: str | None = None
     artifact_refs: list[str] | None = None
@@ -83,30 +81,13 @@ def _list(value: Any) -> list[str]:
     return items
 
 
-def _evidence_strength(value: Any) -> EvidenceStrength:
-    normalized = str(value or "").strip().lower()
-    if normalized == "strong":
-        return "Strong"
-    if normalized == "weak":
-        return "Weak"
-    return "Unverified"
-
-
-def _released_capabilities(packet: Mapping[str, Any]) -> list[str]:
-    items = _list(_value(packet, "releasedCapabilities", "released_capabilities"))
-    target_role = _text(packet, "targetRole", "target_role")
-    if len(items) > 1 and target_role and items[0].lower() == target_role.lower():
-        return items[1:]
-    return items
-
-
 def handoff_envelope_from_packet(
     packet: Mapping[str, Any],
     *,
     raw_input: str | None = None,
     raw_input_ref: str | None = None,
 ) -> HandoffEnvelope:
-    """Build a typed envelope from ``extract_handoff_packet()`` output."""
+    """Build a typed envelope from explicit AI-authored structured fields."""
 
     return HandoffEnvelope(
         source_role=_text(packet, "sourceRole", "source_role"),
@@ -119,11 +100,11 @@ def handoff_envelope_from_packet(
         expected_evidence=_text(packet, "expectedEvidence", "expected_evidence"),
         expected_output=_text(packet, "expectedOutput", "expected_output"),
         evidence_refs=_list(_value(packet, "evidenceRefs", "evidence_refs")),
-        evidence_strength=_evidence_strength(_value(packet, "evidenceStrength", "evidence_strength")),
+        evidence_strength=_text(packet, "evidenceStrength", "evidence_strength"),
         output_refs=_list(_value(packet, "outputRefs", "output_refs")),
         handoff_file=_none_if_empty(_value(packet, "handoffFile", "handoff_file")),
         artifact_refs=_list(_value(packet, "artifactRefs", "artifact_refs")),
-        released_capabilities=_released_capabilities(packet),
+        released_capabilities=_list(_value(packet, "releasedCapabilities", "released_capabilities")),
         stop_conditions=_list(_value(packet, "stopConditions", "stop_conditions")),
         recommended_next_decision=_text(packet, "recommendedNextDecision", "recommended_next_decision"),
         raw_input_ref=raw_input_ref or _none_if_empty(_value(packet, "rawInputRef", "raw_input_ref")),

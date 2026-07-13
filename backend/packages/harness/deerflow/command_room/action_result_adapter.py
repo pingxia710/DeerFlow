@@ -77,7 +77,6 @@ def _from_mapping(value: Mapping[str, Any], *, default_action_id: str) -> Action
     if raw_status is not None and status is None:
         status = RoundItemStatus.FAILED
         terminal_reason = terminal_reason or "unknown_status"
-        unresolved.append(f"Unknown action_result status: {raw_status}")
     if error and status is None:
         status = RoundItemStatus.FAILED
         terminal_reason = terminal_reason or "failed"
@@ -87,7 +86,7 @@ def _from_mapping(value: Mapping[str, Any], *, default_action_id: str) -> Action
     return ActionResult(
         action_id=_optional_str(value.get("action_id")) or default_action_id,
         description=_optional_str(value.get("description")) or "",
-        status=status or RoundItemStatus.COMPLETED,
+        status=status or RoundItemStatus.PENDING,
         terminal_reason=terminal_reason,
         summary=_optional_str(value.get("summary")) or "",
         evidence_refs=_string_list(value.get("evidence_refs")),

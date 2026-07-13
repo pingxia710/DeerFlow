@@ -47,7 +47,7 @@ SECRET_FINAL_TEXT_SHOULD_NOT_APPEAR""",
     assert record["version"] == 2
     assert record["userGoal"]["sha256"]
     assert record["artifacts"]["finalText"]["sha256"]
-    assert record["explicitBoundary"] == [{"taskId": "task-1", "value": "read-only; do not write production"}]
+    assert record["explicitBoundary"] == []
     assert record["actionResults"][0]["actionResult"]["action_id"] == "task-1"
     for legacy in ("verdict", "decisionSignals", "signals", "dispatchPlan", "nextRoundContract", "evidenceStandard"):
         assert legacy not in record

@@ -204,19 +204,18 @@ Good assertions are objectively verifiable and have descriptive names — they s
 
 Update the `eval_metadata.json` files and `evals/evals.json` with the assertions once drafted. Also explain to the user what they'll see in the viewer — both the qualitative outputs and the quantitative benchmark.
 
-### Step 3: As runs complete, capture timing data
+### Step 3: As runs complete, capture available timing data
 
-When each subagent task completes, you receive a notification containing `total_tokens` and `duration_ms`. Save this data immediately to `timing.json` in the run directory:
+Use factual task start/terminal timestamps or `duration_ms` when the runtime provides them. Direct Codex CLI tasks do not currently expose a stable token-usage contract, so omit `total_tokens` rather than inventing or estimating it. Save the available values to `timing.json`:
 
 ```json
 {
-  "total_tokens": 84852,
   "duration_ms": 23332,
   "total_duration_seconds": 23.3
 }
 ```
 
-This is the only opportunity to capture this data — it comes through the task notification and isn't persisted elsewhere. Process each notification as it arrives rather than trying to batch them.
+If timing metadata is unavailable, measure the enclosing evaluation run and label that scope explicitly. Do not attribute Lead Agent tokens to a child task.
 
 ### Step 4: Grade, aggregate, and launch the viewer
 

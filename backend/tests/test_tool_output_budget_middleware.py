@@ -860,19 +860,6 @@ class TestPreScanHelpers:
 
 
 class TestMiddlewareChainIntegration:
-    def test_budget_middleware_is_first_in_chain(self):
-        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
-
-        app_config = AppConfig(sandbox=SandboxConfig(use="test"))
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
-
-        # InputSanitizationMiddleware is the outermost wrap_model_call wrapper;
-        # ToolOutputBudgetMiddleware is the first wrap_tool_call handler.
-        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
-
-        assert isinstance(middlewares[0], InputSanitizationMiddleware)
-        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
-
     def test_budget_middleware_in_lead_chain(self):
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 

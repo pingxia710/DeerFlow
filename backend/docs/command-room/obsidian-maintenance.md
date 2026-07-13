@@ -37,7 +37,7 @@ Automation may propose notes for:
 - Skill deprecation candidates based on failed/stale evals.
 - Cross-run evidence indexes, when tied to explicit source IDs.
 
-Automation must not automatically write every run, every turn, or every agent log into Obsidian. Round/ActionResult/task metadata may be cited as source signals only when it exposes a hard gap, boundary condition, state transition, or linked artifact; it is not by itself an accepted quality judgment.
+Automation must not automatically write every run, every turn, or every agent log into Obsidian. Round/ActionResult/task metadata may be cited only as objective identity, lifecycle, state-transition, or artifact references. A reviewing AI, not program logic, decides whether those facts reveal a gap or boundary concern.
 
 ## Human confirmation boundary
 

@@ -48,11 +48,11 @@ Invalid proof:
 - `tests passed` / `测试通过` alone.
 - `output_ref` alone.
 - Collaborator or checker self-report without external evidence.
-- Automatic Round/program judgment without a linked hard gap, state transition, log, diff, or artifact.
+- Any automatic Round/program quality, completion, safety, next-action, or rework judgment, regardless of available metadata.
 
 ## Probes
 
-- `probe-name`: expected pass/fail signal.
+- `probe-name`: scenario, captured facts, and the question for an independent review AI.
 
 ## Human confirmation required for
 

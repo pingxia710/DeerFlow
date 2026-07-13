@@ -78,12 +78,14 @@ Per-thread isolated execution with virtual path translation:
 
 ### Subagent System
 
-Async task delegation with concurrent execution:
+One-shot AI-AI delegation with concurrent execution:
 
-- **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist, exposed only when shell access is available)
-- **Concurrency**: Max 3 subagents per turn, 15-minute timeout
-- **Execution**: Background thread pools with status tracking and SSE events
-- **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
+- **Roles**: Lead-authored prompts carry the professional role, goal, context, boundaries, and requested natural result
+- **Concurrency**: Maximum six `task` calls per response; default timeout is 60 minutes
+- **Execution**: One ephemeral `codex exec` process per task; Codex owns planning and tools
+- **Flow**: prompt → `task()` → one Codex CLI process → complete natural result → process exit
+
+Delegated tasks require the pinned `@openai/codex` CLI plus `codex login` or a supported Codex authentication environment, regardless of the lead model provider. Docker installs the CLI but does not include personal credentials; provide auth intentionally at runtime.
 
 ### Memory System
 
@@ -236,9 +238,9 @@ backend/
 │   │   ├── tools.py           # bash, ls, read/write/str_replace
 │   │   └── middleware.py      # Sandbox lifecycle
 │   ├── subagents/              # Subagent delegation
-│   │   ├── builtins/          # general-purpose, bash agents
-│   │   ├── executor.py        # Background execution engine
-│   │   └── registry.py        # Agent registry
+│   │   ├── builtins/          # Professional role labels
+│   │   ├── codex_cli.py       # One-shot Codex CLI transport
+│   │   └── registry.py        # Role label registry
 │   ├── tools/builtins/         # Built-in tools
 │   ├── mcp/                    # MCP protocol integration
 │   ├── models/                 # Model factory
@@ -275,7 +277,7 @@ Key sections:
 - `skills` - Skills directory paths
 - `title` - Auto-title generation settings
 - `summarization` - Context summarization settings
-- `subagents` - Subagent system (enabled/disabled)
+- `subagents` - One-shot Codex model, reasoning effort, timeout, and professional role context
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
 
 Provider note:

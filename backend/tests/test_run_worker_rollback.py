@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.persistence.round_state import MemoryRoundStateStore
 from deerflow.runtime.checkpoint_owner import (
     owner_checkpoint_config,
@@ -21,6 +22,7 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
+    _RUN_NO_PROGRESS_TIMEOUT_SECONDS,
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
@@ -33,6 +35,10 @@ from deerflow.runtime.runs.worker import (
     _try_extract_from_message,
     run_agent,
 )
+
+
+def test_default_run_watchdog_exceeds_default_codex_task_timeout():
+    assert _RUN_NO_PROGRESS_TIMEOUT_SECONDS > SubagentsAppConfig().timeout_seconds
 
 
 class FakeCheckpointer:

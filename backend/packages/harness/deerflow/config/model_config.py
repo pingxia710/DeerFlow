@@ -44,10 +44,6 @@ class ModelConfig(BaseModel):
         default=None,
         description="Reasoning effort used when no selectable request is supplied",
     )
-    subagents_inherit: bool = Field(
-        default=True,
-        description="Whether subagents using model='inherit' should inherit this model from the lead agent.",
-    )
     when_thinking_enabled: dict | None = Field(
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",

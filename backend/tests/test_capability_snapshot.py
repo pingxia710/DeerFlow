@@ -87,6 +87,11 @@ def _app_config(tmp_path: Path) -> AppConfig:
             },
         ),
         tool_search=ToolSearchConfig(enabled=True),
+        subagents={
+            "model": "main",
+            "reasoning_effort": "xhigh",
+            "timeout_seconds": 3600,
+        },
     )
 
 
@@ -104,7 +109,7 @@ def _router_app(config: AppConfig) -> FastAPI:
 def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path: Path):
     snapshot = build_capability_snapshot(_app_config(tmp_path), thread_id="thread-1", user_id="user-1")
 
-    assert snapshot["version"] == 1
+    assert snapshot["version"] == 2
     assert snapshot["user_id"] == "user-1"
     assert snapshot["thread_id"] == "thread-1"
     for field in (
@@ -197,7 +202,7 @@ def test_capability_snapshot_labels_tools_skills_middleware_and_policy(tmp_path:
     assert {item["label"] for item in snapshot["filesystem_permissions"]} >= {"read", "write", "execute", "approval_required", "denied"}
 
 
-def test_command_room_runtime_snapshot_distinguishes_direct_and_delegated_capabilities(tmp_path: Path, monkeypatch):
+def test_command_room_runtime_snapshot_reports_direct_and_codex_transport_facts(tmp_path: Path, monkeypatch):
     from deerflow.config import paths as paths_module
 
     home = tmp_path / "home"
@@ -217,17 +222,6 @@ def test_command_room_runtime_snapshot_distinguishes_direct_and_delegated_capabi
     )
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setattr(paths_module, "_paths", None)
-    monkeypatch.setattr(
-        "deerflow.mcp.cache.get_mcp_cache_status",
-        lambda: {
-            "initialized": True,
-            "stale": False,
-            "tool_count": 2,
-            "tool_names": ["github_search", "github_read"],
-            "last_error_type": None,
-        },
-    )
-
     snapshot = build_capability_snapshot(_app_config(tmp_path), user_id="user-1")
     runtime = snapshot["command_room_runtime"]
 
@@ -238,12 +232,24 @@ def test_command_room_runtime_snapshot_distinguishes_direct_and_delegated_capabi
     assert runtime["skills"]["loaded"] == ["command-room-chair"]
     assert runtime["skills"]["missing"] == ["missing-skill"]
     assert runtime["direct"]["include_mcp"] is False
-    assert runtime["direct"]["tool_groups"] == ["file:read"]
-    assert "read_file" in runtime["direct"]["configured_tools"]
+    assert runtime["direct"]["tool_groups"] == []
+    assert runtime["direct"]["configured_tools"] == ["ask_clarification", "present_files", "task"]
     assert "bash" not in runtime["direct"]["configured_tools"]
-    assert runtime["delegated"]["include_mcp"] is True
-    assert runtime["delegated"]["mcp_servers_configured"] == ["github"]
-    assert runtime["delegated"]["mcp_cache"]["tool_names"] == ["github_search", "github_read"]
+    assert runtime["task_transport"] == {
+        "runtime": "codex-cli-one-shot",
+        "model": "gpt-4.1",
+        "configured_model": "main",
+        "reasoning_effort": "xhigh",
+        "timeout_seconds": 3600,
+        "sandbox_mode": "workspace-write",
+        "workspace_source": "thread_data.workspace_path",
+        "inherits_deerflow_tools": False,
+        "inherits_deerflow_skills": False,
+        "inherits_deerflow_mcp": False,
+        "programmatic_turn_loop": False,
+        "process_ends_after_result": True,
+    }
+    assert [profile["agent_name"] for profile in snapshot["agent_harness_profiles"]] == ["command-room"]
 
 
 def test_mcp_cache_status_is_read_only_and_reports_loaded_tools(monkeypatch):

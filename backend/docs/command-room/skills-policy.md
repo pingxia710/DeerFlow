@@ -4,16 +4,16 @@ Purpose: keep DeerFlow/Command Room skills few, narrow, failure-driven, trigger-
 
 ## Readiness/evidence/risk signal ownership
 
-- Command Room is the main development AI, not a workflow system. The user controls direction: the current round goal, boundaries, and whether to enter another round. Within that confirmed round, final execution judgment lives in the continuous lead AI brain, not in disposable one-shot sub-AIs, an always-on reviewer pipeline, or program-level gates.
-- A Round is the lead AI's working memory for following project quality; it is not Jira, a user-visible dashboard, a form, or a PASS/FAIL machine. For technical/program-development Command Room collaborations that dispatch subagents/tasks, terminal task `action_result` metadata may be collected into Round/RoundContext signals for the lead AI to inspect before deciding the next step. `action_result` is a runtime/adapter-normalized observation from terminal events, metadata, tool-observed outputs, commands, files, logs, and artifacts; it must not depend on a sub-AI hand-writing a fixed format. Ordinary lightweight chat or no-task conversations are not forced into a blocking Round by default.
-- Evidence-checker and opposition are optional small evidence/risk checks for a prior round's claim/evidence when risk, ambiguity, or contradiction warrants it. They do not replace the lead AI's final judgment. Opposition is not a second command room: it does not decide, accept, schedule, or keep long-term accounts. Their stable candidate interfaces live in `evidence-checker-skill.md` and `opposition-skill.md`.
-- Handoff packets are the core unit for AI-AI collaboration governance: goal, boundary, inherited context, released capabilities, expected evidence, and stop conditions. A worker result and its handoff belong together; weak results should make us inspect prompt/context/boundary/tool/model/skill choice and evidence request, not simply blame the worker.
+- Command Room is the main development AI, not a workflow system. It keeps the goal, plan, progress, context, boundaries, and final judgment while disposable one-shot professional sub-AIs perform execution, checking, acceptance, and opposition through natural-language prompts.
+- A Round is optional factual working memory for the lead AI, not Jira, a user-visible dashboard, a form, or a PASS/FAIL machine. It may preserve explicit AI-authored fields and objective task/event/artifact references. It must not parse natural-language prompts/results or normalize them into evidence, readiness, safety, completion, gap, or next-action signals.
+- A different checking/review/acceptance AI examines each worker result, and an independent opposition AI works from the other direction. They return natural-language judgments and end; they do not replace the lead AI's final judgment or become a second command room. Focused guidance lives in `evidence-checker-skill.md` and `opposition-skill.md`.
+- The self-contained natural-language prompt is the core AI-AI handoff: include the goal, boundary, confirmed context, authority, expected result/evidence, and stop conditions without requiring a fixed packet or response form. A worker result and its prompt belong together; weak results should make the lead inspect the prompt/context/boundary/model/role and evidence request, not simply blame the worker.
 - Running workers do not freeze the lead AI's user conversation. The lead AI may continue discussing strategy, constraints, trade-offs, and next moves while workers run; that discussion is advisory context by default and changes a running worker only after explicit user intervention.
-- Worker completion can create a new handoff. The lead AI may redispatch when completed worker information plus current user intent reveals a new executable issue inside the same authorization boundary; boundary-changing redispatch needs user confirmation.
-- Workflow terms are only internal compression and recheck aids. They do not create fixed roles, gates, dashboards, forms, automatic review loops, automatic acceptance, automatic adjudication, automatic rework, default reviewers, or mandatory default dispatch. Ordinary technical choices inside the current boundary should be handled autonomously rather than escalated to the user.
-- The discoverable Command Room subtask index is `subtask-interfaces.md`; it summarizes executor, fact-finder, evidence-checker, opposition, and synthesis-checker boundaries without enabling automatic dispatch.
-- Program code should expose hard gaps, evidence/risk/unresolved RoundContext signals, and boundary signals only; it must not auto-judge project quality, auto-trigger rework, or silently dispatch default reviewers/opposition. The lead AI consumes these signals and makes the judgment. Users see natural development results; internals keep only minimal facts, memory, and safety boundaries.
-- Human Needed / user confirmation is a redline or authorization-boundary signal, not a label for ordinary small blockers, function names, test-writing choices, commit splits, or implementation details inside an authorized round. Use it for destructive operations, production writes, credentials/secrets, customer data, external sends, payment/security/legal impact, or project-direction changes. Incomplete rounds that only need safe read-only diagnostics, evidence collection, log/file/status inspection, or clarification within the current boundary should remain unresolved / needs follow-up with `next_round_is_safe=True` so AI-AI rounds can continue autonomously. Dangerous follow-up actions such as killing processes, clearing locks, deleting files, or production writes must still stop for human confirmation before execution.
+- Worker completion creates a new AI-AI handoff: the lead passes the natural result to a checking AI and an opposition AI, then decides whether further execution is needed. Boundary-changing work still needs user confirmation.
+- Professional roles are AI prompt context, not program states. Do not create programmatic gates, dashboards, forms, automatic review loops, automatic acceptance, automatic adjudication, or automatic rework.
+- The discoverable Command Room role index is `subtask-interfaces.md`; it describes professional prompt perspectives without enabling programmatic dispatch.
+- Program code exposes factual status and explicit AI-authored boundaries only; it must not judge project quality, trigger rework, choose roles, or dispatch reviewers/opposition. The lead AI sends the prompts, consumes the natural results, and makes the judgment.
+- Human Needed / user confirmation is a redline or authorization-boundary signal, not a label for ordinary small blockers, function names, test choices, commit splits, or implementation details inside an authorized scope. Use it for destructive operations, production writes, credentials/secrets, customer data, external sends, payment/security/legal impact, or project-direction changes. The lead AI may continue safe in-scope diagnostics and evidence collection through sub-AIs; compatibility fields such as `next_round_is_safe` remain neutral because program code does not make that judgment.
 
 ## What qualifies as a skill
 
@@ -35,7 +35,7 @@ Do not accept:
 - Automatic quality gates that make the Round/program layer judge success, trigger rework, or require subagents/review subagents to prove completion.
 - Content that belongs in architecture docs, runbooks, API references, README material, or project encyclopedias.
 - A mechanical conversion of docs into skills without a narrow trigger, repeated failure evidence, and probes.
-- Fixed roles, SOPs, dashboards, reviewers, or gates; a skill is a pitfall-avoidance card, not a workflow system.
+- Programmatic role workflows, dashboards, automatic reviewers, or gates; a skill is professional AI guidance, not a workflow engine.
 
 ## Minimal structure
 
@@ -60,25 +60,25 @@ Each skill must contain:
 - Keep the catalog small: merge overlapping skills before adding new ones.
 - If a skill has no recent trigger, no passing eval, or creates noisy behavior, deprecate it.
 - Prefer changing probes before changing prose when behavior is ambiguous.
-- Keep quality ownership in the lead AI / Command Room: skills may define critique triggers and evidence checks, but must not encode automatic program-level judgment or rework loops.
+- Keep quality ownership in the lead AI / Command Room: skills guide checking and opposition AIs, but must not encode automatic program-level judgment or rework loops.
 
 ## Eval and probe rules
 
 - Every active skill must have at least one probe case.
-- Eval decides whether a skill stays; prose alone does not.
-- Probes must verify external evidence, not worker self-proof.
-- State machine transitions and evidence chains are preferred over natural-language assertions.
-- A failed probe opens one of three actions: fix skill, merge/delete skill, or mark product/runtime gap.
-- New probes should be minimal and deterministic enough to run in CI or local review.
+- An independent review AI decides whether observed behavior supports keeping the skill; prose alone does not.
+- Runtime probes capture natural results and objective events. They do not turn those facts into a program verdict.
+- Give the review AI external evidence, not worker self-proof, and let the Command Room adjudicate its natural-language assessment.
+- A negative AI review gives the Command Room three options: fix the skill, propose merge/deletion, or record a product/runtime gap.
+- Keep static checks minimal and deterministic, but limit them to factual schema, path, and text-presence regressions.
 
 ## SkillOpt probe checklist
 
-Use SkillOpt-style probes as minimal behavior-drift evals for skill policy. They are not runtime, task ledgers, adjudicators, or gates. At minimum, active-skill probes should catch regressions where:
+Use SkillOpt-style probes to send realistic behavior-drift scenarios to an independent review AI. They are not runtime or task ledgers. The review AI should identify regressions where:
 
 - Worker self-claim is treated as evidence.
 - A bare "tests passed" summary is treated as hard evidence.
-- Opposition or evidence-checker appears by default instead of on demand.
-- A skill becomes a fixed process, role, reviewer, dashboard, or gate.
+- A worker result is accepted without another AI checking it or without an independent opposition view.
+- A skill becomes a program-controlled process, dashboard, or gate instead of one-shot AI role guidance.
 - Obsidian/progress memory is used as the runtime task ledger.
 - Production, credentials/secrets, customer data, or scope expansion proceeds without stopping to ask.
 

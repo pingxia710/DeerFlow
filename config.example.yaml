@@ -16,7 +16,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 17
+config_version: 18
 
 # ============================================================================
 # Logging
@@ -241,8 +241,6 @@ models:
   #   max_tokens: 8192
   #   supports_thinking: true
   #   supports_vision: false  # DeepSeek V3 does not support vision
-  #   # Set false for lead-only routing; subagents with model: inherit fall back to the default model.
-  #   subagents_inherit: true
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -838,9 +836,10 @@ suggestions:
 # ============================================================================
 # Loop Detection Configuration
 # ============================================================================
-# Detect and interrupt repeated identical tool-call loops in the lead agent.
-# One-shot subagents do not use this middleware; their timeout, cancellation,
-# model-call, and structural recursion limits remain active.
+# Detect repeated identical tool-call loops in ordinary lead agents. The
+# coordinator-only Command Room is excluded so its AI controls task sequencing.
+# One-shot Codex CLI subagents do not use this middleware or DeerFlow's child
+# model-call/recursion limits; process timeout and cancellation remain active.
 
 loop_detection:
   enabled: true
@@ -1038,14 +1037,20 @@ sandbox:
 # subagents:
 #   # Default timeout in seconds (default: 3600 = 60 minutes).
 #   timeout_seconds: 3600
+#   # Default raw Codex model id or a models[].name alias for every delegated task.
+#   model: gpt-5.6-terra
 #   # Optional Codex CLI reasoning effort for every delegated task.
 #   # reasoning_effort: xhigh
 #   # Optional model override for a compatibility task label.
 #   agents:
 #     general-purpose:
 #       model: gpt-5.6-terra
-#   # Custom role prompts, Skills, tools, and max_turns do not affect direct
-#   # Codex CLI tasks. Put complete task instructions in the task prompt.
+#   # Add role names for the lead AI to use when writing complete task prompts.
+#   custom_agents:
+#     contract-reviewer:
+#       description: Reviews API contracts and reports concrete mismatches.
+#       system_prompt: Act as an independent professional contract reviewer.
+#       # model: gpt-5.6-terra  # Optional role-specific override.
 
 # ============================================================================
 # ACP Agents Configuration

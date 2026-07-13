@@ -127,6 +127,20 @@ def main() -> int:
         failed = True
 
     print()
+    print("Checking Codex CLI...")
+    if shutil.which("codex"):
+        codex_version = run_command(["codex", "--version"])
+        if codex_version:
+            print(f"  OK {codex_version}")
+        else:
+            print("  FAIL Codex CLI could not be executed")
+            failed = True
+    else:
+        print("  FAIL Codex CLI not found")
+        print("    Install: npm install -g @openai/codex")
+        failed = True
+
+    print()
     print("Checking nginx...")
     if shutil.which("nginx"):
         nginx_version_text = run_command(["nginx", "-v"])

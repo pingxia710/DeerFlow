@@ -158,7 +158,7 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
-   DeepSeek configs using `deerflow.models.patched_deepseek:PatchedChatDeepSeek` may set `api_keys` to a comma/newline separated credential pool. DeerFlow starts with the first key and rotates on rate-limit/auth/server errors. Set `subagents_inherit: false` on a lead-only model when delegated subagents should fall back to the default model instead of inheriting it.
+   DeepSeek configs using `deerflow.models.patched_deepseek:PatchedChatDeepSeek` may set `api_keys` to a comma/newline separated credential pool. DeerFlow starts with the first key and rotates on rate-limit/auth/server errors. Delegated `task()` workers do not inherit the lead model; configure their Codex model explicitly with `subagents.model`.
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
@@ -301,7 +301,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 1. **Check prerequisites**:
    ```bash
-   make check  # Verifies Node.js 22+, pnpm, uv, nginx
+   make check  # Verifies Node.js 22+, pnpm, uv, Codex CLI, nginx
    ```
 
 2. **Install dependencies**:
@@ -692,17 +692,15 @@ See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerfl
 
 ### Sub-Agents
 
-Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
+The lead agent delegates execution through `task()`. Each call sends one self-contained natural-language prompt, including developer-authored professional role context, to one ephemeral Codex CLI AI. Codex chooses its own plan and native tools, returns its complete natural-language result unchanged, and exits. A single lead-model response may issue up to six task calls; further work is sent in a later batch rather than through a program queue.
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step.
+Delegation requires the pinned `@openai/codex` CLI and a working `codex login` (or a supported Codex authentication environment), even when the lead model uses another provider. The Docker image installs the CLI but does not bake in or mount personal Codex credentials by default; provide authentication deliberately at runtime.
 
-This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
-
-For `command-room` runs, DeerFlow is goal-first: the lead agent completes ordinary, safe work directly and uses subagents only when parallelism, isolated context, specialist capability, real-world execution, or a concrete risk makes them useful. A worker returns processed AI output for synthesis rather than raw MCP/tool output. Paired tool results can retain redacted runtime facts such as commands, exit codes, paths, status, and output hashes, so a high-risk completion claim is not reduced to worker prose. The Command Room Loop is inter-agent: after one worker returns, the lead decides whether another AI should continue. One-shot subagents are not stopped by the lead agent's tool-frequency loop detector; timeout, cancellation, model-call, and structural recursion limits remain active.
+For `command-room` runs, DeerFlow follows AI-AI-AI. The lead is the brain: it keeps the goal, plan, progress, context, and final judgment clear while one-shot professional sub-agents execute work from self-contained natural-language prompts. Each worker returns its complete natural result and ends; a different sub-agent checks that result, an independent opposition sub-agent explores the other direction, and the lead adjudicates their returned text. Program code transports prompts/results, records factual lifecycle state, and enforces hard permissions only; it does not choose roles, judge quality, dispatch reviewers, or trigger rework.
 
 DeerFlow can keep compact, owner/thread-scoped audit facts and task progress for recovery without exposing them as a chat workflow. Native round and task-lane state tracks lifecycle associations, current intent, artifacts, errors, and observed actions; it does not assign quality, choose a next role, authorize a next action, or generate PASS/FAIL/rework decisions. A follow-up starts from the new user intent rather than treating a previous answer or historical next action as accepted work.
 
-User-facing command-room replies stay natural and action-oriented. Internal audit is an operational record, not a required report, governance roster, or visible quality dashboard.
+User-facing command-room replies stay natural and action-oriented. Internal audit is an operational record, not the AI collaboration itself or a visible quality dashboard.
 
 ### Sandbox & File System
 

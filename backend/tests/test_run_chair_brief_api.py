@@ -151,7 +151,7 @@ def test_chair_brief_api_returns_owner_scoped_compact_read_model(tmp_path, monke
     assert body["run_id"] == "run-1"
     assert body["round_id"] == "round-1"
     assert body["task_id"] == "task-1"
-    assert body["capability_snapshot_version"] == 1
+    assert body["capability_snapshot_version"] == 2
     assert body["handoff_count"] == 1
     assert body["latest_handoff"]["target_role"] == "Chair"
     assert body["evidence_summary"]["total"] == 1
@@ -197,4 +197,4 @@ def test_chair_brief_api_reads_audit_records_from_request_owner_only(tmp_path, m
     body = response.json()
     assert body["quality_signals"] == []
     assert body["source_counts"]["quality_signals"] == 0
-    assert "no_quality_signals" in body["known_gaps"]
+    assert body["known_gaps"] == []

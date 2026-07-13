@@ -12,8 +12,10 @@
 # is why they are NOT mounted by default.
 #
 # Prefer passing only a token via env instead (no directory exposure):
-#   CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN for Claude, CODEX_AUTH_PATH
-#   for a single Codex auth file — see .env.example and SECURITY.md.
+#   CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN for Claude, or CODEX_API_KEY
+#   / OPENAI_API_KEY / CODEX_ACCESS_TOKEN for native Codex CLI — see
+#   .env.example and backend/docs/CONFIGURATION.md. CODEX_AUTH_PATH applies to
+#   DeerFlow's Codex model provider, not native `codex exec`.
 # Use this overlay only when you need the full CLI config (e.g. ACP adapters
 # that run the CLI in-container and read more than just the credential file).
 #

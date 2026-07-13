@@ -1,6 +1,6 @@
 ---
 title: 沙箱
-description: 沙箱为 Lead Agent 提供一个受控环境，在其中可以读取文件、写入输出、运行 Shell 命令并生成产出物。没有沙箱，Agent 只能生成文本；有了沙箱，它可以编写和执行代码、处理数据文件、生成图表并构建交付物。
+description: 沙箱为普通 Agent 和被委派的 worker 提供文件与命令环境。Command Room 不直接使用沙箱工具，而是通过一次性 Codex 子任务委派执行。
 ---
 
 import { Callout, Tabs } from "nextra/components";
@@ -12,7 +12,7 @@ import { Callout, Tabs } from "nextra/components";
   能够采取真实行动，而不仅仅是对话。
 </Callout>
 
-沙箱为 Lead Agent 提供一个受控环境，在其中可以读取文件、写入输出、运行 Shell 命令并生成产出物。没有沙箱，Agent 只能生成文本；有了沙箱，它可以编写和执行代码、处理数据文件、生成图表并构建交付物。
+沙箱为普通 Agent profile 提供受控环境，使其可以读取文件、写入输出、运行 Shell 命令并生成产出物。Command Room profile 不同：它把路径和边界写入 `task()` prompt，交给一次性 Codex 子 AI 执行，主指挥室不直接调用沙箱文件或 Shell 工具。
 
 ## 沙箱模式
 
@@ -130,7 +130,7 @@ sandbox:
   allow_host_bash: true # 危险：授予 Agent 对你机器的 Shell 访问权限
 ```
 
-即使没有 `bash`，Agent 也可以通过专用文件工具读写文件。
+即使没有 `bash`，普通 Agent profile 仍可以通过专用文件工具读写文件。Command Room 会把文件和 Shell 工作都通过 `task()` 委派出去。
 
 ### 容器沙箱
 
@@ -138,7 +138,7 @@ sandbox:
 
 ### 审计中间件
 
-`SandboxAuditMiddleware` 在每次 Agent 轮次上运行，记录所有沙箱操作，提供会话期间访问了哪些文件、运行了哪些命令的审计跟踪。
+`SandboxAuditMiddleware` 检查 `bash` 工具调用并记录分类后的命令审计事件。它看不到每一次专用文件工具读写，因此这是命令审计，不是完整的文件系统访问日志。
 
 <Cards num={2}>
   <Cards.Card title="工具" href="/docs/harness/tools" />

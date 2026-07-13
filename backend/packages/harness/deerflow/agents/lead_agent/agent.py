@@ -25,6 +25,7 @@ import logging
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
@@ -32,7 +33,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, SubagentLimitMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, SubagentLimitMiddleware, normalize_subagent_limit
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -51,7 +52,8 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
-_COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
+_COMMAND_ROOM_DIRECT_TOOL_GROUPS: list[str] = []
+_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"ask_clarification", "present_files", "task"})
 _COMMAND_ROOM_CHAIR_SKILL = "command-room-chair"
 
 
@@ -86,19 +88,19 @@ def _is_coordinator_only_agent(agent_name: str | None) -> bool:
 def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
     """Return config-tool groups for the lead agent.
 
-    Command room gets only the direct tools needed to ground itself in the
-    project; broader tool access still belongs in delegated sub-AIs.
+    Command Room execution belongs in delegated sub-AIs, so it receives no
+    configured file, shell, web, or MCP tool group.
     """
     if _is_coordinator_only_agent(agent_name):
         return list(_COMMAND_ROOM_DIRECT_TOOL_GROUPS)
     return agent_config.tool_groups if agent_config else None
 
 
-def _resolve_subagent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
-    """Return tool groups delegated sub-AIs should inherit."""
-    if _is_coordinator_only_agent(agent_name):
-        return None
-    return agent_config.tool_groups if agent_config else None
+def _filter_coordinator_tools(agent_name: str | None, tools: list[BaseTool]) -> list[BaseTool]:
+    """Keep only coordination and result-delivery tools in Command Room."""
+    if not _is_coordinator_only_agent(agent_name):
+        return tools
+    return [tool for tool in tools if tool.name in _COMMAND_ROOM_DIRECT_TOOL_NAMES]
 
 
 def _include_direct_mcp_tools(agent_name: str | None) -> bool:
@@ -113,19 +115,6 @@ def _uses_todo_list(agent_name: str | None, is_plan_mode: bool) -> bool:
     if _is_coordinator_only_agent(agent_name):
         return False
     return is_plan_mode
-
-
-def _resolve_subagent_available_skills(agent_name: str | None, available_skills: set[str] | None) -> set[str] | None:
-    """Extend a non-empty Command Room allowlist with trusted built-in role skills."""
-
-    if available_skills is None or not available_skills or not _is_coordinator_only_agent(agent_name):
-        return available_skills
-    from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
-
-    delegated = set(available_skills)
-    for role_config in COMMAND_ROOM_ROLE_CONFIGS.values():
-        delegated.update(role_config.skills or [])
-    return delegated
 
 
 def _resolve_command_room_available_skills(agent_name: str | None, available_skills: set[str] | None) -> set[str] | None:
@@ -222,7 +211,6 @@ You have access to the `write_todos` tool to help you manage and track complex m
 - Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
 - Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
 - Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
-- DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
 
 **When to Use:**
 This tool is designed for complex objectives that require systematic tracking:
@@ -252,7 +240,7 @@ Writing todos takes time and tokens - use it when helpful for managing complex p
 
     tool_description = """Use this tool to create and manage a structured task list for complex work sessions.
 
-**IMPORTANT: Only use this tool for complex tasks (3+ steps). For simple requests, just do the work directly.**
+**IMPORTANT: Use this tool only when a visible task list helps track the Command Room's plan and delegated work.**
 
 ## When to Use
 
@@ -269,7 +257,7 @@ Skip this tool when:
 1. The task is straightforward and takes less than 3 steps
 2. The task is trivial and tracking provides no benefit
 3. The task is purely conversational or informational
-4. It's clear what needs to be done and you can just do it
+4. Tracking would not help the Command Room preserve its plan and progress
 
 ## How to Use
 
@@ -310,7 +298,7 @@ If blocked, keep the task as `in_progress` and create a new task describing what
 
 Being proactive with task management demonstrates thoroughness and ensures all requirements are completed successfully.
 
-**Remember**: If you only need a few tool calls to complete a task and it's clear what to do, it's better to just do the task directly and NOT use this tool at all.
+**Remember**: This tool tracks the Command Room's plan; it does not replace AI-AI delegation or decide who performs the work.
 """
 
     return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
@@ -419,14 +407,15 @@ def build_middlewares(
     middlewares.append(CommandRoomRoundContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    subagent_enabled = _is_coordinator_only_agent(agent_name) or cfg.get("subagent_enabled", False)
     if subagent_enabled:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
+    # Ordinary lead agents may use loop detection. The Command Room must leave
+    # task sequencing and completion decisions to the lead AI.
     loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
+    if loop_detection_config.enabled and not _is_coordinator_only_agent(agent_name):
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # TokenBudgetMiddleware - enforce per-run token limits
@@ -500,16 +489,16 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
+    max_concurrent_subagents = normalize_subagent_limit(cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS))
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
+    if _is_coordinator_only_agent(agent_name):
+        subagent_enabled = True
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     lead_available_skills = _resolve_command_room_available_skills(agent_name, available_skills)
-    subagent_available_skills = _resolve_subagent_available_skills(agent_name, available_skills)
     tool_groups = _resolve_agent_tool_groups(agent_name, agent_config)
-    subagent_tool_groups = _resolve_subagent_tool_groups(agent_name, agent_config)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -557,10 +546,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": tool_groups,
-            "subagent_tool_groups": subagent_tool_groups,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
             "lead_available_skills": sorted(lead_available_skills) if lead_available_skills is not None else None,
-            "subagent_available_skills": sorted(subagent_available_skills) if subagent_available_skills is not None else None,
         }
     )
 
@@ -624,6 +611,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         app_config=resolved_app_config,
     )
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+    filtered = _filter_coordinator_tools(agent_name, filtered)
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
     model_kwargs = {
         "name": model_name,

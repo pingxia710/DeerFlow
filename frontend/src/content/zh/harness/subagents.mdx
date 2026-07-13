@@ -1,6 +1,6 @@
 ---
 title: 子 Agent
-description: 当一个任务对单个推理线程来说太宽泛，或者部分任务可以并行完成时，Lead Agent 将工作委派给**子 Agent**。子 Agent 是一个独立的 Agent 调用，接收特定任务、执行并返回结果。
+description: Lead Agent 保留目标、方案、进度和最终判断，一次性 Codex 子 AI 根据完整 prompt 执行工作。
 ---
 
 import { Callout } from "nextra/components";
@@ -12,33 +12,26 @@ import { Callout } from "nextra/components";
   委派子任务的专注执行者。它们以隔离的上下文运行，在处理并行或专业工作的同时保持主对话清晰。
 </Callout>
 
-当一个任务对单个推理线程来说太宽泛，或者部分任务可以并行完成时，Lead Agent 将工作委派给**子 Agent**。子 Agent 是一个独立的 Agent 调用，接收特定任务、执行并返回结果。
+Lead Agent 是指挥室的脑袋，保留目标、方案、进度、上下文和最终判断；一次性**子 AI**根据自包含的自然语言 prompt 执行工作。
 
 ## 为什么子 Agent 很重要
 
-子 Agent 解决了长时序工作流中的两个关键问题：
+子 AI 解决大型工作中的两个关键问题：
 
 1. **上下文隔离**：子 Agent 只看到完成其任务所需的信息，而不是整个父对话。这保持了每个 Agent 的工作上下文专注且可控。
 2. **并行性**：多个子 Agent 可以并发运行，允许任务的独立部分（例如同时研究多个话题）并行处理。
 
-## 内置子 Agent
+## 专业角色标签
 
-DeerFlow 内置两个子 Agent：
+DeerFlow 提供 `general-purpose`、`bash`，以及 `planner`、`evidence`、`fact-finder`、`opposition` 等指挥室角色。角色标签会选择开发者写好的上下文，由 DeerFlow 放到任务 prompt 前面：优先使用配置的 `system_prompt`，否则使用角色 description。它不会授予 DeerFlow 工具、创建轮次循环或安装质量规则；一次性 Codex AI 自己拥有并选择原生工具。
 
 ### general-purpose
 
-通用推理和执行 Agent，适合委派需要多步骤推理、网络搜索、文件操作和产出物生成的复杂子任务。
-
-- **默认超时**：900 秒（15 分钟）
-- **默认最大轮次**：160
+通用执行角色，适合探索、实现、命令、检查和其他委派工作。
 
 ### bash
 
-专门用于在沙箱内执行命令行任务的子 Agent，适合脚本编写、数据处理、文件转换和环境设置任务。
-
-- **默认超时**：900 秒（15 分钟）
-- **默认最大轮次**：80
-- **可用性**：仅当沙箱的 `bash` 工具可用时才暴露（`allow_host_bash: true` 或配置了容器沙箱）
+用于构建、测试、诊断和大量终端输出的命令执行角色。标签本身不授予 shell 权限；Codex CLI 使用自己的工具与权限配置。
 
 ## 委派流程
 
@@ -46,55 +39,54 @@ Lead Agent 使用内置 `task` 工具将工作委派给子 Agent：
 
 ```
 task(
-  agent="general-purpose",
-  task="研究 Acme Corp 的前 5 个竞争对手并总结其定价",
-  context="专注于 B2B SaaS 定价模型"
+  description="研究竞争对手定价",
+  prompt="""你是 B2B SaaS 定价研究员。找出 Acme Corp 的前五个竞争对手，
+从一手来源核实当前定价，返回简洁的自然语言对比、来源链接和仍存在的不确定项。""",
+  subagent_type="fact-finder"
 )
 ```
 
 运行时然后：
 
-1. 从注册表查找子 Agent 配置，应用任何 `config.yaml` 覆盖。
-2. 用子 Agent 自己的提示词和工具创建新的 Agent 调用。
-3. 将子 Agent 运行到完成（或直到超时/最大轮次）。
-4. 将子 Agent 的最终输出作为工具结果返回给 Lead Agent。
+1. 组合开发者写的角色上下文、Lead Agent 的任务 prompt、适用规则提示和真实任务路径，再把这个自包含 prompt 交给一个临时 Codex CLI 进程。
+2. 由这个 Codex AI 自主规划、调用工具并完成任务。
+3. 把完整自然语言结果原样返回给 Lead Agent。
+4. 结束子进程；Lead Agent 必须用新 prompt 把完整结果交给另一个核对 AI，并取得独立反方结果后再裁决。
 
 ## 配置
 
-子 Agent 超时和最大轮次通过 `config.yaml` 中的 `subagents:` 部分控制：
+Codex 子任务的传输参数通过 `config.yaml` 中的 `subagents:` 部分配置：
 
 ```yaml
 subagents:
-  # 所有子 Agent 的默认超时（秒，默认：900 = 15 分钟）
-  timeout_seconds: 900
-
-  # 可选：覆盖所有子 Agent 的最大轮次
-  # max_turns: 120
-
-  # 可选：按 Agent 覆盖
-  agents:
-    general-purpose:
-      timeout_seconds: 1800 # 复杂任务 30 分钟
-      max_turns: 160
-    bash:
-      timeout_seconds: 300 # 快速命令 5 分钟
-      max_turns: 80
+  # 每个 Codex 子任务的生命周期超时（默认：3600 = 60 分钟）
+  timeout_seconds: 3600
+  # 所有委派任务的明确默认模型和推理强度
+  model: gpt-5.6-terra
+  reasoning_effort: xhigh
+  # 可选：向 Lead Agent 展示的专业角色名称
+  custom_agents:
+    contract-reviewer:
+      description: 核对 API 契约并报告具体不一致。
+      system_prompt: 作为独立的专业 API 契约审查者工作。
 ```
 
-按 Agent 覆盖优先于全局 `timeout_seconds` 和 `max_turns` 设置。
+DeerFlow 不再为子 AI 设置轮次循环、工具白名单、评分或程序化完成规则。组合后的自然语言 prompt 就是任务契约；超时只负责进程生命周期。
+
+委派还要求安装项目锁定版本的 `@openai/codex` CLI，并完成 `codex login` 或提供 Codex 支持的认证环境；即使 Lead Agent 使用其他模型 provider 也是如此。Docker 镜像会安装 CLI，但默认不包含个人凭证。
 
 ## 并发限制
 
-`SubagentLimitMiddleware` 控制 Lead Agent 在单次轮次中可以并行调用多少个子 Agent，通过每次请求的配置控制：
+`SubagentLimitMiddleware` 控制 Lead Agent 在一次模型响应中最多可以发出多少个 `task()` 调用，通过每次请求的配置控制：
 
 - `subagent_enabled`：是否为此会话激活子 Agent 委派
-- `max_concurrent_subagents`：单次轮次中最大并行任务调用数（默认：3）
+- `max_concurrent_subagents`：一次模型响应中的最大任务调用数（默认：6）
 
-如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。
+如果一条响应中的调用超过配置上限，中间件只省略超出的调用，并把这个客观事实告诉 Lead Agent。它不会建议下一步、把调用放入程序队列或静默调度；Lead Agent 根据已返回的 AI 结果自行判断。
 
 ## Handoff audit
 
-每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留调度元数据、状态、用量、哈希、字符数和精简的 action-result 事实，不写入原始 prompt、worker 输出或错误正文；不会从 worker 自然语言中推导 verdict、证据强弱或下一步动作。
+每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留客观的调度身份、状态、哈希和字符数，不写入原始 prompt、worker 输出和错误文本，也不会解析 worker 文字或推断 verdict、证据强度和下一步。
 
 ## ACP Agent（外部 Agent）
 
@@ -117,13 +109,17 @@ acp_agents:
     model: null
 ```
 
-Lead Agent 通过 `invoke_acp_agent` 内置工具调用 ACP Agent。
+普通 Agent profile 可以通过 `invoke_acp_agent` 内置工具调用 ACP Agent。Command Room profile 只暴露 `task`、必要澄清和结果展示工具；它把同类执行交给一次性 Codex 子任务，不直接调用 ACP。
 
 <Callout type="tip">
   ACP Agent 作为 DeerFlow 管理的子进程运行，通过 ACP 协议通信。标准 CLI
   工具（如原始的 `claude` 或 `codex` 命令）默认不兼容
   ACP——请使用上面列出的适配器包或兼容的 ACP 封装器。
 </Callout>
+
+## 自定义专业角色
+
+`subagents.custom_agents` 可以增加角色名称、说明、开发者写的 `system_prompt` 和可选 Codex 模型覆盖。通过 `subagent_type="my-role"` 使用该标签；DeerFlow 会先放入角色上下文，再接 Lead Agent 写的具体目标、上下文、边界、权限、完成标准和返回要求。skills、工具组、轮次限制和按角色超时不会控制一次性 Codex 进程。
 
 <Cards num={2}>
   <Cards.Card title="沙箱" href="/docs/harness/sandbox" />

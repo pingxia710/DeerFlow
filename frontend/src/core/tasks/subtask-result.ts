@@ -40,22 +40,9 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
 };
 
 /**
- * Prefix strings the backend `task` tool writes into its result `content`.
- *
- * These values are not user-facing copy — they are part of the
- * backend↔frontend contract defined in
- * `backend/packages/harness/deerflow/tools/builtins/task_tool.py` (returned
- * from the tool body) and in
- * `backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py`
- * (wrapper for tool exceptions). Any change here must be paired with the
- * matching backend change. Exported so a future structured-status migration
- * can reference the same values from one place.
- *
- * `task_tool.py` also emits three `Error:` strings for pre-execution failures
- * — unknown subagent type, host-bash disabled, and "task disappeared from
- * background tasks". They are handled by {@link ERROR_WRAPPER_PATTERN}
- * rather than dedicated prefixes because the wrapper already produces
- * exactly the right `terminal failed` shape.
+ * Legacy prefixes retained only for historical threads. Current successful
+ * task content is the worker's complete natural-language result unchanged;
+ * lifecycle status comes from `additional_kwargs.subagent_status`.
  */
 export const SUCCESS_WITH_SUGGESTED_RECEIVER_PREFIX =
   "Task Succeeded. Suggested next receiver";
@@ -79,14 +66,9 @@ export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
  * middleware). Both shapes converge on the same {@link SubtaskStatus}
  * vocabulary the card UI renders.
  *
- * When the structured field is present, the prefix parser is still run
- * so the success `result` body and the wrapped-error message can be
- * back-filled from `content`. Today the backend only stamps the
- * `subagent_status` enum value — the human-facing payload still lives
- * in `content`, so dropping the prefix parse would regress the subtask
- * card display. Structured fields win on conflict: if `subagent_status`
- * and the text disagree, the text-derived `result`/`error` are
- * discarded so a malformed wrapper can't sneak through.
+ * When the structured field says `completed`, `content` is the result. The
+ * legacy parser strips an old success prefix when present; otherwise the raw
+ * text is preserved exactly.
  *
  * Returning `in_progress` is the **deliberate** fallback for content that
  * matches none of the known prefixes and carries no structured stamp.
@@ -118,14 +100,10 @@ export function parseSubtaskResult(
   ) {
     update.error = fromText.error;
   }
-  // Result body only matters for `completed`; require text agreement so
-  // a lying success prefix under a `failed` stamp is dropped.
-  if (
-    structured.status === "completed" &&
-    fromText.status === "completed" &&
-    fromText.result !== undefined
-  ) {
-    update.result = fromText.result;
+  // A structured completed message uses the current raw-text contract. Legacy
+  // prefix parsing is only for messages that have no structured status.
+  if (structured.status === "completed") {
+    update.result = text;
   }
   return update;
 }

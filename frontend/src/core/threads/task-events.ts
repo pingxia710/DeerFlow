@@ -1,4 +1,5 @@
 import type { SubtaskUpdate } from "../tasks/context";
+import { parseSubtaskResult } from "../tasks/subtask-result";
 
 import type { TaskLaneSnapshot } from "./command-room-read-model";
 import type { RunMessage } from "./types";
@@ -58,6 +59,85 @@ export type RunTerminalEvent = {
 };
 
 type TaskEventUpdateSubtask = (task: SubtaskUpdate) => void;
+
+function taskToolMessageText(message: Record<string, unknown>) {
+  const content = message.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+      if (
+        typeof part === "object" &&
+        part !== null &&
+        (part as Record<string, unknown>).type === "text"
+      ) {
+        const text = (part as Record<string, unknown>).text;
+        return typeof text === "string" ? text : "";
+      }
+      return "";
+    })
+    .join("\n");
+}
+
+export function applyTaskToolResultRunMessages(
+  messages: RunMessage[],
+  updateSubtask: TaskEventUpdateSubtask,
+  fallbackThreadId?: string | null,
+) {
+  const taskRoundIds = new Map<string, string>();
+  for (const row of messages) {
+    const event = asTaskEvent(row.content);
+    const taskId = stringValue(event?.task_id);
+    const roundId = taskEventRoundId(event);
+    if (taskId && roundId) {
+      taskRoundIds.set(taskId, roundId);
+    }
+  }
+
+  for (const row of messages) {
+    if (typeof row.content !== "object" || row.content === null) {
+      continue;
+    }
+    const message = row.content as Record<string, unknown>;
+    if (message.type !== "tool" || message.name !== "task") {
+      continue;
+    }
+    const taskId = stringValue(message.tool_call_id);
+    if (!taskId) {
+      continue;
+    }
+    const additionalKwargs =
+      typeof message.additional_kwargs === "object" &&
+      message.additional_kwargs !== null
+        ? (message.additional_kwargs as Record<string, unknown>)
+        : undefined;
+    const parsed = parseSubtaskResult(
+      taskToolMessageText(message),
+      additionalKwargs,
+    );
+    if (parsed.status === "in_progress") {
+      continue;
+    }
+    updateSubtask({
+      id: taskId,
+      threadId: fallbackThreadId ?? undefined,
+      runId: row.run_id,
+      roundId:
+        objectStringValue(additionalKwargs, "round_id") ??
+        objectStringValue(row.metadata, "round_id") ??
+        taskRoundIds.get(taskId),
+      ...parsed,
+      notify: false,
+    });
+  }
+}
 
 export function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;

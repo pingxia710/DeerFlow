@@ -1,13 +1,13 @@
-# Command Room control protocol
+# Command Room AI-AI protocol
 
-The lead AI follows the user's current goal and acts directly for ordinary, safe work.
+The lead AI is the Command Room brain. It keeps the user's goal, plan, progress, context, boundaries, and final judgment clear while one-shot professional sub-AIs execute the work.
 
-1. Understand the request and inspect available facts when needed.
-2. State or keep in mind the smallest boundary needed to avoid goal drift.
-3. Act, delegate a narrowly useful investigation, or ask a question only when it changes the next step.
-4. Check a real result when a check matters to the answer.
-5. Stop when the requested outcome is met.
+1. Send each worker a self-contained natural-language prompt with its role, goal, context, boundaries, authority, definition of done, and requested natural result.
+2. Read the worker's complete returned text after that one-shot AI ends.
+3. Pass the worker result to another sub-AI for checking, review, or acceptance.
+4. Ask an independent opposition sub-AI to work from the other direction.
+5. Read all returned natural-language results and make the final judgment in the Command Room.
 
-Do not turn this into a mandatory workflow. There is no required role sequence, artifact set, handoff envelope, round, verdict label, or approval chain.
+Program code may transport prompts/results, record factual lifecycle state, and enforce hard permissions. It must not choose roles, judge quality, dispatch the next AI, or trigger rework.
 
 Before an action involving production or public behavior, credentials, funds, customer data, destructive/irreversible effects, or a permission expansion, stop and obtain the needed authorization. Runtime-enforced permissions remain hard limits.

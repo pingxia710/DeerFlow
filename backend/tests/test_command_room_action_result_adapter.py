@@ -2,7 +2,7 @@ from deerflow.command_room.action_result_adapter import action_result_from_value
 from deerflow.command_room.round import Round, RoundItemStatus
 
 
-def test_dict_with_evidence_can_enter_round_and_complete():
+def test_dict_with_evidence_enters_round_without_programmatic_completion():
     result = action_result_from_value(
         {
             "action_id": "run-tests",
@@ -17,7 +17,7 @@ def test_dict_with_evidence_can_enter_round_and_complete():
 
     assert result.status == RoundItemStatus.COMPLETED
     assert round_.evidence_refs == ["pytest tests/test_command_room_round.py passed"]
-    assert round_.is_complete is True
+    assert round_.is_complete is None
 
 
 def test_string_result_does_not_invent_evidence():
@@ -28,7 +28,13 @@ def test_string_result_does_not_invent_evidence():
     assert result.summary == "普通 subagent 输出"
     assert result.evidence_refs == []
     assert round_.has_evidence is False
-    assert round_.is_complete is False
+    assert round_.is_complete is None
+
+
+def test_mapping_without_status_stays_pending():
+    result = action_result_from_value({"action_id": "subagent-2", "summary": "natural result"})
+
+    assert result.status == RoundItemStatus.PENDING
 
 
 def test_error_input_blocks_completion_as_unresolved_error():
@@ -38,7 +44,7 @@ def test_error_input_blocks_completion_as_unresolved_error():
     assert result.status == RoundItemStatus.FAILED
     assert result.error == "boom"
     assert round_.unresolved == ["boom"]
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_mapping_error_status_blocks_completion_even_with_evidence():
@@ -55,7 +61,7 @@ def test_mapping_error_status_blocks_completion_even_with_evidence():
     assert result.status == RoundItemStatus.FAILED
     assert round_.has_evidence is True
     assert round_.has_open_questions is True
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_output_ref_is_not_evidence():
@@ -72,7 +78,7 @@ def test_output_ref_is_not_evidence():
     assert result.output_ref == "outputs/report.md"
     assert result.evidence_refs == []
     assert round_.evidence_refs == []
-    assert round_.is_complete is False
+    assert round_.is_complete is None
 
 
 def test_status_aliases_include_running_pending_blocked_failed():
@@ -94,7 +100,7 @@ def test_terminal_reason_distinguishes_cancelled_timeout_and_boundary_blocked():
     assert blocked.terminal_reason == "boundary_blocked"
 
 
-def test_unknown_explicit_status_fails_safe_and_preserves_risk_context():
+def test_unknown_explicit_status_fails_safe_without_inventing_open_questions():
     result = action_result_from_value(
         {
             "action_id": "subagent-x",
@@ -108,5 +114,4 @@ def test_unknown_explicit_status_fails_safe_and_preserves_risk_context():
     assert result.status == RoundItemStatus.FAILED
     assert result.terminal_reason == "unknown_status"
     assert result.risks == ["needs review"]
-    assert "missing terminal proof" in result.open_questions
-    assert "Unknown action_result status: mystery" in result.open_questions
+    assert result.open_questions == ["missing terminal proof"]

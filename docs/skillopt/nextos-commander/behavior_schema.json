@@ -2,42 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decisions"],
+  "required": ["passed", "assessment", "scenario_reviews"],
   "properties": {
-    "decisions": {
+    "passed": { "type": "boolean" },
+    "assessment": { "type": "string" },
+    "scenario_reviews": {
       "type": "array",
       "minItems": 3,
       "maxItems": 3,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "next_action", "dispatch_roles", "ask_user", "rationale"],
+        "required": ["id", "assessment", "concerns"],
         "properties": {
           "id": {
             "type": "string",
             "enum": [
-              "stop-after-observed-implementation",
-              "small-fact-minimal-path",
+              "review-observed-implementation",
+              "small-fact-delegation",
               "bottom-boundary-confirmation"
             ]
           },
-          "next_action": {
-            "type": "string",
-            "enum": [
-              "finish",
-              "direct",
-              "single_subagent",
-              "multi_subagent",
-              "clarify",
-              "stop_confirm"
-            ]
-          },
-          "dispatch_roles": {
+          "assessment": { "type": "string" },
+          "concerns": {
             "type": "array",
             "items": { "type": "string" }
-          },
-          "ask_user": { "type": "boolean" },
-          "rationale": { "type": "string" }
+          }
         }
       }
     }

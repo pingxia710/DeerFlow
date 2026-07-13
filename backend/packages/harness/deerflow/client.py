@@ -34,6 +34,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import (
     _available_skill_names,
+    _filter_coordinator_tools,
     _include_direct_mcp_tools,
     _load_enabled_skills_for_tool_policy,
     _resolve_agent_tool_groups,
@@ -41,6 +42,7 @@ from deerflow.agents.lead_agent.agent import (
     build_middlewares,
 )
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, normalize_subagent_limit
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
@@ -50,7 +52,6 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
-from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -249,6 +250,8 @@ class DeerFlowClient:
             effective_available_skills = _available_skill_names(agent_config, is_bootstrap=False)
         lead_available_skills = _resolve_command_room_available_skills(self._agent_name, effective_available_skills)
         tool_groups = _resolve_agent_tool_groups(self._agent_name, agent_config)
+        subagent_enabled = True if self._agent_name == "command-room" else cfg.get("subagent_enabled", False)
+        max_concurrent_subagents = normalize_subagent_limit(cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS))
         model_name = cfg.get("model_name")
         if not model_name and agent_config and agent_config.model:
             model_name = agent_config.model
@@ -256,7 +259,8 @@ class DeerFlowClient:
             model_name,
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
-            cfg.get("subagent_enabled"),
+            subagent_enabled,
+            max_concurrent_subagents,
             self._agent_name,
             frozenset(effective_available_skills) if effective_available_skills is not None else None,
             tuple(tool_groups) if tool_groups is not None else None,
@@ -266,9 +270,6 @@ class DeerFlowClient:
             return
 
         thinking_enabled = cfg.get("thinking_enabled", True)
-        subagent_enabled = cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
-
         tools = self._get_tools(
             model_name=model_name,
             subagent_enabled=subagent_enabled,
@@ -278,6 +279,7 @@ class DeerFlowClient:
         if tools:
             skills_for_tool_policy = _load_enabled_skills_for_tool_policy(lead_available_skills, app_config=self._app_config)
             filtered_tools = filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy)
+            filtered_tools = _filter_coordinator_tools(self._agent_name, filtered_tools)
         else:
             filtered_tools = []
         final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=self._app_config.tool_search.enabled)

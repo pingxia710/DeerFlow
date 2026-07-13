@@ -89,8 +89,23 @@ export interface ThreadContextUsageSnapshot {
   char_count: number;
   estimated_tokens: number;
   role_counts: Record<string, number>;
+  has_full_text: boolean;
   seq: number;
   created_at: string;
+}
+
+export interface ThreadContextMessage {
+  role: string;
+  content: unknown;
+  name?: string;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  [key: string]: unknown;
+}
+
+export interface ThreadContextDetail extends ThreadContextUsageSnapshot {
+  messages: ThreadContextMessage[];
+  tool_schemas: unknown[];
 }
 
 export interface ThreadContextUsageResponse {

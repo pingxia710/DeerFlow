@@ -3,17 +3,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILLOPT_ROOT="${SKILLOPT_ROOT:-/Users/pingxia/projects/SkillOpt}"
-CONFIG="$REPO_ROOT/docs/skillopt/naxus-round/config.json"
-TASKS="$REPO_ROOT/docs/skillopt/naxus-round/tasks.json"
-OUT="$REPO_ROOT/docs/skillopt/naxus-round/static_report.json"
-SKILL="$REPO_ROOT/skills/custom/naxus-round/SKILL.md"
-BEHAVIOR_OUT="$REPO_ROOT/docs/skillopt/naxus-round/behavior_report.json"
-BEHAVIOR_SCHEMA="$REPO_ROOT/docs/skillopt/naxus-round/behavior_schema.json"
+CONFIG="$REPO_ROOT/docs/skillopt/nextos-commander/config.json"
+TASKS="$REPO_ROOT/docs/skillopt/nextos-commander/tasks.json"
+OUT="$REPO_ROOT/docs/skillopt/nextos-commander/static_report.json"
+SKILL="$REPO_ROOT/skills/custom/nextos-commander/SKILL.md"
+BEHAVIOR_OUT="$REPO_ROOT/docs/skillopt/nextos-commander/behavior_report.json"
+BEHAVIOR_SCHEMA="$REPO_ROOT/docs/skillopt/nextos-commander/behavior_schema.json"
 BEHAVIOR_PROBE="$REPO_ROOT/scripts/command-room-skill-behavior-probe.py"
 
 if [[ ! -f "$SKILL" ]]; then
   echo "Missing local skill: $SKILL" >&2
-  echo "Create or restore skills/custom/naxus-round/SKILL.md before running this probe." >&2
+  echo "Create or restore skills/custom/nextos-commander/SKILL.md before running this probe." >&2
   exit 2
 fi
 

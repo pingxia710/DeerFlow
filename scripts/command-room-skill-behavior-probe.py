@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a model-backed behavioral gate for the Naxus Command Room skill."""
+"""Run a model-backed behavioral gate for the NextOS Commander skill."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SKILL = REPO_ROOT / "skills" / "custom" / "naxus-round" / "SKILL.md"
-DEFAULT_SCHEMA = REPO_ROOT / "docs" / "skillopt" / "naxus-round" / "behavior_schema.json"
-DEFAULT_REPORT = REPO_ROOT / "docs" / "skillopt" / "naxus-round" / "behavior_report.json"
+DEFAULT_SKILL = REPO_ROOT / "skills" / "custom" / "nextos-commander" / "SKILL.md"
+DEFAULT_SCHEMA = REPO_ROOT / "docs" / "skillopt" / "nextos-commander" / "behavior_schema.json"
+DEFAULT_REPORT = REPO_ROOT / "docs" / "skillopt" / "nextos-commander" / "behavior_report.json"
 
 SCENARIOS = (
     {

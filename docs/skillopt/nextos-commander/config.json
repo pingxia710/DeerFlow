@@ -1,6 +1,6 @@
 {
-  "project": "deerflow-command-room-goal-first",
-  "skill_path": "skills/custom/naxus-round/SKILL.md",
+  "project": "nextos-command-room-goal-first",
+  "skill_path": "skills/custom/nextos-commander/SKILL.md",
   "rules": {
     "goal-first-direct": "Take the most valuable next action directly",
     "bounded-delegation": "Use a sub-AI only for concrete value",

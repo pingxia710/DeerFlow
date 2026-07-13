@@ -203,6 +203,11 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - Deleting a chat thread must also clear thread-local client state such as
   running/finished activity markers, run lists, metadata, token usage, and
   context usage caches.
+- The top-right Context view represents the exact text payload presented at a
+  model-call boundary. Its primary measure is `char_count`, and full messages
+  plus tool schemas are fetched lazily by `run_id`/`seq`. Do not slice,
+  head-tail shorten, or substitute token spend for the full payload; legacy
+  metric-only snapshots should say that full text is unavailable.
 - Task event/action_result parsing is pinned by
   `contracts/task_event_contract.json`; do not depend on prose-only status text
   or silently leave unknown structured terminal states in progress.

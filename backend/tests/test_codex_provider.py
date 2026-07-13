@@ -276,6 +276,28 @@ def test_call_codex_api_retries_transient_connection_errors(monkeypatch):
     assert sleeps == [1, 2]
 
 
+def test_call_codex_api_marks_exhausted_provider_retry_budget(monkeypatch):
+    from deerflow.models.openai_codex_provider import CodexRetryExhaustedError
+
+    model = _make_model(retry_max_attempts=2)
+    attempts = 0
+
+    def timed_out_stream_response(headers, payload):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    monkeypatch.setattr(model, "_refresh_codex_auth", lambda: None)
+    monkeypatch.setattr(model, "_stream_response", timed_out_stream_response)
+    monkeypatch.setattr("deerflow.models.openai_codex_provider.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(CodexRetryExhaustedError) as caught:
+        model._call_codex_api([HumanMessage(content="Hello")])
+
+    assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
+    assert attempts == 2
+
+
 def test_call_codex_api_retries_incomplete_stream(monkeypatch):
     from deerflow.models.openai_codex_provider import CodexStreamIncompleteError
 

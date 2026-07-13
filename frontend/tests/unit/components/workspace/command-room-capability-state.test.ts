@@ -14,11 +14,11 @@ const healthyRuntime = {
     model_fallback: false,
   },
   skills: {
-    configured: ["naxus-round"],
-    loaded: ["naxus-round"],
+    configured: ["nextos-commander"],
+    loaded: ["nextos-commander"],
     missing: [],
     disabled: [],
-    delegated_loaded: ["naxus-round", "command-room-planner"],
+    delegated_loaded: ["nextos-commander", "command-room-planner"],
     role_skills: ["command-room-planner"],
   },
   direct: {

@@ -128,29 +128,45 @@ class RunJournal(BaseCallbackHandler):
         role = getattr(message, "type", None)
         return str(role or type(message).__name__)
 
-    def _message_context_payload(self, message: BaseMessage) -> str:
-        """Compact, non-persisted payload used only for context-size estimates."""
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Return a JSON-safe copy without shortening any textual content."""
+        return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+
+    def _message_context_payload(self, message: BaseMessage) -> dict[str, Any]:
+        """Serialize the complete message payload seen at the model boundary."""
+        message_type = self._message_role(message)
+        role = {
+            "human": "user",
+            "ai": "assistant",
+            "system": "system",
+            "tool": "tool",
+        }.get(message_type, message_type)
         payload: dict[str, Any] = {
-            "type": self._message_role(message),
-            "content": getattr(message, "content", ""),
+            "role": role,
+            "content": self._json_safe(getattr(message, "content", "")),
         }
         name = getattr(message, "name", None)
         if name:
             payload["name"] = name
         tool_calls = getattr(message, "tool_calls", None)
         if tool_calls:
-            payload["tool_calls"] = tool_calls
-        return json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+            payload["tool_calls"] = self._json_safe(tool_calls)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            payload["tool_call_id"] = str(tool_call_id)
+        return payload
 
-    @staticmethod
-    def _tool_schema_payload(kwargs: dict[str, Any]) -> str:
+    def _tool_schemas(self, kwargs: dict[str, Any]) -> list[Any]:
         invocation_params = kwargs.get("invocation_params")
         if not isinstance(invocation_params, Mapping):
-            return ""
+            return []
         tools = invocation_params.get("tools")
         if not tools:
-            return ""
-        return json.dumps({"tools": tools}, default=str, ensure_ascii=False, separators=(",", ":"))
+            return []
+        if isinstance(tools, list):
+            return self._json_safe(tools)
+        return [self._json_safe(tools)]
 
     def _context_snapshot(
         self,
@@ -158,18 +174,28 @@ class RunJournal(BaseCallbackHandler):
         *,
         caller: str,
         llm_run_id: str,
-        tool_schema_payload: str = "",
+        tool_schemas: list[Any] | None = None,
     ) -> dict[str, Any]:
         role_counts: dict[str, int] = {}
         char_count = 0
         estimated_tokens = 0
+        message_payloads: list[dict[str, Any]] = []
         for message in batch:
             role = self._message_role(message)
             role_counts[role] = role_counts.get(role, 0) + 1
             payload = self._message_context_payload(message)
-            char_count += len(payload)
-            estimated_tokens += self._char_based_token_estimate(payload)
-        if tool_schema_payload:
+            message_payloads.append(payload)
+            serialized = json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+            char_count += len(serialized)
+            estimated_tokens += self._char_based_token_estimate(serialized)
+        resolved_tool_schemas = tool_schemas or []
+        if resolved_tool_schemas:
+            tool_schema_payload = json.dumps(
+                {"tools": resolved_tool_schemas},
+                default=str,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             char_count += len(tool_schema_payload)
             estimated_tokens += self._char_based_token_estimate(tool_schema_payload)
         return {
@@ -177,10 +203,12 @@ class RunJournal(BaseCallbackHandler):
             "llm_call_index": self._llm_call_index,
             "llm_run_id": llm_run_id,
             "message_count": len(batch),
-            "tool_schema_count": 1 if tool_schema_payload else 0,
+            "tool_schema_count": len(resolved_tool_schemas),
             "char_count": char_count,
             "estimated_tokens": estimated_tokens,
             "role_counts": role_counts,
+            "messages": message_payloads,
+            "tool_schemas": resolved_tool_schemas,
         }
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
@@ -273,16 +301,16 @@ class RunJournal(BaseCallbackHandler):
         )
 
         caller = self._identify_caller(tags)
-        tool_schema_payload = self._tool_schema_payload(kwargs)
+        tool_schemas = self._tool_schemas(kwargs)
         for batch in messages:
             self._put(
                 event_type="llm.context",
-                category="trace",
+                category="context",
                 content=self._context_snapshot(
                     batch,
                     caller=caller,
                     llm_run_id=rid,
-                    tool_schema_payload=tool_schema_payload,
+                    tool_schemas=tool_schemas,
                 ),
                 metadata={"caller": caller, "llm_call_index": self._llm_call_index},
             )

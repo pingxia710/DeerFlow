@@ -37,6 +37,7 @@ You have access to the sandbox environment:
 """,
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
     disallowed_tools=["task"],
+    skills=[],  # Execute the delegated command; do not inherit coordinator operating skills.
     model="inherit",
     max_turns=60,
 )

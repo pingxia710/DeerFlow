@@ -1008,7 +1008,7 @@ class TestEnsureAgent:
                     name="command-room",
                     model="safe-model",
                     tool_groups=["sandbox", "bash"],
-                    skills=["naxus-round"],
+                    skills=["nextos-commander"],
                 ),
             ),
             patch("deerflow.client.create_chat_model", side_effect=fake_create_chat_model),
@@ -1026,8 +1026,8 @@ class TestEnsureAgent:
         assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
         assert mock_get_tools.call_args.kwargs["include_mcp"] is False
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
-        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"naxus-round", "command-room-chair"}
-        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"naxus-round", "command-room-chair"}
+        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
+        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()

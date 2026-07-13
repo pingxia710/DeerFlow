@@ -219,6 +219,16 @@ class TestNeedsBudget:
         msg = _tm("x" * 100, name="read_file")
         assert _needs_budget(msg, config) is False
 
+    def test_task_result_is_always_complete(self):
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=20,
+            exempt_tools=[],
+        )
+        msg = _tm("subagent result " + ("x" * 100), name="task")
+
+        assert _needs_budget(msg, config) is False
+
     def test_multimodal_does_not_need_budget(self):
         config = ToolOutputConfig(externalize_min_chars=10)
         msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")

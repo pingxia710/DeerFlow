@@ -345,10 +345,15 @@ class _CodexStreamIncompleteError(Exception):
     """Local stand-in for CodexStreamIncompleteError — matched by class name."""
 
 
+class _CodexRetryExhaustedError(Exception):
+    """Local stand-in for a provider whose own retry budget is exhausted."""
+
+
 _ReadError.__name__ = "ReadError"
 _RemoteProtocolError.__name__ = "RemoteProtocolError"
 _ConnectError.__name__ = "ConnectError"
 _CodexStreamIncompleteError.__name__ = "CodexStreamIncompleteError"
+_CodexRetryExhaustedError.__name__ = "CodexRetryExhaustedError"
 
 
 def test_classify_error_read_error_is_retriable() -> None:
@@ -385,6 +390,26 @@ def test_classify_codex_stream_incomplete_error_is_retriable() -> None:
     retriable, reason = middleware._classify_error(exc)
     assert retriable is True
     assert reason == "transient"
+
+
+def test_sync_codex_provider_retry_exhaustion_is_not_retried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3)
+    attempts = 0
+    waits: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda delay: waits.append(delay))
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _CodexRetryExhaustedError("Codex provider retry budget exhausted")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 1
+    assert waits == []
+    assert result.additional_kwargs["error_reason"] == "transient"
 
 
 def test_classify_ssl_unexpected_eof_is_retriable() -> None:

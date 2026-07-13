@@ -238,12 +238,6 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
-    loop_detection_config = app_config.loop_detection
-    if loop_detection_config.enabled:
-        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
-
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
-
     if max_model_calls is not None:
         from langchain.agents.middleware import ModelCallLimitMiddleware
 

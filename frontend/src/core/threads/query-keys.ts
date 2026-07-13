@@ -23,6 +23,11 @@ export const queryKeys = {
       ["thread-token-usage", threadId] as const,
     contextUsage: (threadId?: string | null) =>
       ["thread-context-usage", threadId] as const,
+    contextDetail: (
+      threadId?: string | null,
+      runId?: string | null,
+      seq?: number | null,
+    ) => ["thread-context-detail", threadId, runId, seq] as const,
     artifact: (
       threadId: string,
       filepath: string,
@@ -58,7 +63,8 @@ export function isThreadScopedQueryKey(
   }
   if (
     (queryKey[0] === "thread-token-usage" ||
-      queryKey[0] === "thread-context-usage") &&
+      queryKey[0] === "thread-context-usage" ||
+      queryKey[0] === "thread-context-detail") &&
     queryKey[1] === threadId
   ) {
     return true;

@@ -1054,14 +1054,15 @@ export function MessageList({
             <div
               className="text-muted-foreground bg-background/70 flex h-8 items-center gap-1.5 rounded-full border px-2 text-xs"
               title={`${t.contextUsage.label} ${formatContextCount(
-                contextSnapshotForTurn.estimated_tokens,
-              )}`}
+                contextSnapshotForTurn.char_count,
+              )} ${t.contextUsage.charUnit}`}
             >
               <BrainCircuitIcon className="size-3.5" />
               <span className="hidden sm:inline">{t.contextUsage.label}</span>
               <span className="font-mono">
-                {formatContextCount(contextSnapshotForTurn.estimated_tokens)}
+                {formatContextCount(contextSnapshotForTurn.char_count)}
               </span>
+              <span>{t.contextUsage.charUnit}</span>
             </div>
           )}
           <Button
@@ -1082,6 +1083,7 @@ export function MessageList({
       handleReviewTurnClick,
       onRegenerateMessage,
       regeneratingMessageId,
+      t.contextUsage.charUnit,
       t.contextUsage.label,
       t.common.regenerate,
       t.chats.reviewTurn,

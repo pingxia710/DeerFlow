@@ -1,8 +1,8 @@
-# Naxus Round SkillOpt Probe
+# NextOS Commander SkillOpt Probe
 
-SkillOpt gate for the local `skills/custom/naxus-round/SKILL.md`.
+SkillOpt gate for the local `skills/custom/nextos-commander/SKILL.md`.
 
-Run from the DeerFlow repo root:
+Run from the NextOS repo root:
 
 ```bash
 bash scripts/skillopt-probe.sh

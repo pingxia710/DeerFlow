@@ -53,8 +53,8 @@ class ToolOutputConfig(BaseModel):
         description="Subdirectory under the thread outputs path for persisted tool results.",
     )
     exempt_tools: list[str] = Field(
-        default_factory=lambda: ["read_file", "read_file_tool"],
-        description="Tool names exempt from budget enforcement (prevents persist→read→persist loops).",
+        default_factory=lambda: ["read_file", "read_file_tool", "task"],
+        description="Tool names exempt from budget enforcement. Read tools prevent persist→read→persist loops; task preserves complete AI-to-AI results for the lead agent.",
     )
     tool_overrides: dict[str, int] = Field(
         default_factory=dict,

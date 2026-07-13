@@ -367,14 +367,14 @@ def test_command_room_allows_direct_file_read_tool_group_without_bash():
     assert lead_agent_module._uses_todo_list("command-room", True) is False
     assert lead_agent_module._uses_todo_list("builder", True) is True
 
-    chair_skills = lead_agent_module._resolve_command_room_available_skills("command-room", {"naxus-round"})
-    assert chair_skills == {"naxus-round", "command-room-chair"}
+    chair_skills = lead_agent_module._resolve_command_room_available_skills("command-room", {"nextos-commander"})
+    assert chair_skills == {"nextos-commander", "command-room-chair"}
     assert lead_agent_module._resolve_command_room_available_skills("command-room", set()) == set()
     assert lead_agent_module._resolve_command_room_available_skills("builder", {"safe-skill"}) == {"safe-skill"}
 
-    delegated_skills = lead_agent_module._resolve_subagent_available_skills("command-room", {"naxus-round"})
+    delegated_skills = lead_agent_module._resolve_subagent_available_skills("command-room", {"nextos-commander"})
     assert delegated_skills is not None
-    assert "naxus-round" in delegated_skills
+    assert "nextos-commander" in delegated_skills
     assert "command-room-planner" in delegated_skills
     assert "command-room-evidence" in delegated_skills
     assert "command-room-opposition" in delegated_skills

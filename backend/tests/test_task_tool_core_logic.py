@@ -943,6 +943,48 @@ def test_task_tool_inherits_parent_skill_allowlist_for_default_subagent(monkeypa
     assert captured["config"].skills == ["safe-skill"]
 
 
+def test_task_tool_keeps_command_room_skills_out_of_bash_executor(monkeypatch):
+    """A command executor must not receive the coordinator's operating Skill."""
+    from deerflow.subagents.builtins.bash_agent import BASH_AGENT_CONFIG
+
+    runtime = _make_runtime()
+    runtime.config["metadata"]["available_skills"] = ["nextos-commander", "command-room-chair"]
+    captured = {}
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["bash"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: BASH_AGENT_CONFIG)
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: True)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="执行有界命令",
+        prompt="rename the Skill",
+        subagent_type="bash",
+        tool_call_id="tc-bash-skill-isolation",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert captured["config"].skills == []
+
+
 def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
     config = _make_subagent_config()
     config = SubagentConfig(
@@ -998,8 +1040,8 @@ def test_task_tool_uses_delegated_role_skill_allowlist_separate_from_parent_prom
         timeout_seconds=10,
     )
     runtime = _make_runtime()
-    runtime.config["metadata"]["available_skills"] = ["naxus-round"]
-    runtime.config["metadata"]["subagent_available_skills"] = ["naxus-round", "command-room-planner"]
+    runtime.config["metadata"]["available_skills"] = ["nextos-commander"]
+    runtime.config["metadata"]["subagent_available_skills"] = ["nextos-commander", "command-room-planner"]
     captured = {}
     events = []
 
@@ -1037,8 +1079,8 @@ def test_task_tool_uses_delegated_role_skill_allowlist_separate_from_parent_prom
 def test_task_tool_does_not_load_role_skills_into_general_implementation_agent(monkeypatch):
     config = _make_subagent_config()
     runtime = _make_runtime()
-    runtime.config["metadata"]["available_skills"] = ["naxus-round"]
-    runtime.config["metadata"]["subagent_available_skills"] = ["naxus-round", "command-room-planner"]
+    runtime.config["metadata"]["available_skills"] = ["nextos-commander"]
+    runtime.config["metadata"]["subagent_available_skills"] = ["nextos-commander", "command-room-planner"]
     captured = {}
     events = []
 
@@ -1070,7 +1112,7 @@ def test_task_tool_does_not_load_role_skills_into_general_implementation_agent(m
     )
 
     assert output == "Task Succeeded. Result: done"
-    assert captured["config"].skills == ["naxus-round"]
+    assert captured["config"].skills == ["nextos-commander"]
 
 
 def test_task_tool_no_tool_groups_passes_none(monkeypatch):

@@ -798,8 +798,14 @@ class ThreadContextUsageSnapshot(BaseModel):
     char_count: int = 0
     estimated_tokens: int = 0
     role_counts: dict[str, int] = Field(default_factory=dict)
+    has_full_text: bool = False
     seq: int = 0
     created_at: str = ""
+
+
+class ThreadContextDetailResponse(ThreadContextUsageSnapshot):
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    tool_schemas: list[Any] = Field(default_factory=list)
 
 
 class ThreadContextUsageResponse(BaseModel):
@@ -1860,6 +1866,7 @@ def _context_usage_snapshot_from_event(event: dict[str, Any]) -> ThreadContextUs
         char_count=_int_value("char_count"),
         estimated_tokens=_int_value("estimated_tokens"),
         role_counts={str(k): int(v) for k, v in role_counts.items() if isinstance(v, int)},
+        has_full_text=isinstance(content.get("messages"), list) and isinstance(content.get("tool_schemas"), list),
         seq=event.get("seq") if isinstance(event.get("seq"), int) else 0,
         created_at=str(event.get("created_at") or ""),
     )
@@ -3218,4 +3225,46 @@ async def thread_context_usage(
         latest_lead=by_caller.get("lead_agent"),
         by_caller=by_caller,
         recent=recent,
+    )
+
+
+@router.get(
+    "/{thread_id}/context-usage/{run_id}/{seq}",
+    response_model=ThreadContextDetailResponse,
+)
+@require_permission("threads", "read", owner_check=True)
+async def thread_context_detail(
+    thread_id: str,
+    run_id: str,
+    seq: int,
+    request: Request,
+) -> ThreadContextDetailResponse:
+    """Return one complete, unshortened model-input snapshot."""
+    event_store = get_run_event_store(request)
+    user_id = get_request_storage_user_id(request)
+    list_events_kwargs: dict[str, Any] = {
+        "event_types": ["llm.context"],
+        "limit": 1,
+        "after_seq": max(0, seq - 1),
+    }
+    if _supports_user_id_keyword(event_store.list_events):
+        list_events_kwargs["user_id"] = user_id
+    events = await event_store.list_events(thread_id, run_id, **list_events_kwargs)
+    event = next((item for item in events if item.get("seq") == seq), None)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Context snapshot not found")
+
+    content = event.get("content")
+    snapshot = _context_usage_snapshot_from_event(event)
+    if snapshot is None or not isinstance(content, dict):
+        raise HTTPException(status_code=404, detail="Context snapshot not found")
+    messages = content.get("messages")
+    tool_schemas = content.get("tool_schemas")
+    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages) or not isinstance(tool_schemas, list):
+        raise HTTPException(status_code=404, detail="Complete context text is unavailable for this snapshot")
+
+    return ThreadContextDetailResponse(
+        **snapshot.model_dump(),
+        messages=messages,
+        tool_schemas=tool_schemas,
     )

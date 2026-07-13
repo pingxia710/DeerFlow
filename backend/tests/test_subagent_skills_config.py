@@ -89,9 +89,9 @@ def test_command_room_recorder_skill_preserves_only_durable_facts_when_useful():
     assert "not a durable decision" in text
 
 
-def test_naxus_skill_is_goal_first_and_has_no_default_process():
+def test_nextos_commander_skill_is_goal_first_and_has_no_default_process():
     repo_root = Path(__file__).resolve().parents[2]
-    skill = _read_custom_skill_or_skip(repo_root, "naxus-round")
+    skill = _read_custom_skill_or_skip(repo_root, "nextos-commander")
 
     assert "Take the most valuable next action directly" in skill
     assert "Roles are optional perspectives" in skill
@@ -99,7 +99,7 @@ def test_naxus_skill_is_goal_first_and_has_no_default_process():
     assert "SkillOpt is a regression check" in skill
 
 
-def test_naxus_skillopt_entrypoint_runs_model_backed_behavior_gate():
+def test_nextos_commander_skillopt_entrypoint_runs_model_backed_behavior_gate():
     repo_root = Path(__file__).resolve().parents[2]
     script = (repo_root / "scripts" / "skillopt-probe.sh").read_text(encoding="utf-8")
 

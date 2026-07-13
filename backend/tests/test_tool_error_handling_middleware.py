@@ -145,16 +145,15 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert captured["app_config"] is app_config
     # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
     # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 LoopDetectionMiddleware + 1 SafetyFinishReasonMiddleware
-    # (both enabled by default).
+    # + 1 SafetyFinishReasonMiddleware (enabled by default). Subagents do not
+    # receive the lead-only single-agent LoopDetectionMiddleware.
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 10
+    assert len(middlewares) == 9
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
-    assert any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 
 
@@ -170,8 +169,8 @@ def test_subagent_runtime_middlewares_enforce_model_turn_budget(monkeypatch: pyt
     assert limits[0].exit_behavior == "end"
 
 
-def test_subagent_runtime_middlewares_respect_disabled_loop_detection(monkeypatch: pytest.MonkeyPatch):
-    app_config = _make_app_config(loop_detection_enabled=False)
+def test_subagent_runtime_middlewares_do_not_attach_single_agent_loop_detection(monkeypatch: pytest.MonkeyPatch):
+    app_config = _make_app_config(loop_detection_enabled=True)
     _stub_runtime_middleware_imports(monkeypatch)
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config)

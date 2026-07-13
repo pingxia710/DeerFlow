@@ -83,6 +83,7 @@ _TRANSIENT_CONNECTION_PATTERNS = (
 # value of 2 means "1 first attempt + 1 retry" (the CR-requested
 # "keep one retry" behavior).
 _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
+    "CodexRetryExhaustedError": 1,
     "StreamChunkTimeoutError": 2,
 }
 
@@ -204,6 +205,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "APITimeoutError",
             "APIConnectionError",
             "ConnectError",  # httpx.ConnectError: local proxy/upstream refused connection
+            "CodexRetryExhaustedError",  # Codex provider already spent its own retry budget
             "CodexStreamIncompleteError",  # Codex provider: stream ended before response.completed
             "ConnectTimeout",
             "InternalServerError",

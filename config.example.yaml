@@ -820,6 +820,7 @@ tool_output:
   exempt_tools:
     - read_file
     - read_file_tool
+    - task  # Preserve the complete subagent result for the lead agent.
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
@@ -837,8 +838,9 @@ suggestions:
 # ============================================================================
 # Loop Detection Configuration
 # ============================================================================
-# Detect and interrupt repeated identical tool-call loops.
-# Frequency thresholds are safety limits for repeated use of the same tool type.
+# Detect and interrupt repeated identical tool-call loops in the lead agent.
+# One-shot subagents do not use this middleware; their timeout, cancellation,
+# model-call, and structural recursion limits remain active.
 
 loop_detection:
   enabled: true

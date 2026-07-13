@@ -473,9 +473,18 @@ export const enUS: Translations = {
     messages: "Messages",
     tools: "Tools",
     chars: "Chars",
+    charUnit: "chars",
     byCaller: "Source",
     unavailable:
       "No context snapshot yet. It appears when the next model call starts.",
+    openFullText: "View complete text for every call",
+    complete: "Complete record (not truncated)",
+    calls: "Model calls",
+    modelMessages: "Complete messages sent to the model",
+    toolSchemas: "Complete tool definitions for this call",
+    loading: "Loading complete context…",
+    fullTextUnavailable:
+      "This is a legacy snapshot. Only statistics were stored, not the complete text.",
   },
 
   // Shortcuts

@@ -60,9 +60,9 @@ def test_behavior_probe_extracts_json_from_fenced_output():
 
 
 def test_behavior_prompt_contains_skill_and_all_scenarios():
-    prompt = probe.build_prompt("# Naxus Round\nStop dispatching when evidence is strong.")
+    prompt = probe.build_prompt("# NextOS Commander\nStop dispatching when evidence is strong.")
 
-    assert "# Naxus Round" in prompt
+    assert "# NextOS Commander" in prompt
     assert "stop-after-observed-implementation" in prompt
     assert "small-fact-minimal-path" in prompt
     assert "bottom-boundary-confirmation" in prompt

@@ -32,6 +32,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# AI-to-AI handoff results are model-authored context, not ordinary program
+# output. Generic output budgeting must never rewrite them, even when an older
+# user config supplies an explicit ``exempt_tools`` list without ``task``.
+_NEVER_BUDGET_TOOLS = frozenset({"task"})
+
 # Virtual outputs root inside the sandbox. Host-mounted sandboxes map this to
 # the thread outputs dir on the host; for non-mounted (remote) sandboxes the
 # same path is written directly into the sandbox filesystem so the model's
@@ -428,7 +433,7 @@ def _patch_tool_message(
 ) -> ToolMessage:
     """Apply budget to a single ToolMessage. Returns the original if unchanged."""
     tool_name = msg.name or "unknown"
-    if tool_name in config.exempt_tools:
+    if tool_name in _NEVER_BUDGET_TOOLS or tool_name in config.exempt_tools:
         return msg
 
     text = _message_text(msg.content)
@@ -472,7 +477,7 @@ def _effective_trigger(tool_name: str, config: ToolOutputConfig) -> int:
 
 def _tool_message_over_budget(msg: ToolMessage, config: ToolOutputConfig) -> bool:
     """Cheap, per-tool-aware check: is this ToolMessage non-exempt and over its trigger?"""
-    if (msg.name or "") in config.exempt_tools:
+    if (msg.name or "") in _NEVER_BUDGET_TOOLS or (msg.name or "") in config.exempt_tools:
         return False
     trigger = _effective_trigger(msg.name or "", config)
     if trigger < 0:

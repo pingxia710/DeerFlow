@@ -22,7 +22,7 @@ class RunEventRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
-    # "message" | "trace" | "lifecycle"
+    # Common categories include "message", "trace", "context", and "lifecycle".
     content: Mapped[str] = mapped_column(Text, default="")
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     seq: Mapped[int] = mapped_column(nullable=False)

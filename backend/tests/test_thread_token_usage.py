@@ -159,6 +159,7 @@ def test_thread_context_usage_returns_latest_snapshots():
     data = response.json()
     assert data["latest"]["run_id"] == "run-2"
     assert data["latest"]["estimated_tokens"] == 100
+    assert data["latest"]["has_full_text"] is False
     assert data["latest_lead"]["estimated_tokens"] == 100
     assert data["by_caller"]["subagent:research"]["estimated_tokens"] == 30
     assert [item["run_id"] for item in data["recent"]] == ["run-2", "run-2", "run-1"]
@@ -175,6 +176,63 @@ def test_thread_context_usage_returns_latest_snapshots():
         "run-1",
         event_types=["llm.context"],
         limit=200,
+        user_id=str(_TEST_USER_ID),
+    )
+
+
+def test_thread_context_detail_returns_complete_model_input_for_exact_event():
+    full_task_result = "subagent result " + ("结果" * 10_000)
+    run_store = MagicMock()
+    event_store = MagicMock()
+    event_store.list_events = AsyncMock(
+        return_value=[
+            {
+                "run_id": "run-1",
+                "event_type": "llm.context",
+                "category": "context",
+                "content": {
+                    "caller": "lead_agent",
+                    "llm_call_index": 3,
+                    "message_count": 2,
+                    "tool_schema_count": 1,
+                    "char_count": len(full_task_result),
+                    "estimated_tokens": 0,
+                    "role_counts": {"system": 1, "tool": 1},
+                    "messages": [
+                        {"role": "system", "content": "system prompt"},
+                        {
+                            "role": "tool",
+                            "name": "task",
+                            "tool_call_id": "task-1",
+                            "content": full_task_result,
+                        },
+                    ],
+                    "tool_schemas": [
+                        {"type": "function", "function": {"name": "task"}},
+                    ],
+                },
+                "seq": 9,
+                "created_at": "2026-07-13T10:00:00+00:00",
+            }
+        ],
+    )
+    app = _make_app(run_store, event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/context-usage/run-1/9")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["run_id"] == "run-1"
+    assert data["seq"] == 9
+    assert data["messages"][1]["content"] == full_task_result
+    assert data["tool_schemas"][0]["function"]["name"] == "task"
+    event_store.list_events.assert_awaited_once_with(
+        "thread-1",
+        "run-1",
+        event_types=["llm.context"],
+        limit=1,
+        after_seq=8,
         user_id=str(_TEST_USER_ID),
     )
 

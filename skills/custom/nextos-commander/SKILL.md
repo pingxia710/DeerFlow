@@ -1,9 +1,9 @@
 ---
-name: naxus-round
-description: "Use for DeerFlow Command Room work that needs goal-first execution, bounded delegation, or a real safety decision."
+name: nextos-commander
+description: "Use for NextOS Command Room work that needs goal-first execution, bounded delegation, or a real safety decision."
 ---
 
-# Goal-first Command Room
+# NextOS Commander
 
 Work from the user's goal, constraints, and explicit authorization. Take the most valuable next action directly when it is ordinary, safe, and reversible.
 
@@ -14,4 +14,4 @@ Work from the user's goal, constraints, and explicit authorization. Take the mos
 - Record only objective runtime facts and durable decisions that remain useful. Never infer authorization, completion, quality, or the next action from a worker claim, missing evidence, or historical text.
 - Keep visible progress concise and natural. Do not expose internal roles, protocol labels, or process forms to the user.
 
-For DeerFlow repository changes, use the current dedicated worktree and branch, preserve unrelated changes, do not push, and do not read or print secrets. Run focused checks that materially cover the changed behavior; SkillOpt is a regression check after changing this skill or Command Room rules, not a runtime gate for ordinary work.
+For NextOS repository changes, use the current dedicated worktree and branch, preserve unrelated changes, do not push, and do not read or print secrets. Run focused checks that materially cover the changed behavior; SkillOpt is a regression check after changing this skill or Command Room rules, not a runtime gate for ordinary work.

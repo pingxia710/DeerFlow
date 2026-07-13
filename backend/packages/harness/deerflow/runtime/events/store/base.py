@@ -1,8 +1,9 @@
 """Abstract interface for run event storage.
 
 RunEventStore is the unified storage interface for run event streams.
-Messages (frontend display) and execution traces (debugging/audit) go
-through the same interface, distinguished by the ``category`` field.
+Messages (frontend display), execution traces (debugging/audit), and complete
+model-input context snapshots go through the same interface, distinguished by
+the ``category`` field.
 
 Implementations:
 - MemoryRunEventStore: in-memory dict (development, tests)

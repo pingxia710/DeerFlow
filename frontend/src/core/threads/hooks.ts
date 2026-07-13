@@ -46,7 +46,11 @@ import {
   uploadListQueryKey,
 } from "../uploads";
 
-import { fetchThreadContextUsage, fetchThreadTokenUsage } from "./api";
+import {
+  fetchThreadContextDetail,
+  fetchThreadContextUsage,
+  fetchThreadTokenUsage,
+} from "./api";
 import {
   applyNativeRoundsToSnapshotRuns,
   buildCommandRoomReadModel,
@@ -151,6 +155,7 @@ import type {
   AgentThreadContext,
   AgentThreadState,
   RunMessage,
+  ThreadContextDetail,
   ThreadContextUsageResponse,
   ThreadTokenUsageResponse,
 } from "./types";
@@ -4821,6 +4826,33 @@ export function useThreadContextUsage(
       enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
+  });
+}
+
+export function useThreadContextDetail(
+  threadId?: string | null,
+  runId?: string | null,
+  seq?: number | null,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery<ThreadContextDetail | null>({
+    queryKey: queryKeys.thread.contextDetail(threadId, runId, seq),
+    queryFn: async () => {
+      if (!threadId || !runId || seq === undefined || seq === null) {
+        return null;
+      }
+      return fetchThreadContextDetail(threadId, runId, seq);
+    },
+    enabled:
+      enabled &&
+      Boolean(threadId) &&
+      Boolean(runId) &&
+      seq !== undefined &&
+      seq !== null &&
+      !isDeletedThreadTombstoned(threadId ?? undefined),
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
   });
 }
 

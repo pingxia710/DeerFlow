@@ -29,7 +29,7 @@ help:
 	@echo "  make command-room-contract-check - Inspect internal command-room audit fixture"
 	@echo "  make command-room-opposition-probe - Run optional command-room opposition development probe"
 	@echo "  make command-room-ai-native-probe - Run optional command-room AI-native development probe"
-	@echo "  make skillopt-probe  - Run local SkillOpt probe for the Naxus Round skill"
+	@echo "  make skillopt-probe  - Run local SkillOpt probe for the NextOS Commander skill"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (stable Gateway, frontend hot-reload)"

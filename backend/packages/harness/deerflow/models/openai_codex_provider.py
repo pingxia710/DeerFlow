@@ -78,6 +78,10 @@ class CodexStreamIncompleteError(RuntimeError):
     """Codex SSE ended before the required response.completed event."""
 
 
+class CodexRetryExhaustedError(RuntimeError):
+    """The Codex provider already exhausted its own retry budget."""
+
+
 class CodexChatModel(BaseChatModel):
     """LangChain chat model using ChatGPT Codex Responses API.
 
@@ -272,7 +276,7 @@ class CodexChatModel(BaseChatModel):
                 last_error = e
                 if e.response.status_code in (429, 500, 529):
                     if attempt >= self.retry_max_attempts:
-                        raise
+                        raise CodexRetryExhaustedError(f"Codex provider retry budget exhausted after {attempt} attempts") from e
                     wait_ms = 2000 * (1 << (attempt - 1))
                     logger.warning(f"Codex API error {e.response.status_code}, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms")
                     time.sleep(wait_ms / 1000)
@@ -281,7 +285,7 @@ class CodexChatModel(BaseChatModel):
             except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError, CodexStreamIncompleteError) as e:
                 last_error = e
                 if attempt >= self.retry_max_attempts:
-                    raise
+                    raise CodexRetryExhaustedError(f"Codex provider retry budget exhausted after {attempt} attempts") from e
                 wait_ms = 1000 * (1 << (attempt - 1))
                 logger.warning(f"Codex API connection/stream error, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms: {e}")
                 time.sleep(wait_ms / 1000)

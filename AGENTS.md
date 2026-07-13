@@ -97,7 +97,7 @@ make check       # Check that required tools are installed
 make command-room-contract-check  # Inspect internal command-room audit fixture
 make command-room-opposition-probe  # Run optional command-room opposition development probe
 make command-room-ai-native-probe  # Run optional command-room AI-native development probe
-make skillopt-probe  # Run local SkillOpt probe for the Naxus Round skill
+make skillopt-probe  # Run local SkillOpt probe for the NextOS Commander skill
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
@@ -149,10 +149,11 @@ These apply repo-wide; module guides own the module-specific detail.
   Program logic may record facts, preserve AI-authored content, and enforce hard permissions. It must not infer quality, completion, the next role, or rework from missing evidence or signals.
   Ask the user before production or public behavior, credentials, money, customer data, deletion or migration, irreversible action, or a boundary/permission expansion. Keep visible status concise and action-oriented.
   At most six `task` calls may run concurrently. For DeerFlow repository changes, use a dedicated worktree and branch; never modify `main`, push, or read secrets/config credentials.
+- **AI-AI text contract** — a `task` handoff is natural-language input to a one-shot sub-AI, and its returned natural-language result must reach the lead AI in full. Keep `task` exempt from generic tool-output preview/truncation. Record each actual model-call message/tool payload as an owner-scoped, non-truncated context event and expose it on demand in the top-right Context inspector; use character counts for this view, not subagent token spend. The Command Room Loop is inter-agent: one worker returns before the lead decides whether another AI is useful. Do not attach the lead's tool-frequency `LoopDetectionMiddleware` to subagents; retain timeout, cancellation, model-call, and structural recursion limits.
 - **Command Room skill governance** — keep local Command Room skills small,
   failure-driven, and probe-backed. Do not turn `SKILL.md` files into project
   encyclopedias; move background to docs/Obsidian and run `make skillopt-probe`
-  after changing `skills/custom/naxus-round/SKILL.md` or its governing rules.
+  after changing `skills/custom/nextos-commander/SKILL.md` or its governing rules.
 - **Progress record for meta-rule changes** — when changing AI-AI protocol,
   Command Room skills, AGENTS rules, SkillOpt probes, loop/evidence rules, or
   bottom-boundary rules, update `Progress.md` in the same change set. Ordinary

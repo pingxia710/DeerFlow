@@ -74,6 +74,8 @@ deer-flow/
 - Program logic may record facts and enforce hard execution permissions. It must not infer quality, completion, the next role, or rework from absent evidence, signals, or summaries.
 - Stop and ask the user before production or public behavior, credentials, money, customer data, deletion or migration, irreversible operations, or a boundary/permission expansion. Keep status concise and action-oriented.
 - Keep Command Room skills narrow and failure-driven; probes are regression checks, not runtime gates. Preserve raw handoff content when a handoff is used.
+- Execution-only `bash` subagents do not inherit coordinator operating Skills; role subagents receive only their explicitly declared Skills.
+- Treat `task` prompt/result bodies as the AI-AI text contract: the result must re-enter the lead model context in full, so `task` stays exempt from generic tool-output externalization/truncation.
 
 
 ### Documentation Update Policy
@@ -216,7 +218,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages
-2. **ToolOutputBudgetMiddleware** - Caps tool output size (per app config) before it re-enters the model context
+2. **ToolOutputBudgetMiddleware** - Caps ordinary tool output size (per app config) before it re-enters the model context; `task` is exempt so the lead AI receives the complete sub-AI result
 3. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only)
 4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode)
 5. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
@@ -325,11 +327,13 @@ The replay-only `tests/seed_runs_router.py` may seed these row kinds for
 cross-stack frontend tests, but it is mounted only by `scripts/run_replay_gateway.py`
 when `DEERFLOW_ENABLE_TEST_SEED=1`, never by the production app.
 
-`RunJournal.on_chat_model_start` emits `llm.context` trace events with only
-context size metrics (`estimated_tokens`, chars, message count, caller, role
-counts, tool schema count). Do not put raw prompt/message/tool-schema content
-in these snapshots; raw event inspection already exists via
-`GET /runs/{rid}/events`. Persistent event replay uses the RunEventStore
+`RunJournal.on_chat_model_start` emits owner-scoped `llm.context` events at the
+actual model-call boundary. Each event keeps the complete message payload and
+tool schemas plus lightweight metrics (chars, message count, caller, role
+counts, tool schema count). These events use category `context`, not `trace`,
+so the database's trace-size limit must not shorten them. The summary endpoint
+`GET /threads/{id}/context-usage` stays lightweight; the exact event is fetched
+on demand through `GET /threads/{id}/context-usage/{run_id}/{seq}`. Persistent event replay uses the RunEventStore
 `seq` cursor (`GET /threads/{id}/runs/{rid}/events?after_seq=N`); live SSE
 `Last-Event-ID` remains a StreamBridge buffer cursor. When the StreamBridge
 reports an evicted buffer, `sse_consumer` must emit
@@ -515,6 +519,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 6` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model` and adds a model-visible warning; six is the maximum per-response release, not a process-wide cap). `SubagentExecutor` also applies a process-wide admitted execution cap (`subagents.process_wide_max_concurrent`, default 12) with a pending queue (`subagents.process_wide_queue_size`, default 64); queued tasks remain `PENDING` until capacity frees up. Default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
+**AI-AI result boundary**: The subagent is a one-shot AI call whose final natural-language result is determined by the lead-authored `task` prompt. The complete result returns as the `task` ToolMessage; generic tool-output preview/truncation must not rewrite it before the next lead model call.
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_cancelled`/`task_timed_out`; task event/action_result fields are a frontend-backend contract pinned in `contracts/task_event_contract.json`, must be emitted to the live stream, and must be persisted through `RunJournal.record_task_event` so conversation switches can replay subtask state. Root run completion also writes a `run.terminal` lifecycle event with `status` and `terminal_reason` as the replay/timeline terminal anchor.
 **Handoff audit**: `task()` appends compact records to `audit/subagent_handoffs.jsonl` under the thread directory when possible. Records keep prompt/result/error hashes, character counts, usage, status, and compact extracted fields; raw prompts, worker output, and errors are intentionally omitted.
 
@@ -583,6 +588,7 @@ Additional providers also live here (`brave`, `browserless`, `ddg_search`, `exa`
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
 - `PatchedChatDeepSeek` accepts optional `api_keys` for comma/newline separated credential pools and rotates on rate-limit/auth/server errors
 - The Codex Responses provider treats UI-level `max` and `ultra` reasoning effort as aliases for the endpoint-supported `xhigh` value; keep this normalization at the provider boundary so direct and Gateway callers behave identically.
+- The Codex Responses provider owns its three-attempt transport retry budget. Once it raises `CodexRetryExhaustedError`, `LLMErrorHandlingMiddleware` must surface that terminal transient failure without replaying the provider's whole retry loop.
 - Models can set `subagents_inherit: false` to keep subagents with `model: inherit` on the default model instead of inheriting a lead-only model
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables

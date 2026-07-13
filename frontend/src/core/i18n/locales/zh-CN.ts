@@ -450,8 +450,16 @@ export const zhCN: Translations = {
     messages: "消息",
     tools: "工具",
     chars: "字符",
+    charUnit: "字",
     byCaller: "来源",
     unavailable: "暂无上下文快照。下一次模型调用开始后会显示。",
+    openFullText: "查看每轮完整文本",
+    complete: "完整记录（未截断）",
+    calls: "模型调用",
+    modelMessages: "发送给模型的完整消息",
+    toolSchemas: "本轮完整工具定义",
+    loading: "正在加载完整上下文…",
+    fullTextUnavailable: "这轮来自升级前的旧快照，仅有统计，没有保存完整文本。",
   },
 
   // Shortcuts

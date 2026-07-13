@@ -382,8 +382,16 @@ export interface Translations {
     messages: string;
     tools: string;
     chars: string;
+    charUnit: string;
     byCaller: string;
     unavailable: string;
+    openFullText: string;
+    complete: string;
+    calls: string;
+    modelMessages: string;
+    toolSchemas: string;
+    loading: string;
+    fullTextUnavailable: string;
   };
 
   // Shortcuts

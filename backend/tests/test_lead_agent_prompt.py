@@ -239,6 +239,26 @@ def test_command_room_prompt_prefers_direct_safe_work_and_bounds_delegation():
     assert "Stop and ask before destructive or irreversible actions" in section
 
 
+def test_command_room_prompt_requires_a_self_contained_one_shot_handoff():
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+        ),
+        subagents=SubagentsAppConfig(),
+    )
+
+    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+
+    assert "does not inherit this lead conversation" in section
+    assert "self-contained one-shot handoff" in section
+    assert "relevant confirmed context and starting points" in section
+    assert "authority to inspect, edit, run checks, and make ordinary technical choices" in section
+    assert "observable definition of done" in section
+    assert "Do not prescribe a tool-by-tool procedure" in section
+    assert "Do not require a fixed handoff form" in section
+
+
 def test_command_room_prompt_has_no_required_governance_workflow():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(

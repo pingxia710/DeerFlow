@@ -166,11 +166,12 @@ class TestLlmCallbacks:
         await j.flush()
 
     @pytest.mark.anyio
-    async def test_chat_model_start_records_context_size_without_raw_content(self, journal_setup):
+    async def test_chat_model_start_records_complete_model_input_without_truncation(self, journal_setup):
         j, store = journal_setup
+        full_task_result = "subagent result " + ("x" * 20_000)
         j.on_chat_model_start(
             {},
-            [[SystemMessage(content="system text"), HumanMessage(content="user secret text")]],
+            [[SystemMessage(content="system text"), HumanMessage(content=full_task_result)]],
             run_id=uuid4(),
             tags=["lead_agent"],
             invocation_params={"tools": [{"type": "function", "function": {"name": "read_file"}}]},
@@ -180,6 +181,7 @@ class TestLlmCallbacks:
         events = await store.list_events("t1", "r1", event_types=["llm.context"])
 
         assert len(events) == 1
+        assert events[0]["category"] == "context"
         snapshot = events[0]["content"]
         assert snapshot["caller"] == "lead_agent"
         assert snapshot["message_count"] == 2
@@ -187,7 +189,14 @@ class TestLlmCallbacks:
         assert snapshot["char_count"] > 0
         assert snapshot["estimated_tokens"] > 0
         assert snapshot["role_counts"] == {"system": 1, "human": 1}
-        assert "user secret text" not in json.dumps(snapshot)
+        assert snapshot["messages"] == [
+            {"role": "system", "content": "system text"},
+            {"role": "user", "content": full_task_result},
+        ]
+        assert snapshot["tool_schemas"] == [
+            {"type": "function", "function": {"name": "read_file"}},
+        ]
+        assert full_task_result in json.dumps(snapshot)
 
     @pytest.mark.anyio
     async def test_latency_tracking(self, journal_setup):

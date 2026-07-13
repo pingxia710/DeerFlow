@@ -39,9 +39,19 @@ def test_output_ref_only_is_not_evidence():
     assert signal.source_kind == "output_ref"
 
 
+def test_worker_output_ref_is_self_attestation_not_strong_evidence():
+    signal = analyze_evidence_ref("worker-output:task-123")
+
+    assert signal.strong is False
+    assert signal.trusted_source is False
+    assert "worker-output-self-attestation" in signal.weak_reasons
+    assert signal.source_kind == "self_claim"
+
+
 def test_summary_does_not_make_quality_verdict_or_auto_rework():
-    summary = summarize_evidence_refs(["tests passed", "output_ref: worker-output-123"])
+    summary = summarize_evidence_refs(["tests passed", "output_ref: worker-output-123", "worker-output:task-123"])
 
     assert summary["has_strong_signal"] is False
+    assert summary["weak_count"] == 3
     assert summary["quality_verdict"] is None
     assert summary["auto_rework"] is False

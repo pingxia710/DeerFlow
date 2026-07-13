@@ -38,6 +38,7 @@ _COMMAND_RE = re.compile(r"(?:^|\b)(?:command|cmd|\$|pytest|python -m pytest|mak
 _OUTPUT_RE = re.compile(r"(?:^|\b)(?:output|stdout|stderr|exit code|exit_code|returncode)\b", re.I)
 _TESTS_PASSED_ALONE_RE = re.compile(r"^\s*(?:tests?\s+passed|测试通过|passed)\s*[.!。]?\s*$", re.I)
 _OUTPUT_REF_ONLY_RE = re.compile(r"^\s*output[_ -]?ref\s*[:=]?\s*\S+\s*$", re.I)
+_WORKER_OUTPUT_RE = re.compile(r"^\s*worker[-_\s]?output\s*[:=]\s*\S+\s*$", re.I)
 _SUMMARY_ONLY_RE = re.compile(r"^\s*(?:summary|总结)\s*[:：].*$", re.I | re.S)
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.I | re.S)
 _OPEN_THINK_RE = re.compile(r"<think\b[^>]*>.*$", re.I | re.S)
@@ -125,6 +126,8 @@ def analyze_evidence_ref(ref: str | None) -> EvidenceSignal:
         weak.append("tests-passed-alone")
     if _OUTPUT_REF_ONLY_RE.match(text) or ("output_ref" in lower and not any(t in lower for t in _STRONG_TOKENS)):
         weak.append("output-ref-only")
+    if _WORKER_OUTPUT_RE.match(text):
+        weak.append("worker-output-self-attestation")
     if _SUMMARY_ONLY_RE.match(text) and not any(t in lower for t in _STRONG_TOKENS):
         weak.append("summary-only")
 
@@ -156,7 +159,7 @@ def _source_kind(text: str, lower: str, weak_reasons: tuple[str, ...], *, has_co
         return "empty"
     if "output-ref-only" in weak_reasons:
         return "output_ref"
-    if "tests-passed-alone" in weak_reasons or "summary-only" in weak_reasons:
+    if "tests-passed-alone" in weak_reasons or "summary-only" in weak_reasons or "worker-output-self-attestation" in weak_reasons:
         return "self_claim"
     if has_command and has_output:
         return "command_output"

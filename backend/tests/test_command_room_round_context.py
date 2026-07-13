@@ -147,6 +147,34 @@ def test_output_ref_is_not_evidence():
     assert updated.is_complete is False
 
 
+def test_worker_output_evidence_ref_is_self_attestation_only():
+    round_ = create_round_context("worker output")
+    updated = record_action_result_from_event(
+        round_,
+        {
+            "type": "task_completed",
+            "task_id": "task-worker-output",
+            "action_result": {
+                "action_id": "task-worker-output",
+                "status": "completed",
+                "evidence_refs": ["worker-output:task-worker-output"],
+            },
+        },
+    )
+
+    signals = round_context_signals(updated)
+    evidence_signal = signals.evidence_signals["signals"][0]
+
+    assert evidence_signal.ref == "worker-output:task-worker-output"
+    assert evidence_signal.strong is False
+    assert evidence_signal.trusted_source is False
+    assert evidence_signal.source_kind == "self_claim"
+    assert signals.evidence_signals["strong_count"] == 0
+    assert signals.evidence_signals["weak_count"] == 1
+    assert signals.quality_verdict is None
+    assert signals.auto_rework is False
+
+
 def test_helper_does_not_change_original_task_return_or_auto_rework():
     task_return = "plain task() string return"
     round_ = create_round_context("non invasive")

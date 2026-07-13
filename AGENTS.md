@@ -14,11 +14,16 @@ guide rather than expecting full detail here:
 
 ## What is DeerFlow
 
-DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
-backend runs a "super agent" with sandboxed execution, persistent memory, subagent
-delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
-frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
-DingTalk) bridge into the same agent through the Gateway.
+- DeerFlow的指挥室是脑袋，指派子任务是让脑袋保持清醒。如果指挥室既执行工作又指挥，上下文很快就不够，无法完成大型项目
+- 子任务是分身，是指挥室能力的延伸，因为指挥室这个脑袋需要专注，所以很多事情要交给子任务AI来完成
+- 角色是因为很多工作非常固定，专业的角色才能做得好
+- 所有工作必须AI-AI-AI，AI不是程序，是智能体，不要给AI写一堆程序来控制他
+- AI-AI的工作模式是prompt传递信息、目的、边界等，给子AI的prompt是什么，子AI就输出什么结果，这跟程序最后才输出结果完全不一样
+- 子AI/子任务执行完成后，把自然结果传递给下一个环节或者主AI，AI能读懂这些自然语言文本。子任务完成就结束，没有常驻的逻辑，也不会影响主AI/指挥室
+- 指挥室AI明确目标，制定方案，推动进度，子AI等专业角色进行核对、审查、验收。人类已经无法验收这些结果，也无法控制结果，AI才是最终的核对、审查、验收
+- AI有幻想，只会往一个方向上思考，这不全面。需要反方走另一个方向，把可能的角度暴露出来。指挥室根据正反2个方面进行最终的裁决
+- 子AI的结果，另一个子AI来核对、审查、验收。小任务对AI来说非常快，比程序还快，要合理利用这个规则去达到质量目标
+- 本段内容由开发者维护，任何改动都需要经过开发者授权才能更改
 
 ## Service Topology
 

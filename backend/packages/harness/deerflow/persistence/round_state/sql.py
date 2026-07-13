@@ -275,6 +275,30 @@ class RoundStateRepository:
         evidence_refs = _dedupe_refs([ref for row in rows for ref in ((row[1] if isinstance(row[1], list) else [row[1]]) if row[1] else [])])
         return {"artifact_refs": artifact_refs, "evidence_refs": evidence_refs}
 
+    async def _attached_rounds_for_run(
+        self,
+        session: AsyncSession,
+        run_id: str,
+    ) -> dict[str, RoundRow | None]:
+        """Return every durable ``run.attached`` target for a run."""
+        round_ids = list(
+            (
+                await session.scalars(
+                    select(RoundEventRow.round_id)
+                    .where(
+                        RoundEventRow.event_type == "run.attached",
+                        RoundEventRow.run_id == run_id,
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
+        if not round_ids:
+            return {}
+        rows = list((await session.scalars(select(RoundRow).where(RoundRow.round_id.in_(round_ids)))).all())
+        rows_by_id = {row.round_id: row for row in rows}
+        return {round_id: rows_by_id.get(round_id) for round_id in round_ids}
+
     async def bind_run(
         self,
         *,
@@ -289,6 +313,22 @@ class RoundStateRepository:
         async with self._sf() as session:
             async with self._seq_write_guard(session), session.begin():
                 explicit_round_id = _explicit_round_id(metadata)
+                attached_rounds = await self._attached_rounds_for_run(
+                    session,
+                    run_id,
+                )
+                if len(attached_rounds) > 1:
+                    raise ValueError("Run is attached to multiple rounds")
+                if attached_rounds:
+                    attached_round_id, attached_row = next(iter(attached_rounds.items()))
+                    if attached_row is None:
+                        raise ValueError("Run is attached to a missing round")
+                    if attached_row.thread_id != thread_id or attached_row.user_id != user_id:
+                        raise ValueError("Run is already attached to a different thread or user")
+                    if explicit_round_id is not None and explicit_round_id != attached_round_id:
+                        raise ValueError("Explicit round_id does not match the run attachment")
+                    return _row_to_dict(attached_row)
+
                 round_row = await session.get(RoundRow, explicit_round_id) if explicit_round_id else None
                 if explicit_round_id is not None:
                     _validate_explicit_round(
@@ -466,6 +506,9 @@ class RoundStateRepository:
         self,
         run_id: str,
         *,
+        thread_id: str,
+        user_id: str | None,
+        round_id: str,
         state: str,
         event_type: str,
         content: dict[str, Any] | None = None,
@@ -474,36 +517,55 @@ class RoundStateRepository:
         now = _now()
         async with self._sf() as session:
             async with self._seq_write_guard(session), session.begin():
-                row = await session.scalar(select(RoundRow).where(RoundRow.current_run_id == run_id).order_by(RoundRow.updated_at.desc()).limit(1))
-                if row is None:
+                row = await session.get(RoundRow, round_id)
+                attached_rounds = await self._attached_rounds_for_run(
+                    session,
+                    run_id,
+                )
+                if row is None or row.thread_id != thread_id or row.user_id != user_id or set(attached_rounds) != {round_id} or attached_rounds.get(round_id) is not row:
                     return None
+
+                is_current_run = row.current_run_id == run_id
                 previous = row.state
-                if previous == state:
+                if is_current_run and previous == state:
                     return {
                         **_row_to_dict(row),
-                        **(await self._round_refs(session, row.round_id)),
+                        **(await self._round_refs(session, round_id)),
                     }
-                _assert_allowed_transition(previous, state)
-                row.state = state
-                row.updated_at = now
-                if state in TERMINAL_ROUND_STATES and row.closed_at is None:
-                    row.closed_at = now
-                if state == "closed" and next_action is None:
-                    row.next_action = None
-                elif next_action:
-                    row.next_action = _clip(next_action, MAX_NEXT_ACTION_CHARS)
+                event_content = {
+                    **(content or {}),
+                    "from_state": previous,
+                    "to_state": state,
+                    "requested_state": state,
+                    "state_applied": is_current_run,
+                }
+                if is_current_run:
+                    _assert_allowed_transition(previous, state)
+                    row.state = state
+                    row.updated_at = now
+                    if state in TERMINAL_ROUND_STATES and row.closed_at is None:
+                        row.closed_at = now
+                    if state == "closed" and next_action is None:
+                        row.next_action = None
+                    elif next_action:
+                        row.next_action = _clip(
+                            next_action,
+                            MAX_NEXT_ACTION_CHARS,
+                        )
+                else:
+                    event_content["superseded_by_run_id"] = row.current_run_id
                 await self._append_event(
                     session,
-                    round_id=row.round_id,
-                    thread_id=row.thread_id,
+                    round_id=round_id,
+                    thread_id=thread_id,
                     run_id=run_id,
-                    user_id=row.user_id,
+                    user_id=user_id,
                     event_type=event_type,
-                    content={**(content or {}), "from_state": previous, "to_state": state},
+                    content=event_content,
                 )
                 return {
                     **_row_to_dict(row),
-                    **(await self._round_refs(session, row.round_id)),
+                    **(await self._round_refs(session, round_id)),
                 }
 
     async def rollback_terminal_projection(
@@ -552,11 +614,14 @@ class RoundStateRepository:
                     task_id = event.get("task_id")
                     if not isinstance(thread_id, str) or not isinstance(run_id, str) or not isinstance(task_id, str):
                         continue
-                    round_id = event.get("round_id")
-                    row = await session.scalar(select(RoundRow).where(RoundRow.current_run_id == run_id).order_by(RoundRow.updated_at.desc()).limit(1))
-                    if row is None and isinstance(round_id, str):
-                        row = await session.get(RoundRow, round_id)
-                    if row is None:
+                    attached_rounds = await self._attached_rounds_for_run(
+                        session,
+                        run_id,
+                    )
+                    if len(attached_rounds) != 1:
+                        continue
+                    row = next(iter(attached_rounds.values()))
+                    if row is None or row.thread_id != thread_id:
                         continue
                     lane = await session.get(TaskLaneRow, {"thread_id": thread_id, "run_id": run_id, "task_id": task_id})
                     if lane is None:
@@ -577,6 +642,8 @@ class RoundStateRepository:
                             updated_at=_now(),
                         )
                         session.add(lane)
+                    lane.round_id = row.round_id
+                    lane.user_id = row.user_id
                     lane.status = str(event.get("status") or lane.status)
                     lane.role = _clip(event.get("subagent_type"), 64) or lane.role
                     lane.description = _clip(event.get("description"), 1000) or lane.description

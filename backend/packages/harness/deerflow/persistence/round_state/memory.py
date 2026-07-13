@@ -148,6 +148,22 @@ class MemoryRoundStateStore:
             "evidence_refs": _dedupe_refs([ref for lane in lanes for ref in (lane.get("evidence_refs") or ([lane.get("evidence_ref")] if lane.get("evidence_ref") else []))]),
         }
 
+    def _attached_rounds_for_run(
+        self,
+        run_id: str,
+    ) -> dict[str, dict[str, Any] | None]:
+        """Return every durable ``run.attached`` target for a run."""
+        bound_rounds: dict[str, dict[str, Any] | None] = {}
+        for stored_round_id, events in self.events.items():
+            for event in events:
+                if event.get("event_type") != "run.attached" or event.get("run_id") != run_id:
+                    continue
+                round_id = event.get("round_id")
+                if not isinstance(round_id, str) or not round_id:
+                    round_id = stored_round_id
+                bound_rounds.setdefault(round_id, self.rounds.get(round_id))
+        return bound_rounds
+
     async def bind_run(
         self,
         *,
@@ -158,8 +174,21 @@ class MemoryRoundStateStore:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         metadata = metadata or {}
-        latest = self._latest_round(thread_id, user_id)
         explicit_round_id = _explicit_round_id(metadata)
+        attached_rounds = self._attached_rounds_for_run(run_id)
+        if len(attached_rounds) > 1:
+            raise ValueError("Run is attached to multiple rounds")
+        if attached_rounds:
+            attached_round_id, attached_row = next(iter(attached_rounds.items()))
+            if attached_row is None:
+                raise ValueError("Run is attached to a missing round")
+            if attached_row["thread_id"] != thread_id or attached_row.get("user_id") != user_id:
+                raise ValueError("Run is already attached to a different thread or user")
+            if explicit_round_id is not None and explicit_round_id != attached_round_id:
+                raise ValueError("Explicit round_id does not match the run attachment")
+            return dict(attached_row)
+
+        latest = self._latest_round(thread_id, user_id)
         row = self.rounds.get(explicit_round_id) if explicit_round_id else None
         if explicit_round_id is not None:
             _validate_explicit_round(
@@ -280,28 +309,51 @@ class MemoryRoundStateStore:
         self,
         run_id: str,
         *,
+        thread_id: str,
+        user_id: str | None,
+        round_id: str,
         state: str,
         event_type: str,
         content: dict[str, Any] | None = None,
         next_action: str | None = None,
     ) -> dict[str, Any] | None:
-        row = next((item for item in self.rounds.values() if item.get("current_run_id") == run_id), None)
-        if row is None:
+        row = self.rounds.get(round_id)
+        attached_rounds = self._attached_rounds_for_run(run_id)
+        if row is None or row["thread_id"] != thread_id or row.get("user_id") != user_id or set(attached_rounds) != {round_id} or attached_rounds.get(round_id) is not row:
             return None
+
+        is_current_run = row.get("current_run_id") == run_id
         previous = row["state"]
-        if previous == state:
-            return {**row, **self._round_refs(row["round_id"])}
-        _assert_allowed_transition(previous, state)
-        row["state"] = state
-        row["updated_at"] = _now_iso()
-        if state in TERMINAL_ROUND_STATES and row.get("closed_at") is None:
-            row["closed_at"] = row["updated_at"]
-        if state == "closed" and next_action is None:
-            row["next_action"] = None
-        elif next_action:
-            row["next_action"] = _clip(next_action, MAX_NEXT_ACTION_CHARS)
-        self._append_event(row["round_id"], thread_id=row["thread_id"], run_id=run_id, user_id=row.get("user_id"), event_type=event_type, content={**(content or {}), "from_state": previous, "to_state": state})
-        return {**row, **self._round_refs(row["round_id"])}
+        if is_current_run and previous == state:
+            return {**row, **self._round_refs(round_id)}
+        event_content = {
+            **(content or {}),
+            "from_state": previous,
+            "to_state": state,
+            "requested_state": state,
+            "state_applied": is_current_run,
+        }
+        if is_current_run:
+            _assert_allowed_transition(previous, state)
+            row["state"] = state
+            row["updated_at"] = _now_iso()
+            if state in TERMINAL_ROUND_STATES and row.get("closed_at") is None:
+                row["closed_at"] = row["updated_at"]
+            if state == "closed" and next_action is None:
+                row["next_action"] = None
+            elif next_action:
+                row["next_action"] = _clip(next_action, MAX_NEXT_ACTION_CHARS)
+        else:
+            event_content["superseded_by_run_id"] = row.get("current_run_id")
+        self._append_event(
+            round_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user_id,
+            event_type=event_type,
+            content=event_content,
+        )
+        return {**row, **self._round_refs(round_id)}
 
     async def rollback_terminal_projection(
         self,
@@ -335,8 +387,11 @@ class MemoryRoundStateStore:
             task_id = event.get("task_id")
             if not isinstance(thread_id, str) or not isinstance(run_id, str) or not isinstance(task_id, str):
                 continue
-            row = next((item for item in self.rounds.values() if item.get("current_run_id") == run_id), None)
-            if row is None:
+            attached_rounds = self._attached_rounds_for_run(run_id)
+            if len(attached_rounds) != 1:
+                continue
+            row = next(iter(attached_rounds.values()))
+            if row is None or row["thread_id"] != thread_id:
                 continue
             key = (thread_id, run_id, task_id)
             lane = self.task_lanes.setdefault(
@@ -349,6 +404,8 @@ class MemoryRoundStateStore:
                     "user_id": row.get("user_id"),
                 },
             )
+            lane["round_id"] = row["round_id"]
+            lane["user_id"] = row.get("user_id")
             lane["status"] = str(event.get("status") or lane.get("status") or "in_progress")
             lane["role"] = event.get("subagent_type") or lane.get("role")
             lane["subagent_type"] = lane.get("role")

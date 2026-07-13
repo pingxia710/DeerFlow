@@ -121,10 +121,24 @@ class _RepairableRoundStoreForSnapshotTests:
     async def list_task_lanes_by_round(self, *, thread_id: str, round_id: str, user_id=None, limit: int = 100):
         return [dict(row) for row in self.task_lanes if row["thread_id"] == thread_id and row["round_id"] == round_id and row.get("user_id") == user_id][:limit]
 
-    async def set_run_state(self, run_id: str, *, state: str, event_type: str, content: dict | None = None, next_action: str | None = None):
+    async def set_run_state(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        user_id: str | None,
+        round_id: str,
+        state: str,
+        event_type: str,
+        content: dict | None = None,
+        next_action: str | None = None,
+    ):
         self.set_run_state_calls.append(
             {
                 "run_id": run_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "round_id": round_id,
                 "state": state,
                 "event_type": event_type,
                 "content": content,

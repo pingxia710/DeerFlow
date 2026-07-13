@@ -1112,6 +1112,9 @@ async def _repair_terminal_runtime_snapshot_rows(
             try:
                 updated = await round_store.set_run_state(
                     run_id,
+                    thread_id=record.thread_id,
+                    user_id=record.user_id,
+                    round_id=row["round_id"],
                     state=state,
                     event_type=event_type,
                     content={

@@ -55,7 +55,14 @@ async def _assert_explicit_round_binding_is_owner_scoped(round_store):
     )
     assert rebound["round_id"] == round_id
 
-    await round_store.set_run_state("run-rebound", state="closed", event_type="run.completed")
+    await round_store.set_run_state(
+        "run-rebound",
+        thread_id="thread-a",
+        user_id="user-a",
+        round_id=round_id,
+        state="closed",
+        event_type="run.completed",
+    )
     with pytest.raises(ValueError):
         await round_store.bind_run(
             thread_id="thread-a",
@@ -199,7 +206,14 @@ async def _assert_run_binding_rollback_restores_prior_rounds(round_store):
         run_id="run-parent",
         current_intent="parent intent",
     )
-    await round_store.set_run_state("run-parent", state="closed", event_type="run.completed")
+    await round_store.set_run_state(
+        "run-parent",
+        thread_id="thread-rollback-child",
+        user_id=None,
+        round_id=parent["round_id"],
+        state="closed",
+        event_type="run.completed",
+    )
     child = await round_store.bind_run(
         thread_id="thread-rollback-child",
         run_id="run-child-cancelled",
@@ -968,7 +982,14 @@ async def test_projection_repair_scopes_same_task_id_to_run_id():
     round_store = MemoryRoundStateStore()
     thread_id = "thread-projection-run-scope"
     first = await round_store.bind_run(thread_id=thread_id, run_id="run-1", current_intent="first")
-    await round_store.set_run_state("run-1", state="closed", event_type="run.completed")
+    await round_store.set_run_state(
+        "run-1",
+        thread_id=thread_id,
+        user_id=None,
+        round_id=first["round_id"],
+        state="closed",
+        event_type="run.completed",
+    )
     second = await round_store.bind_run(thread_id=thread_id, run_id="run-2", current_intent="second")
     records = [
         RunRecord(run_id="run-1", thread_id=thread_id, assistant_id="lead_agent", status=RunStatus.success, on_disconnect="continue", round_id=first["round_id"]),

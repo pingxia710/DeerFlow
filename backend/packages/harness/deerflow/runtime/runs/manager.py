@@ -755,7 +755,7 @@ class RunManager:
         context = {
             "round_id": info.get("round_id"),
             "state": info.get("state"),
-            "current_run_id": run_id,
+            "current_run_id": info.get("current_run_id", run_id),
             "source_goal_run_id": info.get("source_goal_run_id"),
             "parent_round_id": info.get("parent_round_id"),
             "current_intent": current_intent or info.get("current_intent"),
@@ -808,9 +808,14 @@ class RunManager:
             event_type = "round.blocked"
         else:
             return True
+        if not isinstance(record.round_id, str) or not record.round_id:
+            return False
         try:
             info = await self._round_store.set_run_state(
                 record.run_id,
+                thread_id=record.thread_id,
+                user_id=record.user_id,
+                round_id=record.round_id,
                 state=state,
                 event_type=event_type,
                 content={"run_status": status.value, "terminal_reason": terminal_reason, "error": error},

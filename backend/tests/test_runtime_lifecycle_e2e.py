@@ -97,14 +97,17 @@ class _ScriptedAgent:
         self.controller.started.set()
 
         try:
-            thread_id = _thread_id_from_config(config)
             human_text = _last_human_text(graph_input)
             human = HumanMessage(content=human_text)
             ai = await self.model.ainvoke([human], config=config)
             state = {"messages": [human.model_dump(), ai.model_dump()], "title": self.title}
 
             if self.checkpointer is not None:
-                await _write_checkpoint(self.checkpointer, thread_id=thread_id, state=state)
+                await _write_checkpoint(
+                    self.checkpointer,
+                    config=config,
+                    state=state,
+                )
             self.controller.checkpoint_written.set()
 
             yield _stream_item_for_mode(stream_mode, state)
@@ -379,15 +382,6 @@ def _wait_for_status(client, thread_id: str, run_id: str, status: str, *, timeou
     raise AssertionError(f"Run {run_id} did not reach {status!r}; last={last!r}")
 
 
-def _thread_id_from_config(config: dict | None) -> str:
-    config = config or {}
-    context = config.get("context") if isinstance(config.get("context"), dict) else {}
-    configurable = config.get("configurable") if isinstance(config.get("configurable"), dict) else {}
-    thread_id = context.get("thread_id") or configurable.get("thread_id")
-    assert thread_id, f"runtime config did not contain thread_id: {config!r}"
-    return str(thread_id)
-
-
 def _last_human_text(graph_input: dict) -> str:
     messages = graph_input.get("messages") or []
     if not messages:
@@ -399,13 +393,24 @@ def _last_human_text(graph_input: dict) -> str:
     return str(content)
 
 
-async def _write_checkpoint(checkpointer: Any, *, thread_id: str, state: dict[str, Any]) -> None:
+async def _write_checkpoint(
+    checkpointer: Any,
+    *,
+    config: dict | None,
+    state: dict[str, Any],
+) -> None:
     from langgraph.checkpoint.base import empty_checkpoint
+
+    configurable = config.get("configurable") if isinstance(config, dict) else None
+    assert isinstance(configurable, dict), f"runtime config did not contain configurable: {config!r}"
+    copied_configurable = dict(configurable)
+    assert copied_configurable.get("thread_id"), f"runtime config configurable did not contain thread_id: {config!r}"
+    copied_configurable.setdefault("checkpoint_ns", "")
 
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = dict(state)
     checkpoint["channel_versions"] = {key: 1 for key in state}
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config = {"configurable": copied_configurable}
     metadata = {
         "source": "loop",
         "step": 1,

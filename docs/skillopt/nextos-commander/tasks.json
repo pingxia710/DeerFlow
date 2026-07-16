@@ -3,7 +3,7 @@
     "id": "train-clear-direct-execution",
     "split": "train",
     "intent": "用户明确要求把一个已知文件复制到指定下载目录，目标、边界和完成标准都清楚。",
-    "required_rules": ["lead-brain", "prompt-contract", "optional-planning", "execution-review"]
+    "required_rules": ["lead-brain", "prompt-contract", "optional-planning", "free-dispatch"]
   },
   {
     "id": "val-planning-angles",
@@ -20,14 +20,14 @@
   {
     "id": "test-review-loop",
     "split": "test",
-    "intent": "执行完成后审查发现真实偏差，需要把自然语言findings传给下一轮执行。",
-    "required_rules": ["execution-review", "findings-loop", "prompt-contract"]
+    "intent": "执行完成后，指挥室判断需要独立落地审查；审查发现真实偏差后，由指挥室决定下一项修正任务。",
+    "required_rules": ["free-dispatch", "optional-review", "prompt-contract"]
   },
   {
     "id": "test-no-program-controller",
     "split": "test",
     "intent": "有人建议程序解析findings、选择角色、自动判定通过并触发返工。",
-    "required_rules": ["no-program-control", "findings-loop"]
+    "required_rules": ["no-program-control", "optional-review"]
   },
   {
     "id": "test-background-control-lane",
@@ -39,7 +39,7 @@
     "id": "test-project-lifecycle",
     "split": "test",
     "intent": "审查接受后自动进入项目管家；项目完成时进入债务和学习沉淀，再经过治理执行与审查后关闭。",
-    "required_rules": ["project-lifecycle", "execution-review", "no-program-control"]
+    "required_rules": ["project-lifecycle", "optional-review", "no-program-control"]
   },
   {
     "id": "test-hard-boundary-confirmation",

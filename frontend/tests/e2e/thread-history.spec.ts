@@ -141,6 +141,7 @@ test.describe("Thread history", () => {
   }) => {
     const fullResult = "COMPLETE-RESULT-FROM-RUN";
     mockLangGraphAPI(page, {
+      agents: [{ name: "command-room", description: "Command Room" }],
       threads: [
         {
           thread_id: MOCK_THREAD_ID,
@@ -148,6 +149,11 @@ test.describe("Thread history", () => {
           agent_name: "command-room",
           updated_at: "2025-06-01T12:00:00Z",
           messages: [
+            {
+              type: "human",
+              id: "command-room-task-request",
+              content: "Run the bounded task",
+            },
             {
               type: "tool",
               name: "task",
@@ -189,16 +195,30 @@ test.describe("Thread history", () => {
       ],
     });
 
-    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const runtimeSnapshotResponse = page.waitForResponse((response) =>
+      response
+        .url()
+        .includes(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot`),
+    );
+    const commandRoomUrl = `/workspace/agents/command-room/chats/${MOCK_THREAD_ID}`;
+    await page.goto(commandRoomUrl);
 
-    await expect(page.getByLabel("Run trace")).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText("Subtasks")).toBeVisible();
-    await expect(page.getByText("Started:")).toBeVisible();
-    await expect(page.getByText("Finished:")).toBeVisible();
-    await expect(page.getByText("Elapsed: 00:01:05")).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
+    const runtimeSnapshot = await runtimeSnapshotResponse;
+    expect(runtimeSnapshot.ok()).toBe(true);
+    expect((await runtimeSnapshot.json()).task_lanes).toHaveLength(1);
+    await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
+    await expect(page.getByText("command-room", { exact: true })).toBeVisible();
+
+    const trajectory = page.locator("[data-command-room-trajectory]");
+    await expect(trajectory).toBeVisible({ timeout: 15_000 });
+    await expect(trajectory.getByText("Subtasks")).toBeVisible();
+    await expect(trajectory.getByText("Started:")).toBeVisible();
+    await expect(trajectory.getByText("Finished:")).toBeVisible();
+    await expect(trajectory.getByText("Elapsed: 00:01:05")).toBeVisible();
     await expect(page.getByText(fullResult)).toHaveCount(0);
 
-    await page
+    await trajectory
       .getByRole("button", { name: "Legacy execution task: Completed" })
       .click();
     await expect(page.getByText(fullResult)).toBeVisible();

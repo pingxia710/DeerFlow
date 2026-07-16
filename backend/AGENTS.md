@@ -51,32 +51,26 @@ agent loop:
    `ToolMessage` result. Command Room receives an immediate background receipt;
    Gateway preserves the terminal task event and starts a new sequential Chair
    Run with the complete result. No prose is parsed, scored, or truncated.
-5. An explicit `work_package_id` isolates Context, Planning, Delivery,
-   Governance, and parent-owned receipts under `packages/<work_package_id>/`.
-   Optional Context runs independent discovery handoffs before a Recorder
-   preserves `00-context/context.md`. Optional Planning and Technical Design
-   use independent forward and opposition AIs from the same factual snapshot;
-   a Recorder preserves the Chair's unified decision in `01-planning/spec.md`
-   or `02-technical-design/technical-plan.md`. The Chair then presents that
-   plan to the human and waits for explicit confirmation or revision before it
-   starts Execution.
-   Calls without an ID remain in one legacy package for compatibility. Once
-   that package has Delivery activity, a new Context, Planning, or Technical
-   Design handoff must provide an explicit ID; program code never infers one.
-6. A work package never overlaps Planning and Execution. Real work uses
-   `execution` cycle N and must be followed by a different AI in `review` cycle
-   N only after every admitted Execution N handoff is terminal. Execution tasks
-   declared by the Chair may run in parallel within that cycle. A confirmed
-   package may execute in parallel with Context/Planning for a separately scoped
-   package. The Chair alone decides whether to re-plan, call Execution N+1, or
-   accept with `close_task`.
-   Markdown and the real workspace carry shared state between one-shot AIs.
+5. Command Room may dispatch a bounded task with only `description`, `prompt`,
+   and `subagent_type`. `work_package_id`, `container`,
+   `container_artifact`, and `delivery_cycle_index` are optional factual labels
+   for display and optional Markdown routing. An explicit package ID creates an
+   isolated `packages/<work_package_id>/` namespace; program code never infers
+   one. Labels never authorize, block, sequence, or choose a task.
+6. Context, Planning, Technical Design, Execution, and Review artifacts are
+   optional shared AI state, not stages. The Chair may issue independent tasks
+   in parallel regardless of labels and may use artifacts in any order. A plan
+   is discussion context, never approval or an Execution gate. When the Chair
+   chooses a Review, it performs only the smallest targeted landing check,
+   records exact facts and gaps, and stops. It does not implement, repair,
+   refactor, broaden scope, or run an unrequested full suite. The Chair alone
+   reads the natural result and chooses the next task or stop.
 7. `close_task` deterministically starts Project Steward only after explicit
    Chair acceptance. The Chair then emits `continue`, `project_complete`, or
    `blocked`; only explicit `project_complete` starts fixed Debt and Learning
    Curators. Their updates still require a later Execution → Review and explicit
    terminal `closed`.
-8. A failed Planning or Technical Design angle may be retried with a new task.
+8. A failed Planning or Technical Design artifact handoff may be retried with a new task.
    If its assigned Markdown changed before transport failure, only the Chair
    may inspect and explicitly accept it with `accept_handoff`; the program
    records hashes/status but does not judge completeness or quality.
@@ -86,9 +80,9 @@ The transport may emit `task_started` and exactly one terminal factual event
 reintroduce `task_running` heartbeats, child turns, broad graph nodes,
 resident workers, structured handoff packets, program-generated plans, or
 programmatic checking/rework. Short frontend snapshot polling while background
-work or wakeup is pending is transport observability, not child polling. The
-approved optional-stage, delivery-cycle, and fixed lifecycle admission boundary
-is structural only.
+work or wakeup is pending is transport observability, not child polling.
+Optional labels may be checked only for field/path shape, task identity, and
+concurrent writes to one explicit artifact. The fixed close lifecycle is separate.
 
 A single lead model response can contain at most six task calls. This limit is
 enforced at the response boundary; it is not a global queue or concurrency
@@ -105,6 +99,10 @@ subagents:
   reasoning_effort: xhigh
   timeout_seconds: 3600
 ```
+
+When the Chair explicitly labels a task `review`, it has a narrower hard ceiling
+of 900 seconds. This factual label applies only the landing-check boundary;
+ordinary delegated work keeps the configured 3600-second timeout.
 
 - Use the exact Codex effort name `xhigh`; do not rename it to “Extra high” in
   config or assume a provider-specific alias.
@@ -145,9 +143,10 @@ Curator roles and wake the Chair after terminal work. Gateway may retry a
 failed sequential Chair wake a bounded number of times and include sibling task
 IDs, roles, and statuses as factual context. The handoff transport may derive only explicit
 container/cycle labels, terminal status, artifact path/hash/size, and
-whether the assigned artifact differs from its pre-dispatch content. It
-may reject structural order violations but never decides whether the artifact
-is adequate. Compatibility fields such as
+whether the assigned artifact differs from its pre-dispatch content. It may
+validate label/path shape and prevent duplicate task identity or concurrent
+writes to one explicit artifact, but it must not enforce stage order or decide
+whether the artifact is adequate. Compatibility fields such as
 `quality_verdict`, `next_round_is_safe`, and `auto_rework` stay neutral. API
 read models must distinguish explicit AI-authored content from factual program
 metadata. The lead AI, checker AI, and opposition AI perform judgment.

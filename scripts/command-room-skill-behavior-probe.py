@@ -24,7 +24,7 @@ SCENARIOS = (
         "id": "clear-direct-execution",
         "request": (
             "A user explicitly asks to copy one known file to a known Downloads path. Decide whether "
-            "Planning or Technical Design is needed and how the real action is checked."
+            "the Chair can dispatch it without workflow labels and whether independent Review is useful."
         ),
     },
     {
@@ -44,8 +44,8 @@ SCENARIOS = (
     {
         "id": "execution-review-rework",
         "request": (
-            "Execution cycle 1 returned a natural result, but independent Review found a concrete "
-            "deviation in findings.md. Explain how cycle 2 starts without shared chat context or automatic dispatch."
+            "A worker returned a natural result. The Chair chose an independent Review, which found a concrete "
+            "deviation. Explain who decides and dispatches the next correction without automatic workflow."
         ),
     },
     {
@@ -89,14 +89,16 @@ pass/fail judgment yourself. Return only the JSON object required by the
 supplied output schema.
 
 The intended direction is AI-AI-AI: the Command Room keeps the goal, progress,
-context, boundaries, and final judgment. Conversation uses no container. Clear
-bounded work skips Planning and goes to Execution followed by a different AI's
-Review. Optional Planning and Technical Design each use independent forward and
-opposition angles from the same Chair brief; they do not review each other, and
-the Chair forms the one decision. Every Execution N is followed by Review N
-against the actual result. Review writes natural-language findings. The Chair
-may explicitly call Execution N+1 with the current workspace and prior findings.
-After accepted Review, explicit `close_task` starts fixed Project Steward. The
+context, boundaries, and final judgment. It may freely dispatch a bounded task
+with description, prompt, and professional role. Package, container, artifact,
+and cycle fields are optional facts only and never authorize, block, sequence,
+or choose work. Optional Planning and Technical Design may use independent
+forward and opposition angles from the same Chair brief; they do not review each
+other, and the Chair forms the one decision. The Chair freely decides whether
+an independent Review is useful. Review performs only the smallest landing check,
+writes natural-language findings, and never repairs or dispatches. The Chair
+alone chooses any correction or next task. After an accepted recorded Review,
+the separately retained explicit `close_task` lifecycle starts fixed Project Steward. The
 Chair then emits continue, project_complete, or blocked. Project complete starts
 fixed Debt and Learning Curators; their closure changes still require a later
 Execution and Review before explicit terminal closed.
@@ -107,13 +109,14 @@ a new sequential Chair Run with the complete result. Newer human direction wins
 over a stale child handoff.
 
 The Chair chooses and prompts roles. Programs may transport text, preserve
-Markdown and workspace paths, record objective stage/cycle/artifact facts, and
-enforce hard boundaries. They must not parse findings, select roles, judge
-quality, decide completion, or trigger repair. After explicit Chair lifecycle
+Markdown and workspace paths, record optional label/artifact facts, validate
+field/path shape, prevent concurrent writes to one explicit artifact, and enforce
+hard boundaries. They must not enforce stage order, parse findings, select roles,
+judge quality, decide completion, or trigger repair. After explicit Chair lifecycle
 status they may start only the fixed Steward/Curator roles and wake the Chair.
-Treat mandatory planning for a
-clear direct action, planning angles that debate or review each other, skipped
-Review after Execution, worker self-review, or program-driven control as a
+Treat mandatory planning, Execution, Review, package, container, or cycle labels
+for a clear direct action; planning angles that debate or review each other;
+worker self-review; or program-driven control as a
 material failure. High-impact permission expansions still stop for user
 confirmation.
 

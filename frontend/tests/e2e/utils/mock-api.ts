@@ -208,7 +208,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Command Room capability summary. Keep this mocked so an E2E page cannot
   // accidentally hit a locally running authenticated Gateway and redirect.
-  void page.route("**/api/capabilities", (route) => {
+  const handleCommandRoomCapabilities = (route: Route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
         status: 200,
@@ -217,7 +217,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       });
     }
     return route.fallback();
-  });
+  };
+  void page.route("**/api/capabilities", handleCommandRoomCapabilities);
+  void page.route(
+    /\/api\/threads\/[^/]+\/capabilities$/,
+    handleCommandRoomCapabilities,
+  );
 
   // Thread search — sidebar thread list & chats list page
   void page.route("**/api/langgraph/threads/search", async (route) => {

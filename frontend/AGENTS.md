@@ -52,8 +52,9 @@ judge sub-AIs.
 - Compatibility fields that are `null`, empty, or `false` remain neutral. Do not
   derive a quality verdict, evidence strength, next action, warning, or gap in
   TypeScript.
-- Another sub-AI performs checking and an independent sub-AI provides
-  opposition; the lead AI decides. The frontend must not dispatch either one.
+- The Chair may choose another sub-AI for checking or an independent opposition
+  view; the lead AI decides. The frontend must not dispatch either one or infer
+  that either task is required.
 
 Task event/action-result parsing is pinned by the contracts in `../contracts/`.
 Coordinate parser, types, replay logic, backend payload, and tests in one change.

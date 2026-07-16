@@ -20,11 +20,13 @@ def test_command_room_prompt_uses_ai_ai_ai_without_generic_clarification_gate(mo
 
     assert "COMMAND ROOM AI-AI-AI" in prompt
     assert "Delegate execution to one-shot sub-AIs" in prompt
-    assert "goal, boundary, and observable result are clear, skip Planning" in prompt
-    assert "planning-forward" in prompt
-    assert "planning-opposition" in prompt
-    assert 'container="execution", delivery_cycle_index=N' in prompt
-    assert 'container="review", delivery_cycle_index=N' in prompt
+    assert "goal, boundary, and observable result are clear" in prompt
+    assert "delegate the useful task directly" in prompt
+    assert "Independent forward and opposition angles may run in parallel" in prompt
+    assert "with only `description`, `prompt`, and `subagent_type`" in prompt
+    assert "optional factual labels" in prompt
+    assert "never authorize, block, sequence, or choose a task" in prompt
+    assert "freely request a review" in prompt
     assert "2 minutes" not in prompt
     assert "Do not defer an in-scope safe next action to a later turn" in prompt
     assert "MANDATORY Clarification Scenarios" not in prompt

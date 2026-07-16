@@ -260,7 +260,7 @@ def test_command_room_prompt_requires_a_self_contained_one_shot_handoff():
     assert "Do not require a fixed handoff form" in section
 
 
-def test_command_room_prompt_uses_ai_review_and_opposition_without_programmatic_workflow():
+def test_command_room_prompt_leaves_review_and_opposition_to_ai_judgment():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -272,7 +272,8 @@ def test_command_room_prompt_uses_ai_review_and_opposition_without_programmatic_
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
     assert "professional role" in section
-    assert "Every delegated execution result must go to a different sub-AI" in section
+    assert "decides whether another sub-AI should independently review" in section
+    assert "not a mandatory successor to every task" in section
     assert "independent forward and opposition AIs" in section
     assert "The lead reads those natural-language results and makes the final judgment" in section
     assert "Program metadata must never choose" in section
@@ -534,7 +535,7 @@ def test_command_room_clarification_system_keeps_ai_ai_ai_boundary():
     assert "Keep the user's goal, plan, progress, and final judgment" in template
     assert "Delegate execution to one-shot sub-AIs" in template
     assert "Make normal technical choices within the stated scope yourself" in template
-    assert "Conversation and direct Chair answers use no container" in template
+    assert "Conversation and direct Chair answers need no label" in template
     assert "independent forward and opposition" in template
     assert "execution" in template
     assert "review" in template
@@ -571,16 +572,14 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "AI-AI-AI" in prompt
     assert "You are the lead brain" in prompt
     assert "Delegate execution work to one-shot sub-AIs" in prompt
-    assert "goal, boundary, and observable result are clear, skip Context and Planning" in prompt
-    assert "work_package_id" in prompt
-    assert "never use omission to start" in prompt
-    assert "another package" in prompt
-    assert "context-discovery" in prompt
-    assert "admitted Execution N task" in prompt
-    assert "planning-forward" in prompt
-    assert "technical-opposition" in prompt
-    assert 'container="execution", delivery_cycle_index=N' in prompt
-    assert 'container="review", delivery_cycle_index=N' in prompt
+    assert "goal, boundary, and observable result are clear" in prompt
+    assert "delegate the useful task directly" in prompt
+    assert "with only `description`, `prompt`, and `subagent_type`" in prompt
+    assert "optional factual labels" in prompt
+    assert "never authorize, block, sequence, or choose a task" in prompt
+    assert "Independent forward and opposition angles may run in parallel" in prompt
+    assert "freely request a review" in prompt
+    assert "Real work uses" not in prompt
     assert "2 minutes" not in prompt
     assert "Delegated Local Sandbox Paths" in prompt
     assert "Command Room lead does not inspect them directly" in prompt

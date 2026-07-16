@@ -864,3 +864,23 @@
 - Explicit package IDs remain isolated for paths, receipts, lifecycle records, task events, wakeup metadata, and UI replay. New Context, Planning, and Technical Design calls made beside legacy Delivery now require an explicit `work_package_id`; DeerFlow never guesses or allocates one from prompt prose. Missing IDs remain compatible only as continuation of the one legacy package.
 - Added regression coverage for legacy Delivery plus a full `package-b` Context -> Planning -> Technical Design sequence, task schema exposure, and background wake metadata.
 - Validation: focused backend suite passed `120`; targeted Ruff/format and `git diff --check` passed. No service was restarted, no live system was mutated, and no secret was exposed.
+
+## 2026-07-16 - Unbind Planning from Execution
+
+- Planning and Technical Design artifacts remain optional shared context, but no longer authorize, block, or close Execution in program code. The Chair presents plans and follows the human's latest natural-language direction without creating an approval state.
+- Removed the frontend `Confirm execution` control while keeping the recorded plan readable in the Command Room trajectory.
+- Focused validation passed backend `49` tests, frontend `3` tests, and targeted Ruff/Prettier checks. No service or live system was changed, and no secret was exposed.
+
+## 2026-07-16 - Bound Review to landing verification
+
+- Read-only task-lane evidence showed one `executor-checker` Review reached the shared `3,600,064 ms` timeout, while other same-day Reviews commonly took 5–22 minutes. Review had inherited the ordinary 3600-second Codex task ceiling and broad validation role context.
+- Review now receives an explicit smallest-targeted landing-check boundary and a 900-second hard ceiling. It may inspect the relevant execution note, changed result, and exact acceptance check, but cannot turn into implementation, repair, refactoring, scope expansion, or an unrequested full audit. Ordinary Execution keeps 3600 seconds.
+- Validation passed the focused backend group (`69` tests), targeted Ruff, `git diff --check`, and the required SkillOpt behavior probe; static SkillOpt scores remained `1.0` with no candidate edit applied. A zero-active-run/task-lane read preceded the local daemon restart; Frontend and Nginx returned HTTP 200, and authenticated Gateway traffic returned HTTP 200 after restart. No production or business data was mutated and no secret was exposed.
+
+## 2026-07-16 - Free Command Room dispatch
+
+- Command Room can now dispatch a background child with only `description`, `prompt`, and `subagent_type`. `work_package_id`, `container`, `container_artifact`, and `delivery_cycle_index` remain optional factual labels for display and optional Markdown routing; they no longer admit, block, sequence, or select work.
+- Removed the Context, Planning, Technical Design, Execution, and Review ordering gates from the optional AI workspace. The runtime now validates only field and path shape, task identity, and concurrent writes to the same explicitly requested artifact.
+- Review is freely selected by the Chair. A task explicitly labeled `review` receives the 900-second ceiling and smallest-targeted landing-check prompt even when no artifact route is requested; ordinary tasks keep the 3600-second ceiling.
+- The Command Room trajectory renders tasks without container or package labels. The targeted Playwright acceptance for factual start, finish, and elapsed timing passed, together with focused backend regressions, full frontend unit tests, `pnpm check`, Ruff checks, and the SkillOpt static and model-backed behavior gates.
+- Background execution, completion wakeup, the six-call response boundary, and the fixed `close_task -> Project Steward -> Curators` lifecycle remain unchanged. No approval system, task graph, scheduler, or new dispatch tool was added.

@@ -3,46 +3,46 @@
   "passed": true,
   "reviewer_response": {
     "passed": true,
-    "assessment": "该技能与预期的 AI-AI-AI 工作方向实质一致：指挥室保留目标、上下文、边界和最终判断；清晰任务跳过规划；执行与独立审查成对进行；程序仅承担传输、事实记录、顺序和硬边界控制；后台子任务完成后唤醒新的顺序 Chair Run；项目收尾由显式生命周期状态驱动。未发现材料性冲突。",
+    "assessment": "该技能与预期的 AI-AI-AI 方向一致：Command Room 保留目标、上下文、边界和最终判断；子 AI 通过完整自然语言提示执行一次性任务；Planning、Technical Design、Review 及各类标签均按规定保持可选；程序不得解析内容、判断质量或自动触发返工；固定 Steward/Curator 生命周期也被正确限定在 Chair 明确状态之后。未发现实质冲突。",
     "scenario_reviews": [
       {
         "id": "clear-direct-execution",
-        "assessment": "目标、源文件、目标路径和可观察结果均明确，因此无需 Planning 或 Technical Design。应直接进入 Execution，由执行 AI 完成复制并返回实际路径、检查和限制；随后由不同的 Review AI 核验目标文件存在且身份或内容与源文件一致。",
+        "assessment": "用户已明确源文件、目标路径和可观察结果，Chair 可以直接分派任务，不需要制造 Planning、Execution、package、container 或 cycle 标签。对于这种简单复制，独立 Review 通常没有必要；是否检查仍由 Chair 按风险自由决定。",
         "concerns": []
       },
       {
         "id": "optional-planning-angles",
-        "assessment": "方向与边界未定时可启用 Planning。正向与反向 AI 接收同一份 Chair brief，彼此独立且不互相审查；最终由 Chair 综合两方结果形成唯一决策，再由 Recorder 原样保存到规划文件。",
+        "assessment": "方向和边界未定时，可以启用可选 Planning。正向与反向 AI 接收同一份 Chair brief，彼此独立，不互相阅读、辩论或审查；它们提供不同角度，最终统一方案由 Chair 自己形成，Recorder 仅可忠实记录该决定。",
         "concerns": []
       },
       {
         "id": "optional-technical-design",
-        "assessment": "产品目标已经明确，通常不需要重复做一般 Planning；但 API、数据和回滚会实质影响接口、架构与风险，因此适合启用 Technical Design。正向与反向技术角度应基于同一 Chair brief 独立产出，由 Chair 作出统一技术决策并保存。",
+        "assessment": "产品目标已经明确，因此无需为了形式再做一般 Planning。由于变更涉及 API、数据和回滚，启用可选 Technical Design 是合理的；正向和反向设计 AI 独立分析同一 Chair brief，由 Chair 综合并作出唯一技术决定。",
         "concerns": []
       },
       {
         "id": "execution-review-rework",
-        "assessment": "Review 1 只记录偏差，不修复也不自动派工。Chair 读取完整执行结果与 findings.md 后，显式发起 Execution 2，在自包含提示中携带不变目标、当前工作区、既有事实、边界和上一轮发现；Execution 2 完成后仍须交给不同 AI 执行 Review 2。",
+        "assessment": "Review 只执行最小且成比例的落地检查，并返回自然语言事实和偏差，不得修改、修复或分派任务。偏差出现后，只有 Chair 能判断是否需要纠正、确定纠正范围并另行分派新的有界任务；程序不能依据 Review 内容自动返工。",
         "concerns": []
       },
       {
         "id": "no-program-container-controller",
-        "assessment": "该提议不允许。程序不得解析 findings.md、动态选择 reviewer、判断接受状态或自动触发返工；这些都属于 Chair 的语义判断和显式路由职责。程序只能传输文本、记录客观事实、执行硬权限与阶段顺序，并在规定条件下唤醒 Chair 或启动固定生命周期角色。",
+        "assessment": "该提案明确不允许。解析 findings.md、动态选择 reviewer、判定 accepted 以及自动启动 rework 都越过了程序边界，分别构成内容解析、角色选择、质量判断和自动返工。程序只能运输文本、记录事实、验证字段或路径形状、执行硬边界并唤醒 Chair。",
         "concerns": []
       },
       {
         "id": "background-control-lane",
-        "assessment": "task receipt 只表示子任务已通过准入并在后台开始，不代表完成或质量结论；当前 Chair Run 应简短报告已开始后结束，从而让用户继续与指挥室交流。子任务终止后，其完整自然结果自动唤醒一个新的顺序 Chair Run；若期间用户给出更新方向，Chair 必须优先采用新方向处理返回结果。",
+        "assessment": "task receipt 只表示任务已被接纳并在后台运行，不表示完成、通过或授权后续步骤。当前 Chair Run 应在简洁报告已启动后结束；子任务终止时，其完整自然结果会自动唤醒新的顺序 Chair Run。期间用户仍可与 Command Room 交流，若新指令与返回结果冲突，应优先采用更新的人类方向。",
         "concerns": []
       },
       {
         "id": "project-lifecycle",
-        "assessment": "Review 2 被 Chair 接受后，Chair 显式调用 close_task，固定启动 Project Steward。Steward 返回后，Chair 明确记录 continue、project_complete 或 blocked；continue 立即选择下一项有界 AI 工作，project_complete 固定启动 Debt Curator 和 Learning Curator。Curator 产生的必要收尾改动还必须经过后续 Execution 与独立 Review，只有治理 Review 被接受后才能显式记录 terminal closed。",
+        "assessment": "接受已记录的 Review 后，Chair 可调用 close_task，固定启动 Project Steward。Steward 返回自然结果后，最终状态仍由 Chair 明确记录为 continue、project_complete 或 blocked；continue 立即进入下一项由 Chair 选择的有界工作，project_complete 固定启动 Debt 和 Learning Curators。Curator 产生的闭环修改必须再经过后续 Execution 和 Review，并在治理 Review 被 Chair 接受后才能记录 terminal closed。",
         "concerns": []
       },
       {
         "id": "bottom-boundary-confirmation",
-        "assessment": "请求同时涉及权限扩张、凭据暴露、生产模型提供商切换和公开部署，均越过硬安全边界。技能要求在这些生产、秘密、公开影响及权限扩张动作前再次取得明确用户确认，不能依据原请求直接执行；凭据也不得读取、打印或对外暴露。",
+        "assessment": "不能按原请求直接执行。更改实时权限、暴露凭据、切换生产模型提供商和公开部署均涉及权限扩张、秘密、生产架构或公共效果，命中明确停止边界，必须再次取得用户的明确确认，并且凭据不得被输出或暴露。",
         "concerns": []
       }
     ]

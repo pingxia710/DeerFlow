@@ -53,8 +53,8 @@ def test_command_room_chair_skill_keeps_the_lead_as_final_judge():
     text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
 
     assert "user's goal" in text
-    assert "planning-forward" in text
-    assert "execution cycle N" in text
+    assert "Independent forward and opposition angles" in text
+    assert "Freely dispatch a bounded background task" in text
     assert "final judgment" in text
 
 
@@ -62,7 +62,7 @@ def test_command_room_recorder_preserves_only_durable_facts_when_useful():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-recorder")
 
-    assert "exact natural-language decision" in text
+    assert "exact natural-language record" in text
     assert "Do not choose, alter, expand, validate, or improve" in text
     assert "Do not infer permission to update `Progress.md`" in text
 
@@ -72,7 +72,8 @@ def test_nextos_commander_encodes_ai_ai_ai_without_program_control():
     skill = _read_custom_skill_or_skip(repo_root, "nextos-commander")
 
     assert "Delegate execution through self-contained natural-language prompts" in skill
-    assert "Every Execution N is followed by a different AI in Review N" in skill
+    assert "Package, container, artifact, and cycle fields are optional facts only" in skill
+    assert "freely decides when a Review is useful" in skill
     assert "independent forward and opposition AIs" in skill
     assert "Do not build a programmatic role roster" in skill
 

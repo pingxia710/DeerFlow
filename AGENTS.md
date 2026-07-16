@@ -35,29 +35,26 @@ README files, or skills rather than expanding this file.
 - A professional role supplies developer-authored prompt context. It does not
   install a DeerFlow tool list or turn the child into a program-managed agent.
   Codex CLI owns its reasoning, planning, native tools, checks, and response.
-- Command Room uses a project-lifecycle natural-language AI-AI workspace under
-  the thread workspace (`command-room-loop/<thread_id>/`). An explicit
-  `work_package_id` creates its own `packages/<work_package_id>/` namespace,
-  receipts, and lifecycle records. Context collection is optional; when used,
-  parallel discovery AIs return before a Recorder preserves
-  `00-context/context.md`. Planning and Technical Design are optional. When
-  used, independent forward and opposition AIs start from that same factual
-  snapshot and do not review each other; the Chair forms one decision preserved
-  in `01-planning/spec.md` or `02-technical-design/technical-plan.md`. The
-  Chair presents that recorded plan to the human and waits for explicit
-  confirmation or revision before beginning Execution; it never infers approval
-  from the artifact or task state.
-- Calls without `work_package_id` remain in one legacy package for compatibility.
-  Once legacy Delivery begins, new Context, Planning, or Technical Design work
-  must carry an explicit ID; the program never infers or allocates a package.
-- Conversation and direct Chair answers use no container. When the user's goal,
-  boundary, and observable result are clear, skip Context and Planning. A work
-  package never overlaps its own planning and execution. Real work uses
-  `execution` cycle N and must be followed by a different AI in `review` cycle
-  N after every admitted Execution N handoff is terminal. Review writes
-  natural-language findings under `03-delivery/cycle-NN/`.
-  The Chair reads them and either explicitly calls Execution N+1 or accepts the
-  task with `close_task`; there is no fixed number of delivery cycles.
+- Command Room may freely dispatch a bounded background task with only
+  `description`, `prompt`, and `subagent_type`. `work_package_id`, `container`,
+  `container_artifact`, and `delivery_cycle_index` are optional factual labels
+  for display and optional Markdown paths. They never authorize, block,
+  sequence, or choose a task.
+- The optional natural-language AI-AI workspace lives under the thread workspace
+  (`command-room-loop/<thread_id>/`). An explicit `work_package_id` creates an
+  isolated `packages/<work_package_id>/` namespace; omission means no package
+  fact unless an explicit artifact uses the legacy root path. The program never
+  infers or allocates a package.
+- Context, Planning, Technical Design, Execution, and Review artifacts are
+  shared AI-authored context, not stages. The Chair may use them in any order or
+  not use them. A recorded plan is presented for natural discussion and never
+  becomes approval or a prerequisite. Independent tasks may run in parallel
+  based on the Chair's natural-language scope and owned paths, regardless of labels.
+- Review is a Chair-selected, smallest-targeted landing check. When the Chair
+  labels a task `review`, it is capped at 900 seconds and may inspect whether the
+  requested result landed, but it must not implement, repair, refactor, broaden
+  scope, or become an unrequested full audit. The Chair alone decides what to do
+  with its natural-language findings.
 - `close_task` is an explicit Chair quality decision and deterministically
   starts Project Steward. After that natural result returns, the Chair records
   `continue`, `project_complete`, or `blocked` with `project_status`.
@@ -74,23 +71,23 @@ README files, or skills rather than expanding this file.
   assigned angle artifact, the Chair may inspect it and explicitly call
   `accept_handoff`; otherwise the failed angle may be retried with a new task.
   Changed bytes are a transport fact, never a program quality verdict.
-- A confirmed package N may execute in parallel with Context/Planning for an
-  independent package N+1 only when the Chair explicitly declares distinct
-  scopes and owned paths in both handoffs. A single lead model response may
-  issue at most six `task()` calls. This is a
+- A single lead model response may issue at most six independent `task()` calls.
+  This is a
   response-size boundary, not a global queue, scheduler, or serialized worker
   controller. Batch further independent work after results return.
 - The configured child default is `gpt-5.6-terra` with Codex reasoning effort
-  `xhigh`. The child timeout is 3600 seconds; the parent no-progress watchdog is
-  longer so a healthy child is not cancelled first.
+  `xhigh`. Execution and other delegated tasks retain the 3600-second child
+  timeout; Review is a smallest-targeted landing check capped at 900 seconds,
+  not a second implementation or broad audit. The parent no-progress watchdog
+  remains longer than the normal child timeout.
 
 Do not replace this strategy with child turn loops, a broad task graph,
 polling, program-written plans, tool-by-tool scripts, role-based tool grants,
 synthetic handoff forms, programmatic reviewers, scores, PASS/FAIL gates,
-quality inference, content-based dispatch/rework, or a resident child runtime. The
-approved handoff admission boundary is not a scheduler: it only rejects an
-out-of-order, wrong-cycle, or missing-artifact handoff explicitly attempted by
-the Chair, plus the fixed Steward/Curator lifecycle explicitly authorized here.
+quality inference, content-based dispatch/rework, or a resident child runtime.
+Optional labels may be checked only for field/path shape, task identity, and
+concurrent writes to the same explicit artifact. The separately retained
+Steward/Curator lifecycle remains the only fixed lifecycle explicitly authorized here.
 Its project receipt ledger is parent-owned under the thread audit directory,
 outside the normal child workspace; this is workflow integrity for the accepted
 trusted-host model, not a replacement for OS isolation when an operator elects
@@ -112,9 +109,10 @@ or gaps, dispatch a checker, or trigger rework. After an explicit AI-authored
 status it may dispatch only the fixed Project Steward, Debt Curator, and
 Learning Curator roles and sequentially wake the Chair. A failed Chair wake Run
 may be retried a bounded number of times with factual sibling task statuses.
-It may enforce optional
-Context/Planning/Technical Design prerequisites, package-scoped Execution N → Review N order, and
-changed-artifact receipt as objective transport facts. Compatibility API fields
+It may validate optional label and artifact-path shape, prevent duplicate task
+identity or concurrent writes to one explicit artifact, and record a
+changed-artifact receipt as an objective transport fact. It must not enforce
+Context, Planning, Technical Design, Execution, or Review order. Compatibility API fields
 for old consumers must stay neutral (`null`, empty, or `false`) rather than
 simulate a decision. A successful task result must not be previewed, summarized,
 or truncated by generic tool-output middleware or frontend replay.

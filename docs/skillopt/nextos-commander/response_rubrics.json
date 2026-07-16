@@ -1,8 +1,8 @@
 [
   {
     "id": "train-clear-direct-execution",
-    "must_include": ["skip Planning", "Execution", "Review"],
-    "forbidden": ["mandatory planning", "worker self-review"]
+    "must_include": ["description", "prompt", "professional role", "optional facts"],
+    "forbidden": ["mandatory planning", "mandatory Execution", "mandatory Review"]
   },
   {
     "id": "val-planning-angles",
@@ -16,8 +16,8 @@
   },
   {
     "id": "test-review-loop",
-    "must_include": ["Execution N", "Review N", "findings", "Execution N+1"],
-    "forbidden": ["fixed number of cycles", "shared chat context"]
+    "must_include": ["Chair", "Review", "smallest", "next task"],
+    "forbidden": ["automatic review", "automatic rework", "shared chat context"]
   },
   {
     "id": "test-no-program-controller",

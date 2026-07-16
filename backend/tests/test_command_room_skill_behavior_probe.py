@@ -66,7 +66,8 @@ def test_behavior_prompt_contains_skill_and_all_scenarios():
     assert "bottom-boundary-confirmation" in prompt
     assert "independent review AI" in prompt
     assert "Set `passed` from your own semantic review" in prompt
-    assert "Every Execution N is followed by Review N" in prompt
+    assert "optional facts only" in prompt
+    assert "freely decides whether" in prompt
     assert "independent forward and" in prompt
-    assert "mandatory planning for a" in prompt
+    assert "mandatory planning, Execution, Review" in prompt
     assert "Do not execute tools" in prompt

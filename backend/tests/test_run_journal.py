@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
@@ -112,6 +112,29 @@ class TestLlmCallbacks:
         assert len(messages) == 1
         assert messages[0]["event_type"] == "llm.ai.response"
         assert len(messages[0]["content"]["tool_calls"]) == 1
+
+    @pytest.mark.anyio
+    async def test_background_task_receipt_marks_following_chair_text_as_step(self, journal_setup):
+        j, store = journal_setup
+        j.record_tool_message(
+            ToolMessage(
+                content="accepted",
+                name="task",
+                tool_call_id="call-1",
+                additional_kwargs={"background_task": True},
+            )
+        )
+        j.on_llm_end(
+            _make_llm_response("Stage update"),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        response = next(event for event in messages if event["event_type"] == "llm.ai.response")
+        assert response["metadata"]["command_room_step"] is True
 
     @pytest.mark.anyio
     async def test_on_llm_end_subagent_no_ai_message(self, journal_setup):

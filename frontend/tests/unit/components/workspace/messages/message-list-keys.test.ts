@@ -251,6 +251,19 @@ test("inferred running subtask filter keeps active history runs visible", () => 
   ).toBe(true);
 });
 
+test("inferred running subtask filter keeps an explicitly active background lane visible", () => {
+  expect(
+    isInferredRunningSubtaskVisible({
+      runId: "run-finished",
+      startedAt: 1_000,
+      groupIsLoading: false,
+      activeRunIds: new Set(),
+      turnStartTime: 10_000,
+      hasMatchingActiveTask: true,
+    }),
+  ).toBe(true);
+});
+
 test("inferred running subtask filter hides stale historical runs", () => {
   expect(
     isInferredRunningSubtaskVisible({

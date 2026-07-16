@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.agents.middlewares import round_context_middleware as round_context_module
+from deerflow.config.paths import Paths
 from deerflow.subagents.audit import record_subagent_handoff
 from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_CONFIGS
 
@@ -19,30 +20,39 @@ def test_command_room_prompt_uses_ai_ai_ai_without_generic_clarification_gate(mo
 
     assert "COMMAND ROOM AI-AI-AI" in prompt
     assert "Delegate execution to one-shot sub-AIs" in prompt
-    assert "another sub-AI check each worker result" in prompt
-    assert "independent opposition view" in prompt
+    assert "goal, boundary, and observable result are clear, skip Planning" in prompt
+    assert "planning-forward" in prompt
+    assert "planning-opposition" in prompt
+    assert 'container="execution", delivery_cycle_index=N' in prompt
+    assert 'container="review", delivery_cycle_index=N' in prompt
+    assert "2 minutes" not in prompt
     assert "Do not defer an in-scope safe next action to a later turn" in prompt
     assert "MANDATORY Clarification Scenarios" not in prompt
     assert "CLARIFY → PLAN → ACT" not in prompt
     assert "Clarification ALWAYS comes BEFORE action" not in prompt
 
 
-def test_command_room_does_not_reinject_persisted_round_audit(monkeypatch):
-    monkeypatch.setattr(round_context_module, "latest_round_context_for_thread", lambda *_: "[Internal Command Room Round signals]\nstale audit action")
+def test_command_room_context_includes_shared_ai_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr(round_context_module, "get_paths", lambda: Paths(tmp_path))
     middleware = round_context_module.CommandRoomRoundContextMiddleware(agent_name="command-room")
 
     text = middleware._context_text(
         SimpleNamespace(
             context={
                 "thread_id": "thread-1",
-                "round_context": {"current_intent": "fix the conversation scroll"},
+                "run_id": "run-1",
+                "user_id": "user-1",
             }
         )
     )
 
+    workspace = tmp_path / "users" / "user-1" / "threads" / "thread-1" / "user-data" / "workspace"
+    ai_workspace = workspace / "command-room-loop" / "thread-1"
     assert text is not None
-    assert "Current user goal: fix the conversation scroll" in text
-    assert "stale audit action" not in text
+    assert "[Internal AI-AI Workspace]" in text
+    assert str(ai_workspace / "01-planning" / "spec.md") in text
+    assert (ai_workspace / "02-technical-design" / "technical-plan.md").is_file()
+    assert (ai_workspace / "03-delivery" / "README.md").is_file()
 
 
 def test_subagent_audit_does_not_infer_a_verdict_from_worker_prose(tmp_path):
@@ -69,7 +79,10 @@ def test_subagent_audit_does_not_infer_a_verdict_from_worker_prose(tmp_path):
 
 def test_command_room_role_catalog_does_not_install_program_workflows():
     role = COMMAND_ROOM_ROLE_CONFIGS["opposition"]
+    evaluator = COMMAND_ROOM_ROLE_CONFIGS["evaluator"]
 
-    assert "Opposition role" in role.description
+    assert "Opposition angle" in role.description
     assert role.system_prompt == role.description
     assert not hasattr(role, "skills")
+    assert "evaluator role" in evaluator.description
+    assert evaluator.system_prompt == evaluator.description

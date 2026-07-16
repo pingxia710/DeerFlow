@@ -272,8 +272,8 @@ def test_command_room_prompt_uses_ai_review_and_opposition_without_programmatic_
     section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
 
     assert "professional role" in section
-    assert "Pass each worker result to a different sub-AI" in section
-    assert "independent opposition sub-AI" in section
+    assert "Every delegated execution result must go to a different sub-AI" in section
+    assert "independent forward and opposition AIs" in section
     assert "The lead reads those natural-language results and makes the final judgment" in section
     assert "Program metadata must never choose" in section
 
@@ -534,8 +534,11 @@ def test_command_room_clarification_system_keeps_ai_ai_ai_boundary():
     assert "Keep the user's goal, plan, progress, and final judgment" in template
     assert "Delegate execution to one-shot sub-AIs" in template
     assert "Make normal technical choices within the stated scope yourself" in template
-    assert "another sub-AI check each worker result" in template
-    assert "independent opposition view" in template
+    assert "Conversation and direct Chair answers use no container" in template
+    assert "independent forward and opposition" in template
+    assert "execution" in template
+    assert "review" in template
+    assert "2 minutes" not in template
     assert "MANDATORY Clarification Scenarios" not in template
     assert "Clarification ALWAYS comes BEFORE action" not in template
 
@@ -568,8 +571,17 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "AI-AI-AI" in prompt
     assert "You are the lead brain" in prompt
     assert "Delegate execution work to one-shot sub-AIs" in prompt
-    assert "Pass each worker result to a different sub-AI" in prompt
-    assert "independent opposition sub-AI" in prompt
+    assert "goal, boundary, and observable result are clear, skip Context and Planning" in prompt
+    assert "work_package_id" in prompt
+    assert "never use omission to start" in prompt
+    assert "another package" in prompt
+    assert "context-discovery" in prompt
+    assert "admitted Execution N task" in prompt
+    assert "planning-forward" in prompt
+    assert "technical-opposition" in prompt
+    assert 'container="execution", delivery_cycle_index=N' in prompt
+    assert 'container="review", delivery_cycle_index=N' in prompt
+    assert "2 minutes" not in prompt
     assert "Delegated Local Sandbox Paths" in prompt
     assert "Command Room lead does not inspect them directly" in prompt
     assert "You may use direct host absolute paths" not in prompt
@@ -588,6 +600,35 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "required Evidence Signal fields" not in prompt
     assert "Single task = No value from subagents = Execute directly" not in prompt
     assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
+
+
+def test_command_room_prompt_stays_compact(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(custom_agents={}),
+        skills=SimpleNamespace(container_path="/Users/pingxia/projects/deer-flow/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        agent_name="command-room",
+        app_config=explicit_config,
+    )
+
+    assert len(prompt) < 7000
+    assert "<available_skills>" not in prompt
+    assert "Example - Deep Research Report" not in prompt
 
 
 def test_command_room_subagent_prompt_default_limit_is_six(monkeypatch):

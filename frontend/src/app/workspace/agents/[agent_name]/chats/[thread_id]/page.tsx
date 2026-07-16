@@ -18,6 +18,8 @@ import {
   shouldCommitThreadStart,
   shouldShowWelcomeMode,
   useThreadChat,
+  WorkRecordActivityTrigger,
+  WorkRecordTrigger,
 } from "@/components/workspace/chats";
 import { CommandRoomCapabilities } from "@/components/workspace/command-room-capabilities";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
@@ -306,14 +308,13 @@ export default function AgentChatPage() {
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
-
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
-      <ChatBox threadId={threadId}>
+      <ChatBox isNewThread={isNewThread} threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
@@ -380,6 +381,8 @@ export default function AgentChatPage() {
                 }
               />
               <ExportTrigger threadId={threadId} />
+              <WorkRecordActivityTrigger />
+              <WorkRecordTrigger />
               <ArtifactTrigger />
             </div>
           </header>
@@ -390,6 +393,7 @@ export default function AgentChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                isCommandRoom={agent_name === "command-room"}
                 contextSnapshot={
                   threadContextUsage.data?.latest_lead ??
                   threadContextUsage.data?.latest ??

@@ -25,3 +25,31 @@ export function formatTimeAgo(date: Date | string | number, locale?: Locale) {
     locale: getDateFnsLocale(effectiveLocale),
   });
 }
+
+export function formatDateTime(value: Date | string | number, locale?: Locale) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return new Intl.DateTimeFormat(locale ?? detectLocale(), {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(timestamp);
+}
+
+export function formatDuration(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+  const totalSeconds = Math.floor(durationMs / 1_000);
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+}

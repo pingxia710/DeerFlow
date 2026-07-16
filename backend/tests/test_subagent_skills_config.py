@@ -23,10 +23,10 @@ def test_command_room_evidence_and_opposition_skills_are_ai_roles():
     evidence = _read_custom_skill_or_skip(repo_root, "command-room-evidence")
     opposition = _read_custom_skill_or_skip(repo_root, "command-room-opposition")
 
-    assert "smallest useful observable check" in evidence
-    assert "Do not require labels, forms, findings files" in evidence
-    assert "independent opposite-direction AI" in opposition
-    assert "missed angles, contrary evidence, hidden assumptions" in opposition
+    assert "checks proportionate to the deliverable" in evidence
+    assert "Worker prose is not proof" in evidence
+    assert "Start independently from the same Chair brief" in opposition
+    assert "hidden assumptions" in opposition
 
 
 def test_command_room_capability_governor_is_limited_to_material_expansion():
@@ -53,18 +53,18 @@ def test_command_room_chair_skill_keeps_the_lead_as_final_judge():
     text = _read_custom_skill_or_skip(repo_root, "command-room-chair")
 
     assert "user's goal" in text
-    assert "worker, checker, and opposition AIs" in text
-    assert "make the final judgment" in text
-    assert "Delegate execution" in text
+    assert "planning-forward" in text
+    assert "execution cycle N" in text
+    assert "final judgment" in text
 
 
 def test_command_room_recorder_preserves_only_durable_facts_when_useful():
     repo_root = Path(__file__).resolve().parents[2]
     text = _read_custom_skill_or_skip(repo_root, "command-room-recorder")
 
-    assert "durable fact" in text
-    assert "Do not create accounts, templates, Progress entries" in text
-    assert "not a durable decision" in text
+    assert "exact natural-language decision" in text
+    assert "Do not choose, alter, expand, validate, or improve" in text
+    assert "Do not infer permission to update `Progress.md`" in text
 
 
 def test_nextos_commander_encodes_ai_ai_ai_without_program_control():
@@ -72,8 +72,8 @@ def test_nextos_commander_encodes_ai_ai_ai_without_program_control():
     skill = _read_custom_skill_or_skip(repo_root, "nextos-commander")
 
     assert "Delegate execution through self-contained natural-language prompts" in skill
-    assert "Pass that result to a different sub-AI" in skill
-    assert "independent opposition sub-AI" in skill
+    assert "Every Execution N is followed by a different AI in Review N" in skill
+    assert "independent forward and opposition AIs" in skill
     assert "Do not build a programmatic role roster" in skill
 
 
@@ -95,15 +95,17 @@ def test_command_room_docs_keep_routing_with_the_lead_ai():
     repo_root = Path(__file__).resolve().parents[2]
     protocol = (repo_root / "docs" / "command-room" / "ai-control-protocol.md").read_text(encoding="utf-8")
 
-    assert "Pass the worker result to another sub-AI" in protocol
-    assert "Ask an independent opposition sub-AI" in protocol
-    assert "It must not choose roles, judge quality, dispatch the next AI, or trigger rework" in protocol
+    assert "clear bounded action" in protocol
+    assert "Planning angles" in protocol
+    assert "Execution -> Review" in protocol
+    assert "The Chair alone decides" in protocol
+    assert "must not parse prose" in protocol
 
 
 def test_role_catalog_contains_metadata_not_execution_controls():
     assert {field.name for field in fields(SubagentConfig)} == {"name", "description", "system_prompt"}
     assert COMMAND_ROOM_ROLE_CONFIGS["opposition"].system_prompt
-    assert "Opposition role" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
+    assert "Opposition angle" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
 
 
 def test_custom_role_keeps_natural_language_role_prompt_but_not_program_controls():
@@ -131,3 +133,13 @@ def test_registry_exposes_custom_role_to_the_lead():
 
     assert role == SubagentConfig(name="contract-reviewer", description="Checks frontend and backend contracts.")
     assert "contract-reviewer" in get_subagent_names(app_config=app_config)
+
+
+@pytest.mark.parametrize("role_name", ["executor", "evaluator"])
+def test_registry_allows_local_command_room_executor_and_evaluator_overrides(role_name):
+    description = f"Local {role_name} role context."
+    app_config = SubagentsAppConfig(custom_agents={role_name: {"description": description}})
+
+    role = get_subagent_config(role_name, app_config=app_config)
+
+    assert role == SubagentConfig(name=role_name, description=description)

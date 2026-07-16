@@ -182,6 +182,52 @@ class TestListEvents:
         assert events[0]["run_id"] == "r1"
 
 
+class TestThreadTimeline:
+    @pytest.mark.anyio
+    async def test_owner_scoped_timeline_returns_stable_window_and_watermark(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="llm.human.input", category="message", content="first", user_id="owner-a")
+        await store.put(thread_id="t1", run_id="r1", event_type="llm.context", category="trace", content="hidden", user_id="owner-a")
+        await store.put(thread_id="t1", run_id="r2", event_type="llm.ai.response", category="message", content="other", user_id="owner-b")
+        await store.put(thread_id="t1", run_id="r1", event_type="run.terminal", category="lifecycle", content={"status": "success"}, user_id="owner-a")
+        await store.put(thread_id="t1", run_id="r1", event_type="artifact.presented", category="artifact", content={"path": "report.md"}, user_id="owner-a")
+
+        page = await store.read_thread_timeline(
+            "t1",
+            categories={"message", "lifecycle", "artifact"},
+            limit=2,
+            user_id="owner-a",
+        )
+
+        assert [record["seq"] for record in page.records] == [4, 5]
+        assert page.watermark_seq == 5
+        assert page.has_more is False
+        assert page.truncated is True
+
+    @pytest.mark.anyio
+    async def test_thread_timeline_after_cursor_paginates_without_hidden_gaps(self, store):
+        for index, category in enumerate(("message", "trace", "lifecycle", "artifact"), start=1):
+            await store.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type=f"event-{index}",
+                category=category,
+                user_id="owner-a",
+            )
+
+        page = await store.read_thread_timeline(
+            "t1",
+            categories={"message", "lifecycle", "artifact"},
+            after_seq=0,
+            limit=1,
+            user_id="owner-a",
+        )
+
+        assert [record["seq"] for record in page.records] == [1]
+        assert page.watermark_seq == 4
+        assert page.has_more is True
+        assert page.truncated is False
+
+
 # -- list_messages_by_run --
 
 
@@ -536,6 +582,56 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_thread_timeline_is_owner_scoped_and_cursor_paged(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'timeline.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        store = DbRunEventStore(get_session_factory())
+        try:
+            for index, (category, owner) in enumerate(
+                (
+                    ("message", "owner-a"),
+                    ("trace", "owner-a"),
+                    ("lifecycle", "owner-a"),
+                    ("artifact", "owner-a"),
+                    ("message", "owner-b"),
+                ),
+                start=1,
+            ):
+                await store.put(
+                    thread_id="t1",
+                    run_id="r1",
+                    event_type=f"event-{index}",
+                    category=category,
+                    user_id=owner,
+                )
+
+            initial = await store.read_thread_timeline(
+                "t1",
+                categories={"message", "lifecycle", "artifact"},
+                limit=2,
+                user_id="owner-a",
+            )
+            page = await store.read_thread_timeline(
+                "t1",
+                categories={"message", "lifecycle", "artifact"},
+                after_seq=0,
+                limit=1,
+                user_id="owner-a",
+            )
+
+            assert [record["seq"] for record in initial.records] == [3, 4]
+            assert initial.watermark_seq == 4
+            assert initial.truncated is True
+            assert [record["seq"] for record in page.records] == [1]
+            assert page.watermark_seq == 4
+            assert page.has_more is True
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
     async def test_delete(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
@@ -813,6 +909,50 @@ class TestJsonlRunEventStore:
         messages = await s.list_messages("t1")
         assert len(messages) == 2
         assert [m["seq"] for m in messages] == [1, 2]
+
+    @pytest.mark.anyio
+    async def test_thread_timeline_is_owner_scoped_and_cursor_paged(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        store = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        for index, (category, owner) in enumerate(
+            (
+                ("message", "owner-a"),
+                ("trace", "owner-a"),
+                ("lifecycle", "owner-a"),
+                ("artifact", "owner-a"),
+                ("message", "owner-b"),
+            ),
+            start=1,
+        ):
+            await store.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type=f"event-{index}",
+                category=category,
+                user_id=owner,
+            )
+
+        initial = await store.read_thread_timeline(
+            "t1",
+            categories={"message", "lifecycle", "artifact"},
+            limit=2,
+            user_id="owner-a",
+        )
+        page = await store.read_thread_timeline(
+            "t1",
+            categories={"message", "lifecycle", "artifact"},
+            after_seq=0,
+            limit=1,
+            user_id="owner-a",
+        )
+
+        assert [record["seq"] for record in initial.records] == [3, 4]
+        assert initial.watermark_seq == 4
+        assert initial.truncated is True
+        assert [record["seq"] for record in page.records] == [1]
+        assert page.watermark_seq == 4
+        assert page.has_more is True
 
     @pytest.mark.anyio
     async def test_list_events_after_seq(self, tmp_path):

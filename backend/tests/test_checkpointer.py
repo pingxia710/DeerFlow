@@ -19,6 +19,7 @@ from deerflow.config.checkpointer_config import (
     load_checkpointer_config_from_dict,
     set_checkpointer_config,
 )
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store import get_store, reset_store
@@ -474,6 +475,24 @@ class TestGetCheckpointer:
 
 
 class TestSyncSingletonThreadSafety:
+    def test_store_uses_unified_database_when_legacy_checkpointer_is_absent(self):
+        database = MagicMock(backend="sqlite")
+        app_config = MagicMock(checkpointer=None, database=database)
+        store = MagicMock()
+        store_context = MagicMock()
+        store_context.__enter__ = MagicMock(return_value=store)
+        store_context.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("deerflow.runtime.store.provider.ensure_config_loaded"),
+            patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.store.provider._sync_store_from_database", return_value=store_context) as make_store,
+        ):
+            resolved = get_store()
+
+        assert resolved is store
+        make_store.assert_called_once_with(database)
+
     def test_store_reset_clears_singleton(self):
         load_checkpointer_config_from_dict({"type": "memory"})
         store1 = get_store()
@@ -611,6 +630,22 @@ class TestSyncSingletonThreadSafety:
 
 
 class TestAsyncCheckpointer:
+    @pytest.mark.anyio
+    async def test_async_store_persists_with_unified_database_when_legacy_checkpointer_is_absent(self, tmp_path):
+        from deerflow.runtime.store.async_provider import make_store
+
+        database = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+        app_config = MagicMock(checkpointer=None, database=database)
+
+        async with make_store(app_config) as store:
+            await store.aput(("threads",), "thread-1", {"status": "completed"})
+
+        async with make_store(app_config) as store:
+            item = await store.aget(("threads",), "thread-1")
+
+        assert item is not None
+        assert item.value == {"status": "completed"}
+
     @pytest.mark.anyio
     async def test_sqlite_creates_parent_dir_via_to_thread(self):
         """Async SQLite setup should move mkdir off the event loop."""

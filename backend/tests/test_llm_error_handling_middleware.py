@@ -345,6 +345,10 @@ class _CodexStreamIncompleteError(Exception):
     """Local stand-in for CodexStreamIncompleteError — matched by class name."""
 
 
+class _CodexResponseTerminalError(Exception):
+    """Local stand-in for CodexResponseTerminalError — matched by class name."""
+
+
 class _CodexRetryExhaustedError(Exception):
     """Local stand-in for a provider whose own retry budget is exhausted."""
 
@@ -353,6 +357,7 @@ _ReadError.__name__ = "ReadError"
 _RemoteProtocolError.__name__ = "RemoteProtocolError"
 _ConnectError.__name__ = "ConnectError"
 _CodexStreamIncompleteError.__name__ = "CodexStreamIncompleteError"
+_CodexResponseTerminalError.__name__ = "CodexResponseTerminalError"
 _CodexRetryExhaustedError.__name__ = "CodexRetryExhaustedError"
 
 
@@ -390,6 +395,17 @@ def test_classify_codex_stream_incomplete_error_is_retriable() -> None:
     retriable, reason = middleware._classify_error(exc)
     assert retriable is True
     assert reason == "transient"
+
+
+def test_classify_context_length_error_is_non_retriable() -> None:
+    middleware = _build_middleware()
+    exc = _CodexResponseTerminalError("status=failed code=context_length_exceeded message=input too long")
+    exc.__class__.__name__ = "CodexResponseTerminalError"
+
+    retriable, reason = middleware._classify_error(exc)
+
+    assert retriable is False
+    assert reason == "context"
 
 
 def test_sync_codex_provider_retry_exhaustion_is_not_retried_again(
@@ -724,6 +740,18 @@ def test_user_message_for_codex_stream_incomplete_uses_generic_transient_copy() 
 
     assert "temporarily unavailable" in message
     assert "response.completed" not in message
+
+
+def test_user_message_for_context_length_error_mentions_shorter_context() -> None:
+    middleware = _build_middleware()
+    exc = _CodexResponseTerminalError("status=failed code=context_length_exceeded message=input too long")
+    exc.__class__.__name__ = "CodexResponseTerminalError"
+
+    message = middleware._build_user_message(exc, reason="context")
+
+    assert "too large" in message
+    assert "shorten" in message
+    assert "temporarily unavailable" not in message
 
 
 def test_user_message_for_generic_transient_keeps_legacy_copy() -> None:

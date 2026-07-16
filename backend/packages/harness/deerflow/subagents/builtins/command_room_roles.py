@@ -14,7 +14,15 @@ def _role_config(name: str, *, description: str) -> SubagentConfig:
 COMMAND_ROOM_ROLE_CONFIGS = {
     "planner": _role_config(
         "planner",
-        description="Command Room Planner role; proposes candidate direction, plan, assumptions, and alternatives.",
+        description=("Command Room Planner angle for optional Planning; independently develops one strong direction, goal, boundary, route, and acceptance shape from the Chair brief without reviewing another AI."),
+    ),
+    "executor": _role_config(
+        "executor",
+        description=(
+            "Command Room Executor role for one delivery cycle; performs the bounded work, writes actual changes, "
+            "checks, evidence, limits, and unresolved facts to its assigned execution note, and returns the complete "
+            "natural-language result without self-approval."
+        ),
     ),
     "boundary": _role_config(
         "boundary",
@@ -22,7 +30,7 @@ COMMAND_ROOM_ROLE_CONFIGS = {
     ),
     "evidence": _role_config(
         "evidence",
-        description="Command Room Evidence role; defines and checks evidence standards and result strength.",
+        description=("Command Room Evidence role for independent Review; examines the real result with checks proportionate to the goal and records facts, deviations, artifacts, limits, and unresolved uncertainty in findings."),
     ),
     "fact-finder": _role_config(
         "fact-finder",
@@ -30,19 +38,32 @@ COMMAND_ROOM_ROLE_CONFIGS = {
     ),
     "opposition": _role_config(
         "opposition",
-        description="Command Room Opposition role; attacks plan, boundary, evidence, assumptions, and overconfidence.",
+        description=("Command Room Opposition angle; independently starts from the same Chair brief and exposes contrary routes, failure modes, boundary misses, hidden assumptions, and overconfidence without debating another AI."),
+    ),
+    "evaluator": _role_config(
+        "evaluator",
+        description=(
+            "Legacy evaluator role usable for an independent Review handoff; inspects the actual result against the "
+            "Chair's accepted goal, writes evidence-based findings, and returns them without repairing work or making "
+            "the Chair's final decision."
+        ),
     ),
     "recorder": _role_config(
         "recorder",
-        description="Command Room Recorder role; persists durable decisions, state, docs, AGENTS, skills, and probes.",
+        description=("Command Room Recorder role; preserves a Chair decision already made in spec.md, technical-plan.md, or another explicitly named durable file without changing, judging, or creating that decision."),
     ),
     "project-steward": _role_config(
         "project-steward",
-        description="Command Room Project Steward angle; tracks project stage, priorities, and what should wait.",
+        description=(
+            "Command Room Project Steward; after a Chair-accepted reviewed task, determines from project state whether to continue, "
+            "declare substantive completion, or report a real blocker, with the next objective or completion basis. It does not dispatch work."
+        ),
     ),
     "debt-curator": _role_config(
         "debt-curator",
-        description="Command Room Debt Curator angle; classifies known technical, governance, docs, and skill debt.",
+        description=(
+            "Command Room Debt Curator; after explicit project completion, classifies concrete technical, governance, documentation, test, and skill debt into closure-required updates versus optional backlog. It does not apply changes."
+        ),
     ),
     "freshness-keeper": _role_config(
         "freshness-keeper",
@@ -54,7 +75,9 @@ COMMAND_ROOM_ROLE_CONFIGS = {
     ),
     "learning-curator": _role_config(
         "learning-curator",
-        description="Command Room Learning Curator angle; proposes what should enter skills, AGENTS, SkillOpt, or nothing.",
+        description=(
+            "Command Room Learning Curator; after explicit project completion, identifies only evidence-backed durable lessons that merit Skills, AGENTS, Progress, SkillOpt, test, reference, or no update. It does not apply changes."
+        ),
     ),
     "conflict-mapper": _role_config(
         "conflict-mapper",

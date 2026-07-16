@@ -163,6 +163,43 @@ def test_prepare_regenerate_payload_rejects_non_latest_assistant():
     assert exc.value.detail == "Only the latest assistant message can be regenerated"
 
 
+def test_prepare_regenerate_payload_finds_latest_visible_message_before_rollback_checkpoint():
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    base = _checkpoint("ckpt-base", [])
+    after_human = _checkpoint("ckpt-human", [human])
+    answered = _checkpoint("ckpt-ai", [human, ai])
+    rolled_back_latest = _checkpoint("ckpt-rollback", [human])
+    checkpointer = FakeCheckpointer(
+        [rolled_back_latest, answered, after_human, base],
+        latest=rolled_back_latest,
+    )
+    event_store = FakeEventStore(
+        [
+            {
+                "run_id": "run-old",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"id": "ai-1", "type": "ai", "content": "answer"},
+                "metadata": {"caller": "lead_agent"},
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        _prepare_regenerate_payload(
+            "thread-1",
+            "ai-1",
+            _request(checkpointer, event_store),
+        )
+    )
+
+    assert response.target_run_id == "run-old"
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+
+
 def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing():
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 

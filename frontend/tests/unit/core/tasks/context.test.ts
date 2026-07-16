@@ -615,6 +615,31 @@ test("settleRunningSubtasksForRun only fails matching thread and run tasks", () 
   ).toBe("completed");
 });
 
+test("settleRunningSubtasksForRun keeps an admitted background task active after its Chair run ends", () => {
+  let tasks: Record<string, Subtask> = {};
+  tasks = applySubtaskUpdateInState(
+    tasks,
+    subtaskUpdateFixture({
+      id: "background-task",
+      threadId: "thread-1",
+      runId: "run-1",
+      status: "in_progress",
+      backgroundTask: true,
+    }),
+  );
+
+  const settled = settleRunningSubtasksForRun(tasks, {
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "error",
+  });
+
+  expect(Object.values(settled)[0]).toMatchObject({
+    status: "in_progress",
+    backgroundTask: true,
+  });
+});
+
 test("settleRunningSubtasksForRun without roundId settles all active subtasks in matching run", () => {
   let tasks: Record<string, Subtask> = {};
   for (const task of [

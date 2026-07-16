@@ -29,11 +29,10 @@ Optional notes may be added only when they reduce recovery risk, such as an impo
 Progress memory sits above the runtime evidence layer and below a full project plan:
 
 - Progress memory is a lightweight continuation summary for humans and new AI sessions. It is optimized for readability and safe resumption, not completeness.
-- `RoundRecord` is passive compatibility memory for explicit AI-authored notes and objective task, event, artifact, or status references. It does not derive risk, readiness, completion, or a next step.
-- `audit` and `action_result` are bottom-layer facts and evidence: commands, files, logs, terminal/tool events, artifacts, statuses, hashes, and compact runtime metadata.
-- `roundBrief` may carry explicit AI-authored notes and objective references into context. It does not turn conversation or audit data into a quality, safety, gap, or next-action judgment.
+- `audit`, run events, task events, artifacts, and `action_result` are bottom-layer facts and evidence: commands, files, logs, terminal/tool events, statuses, hashes, and compact runtime metadata.
+- Native round state carries the active run and task-lane facts. It does not turn conversation or audit data into a quality, safety, gap, or next-action judgment.
 
-A progress memory may point to `RoundRecord`, audit entries, test logs, commits, or changed files, but it must not replace them. It is a reading aid, not a source of truth.
+A progress memory may point to native round state, audit entries, test logs, commits, or changed files, but it must not replace them. It is a reading aid, not a source of truth.
 
 ## Usage boundaries
 

@@ -309,6 +309,33 @@ def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
         assert DynamicContextMiddleware().before_agent(followup_state, _runtime()) is None
 
 
+def test_summarization_handles_ai_tool_slice_after_dynamic_context_rescue() -> None:
+    """A rescued user-message triplet must not make the remaining summary empty."""
+    middleware = _middleware(trigger=("messages", 9), keep=("messages", 2))
+    middleware._summary_model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    reminder_id = "ctx-1"
+    messages = [
+        _dynamic_context_reminder(reminder_id),
+        HumanMessage(
+            content="memory reminder",
+            id=f"{reminder_id}__memory",
+            additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+        ),
+        HumanMessage(content="original user request", id=f"{reminder_id}__user"),
+        AIMessage(content="assistant tool request"),
+        ToolMessage(content="first tool result", tool_call_id="tool-1"),
+        AIMessage(content="assistant follow-up"),
+        ToolMessage(content="second tool result", tool_call_id="tool-2"),
+        HumanMessage(content="recent user request"),
+        AIMessage(content="recent answer"),
+    ]
+
+    result = middleware.before_model({"messages": messages}, _runtime())
+
+    assert result is not None
+    assert result["messages"][1].content.endswith("compressed summary")
+
+
 def test_before_summarization_hook_not_called_when_threshold_not_met() -> None:
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append], trigger=("messages", 10))

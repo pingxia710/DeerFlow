@@ -144,6 +144,20 @@ class TestLoadAgentConfig:
         assert config.model is None
         assert config.skills == []
 
+    def test_loads_builtin_command_room_with_memory_only_user_directory(self, tmp_path):
+        user_dir = tmp_path / "users" / "u1" / "agents" / "command-room"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            config = load_agent_config("command-room", user_id="u1")
+
+        assert config is not None
+        assert config.name == "command-room"
+        assert config.skills == []
+
     def test_load_missing_config_yaml_raises(self, tmp_path):
         # Create directory without config.yaml
         (tmp_path / "agents" / "broken-agent").mkdir(parents=True)

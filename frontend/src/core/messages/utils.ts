@@ -54,6 +54,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   const groups: MessageGroup[] = [];
+  const commandRoomStepMessages = new Set(getCommandRoomStepMessages(messages));
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
@@ -71,7 +72,10 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   for (const message of messages) {
-    if (isHiddenFromUIMessage(message)) {
+    if (
+      isHiddenFromUIMessage(message) ||
+      commandRoomStepMessages.has(message)
+    ) {
       continue;
     }
 
@@ -142,6 +146,63 @@ function messageRunId(message: Message) {
     message.additional_kwargs?.deerflow_run_id ??
     message.additional_kwargs?.run_id;
   return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+function isBackgroundTaskReceipt(message: Message) {
+  return (
+    message.type === "tool" &&
+    message.name === "task" &&
+    message.additional_kwargs?.background_task === true
+  );
+}
+
+export function isCommandRoomStepMessage(message: Message) {
+  return (
+    message.type === "ai" &&
+    message.additional_kwargs?.deerflow_display_message_type === "round_summary"
+  );
+}
+
+/**
+ * Return Chair stage updates separately from both the main conversation and
+ * task cards. New rows carry an explicit display type; the receipt-based path
+ * keeps already-persisted Command Room runs readable after an upgrade.
+ */
+export function getCommandRoomStepMessages(messages: Message[]): Message[] {
+  const steps: Message[] = [];
+  const backgroundTaskRunIds = new Set<string>();
+  let unscopedBackgroundTaskSeen = false;
+
+  for (const message of messages) {
+    if (message.type === "human") {
+      unscopedBackgroundTaskSeen = false;
+    }
+    if (isBackgroundTaskReceipt(message)) {
+      const runId = messageRunId(message);
+      if (runId) {
+        backgroundTaskRunIds.add(runId);
+      } else {
+        unscopedBackgroundTaskSeen = true;
+      }
+      continue;
+    }
+    if (
+      message.type !== "ai" ||
+      message.tool_calls?.length ||
+      !hasContent(message)
+    ) {
+      continue;
+    }
+    const runId = messageRunId(message);
+    if (
+      isCommandRoomStepMessage(message) ||
+      (runId ? backgroundTaskRunIds.has(runId) : unscopedBackgroundTaskSeen)
+    ) {
+      steps.push(message);
+    }
+  }
+
+  return steps;
 }
 
 function groupRunId(group: MessageGroup) {

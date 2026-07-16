@@ -3,6 +3,10 @@ import { expect, test } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
 import {
+  getCommandRoomStepMessages,
+  getMessageGroups,
+} from "@/core/messages/utils";
+import {
   applySubtaskUpdateInState,
   settleRunningSubtasksForRun,
 } from "@/core/tasks/context";
@@ -1018,6 +1022,32 @@ test("taskLaneSubtaskUpdate restores completed task lane state", () => {
   });
 });
 
+test("taskLaneSubtaskUpdate restores explicit Command Room trajectory facts", () => {
+  expect(
+    taskLaneSubtaskUpdate({
+      thread_id: "thread-1",
+      run_id: "run-1",
+      round_id: "round-1",
+      task_id: "task-1",
+      role: "executor",
+      status: "completed",
+      handoff: {
+        command_room_container: "execution",
+        delivery_cycle_index: 2,
+        container_artifact_path: "03-delivery/cycle-02/execution.md",
+        container_artifact_written: true,
+        container_artifact_kind: "execution",
+      },
+    }),
+  ).toMatchObject({
+    commandRoomContainer: "execution",
+    deliveryCycleIndex: 2,
+    containerArtifactPath: "03-delivery/cycle-02/execution.md",
+    containerArtifactWritten: true,
+    containerArtifactKind: "execution",
+  });
+});
+
 test("taskLaneSubtaskUpdate maps non-active terminal lanes to failed", () => {
   expect(
     taskLaneSubtaskUpdate({
@@ -1152,6 +1182,152 @@ test("task event run messages update subtask state without entering visible hist
       [],
     ).map((message) => message.id),
   ).toEqual(["ai-1"]);
+});
+
+test("Command Room stage updates stay out of the main conversation and task projection", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "human-1",
+        type: "human",
+        content: "Run the audit",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: true,
+        surface: "chat",
+        reason: "human_message",
+        message_type: "visible_chat_message",
+      },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "task-receipt-1",
+        type: "tool",
+        name: "task",
+        tool_call_id: "call-1",
+        content: "accepted",
+        additional_kwargs: { background_task: true },
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: false,
+        surface: "control",
+        reason: "tool_message",
+        message_type: "system_internal_state",
+      },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 3,
+      content: {
+        id: "step-1",
+        type: "ai",
+        content: "Planning is in progress.",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: false,
+        surface: "audit",
+        reason: "command_room_step",
+        message_type: "round_summary",
+      },
+      created_at: "2026-05-22T00:00:02Z",
+    },
+  ] as RunMessage[];
+
+  const messages = buildVisibleHistoryMessages(rows, new Set(), []);
+
+  expect(messages.map((message) => message.id)).toEqual(["human-1", "step-1"]);
+  expect(
+    getCommandRoomStepMessages(messages).map((message) => message.id),
+  ).toEqual(["step-1"]);
+  expect(
+    getMessageGroups(messages)
+      .flatMap((group) => group.messages)
+      .map((message) => message.id),
+  ).toEqual(["human-1"]);
+});
+
+test("legacy background receipts keep their following Chair update in steps", () => {
+  const messages = [
+    {
+      id: "task-receipt-1",
+      type: "tool",
+      name: "task",
+      tool_call_id: "call-1",
+      content: "accepted",
+      additional_kwargs: { background_task: true },
+    },
+    {
+      id: "step-1",
+      type: "ai",
+      content: "Planning is in progress.",
+    },
+  ] as Message[];
+
+  expect(
+    getCommandRoomStepMessages(messages).map((message) => message.id),
+  ).toEqual(["step-1"]);
+  expect(getMessageGroups(messages)).toEqual([]);
+});
+
+test("legacy persisted background receipts project Chair stage text into steps", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "task-receipt-1",
+        type: "tool",
+        name: "task",
+        tool_call_id: "call-1",
+        content: "accepted",
+        additional_kwargs: { background_task: true },
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: false,
+        surface: "control",
+        reason: "tool_message",
+        message_type: "system_internal_state",
+      },
+      created_at: "2026-05-22T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "step-1",
+        type: "ai",
+        content: "Planning is in progress.",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      display: {
+        visible_in_chat: true,
+        surface: "chat",
+        reason: "lead_ai_response",
+        message_type: "visible_chat_message",
+      },
+      created_at: "2026-05-22T00:00:01Z",
+    },
+  ] as RunMessage[];
+
+  const messages = buildVisibleHistoryMessages(rows, new Set(), []);
+
+  expect(messages[0]?.additional_kwargs?.deerflow_display_message_type).toBe(
+    "round_summary",
+  );
+  expect(getMessageGroups(messages)).toEqual([]);
+  expect(
+    getCommandRoomStepMessages(messages).map((message) => message.id),
+  ).toEqual(["step-1"]);
 });
 
 test("hidden task ToolMessage restores the complete raw result after preview replay", () => {
@@ -2059,6 +2235,44 @@ test("buildVisibleHistoryMessages preserves same message id across different run
   expect(
     mergeMessages(history, [], []).map((message) => message.content),
   ).toEqual(["first run", "second run"]);
+});
+
+test("buildVisibleHistoryMessages hides a prior human message replayed under a background wakeup run", () => {
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "background-wakeup",
+        seq: 1,
+        content: {
+          id: "prior-human",
+          type: "human",
+          content: "prior user request",
+          additional_kwargs: { run_id: "prior-human-run" },
+        } as Message,
+        metadata: { caller: "lead_agent" },
+        display: {
+          visible_in_chat: true,
+          reason: "user message belongs to the original run",
+        },
+        created_at: "2026-07-15T11:02:44.000Z",
+      },
+      {
+        run_id: "background-wakeup",
+        seq: 2,
+        content: {
+          id: "wakeup-answer",
+          type: "ai",
+          content: "review started",
+        } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-07-15T11:02:45.000Z",
+      },
+    ],
+    new Set(),
+    [],
+  );
+
+  expect(history.map((message) => message.content)).toEqual(["review started"]);
 });
 
 test("mergeMessages lets live messages replace overlapping scoped history", () => {

@@ -28,25 +28,73 @@ README files, or skills rather than expanding this file.
 - The Command Room is the lead AI. It owns the user goal, plan, progress,
   context, and final judgment; execution belongs to short-lived sub-AIs.
 - `task()` carries one self-contained natural-language prompt to one
-  `codex exec --ephemeral` process and returns that AI's complete natural result
-  unchanged. The process then ends.
+  `codex exec --ephemeral` process. Ordinary agents wait for the complete
+  natural result; Command Room receives an admission receipt, stays available
+  to the human, and is automatically woken in a new sequential Run when the
+  child finishes. The child process then ends.
 - A professional role supplies developer-authored prompt context. It does not
   install a DeerFlow tool list or turn the child into a program-managed agent.
   Codex CLI owns its reasoning, planning, native tools, checks, and response.
-- Pass every worker result to a different sub-AI for checking, review, or
-  acceptance. Obtain an independent opposition result. The lead AI adjudicates
-  the worker, checker, and opposition text; do not build an endless review chain.
-- A single lead model response may issue at most six `task()` calls. This is a
+- Command Room uses a project-lifecycle natural-language AI-AI workspace under
+  the thread workspace (`command-room-loop/<thread_id>/`). An explicit
+  `work_package_id` creates its own `packages/<work_package_id>/` namespace,
+  receipts, and lifecycle records. Context collection is optional; when used,
+  parallel discovery AIs return before a Recorder preserves
+  `00-context/context.md`. Planning and Technical Design are optional. When
+  used, independent forward and opposition AIs start from that same factual
+  snapshot and do not review each other; the Chair forms one decision preserved
+  in `01-planning/spec.md` or `02-technical-design/technical-plan.md`. The
+  Chair presents that recorded plan to the human and waits for explicit
+  confirmation or revision before beginning Execution; it never infers approval
+  from the artifact or task state.
+- Calls without `work_package_id` remain in one legacy package for compatibility.
+  Once legacy Delivery begins, new Context, Planning, or Technical Design work
+  must carry an explicit ID; the program never infers or allocates a package.
+- Conversation and direct Chair answers use no container. When the user's goal,
+  boundary, and observable result are clear, skip Context and Planning. A work
+  package never overlaps its own planning and execution. Real work uses
+  `execution` cycle N and must be followed by a different AI in `review` cycle
+  N after every admitted Execution N handoff is terminal. Review writes
+  natural-language findings under `03-delivery/cycle-NN/`.
+  The Chair reads them and either explicitly calls Execution N+1 or accepts the
+  task with `close_task`; there is no fixed number of delivery cycles.
+- `close_task` is an explicit Chair quality decision and deterministically
+  starts Project Steward. After that natural result returns, the Chair records
+  `continue`, `project_complete`, or `blocked` with `project_status`.
+  `project_complete` deterministically starts Debt Curator and Learning
+  Curator. Their accepted updates must still pass a later Execution → Review
+  cycle before the Chair records terminal `closed`.
+- Every `task()` prompt is the complete AI-AI contract. Children return their
+  complete natural result and end; Markdown files and the real workspace carry
+  durable shared state. Program code records only declared stage/cycle,
+  path/hash/status, and changed-artifact facts. It never reads Markdown for
+  quality or chooses a dynamic role. It may only run the fixed lifecycle roles
+  after an explicit Chair status and wake the Chair after factual completion.
+- If a Planning or Technical Design child terminates after changing its
+  assigned angle artifact, the Chair may inspect it and explicitly call
+  `accept_handoff`; otherwise the failed angle may be retried with a new task.
+  Changed bytes are a transport fact, never a program quality verdict.
+- A confirmed package N may execute in parallel with Context/Planning for an
+  independent package N+1 only when the Chair explicitly declares distinct
+  scopes and owned paths in both handoffs. A single lead model response may
+  issue at most six `task()` calls. This is a
   response-size boundary, not a global queue, scheduler, or serialized worker
   controller. Batch further independent work after results return.
 - The configured child default is `gpt-5.6-terra` with Codex reasoning effort
   `xhigh`. The child timeout is 3600 seconds; the parent no-progress watchdog is
   longer so a healthy child is not cancelled first.
 
-Do not replace this strategy with child turn loops, a task graph, polling,
-program-written plans, tool-by-tool scripts, role-based tool grants, synthetic
-handoff forms, programmatic reviewers, scores, PASS/FAIL gates, quality or
-completion inference, automatic dispatch/rework, or a resident child runtime.
+Do not replace this strategy with child turn loops, a broad task graph,
+polling, program-written plans, tool-by-tool scripts, role-based tool grants,
+synthetic handoff forms, programmatic reviewers, scores, PASS/FAIL gates,
+quality inference, content-based dispatch/rework, or a resident child runtime. The
+approved handoff admission boundary is not a scheduler: it only rejects an
+out-of-order, wrong-cycle, or missing-artifact handoff explicitly attempted by
+the Chair, plus the fixed Steward/Curator lifecycle explicitly authorized here.
+Its project receipt ledger is parent-owned under the thread audit directory,
+outside the normal child workspace; this is workflow integrity for the accepted
+trusted-host model, not a replacement for OS isolation when an operator elects
+to grant full host access.
 Changing the frozen definition, this responsibility split, the accepted child
 model/effort, or the trusted-host execution model requires explicit developer
 confirmation.
@@ -58,12 +106,18 @@ prompt/result, manage one process and hard timeout/cancellation, enforce owner,
 path, environment, and sandbox boundaries, and preserve exact AI-authored text
 plus factual IDs, timestamps, statuses, hashes, sizes, and references.
 
-Program code must not choose the role or next AI, interpret prose, infer
+Program code must not choose a dynamic role or next objective, interpret prose, infer
 evidence strength, decide correctness/completion/safety, create recommendations
-or gaps, dispatch a checker, or trigger rework. Compatibility API fields for
-old consumers must stay neutral (`null`, empty, or `false`) rather than simulate
-a decision. A successful task result must not be previewed, summarized, or
-truncated by generic tool-output middleware or frontend replay.
+or gaps, dispatch a checker, or trigger rework. After an explicit AI-authored
+status it may dispatch only the fixed Project Steward, Debt Curator, and
+Learning Curator roles and sequentially wake the Chair. A failed Chair wake Run
+may be retried a bounded number of times with factual sibling task statuses.
+It may enforce optional
+Context/Planning/Technical Design prerequisites, package-scoped Execution N → Review N order, and
+changed-artifact receipt as objective transport facts. Compatibility API fields
+for old consumers must stay neutral (`null`, empty, or `false`) rather than
+simulate a decision. A successful task result must not be previewed, summarized,
+or truncated by generic tool-output middleware or frontend replay.
 
 ## Safety And Change Boundaries
 
@@ -73,9 +127,10 @@ truncated by generic tool-output middleware or frontend replay.
   to switch isolation or host access without confirmation.
 - Child environments receive core runtime and explicit Codex auth variables
   only. Never expose other secrets to a child, logs, chat, commits, or services.
-- Make DeerFlow changes in a dedicated worktree and branch. Do not modify or
-  merge into `main`, push, rewrite history, delete evidence, or touch unrelated
-  projects unless the user explicitly authorizes that action.
+- Local DeerFlow optimization may be done in the current worktree and current
+  branch, including `main`, when the user is actively iterating. Do not push,
+  rewrite history, delete evidence, or touch unrelated projects unless the user
+  explicitly authorizes that action.
 - Stop before production/public or live-data changes, money/customer/credential
   actions, destructive work, new external dependencies, permission expansion,
   or changes to auth, storage, network, deployment, MCP, host access, or AI-AI.
@@ -83,6 +138,11 @@ truncated by generic tool-output middleware or frontend replay.
   and its tradeoff; do not silently implement it.
 
 ## Repository Orientation
+
+Use `/Users/pingxia/projects/deer-flow` as the local active repository for the
+running development stack unless the user explicitly names another checkout.
+Do not copy fixes from `/Users/pingxia/Documents/DeerFlow` without re-auditing
+them against this file; that checkout may contain abandoned experiments.
 
 The local stack is Nginx `:2026`, Gateway `:8001`, Next.js `:3000`, and optional
 provisioner `:8002`. Nginx is the normal browser entry.

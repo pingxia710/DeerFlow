@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _SENSITIVE_ERROR_VALUE_RE = re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|authorization|bearer|secret|password)\b\s*[:=]\s*[^,\s;}]+")
+_TERMINAL_RESPONSE_EVENTS = frozenset({"response.failed", "response.incomplete", "response.cancelled"})
 
 
 def _safe_error_detail(response: httpx.Response) -> str:
@@ -42,6 +43,28 @@ def _safe_error_detail(response: httpx.Response) -> str:
     if not isinstance(error, dict):
         return "unstructured response"
     detail = " ".join(" ".join(f"{key}={error[key]}".split()) for key in ("type", "code", "param", "message") if isinstance(error.get(key), (str, int, float)))
+    return _SENSITIVE_ERROR_VALUE_RE.sub(r"\1=[REDACTED]", detail)[:1000]
+
+
+def _safe_response_event_detail(event: dict[str, Any]) -> str:
+    """Return bounded diagnostics for a terminal Responses stream event."""
+    response = event.get("response")
+    if not isinstance(response, dict):
+        response = event
+
+    parts = [f"{key}={response[key]}" for key in ("type", "status") if isinstance(response.get(key), (str, int, float))]
+
+    incomplete_details = response.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        parts.extend(f"incomplete_{key}={incomplete_details[key]}" for key in ("reason",) if isinstance(incomplete_details.get(key), (str, int, float)))
+
+    error = response.get("error")
+    if isinstance(error, dict):
+        parts.extend(f"{key}={error[key]}" for key in ("type", "code", "param", "message") if isinstance(error.get(key), (str, int, float)))
+
+    detail = " ".join(" ".join(part.split()) for part in parts)
+    if not detail:
+        detail = str(event.get("type") or "terminal response event")
     return _SENSITIVE_ERROR_VALUE_RE.sub(r"\1=[REDACTED]", detail)[:1000]
 
 
@@ -72,10 +95,15 @@ def _build_usage_metadata(oai_usage: dict) -> dict:
 
 
 MAX_RETRIES = 3
+_REPLAYED_TASK_PROMPT_PLACEHOLDER = "[omitted from provider replay: this completed task prompt was {char_count} characters; use the following function_call_output as the task result.]"
 
 
 class CodexStreamIncompleteError(RuntimeError):
     """Codex SSE ended before the required response.completed event."""
+
+
+class CodexResponseTerminalError(RuntimeError):
+    """Codex SSE ended with a terminal non-completed response event."""
 
 
 class CodexRetryExhaustedError(RuntimeError):
@@ -180,6 +208,7 @@ class CodexChatModel(BaseChatModel):
         """
         instructions_parts: list[str] = []
         input_items = []
+        completed_tool_call_ids = {msg.tool_call_id for msg in messages if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and msg.tool_call_id}
 
         for msg in messages:
             if isinstance(msg, SystemMessage):
@@ -199,7 +228,7 @@ class CodexChatModel(BaseChatModel):
                             {
                                 "type": "function_call",
                                 "name": tc["name"],
-                                "arguments": json.dumps(tc["args"]) if isinstance(tc["args"], dict) else tc["args"],
+                                "arguments": self._serialize_tool_call_arguments(tc, completed_tool_call_ids),
                                 "call_id": tc["id"],
                             }
                         )
@@ -215,6 +244,42 @@ class CodexChatModel(BaseChatModel):
         instructions = "\n\n".join(instructions_parts) or "You are a helpful assistant."
 
         return instructions, input_items
+
+    @classmethod
+    def _serialize_tool_call_arguments(cls, tool_call: dict[str, Any], completed_tool_call_ids: set[str]) -> str:
+        args = tool_call["args"]
+        if not isinstance(args, dict):
+            return args
+
+        compacted_args = cls._compact_replayed_task_arguments(tool_call, args, completed_tool_call_ids)
+        return json.dumps(compacted_args)
+
+    @classmethod
+    def _compact_replayed_task_arguments(
+        cls,
+        tool_call: dict[str, Any],
+        args: dict[str, Any],
+        completed_tool_call_ids: set[str],
+    ) -> dict[str, Any]:
+        """Omit completed task prompts from provider replay payloads.
+
+        The Responses API requires replaying prior function_call items before
+        their function_call_output items. For completed DeerFlow ``task`` calls,
+        the long one-shot prompt is historical transport data; the model should
+        reason from the tool output plus the short description on later turns.
+        Keep pending tool calls untouched so execution still receives the exact
+        prompt the model authored.
+        """
+        if tool_call.get("name") != "task" or tool_call.get("id") not in completed_tool_call_ids:
+            return args
+
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str):
+            return args
+
+        compacted = dict(args)
+        compacted["prompt"] = _REPLAYED_TASK_PROMPT_PLACEHOLDER.format(char_count=len(prompt))
+        return compacted
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
         """Convert LangChain tool format to Responses API format."""
@@ -297,6 +362,7 @@ class CodexChatModel(BaseChatModel):
     def _stream_response(self, headers: dict, payload: dict) -> dict:
         """Stream SSE from Codex API and collect the final response."""
         completed_response = None
+        terminal_error_detail = None
         streamed_output_items: dict[int, dict[str, Any]] = {}
 
         with httpx.Client(timeout=300) as client:
@@ -323,8 +389,17 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                    elif event_type in _TERMINAL_RESPONSE_EVENTS:
+                        terminal_error_detail = _safe_response_event_detail(data)
+                        logger.warning(
+                            "Codex API stream ended with terminal event: request_id=%s detail=%s",
+                            getattr(resp, "headers", {}).get("x-request-id", "unknown"),
+                            terminal_error_detail,
+                        )
 
         if not completed_response:
+            if terminal_error_detail:
+                raise CodexResponseTerminalError(terminal_error_detail)
             raise CodexStreamIncompleteError("Codex API stream ended without response.completed event")
 
         # ChatGPT Codex can emit the final assistant content only in stream events.

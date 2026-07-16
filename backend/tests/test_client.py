@@ -259,11 +259,7 @@ class TestStream:
         assert any(event.type == "values" for event in events)
         assert events[-1].type == "end"
 
-    def test_command_room_round_facts_are_not_streamed_as_custom_events(self, client, tmp_path, monkeypatch):
-        """Command Room fact records stay in internal audit storage, not the UI stream."""
-        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-        monkeypatch.setattr("deerflow.config.paths._paths", None)
-
+    def test_command_room_stream_propagates_run_id(self, client):
         ai = AIMessage(content="Done", id="ai-1")
         agent = _make_agent_mock([{"messages": [HumanMessage(content="hi", id="h-1"), ai]}])
         client._agent_name = "command-room"
@@ -271,47 +267,12 @@ class TestStream:
         with (
             patch.object(client, "_ensure_agent"),
             patch.object(client, "_agent", agent),
-            patch("deerflow.client.get_effective_user_id", return_value="user-1"),
-        ):
-            events = list(client.stream("hi", thread_id="t-round-hidden"))
-
-        assert not any(event.type == "custom" and event.data.get("type") == "round_context_signals" for event in events)
-
-        from deerflow.command_room.round_record import latest_command_room_round
-
-        record = latest_command_room_round(thread_id="t-round-hidden", user_id="user-1")
-        assert record is not None
-        assert record["version"] == 2
-        assert "roundContextSignals" not in record
-        assert "verdict" not in record
-        assert record["hide_from_ui"] is True
-
-    def test_command_room_round_record_receives_stream_run_id(self, client, tmp_path, monkeypatch):
-        """Client stream propagates one run_id to graph context and RoundRecord."""
-        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-        monkeypatch.setattr("deerflow.config.paths._paths", None)
-
-        ai = AIMessage(content="Done", id="ai-1")
-        agent = _make_agent_mock([{"messages": [HumanMessage(content="hi", id="h-1"), ai]}])
-        client._agent_name = "command-room"
-
-        with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
-            patch("deerflow.client.get_effective_user_id", return_value="user-1"),
         ):
             list(client.stream("hi", thread_id="t-run", run_id="new"))
 
         call_kwargs = agent.stream.call_args.kwargs
         assert call_kwargs["config"]["configurable"]["run_id"] == "new"
         assert call_kwargs["context"]["run_id"] == "new"
-
-        from deerflow.command_room.round_record import latest_command_room_round
-
-        record = latest_command_room_round(thread_id="t-run", user_id="user-1")
-        assert record is not None
-        assert record["runId"] == "new"
-        assert record["visibility"] == "internal_audit"
 
     def test_context_propagation(self, client):
         """stream() passes agent_name to the context."""

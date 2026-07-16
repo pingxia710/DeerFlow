@@ -263,12 +263,6 @@ class ThreadHistoryRequest(BaseModel):
     before: str | None = Field(default=None, description="Cursor for pagination")
 
 
-class CommandRoomRoundResponse(BaseModel):
-    """Latest persisted command-room RoundRecord for a thread."""
-
-    round: dict[str, Any] = Field(description="Latest command-room RoundRecord")
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1113,26 +1107,6 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(channel_values),
     )
-
-
-@router.get("/{thread_id}/command-room/rounds/latest", response_model=CommandRoomRoundResponse)
-@require_permission("threads", "read", owner_check=True)
-async def get_latest_command_room_round(thread_id: str, request: Request) -> CommandRoomRoundResponse:
-    """Return the latest persisted command-room RoundRecord for a thread."""
-    from deerflow.command_room.round_record import latest_command_room_round
-
-    try:
-        record = await asyncio.to_thread(latest_command_room_round, thread_id=thread_id, user_id=get_request_storage_user_id(request))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Failed to read command-room RoundRecord for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to read command-room RoundRecord") from exc
-
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Command-room RoundRecord for thread {thread_id} not found")
-
-    return CommandRoomRoundResponse(round=record)
 
 
 # ---------------------------------------------------------------------------

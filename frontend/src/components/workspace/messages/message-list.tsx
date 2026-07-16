@@ -41,6 +41,7 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getConversationTurnTiming,
+  getCommandRoomStepMessages,
   getConversationTurns,
   getMessageGroups,
   getStreamingMessageLookup,
@@ -62,14 +63,15 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import { buildCommandRoomTrajectory } from "@/core/threads/command-room-read-model";
 import {
   HISTORY_CREATED_AT_KEY,
   isActiveRunStatus,
+  useThreadRuntimeSnapshot,
+  type ThreadRunTerminalNotice,
+  type useThreadStream,
 } from "@/core/threads/hooks";
-import type {
-  ThreadRunTerminalNotice,
-  useThreadStream,
-} from "@/core/threads/hooks";
+import { mergeTaskLaneSubtasks } from "@/core/threads/task-events";
 import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +79,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { Tooltip } from "../tooltip";
 
+import { CommandRoomTrajectory } from "./command-room-trajectory";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -172,6 +175,15 @@ function getMessageRoundId(message: Message) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function isCommandRoomBackgroundSubtaskGroup(messages: Message[]) {
+  return messages.some(
+    (message) =>
+      message.type === "tool" &&
+      message.name === "task" &&
+      message.additional_kwargs?.background_task === true,
+  );
+}
+
 function isTerminalSubtask(task: Subtask) {
   return task.status === "completed" || task.status === "failed";
 }
@@ -217,6 +229,23 @@ export function findMatchingTerminalSubtaskForTask(
       task.id === taskId &&
       task.runId === runId &&
       isTerminalSubtask(task),
+  );
+  if (roundId) {
+    return candidates.find((task) => matchesRequestedRound(task, roundId));
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+export function findMatchingActiveSubtaskForTask(
+  subtasks: Subtask[],
+  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
+) {
+  const candidates = subtasks.filter(
+    (task) =>
+      task.threadId === threadId &&
+      task.id === taskId &&
+      task.runId === runId &&
+      task.status === "in_progress",
   );
   if (roundId) {
     return candidates.find((task) => matchesRequestedRound(task, roundId));
@@ -288,15 +317,20 @@ export function isInferredRunningSubtaskVisible({
   groupIsLoading,
   activeRunIds,
   turnStartTime,
+  hasMatchingActiveTask = false,
 }: {
   runId?: string | null;
   startedAt?: number;
   groupIsLoading: boolean;
   activeRunIds: ReadonlySet<string>;
   turnStartTime: number | null;
+  hasMatchingActiveTask?: boolean;
 }) {
   if (!runId) {
     return false;
+  }
+  if (hasMatchingActiveTask) {
+    return true;
   }
   if (activeRunIds.has(runId)) {
     return true;
@@ -595,7 +629,8 @@ export function MessageList({
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
   tokenUsageInlineMode = "off",
   hideProtocolUi = false,
-  hideThinkingUi = false,
+  hideThinkingUi = true,
+  isCommandRoom = false,
   contextSnapshot,
   hasMoreHistory,
   loadMoreHistory,
@@ -614,6 +649,7 @@ export function MessageList({
   tokenUsageInlineMode?: TokenUsageInlineMode;
   hideProtocolUi?: boolean;
   hideThinkingUi?: boolean;
+  isCommandRoom?: boolean;
   contextSnapshot?: ThreadContextUsageSnapshot | null;
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => Promise<void> | void;
@@ -632,6 +668,10 @@ export function MessageList({
   const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
   const prevIsLoading = useRef(thread.isLoading);
   const messages = thread.messages;
+  const commandRoomStepMessages = useMemo(
+    () => getCommandRoomStepMessages(messages),
+    [messages],
+  );
   const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const conversationTurns = useMemo(
     () => getConversationTurns(groupedMessages),
@@ -756,6 +796,30 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const contextSubtasks = useSubtasksForThread(threadId);
+  const runtimeSnapshot = useThreadRuntimeSnapshot(threadId, {
+    enabled: isCommandRoom,
+  });
+  const trajectoryTasks = useMemo(
+    () =>
+      isCommandRoom
+        ? mergeTaskLaneSubtasks(
+            runtimeSnapshot.data?.task_lanes ?? [],
+            contextSubtasks,
+          )
+        : contextSubtasks,
+    [contextSubtasks, isCommandRoom, runtimeSnapshot.data?.task_lanes],
+  );
+  const commandRoomTrajectory = useMemo(
+    () => buildCommandRoomTrajectory(trajectoryTasks),
+    [trajectoryTasks],
+  );
+  const unstagedCommandRoomTasks = useMemo(
+    () =>
+      isCommandRoom
+        ? trajectoryTasks.filter((task) => !task.commandRoomContainer)
+        : [],
+    [isCommandRoom, trajectoryTasks],
+  );
   const lastGroupIndex = groupedMessages.length - 1;
   const activeHistoryRunIds = useMemo(() => {
     return new Set(
@@ -816,7 +880,17 @@ export function MessageList({
                 roundId,
               },
             );
-            const effectiveRoundId = roundId ?? matchingTerminal?.roundId;
+            const matchingActive = findMatchingActiveSubtaskForTask(
+              contextSubtasks,
+              {
+                threadId,
+                runId,
+                taskId: toolCall.id,
+                roundId,
+              },
+            );
+            const effectiveRoundId =
+              roundId ?? matchingTerminal?.roundId ?? matchingActive?.roundId;
             const status = derivePendingSubtaskStatus(
               toolCall.id,
               group.messages,
@@ -843,6 +917,7 @@ export function MessageList({
                   groupIsLoading,
                   activeRunIds: activeHistoryRunIds,
                   turnStartTime: activeTurnStartTime,
+                  hasMatchingActiveTask: Boolean(matchingActive),
                 }),
               })
             ) {
@@ -918,6 +993,7 @@ export function MessageList({
     return contextSubtasks.filter(
       (task) =>
         task.status === "in_progress" &&
+        !task.commandRoomContainer &&
         Boolean(task.runId) &&
         isRuntimeOnlySubtaskForActiveTurn(
           task,
@@ -1361,6 +1437,9 @@ export function MessageList({
                     </div>
                   );
                 } else if (group.type === "assistant:subagent") {
+                  if (isCommandRoomBackgroundSubtaskGroup(group.messages)) {
+                    return null;
+                  }
                   const tasks = new Set<Subtask>();
                   for (const message of group.messages) {
                     if (message.type === "ai") {
@@ -1385,8 +1464,17 @@ export function MessageList({
                                 roundId,
                               },
                             );
+                          const matchingActive =
+                            findMatchingActiveSubtaskForTask(contextSubtasks, {
+                              threadId,
+                              runId,
+                              taskId,
+                              roundId,
+                            });
                           const effectiveRoundId =
-                            roundId ?? matchingTerminal?.roundId;
+                            roundId ??
+                            matchingTerminal?.roundId ??
+                            matchingActive?.roundId;
                           const status = derivePendingSubtaskStatus(
                             taskId,
                             group.messages,
@@ -1413,6 +1501,8 @@ export function MessageList({
                                   groupIsLoading,
                                   activeRunIds: activeHistoryRunIds,
                                   turnStartTime: activeTurnStartTime,
+                                  hasMatchingActiveTask:
+                                    Boolean(matchingActive),
                                 },
                               ),
                             })
@@ -1491,8 +1581,19 @@ export function MessageList({
                             taskId,
                             roundId,
                           });
+                        const matchingActive = findMatchingActiveSubtaskForTask(
+                          contextSubtasks,
+                          {
+                            threadId,
+                            runId,
+                            taskId,
+                            roundId,
+                          },
+                        );
                         const effectiveRoundId =
-                          roundId ?? matchingTerminal?.roundId;
+                          roundId ??
+                          matchingTerminal?.roundId ??
+                          matchingActive?.roundId;
                         const status = derivePendingSubtaskStatus(
                           taskId,
                           group.messages,
@@ -1518,6 +1619,7 @@ export function MessageList({
                               groupIsLoading,
                               activeRunIds: activeHistoryRunIds,
                               turnStartTime: activeTurnStartTime,
+                              hasMatchingActiveTask: Boolean(matchingActive),
                             }),
                           })
                         ) {
@@ -1644,6 +1746,11 @@ export function MessageList({
               </Reasoning>
             </div>
           )}
+        <CommandRoomTrajectory
+          chairMessages={commandRoomStepMessages}
+          steps={commandRoomTrajectory}
+          unstagedTasks={unstagedCommandRoomTasks}
+        />
         {recoveryStatus &&
           (recoveryStatus.state !== "terminal" || shouldShowTerminalNotice) && (
             <RunRecoveryNotice

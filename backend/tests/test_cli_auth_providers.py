@@ -288,6 +288,33 @@ def test_codex_provider_missing_completed_raises_typed_stream_error(monkeypatch)
         model._stream_response(headers={}, payload={})
 
 
+def test_codex_provider_terminal_failed_event_raises_sanitized_error(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"input too long access_token=secret-token"}}}',
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    with pytest.raises(codex_provider_module.CodexResponseTerminalError) as exc_info:
+        model._stream_response(headers={}, payload={})
+
+    detail = str(exc_info.value)
+    assert "context_length_exceeded" in detail
+    assert "access_token=[REDACTED]" in detail
+    assert "secret-token" not in detail
+
+
 def test_codex_provider_preserves_completed_output_when_stream_only_has_placeholder(monkeypatch):
     monkeypatch.setattr(
         CodexChatModel,

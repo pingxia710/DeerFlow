@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Any, Protocol, cast, override, runtime_checkable
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage, get_buffer_string
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -185,6 +185,29 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # message objects.
         formatted_messages = get_buffer_string(trimmed_messages)
         return self.summary_prompt.format(messages=formatted_messages).rstrip()
+
+    @override
+    def _trim_messages_for_summary(self, messages: list[AnyMessage]) -> list[AnyMessage]:
+        """Trim summary input without dropping an AI/tool-only transcript slice."""
+        trimmed_messages = super()._trim_messages_for_summary(messages)
+        if trimmed_messages or self.trim_tokens_to_summarize is None:
+            return trimmed_messages
+
+        # The summary model receives a plain-text transcript, not this list as a
+        # chat history. After dynamic-context messages are rescued, the remaining
+        # slice can legitimately begin with an AI/tool block; requiring a human
+        # start would otherwise discard this non-empty slice.
+        return cast(
+            "list[AnyMessage]",
+            trim_messages(
+                messages,
+                max_tokens=self.trim_tokens_to_summarize,
+                token_counter=self.token_counter,
+                strategy="last",
+                allow_partial=True,
+                include_system=True,
+            ),
+        )
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)

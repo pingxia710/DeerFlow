@@ -220,6 +220,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store, round_store=app.state.round_state_store)
+        from app.gateway.command_room_background import CommandRoomBackgroundService
+
+        app.state.command_room_background_service = CommandRoomBackgroundService()
         if getattr(config.database, "backend", None) == "sqlite":
             from deerflow.utils.time import now_iso
 
@@ -230,10 +233,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 before=now_iso(),
             )
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        await app.state.command_room_background_service.recover(app)
 
         try:
             yield
         finally:
+            background_service = getattr(app.state, "command_room_background_service", None)
+            if background_service is not None:
+                await background_service.shutdown()
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
             # otherwise leak into asyncio.run() shutdown, where langgraph's
@@ -305,6 +312,8 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound
     to one backend paired with a config pointing at another.
     """
+    background_service = getattr(request.app.state, "command_room_background_service", None)
+    background_dispatcher = background_service.bind(request) if background_service is not None else None
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -313,6 +322,7 @@ def get_run_context(request: Request) -> RunContext:
         thread_store=get_thread_store(request),
         app_config=get_config(),
         round_store=get_round_state_store(request),
+        command_room_background_dispatcher=background_dispatcher,
     )
 
 

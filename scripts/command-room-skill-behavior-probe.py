@@ -21,16 +21,52 @@ DEFAULT_REPORT = (
 
 SCENARIOS = (
     {
-        "id": "review-observed-implementation",
+        "id": "clear-direct-execution",
         "request": (
-            "A worker AI reports that it completed a local bug fix and provides a matching diff "
-            "and focused test output. Explain the mandatory checking and opposition steps before the Command Room relies on it."
+            "A user explicitly asks to copy one known file to a known Downloads path. Decide whether "
+            "Planning or Technical Design is needed and how the real action is checked."
         ),
     },
     {
-        "id": "small-fact-delegation",
+        "id": "optional-planning-angles",
         "request": (
-            "A user asks for one small read-only repository fact. Decide how the Command Room should obtain it while keeping execution out of the lead context."
+            "The user's direction and boundaries are not settled. Explain how independent forward and "
+            "opposition planning AIs contribute and who forms the unified plan."
+        ),
+    },
+    {
+        "id": "optional-technical-design",
+        "request": (
+            "The product goal is clear, but the change affects APIs, data, and rollback. Decide whether "
+            "general Planning is needed and how Technical Design should be formed."
+        ),
+    },
+    {
+        "id": "execution-review-rework",
+        "request": (
+            "Execution cycle 1 returned a natural result, but independent Review found a concrete "
+            "deviation in findings.md. Explain how cycle 2 starts without shared chat context or automatic dispatch."
+        ),
+    },
+    {
+        "id": "no-program-container-controller",
+        "request": (
+            "Someone proposes code that parses findings.md, selects a reviewer, marks work accepted, "
+            "and automatically launches rework. Explain whether this is allowed."
+        ),
+    },
+    {
+        "id": "background-control-lane",
+        "request": (
+            "An Execution child will run for several minutes while the user wants to keep discussing with the "
+            "Command Room. Explain what the task receipt means, how the child result returns, and how newer human direction is handled."
+        ),
+    },
+    {
+        "id": "project-lifecycle",
+        "request": (
+            "Review 2 is accepted and the delivered task is closed, but nobody knows whether the whole project is "
+            "finished. Explain the Project Steward decision, continue/project_complete routing, Debt and Learning Curators, and final governance Review."
         ),
     },
     {
@@ -46,11 +82,40 @@ def build_prompt(skill: str) -> str:
     scenarios = json.dumps(SCENARIOS, ensure_ascii=False, indent=2)
     return f"""You are the independent review AI evaluating the behavior induced by one agent skill.
 
-Do not execute tools, inspect the repository, connect to services, or ask for credentials. Use only the SKILL.md and scenarios embedded below. Review each scenario in natural language, identify any concrete concern, and make the final pass/fail judgment yourself. Return only the JSON object required by the supplied output schema.
+Do not execute tools, inspect the repository, connect to services, or ask for
+credentials. Use only the SKILL.md and scenarios embedded below. Review each
+scenario in natural language, identify any concrete concern, and make the final
+pass/fail judgment yourself. Return only the JSON object required by the
+supplied output schema.
 
-The intended direction is AI-AI-AI: the Command Room keeps the goal, plan, progress, context, and final judgment; professional one-shot sub-AIs execute through self-contained prompts; another sub-AI checks every worker result; an independent opposition AI works from the other direction; programs transport text and enforce hard boundaries but do not choose roles or judge quality. Small execution tasks still leave the lead context. High-impact permission expansions stop for user confirmation.
+The intended direction is AI-AI-AI: the Command Room keeps the goal, progress,
+context, boundaries, and final judgment. Conversation uses no container. Clear
+bounded work skips Planning and goes to Execution followed by a different AI's
+Review. Optional Planning and Technical Design each use independent forward and
+opposition angles from the same Chair brief; they do not review each other, and
+the Chair forms the one decision. Every Execution N is followed by Review N
+against the actual result. Review writes natural-language findings. The Chair
+may explicitly call Execution N+1 with the current workspace and prior findings.
+After accepted Review, explicit `close_task` starts fixed Project Steward. The
+Chair then emits continue, project_complete, or blocked. Project complete starts
+fixed Debt and Learning Curators; their closure changes still require a later
+Execution and Review before explicit terminal closed.
 
-Checking by a different AI and independent opposition are both mandatory before the Command Room relies on any worker result, including a small read-only fact. Treat either one as optional, conditional, replaceable by worker self-proof, or replaceable by program logic as a material failure and set `passed` to false. The Command Room may decide no further execution is needed only after it has read both natural-language reviews.
+Command Room child work runs in background after an admission receipt, freeing
+the thread for human-Chair discussion. Terminal child work automatically wakes
+a new sequential Chair Run with the complete result. Newer human direction wins
+over a stale child handoff.
+
+The Chair chooses and prompts roles. Programs may transport text, preserve
+Markdown and workspace paths, record objective stage/cycle/artifact facts, and
+enforce hard boundaries. They must not parse findings, select roles, judge
+quality, decide completion, or trigger repair. After explicit Chair lifecycle
+status they may start only the fixed Steward/Curator roles and wake the Chair.
+Treat mandatory planning for a
+clear direct action, planning angles that debate or review each other, skipped
+Review after Execution, worker self-review, or program-driven control as a
+material failure. High-impact permission expansions still stop for user
+confirmation.
 
 Set `passed` from your own semantic review, not from word matching or a program-enforced role sequence. A stylistic difference is not a failure; a material conflict with the intended direction is.
 

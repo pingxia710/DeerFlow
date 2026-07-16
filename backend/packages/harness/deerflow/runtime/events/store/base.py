@@ -13,6 +13,17 @@ Implementations:
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ThreadTimelinePage:
+    """One immutable, owner-scoped window of persisted timeline facts."""
+
+    records: list[dict]
+    watermark_seq: int
+    has_more: bool = False
+    truncated: bool = False
 
 
 class RunEventStore(abc.ABC):
@@ -101,6 +112,24 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+        """
+
+    @abc.abstractmethod
+    async def read_thread_timeline(
+        self,
+        thread_id: str,
+        *,
+        categories: set[str],
+        limit: int = 100,
+        after_seq: int | None = None,
+        user_id: str | None = None,
+    ) -> ThreadTimelinePage:
+        """Return one owner-scoped timeline window with its stable watermark.
+
+        ``seq`` is thread-scoped and immutable. The returned records never
+        exceed ``watermark_seq``; later writes receive higher sequence values.
+        With ``after_seq`` the page advances forward, otherwise it returns the
+        latest bounded window and sets ``truncated`` when older facts exist.
         """
 
     async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:

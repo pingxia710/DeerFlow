@@ -7,6 +7,9 @@ CONFIG="$REPO_ROOT/docs/skillopt/nextos-commander/config.json"
 TASKS="$REPO_ROOT/docs/skillopt/nextos-commander/tasks.json"
 OUT="$REPO_ROOT/docs/skillopt/nextos-commander/static_report.json"
 SKILL="$REPO_ROOT/skills/custom/nextos-commander/SKILL.md"
+EVIDENCE_CONFIG="$REPO_ROOT/docs/skillopt/command-room-evidence/config.json"
+EVIDENCE_TASKS="$REPO_ROOT/docs/skillopt/command-room-evidence/tasks.json"
+EVIDENCE_OUT="$REPO_ROOT/docs/skillopt/command-room-evidence/static_report.json"
 BEHAVIOR_OUT="$REPO_ROOT/docs/skillopt/nextos-commander/behavior_report.json"
 BEHAVIOR_SCHEMA="$REPO_ROOT/docs/skillopt/nextos-commander/behavior_schema.json"
 BEHAVIOR_PROBE="$REPO_ROOT/scripts/command-room-skill-behavior-probe.py"
@@ -35,6 +38,11 @@ python "$SKILLOPT_ROOT/outputs/skill_probe_template/run_static_benchmark.py" \
   --config "$CONFIG" \
   --tasks "$TASKS" \
   --out "$OUT"
+
+python "$SKILLOPT_ROOT/outputs/skill_probe_template/run_static_benchmark.py" \
+  --config "$EVIDENCE_CONFIG" \
+  --tasks "$EVIDENCE_TASKS" \
+  --out "$EVIDENCE_OUT"
 
 if [[ "${SKILLOPT_STATIC_ONLY:-0}" == "1" ]]; then
   echo "SKILLOPT_STATIC_ONLY=1: skipped model-backed behavioral gate." >&2

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -107,8 +109,49 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
 
 
 def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
-    handoff = event.get("handoff_envelope")
-    return dict(handoff) if isinstance(handoff, dict) and handoff else None
+    handoff = _safe_dict(event.get("handoff_envelope"))
+    container = event.get("command_room_container")
+    if isinstance(container, str) and container in {
+        "context",
+        "planning",
+        "technical-design",
+        "execution",
+        "review",
+        "project-steward",
+        "debt-curation",
+        "learning-curation",
+    }:
+        handoff["command_room_container"] = container
+    work_package_id = event.get("work_package_id")
+    if isinstance(work_package_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", work_package_id):
+        handoff["work_package_id"] = work_package_id
+    delivery_cycle_index = event.get("delivery_cycle_index")
+    if isinstance(delivery_cycle_index, int) and not isinstance(delivery_cycle_index, bool) and delivery_cycle_index >= 1:
+        handoff["delivery_cycle_index"] = delivery_cycle_index
+    artifact_path = event.get("container_artifact_path")
+    if isinstance(artifact_path, str) and artifact_path.strip():
+        handoff["container_artifact_path"] = artifact_path
+    artifact_written = event.get("container_artifact_written")
+    if isinstance(artifact_written, bool):
+        handoff["container_artifact_written"] = artifact_written
+    artifact_kind = event.get("container_artifact_kind")
+    if isinstance(artifact_kind, str) and artifact_kind in {
+        "context-discovery",
+        "context",
+        "planning-forward",
+        "planning-opposition",
+        "spec",
+        "technical-forward",
+        "technical-opposition",
+        "technical-plan",
+        "execution",
+        "findings",
+        "project-status",
+        "debt",
+        "learning",
+    }:
+        handoff["container_artifact_kind"] = artifact_kind
+    return handoff or None
 
 
 def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
@@ -130,6 +173,7 @@ class MemoryRoundStateStore:
         self.rounds: dict[str, dict[str, Any]] = {}
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.task_lanes: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._wake_claim_lock = asyncio.Lock()
 
     def _latest_round(self, thread_id: str, user_id: str | None) -> dict[str, Any] | None:
         rows = [row for row in self.rounds.values() if row["thread_id"] == thread_id and row.get("user_id") == user_id]
@@ -204,6 +248,7 @@ class MemoryRoundStateStore:
         previous_run_id = row.get("current_run_id") if row is not None else None
         previous_intent = row.get("current_intent") if row is not None else None
         previous_updated_at = row.get("updated_at") if row is not None else None
+        parent_intent = latest.get("current_intent") if row is None and latest is not None else None
         created = False
         if row is None:
             now = _now_iso()
@@ -242,7 +287,10 @@ class MemoryRoundStateStore:
                 "previous_updated_at": previous_updated_at,
             },
         )
-        return dict(row)
+        result = dict(row)
+        if isinstance(parent_intent, str) and parent_intent:
+            result["parent_intent"] = parent_intent
+        return result
 
     async def rollback_run_binding(self, run_id: str) -> bool:
         attachment = next(
@@ -406,7 +454,9 @@ class MemoryRoundStateStore:
             )
             lane["round_id"] = row["round_id"]
             lane["user_id"] = row.get("user_id")
-            lane["status"] = str(event.get("status") or lane.get("status") or "in_progress")
+            incoming_status = event.get("status")
+            if not (lane.get("status") in {"completed", "failed", "timed_out", "cancelled"} and incoming_status == "in_progress"):
+                lane["status"] = str(incoming_status or lane.get("status") or "in_progress")
             lane["role"] = event.get("subagent_type") or lane.get("role")
             lane["subagent_type"] = lane.get("role")
             lane["description"] = _clip(event.get("description"), 1000) or lane.get("description")
@@ -422,7 +472,9 @@ class MemoryRoundStateStore:
             lane["evidence_refs"] = _dedupe_refs([*(lane.get("evidence_refs") or []), *ref_lists["evidence_refs"]])
             lane["artifact_refs"] = _dedupe_refs([*(lane.get("artifact_refs") or []), *ref_lists["artifact_refs"]])
             lane["output_refs"] = _dedupe_refs([*(lane.get("output_refs") or []), *ref_lists["output_refs"]])
-            lane["handoff"] = _task_handoff(event) or lane.get("handoff")
+            handoff = _task_handoff(event)
+            if handoff:
+                lane["handoff"] = {**(lane.get("handoff") or {}), **handoff}
             lane["error"] = event.get("error_preview") or lane.get("error")
             lane["updated_at"] = _now_iso()
             self._append_event(
@@ -465,3 +517,130 @@ class MemoryRoundStateStore:
         rows = [lane for lane in self.task_lanes.values() if lane["thread_id"] == thread_id and lane["round_id"] == round_id and lane.get("user_id") == user_id]
         rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
         return [dict(row) for row in rows[:limit]]
+
+    async def get_task_lane(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        lane = self.task_lanes.get((thread_id, run_id, task_id))
+        if lane is None or lane.get("user_id") != user_id:
+            return None
+        return dict(lane)
+
+    async def claim_background_wake(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        async with self._wake_claim_lock:
+            lane = self.task_lanes.get((thread_id, run_id, task_id))
+            if lane is None or lane.get("user_id") != user_id:
+                return False
+            expires_at = lane.get("wake_claim_expires_at")
+            if lane.get("wake_claim_id") and isinstance(expires_at, datetime) and expires_at > now:
+                return False
+            lane["wake_claim_id"] = claim_id
+            lane["wake_claim_expires_at"] = lease_expires_at
+            lane["updated_at"] = _now_iso()
+            return True
+
+    async def renew_background_wake_claim(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        async with self._wake_claim_lock:
+            lane = self.task_lanes.get((thread_id, run_id, task_id))
+            expires_at = lane.get("wake_claim_expires_at") if lane is not None else None
+            if lane is None or lane.get("user_id") != user_id or lane.get("wake_claim_id") != claim_id or not isinstance(expires_at, datetime) or expires_at <= now:
+                return False
+            lane["wake_claim_expires_at"] = lease_expires_at
+            lane["updated_at"] = _now_iso()
+            return True
+
+    async def persist_claimed_background_wake(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        handoff: dict[str, Any],
+        event: dict[str, Any] | None = None,
+    ) -> bool:
+        async with self._wake_claim_lock:
+            lane = self.task_lanes.get((thread_id, run_id, task_id))
+            expires_at = lane.get("wake_claim_expires_at") if lane is not None else None
+            if lane is None or lane.get("user_id") != user_id or lane.get("wake_claim_id") != claim_id or not isinstance(expires_at, datetime) or expires_at <= now:
+                return False
+            lane["handoff"] = dict(handoff)
+            if event is not None:
+                if isinstance(event.get("status"), str):
+                    lane["status"] = event["status"]
+                if isinstance(event.get("result_preview"), str):
+                    lane["result"] = _clip(event["result_preview"], 4000)
+                if isinstance(event.get("error_preview"), str):
+                    lane["error"] = _clip(event["error_preview"], 2000)
+            lane["updated_at"] = _now_iso()
+            if event is not None:
+                self._append_event(
+                    lane["round_id"],
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    user_id=lane.get("user_id"),
+                    event_type=str(event.get("type") or "task.event"),
+                    content={
+                        "status": lane.get("status"),
+                        "role": lane.get("role"),
+                        "description": lane.get("description"),
+                        "result": lane.get("result"),
+                        "started_at": lane.get("started_at"),
+                        "finished_at": lane.get("finished_at"),
+                        "duration_ms": lane.get("duration_ms"),
+                        "result_ref": lane.get("result_ref"),
+                        "evidence_ref": lane.get("evidence_ref"),
+                        "evidence_refs": lane.get("evidence_refs") or [],
+                        "artifact_refs": lane.get("artifact_refs") or [],
+                        "output_refs": lane.get("output_refs") or [],
+                        "handoff": lane.get("handoff"),
+                    },
+                )
+            return True
+
+    async def release_background_wake_claim(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+    ) -> None:
+        async with self._wake_claim_lock:
+            lane = self.task_lanes.get((thread_id, run_id, task_id))
+            if lane is not None and lane.get("user_id") == user_id and lane.get("wake_claim_id") == claim_id:
+                lane["wake_claim_id"] = None
+                lane["wake_claim_expires_at"] = None
+                lane["updated_at"] = _now_iso()
+
+    async def list_background_task_lanes(self) -> list[dict[str, Any]]:
+        return [dict(lane) for lane in self.task_lanes.values() if isinstance(lane.get("handoff"), dict) and isinstance(lane["handoff"].get("background_recovery"), dict)]

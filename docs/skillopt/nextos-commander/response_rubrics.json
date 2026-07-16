@@ -1,23 +1,38 @@
 [
   {
-    "id": "train-lead-brain",
-    "must_include": ["goal", "Delegate execution"],
-    "forbidden": ["lead does all execution", "direct execution"]
+    "id": "train-clear-direct-execution",
+    "must_include": ["skip Planning", "Execution", "Review"],
+    "forbidden": ["mandatory planning", "worker self-review"]
   },
   {
-    "id": "val-worker-review",
-    "must_include": ["different sub-AI", "checking"],
-    "forbidden": ["trust worker result directly"]
+    "id": "val-planning-angles",
+    "must_include": ["independent forward and opposition", "same Chair brief", "Chair"],
+    "forbidden": ["debate", "review each other"]
   },
   {
-    "id": "test-opposition",
-    "must_include": ["independent opposition", "other direction"],
-    "forbidden": ["opposition is optional"]
+    "id": "test-technical-design",
+    "must_include": ["Technical Design", "technical-plan.md", "skip Planning"],
+    "forbidden": ["redefine the user goal"]
+  },
+  {
+    "id": "test-review-loop",
+    "must_include": ["Execution N", "Review N", "findings", "Execution N+1"],
+    "forbidden": ["fixed number of cycles", "shared chat context"]
   },
   {
     "id": "test-no-program-controller",
-    "must_include": ["Program logic", "must not infer"],
-    "forbidden": ["automatic role dispatch", "automatic rework"]
+    "must_include": ["Program logic", "must not", "Chair"],
+    "forbidden": ["content-based role dispatch", "automatic rework"]
+  },
+  {
+    "id": "test-background-control-lane",
+    "must_include": ["background", "Chair", "newer human direction"],
+    "forbidden": ["wait for the human to say continue", "concurrent checkpoint writes"]
+  },
+  {
+    "id": "test-project-lifecycle",
+    "must_include": ["Project Steward", "Debt", "Learning", "Execution", "Review"],
+    "forbidden": ["program judges quality", "human must technically validate"]
   },
   {
     "id": "test-hard-boundary-confirmation",

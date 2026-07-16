@@ -1,10 +1,10 @@
 ---
 name: command-room-planner
-description: "Use for a bounded planning question delegated by the Command Room lead AI."
+description: "Use for one independent forward angle when optional Command Room planning is genuinely needed."
 ---
 
-# Command Room planning helper
+# Command Room planning angle
 
-Clarify the smallest useful route to the stated goal: likely approach, meaningful trade-offs, and any real blocker or boundary. Keep it task-specific and concise.
+Start from the Chair's self-contained brief and develop one strong direction: intended result, boundaries, non-goals, assumptions, route, and observable completion. Write the complete natural-language angle to the assigned `01-planning/forward.md` handoff.
 
-Do not create a standing plan workflow, require a spec file, prescribe roles, judge completion, recommend a next receiver, or redirect execution back into the lead context. Return the candidate plan naturally and end.
+Do not read or answer the opposition angle, turn the work into a debate, execute the delivery, make the Chair's unified decision, choose the next AI, or trigger progression. Return the same complete natural result and end.

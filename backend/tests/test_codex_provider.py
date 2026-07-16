@@ -205,6 +205,74 @@ def test_convert_messages_ai_with_tool_calls():
     assert any(item.get("type") == "function_call" and item["name"] == "search" for item in items)
 
 
+def test_convert_messages_compacts_completed_task_prompt_replay():
+    model = _make_model()
+    original_prompt = "inspect the frontend"
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "task",
+                "args": {"description": "Audit frontend", "prompt": original_prompt, "subagent_type": "executor"},
+                "id": "tc1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    tool = ToolMessage(content="Task result", tool_call_id="tc1")
+
+    _, items = model._convert_messages([ai, tool])
+
+    arguments = json.loads(items[0]["arguments"])
+    assert arguments["description"] == "Audit frontend"
+    assert arguments["subagent_type"] == "executor"
+    assert f"{len(original_prompt)} characters" in arguments["prompt"]
+    assert original_prompt not in items[0]["arguments"]
+
+
+def test_convert_messages_keeps_pending_task_prompt_before_tool_output():
+    model = _make_model()
+    long_prompt = "x" * 5000
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "task",
+                "args": {"description": "Audit backend", "prompt": long_prompt, "subagent_type": "executor"},
+                "id": "tc1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    _, items = model._convert_messages([ai])
+
+    arguments = json.loads(items[0]["arguments"])
+    assert arguments["prompt"] == long_prompt
+
+
+def test_convert_messages_keeps_completed_non_task_arguments():
+    model = _make_model()
+    long_query = "x" * 5000
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "search",
+                "args": {"q": long_query},
+                "id": "tc1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    tool = ToolMessage(content="Search result", tool_call_id="tc1")
+
+    _, items = model._convert_messages([ai, tool])
+
+    arguments = json.loads(items[0]["arguments"])
+    assert arguments["q"] == long_query
+
+
 def test_convert_messages_tool_message():
     model = _make_model()
     tool_msg = ToolMessage(content="result data", tool_call_id="tc1")

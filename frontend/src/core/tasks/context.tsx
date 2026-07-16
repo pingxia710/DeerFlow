@@ -488,6 +488,7 @@ export function settleRunningSubtasksForRun(
       task.threadId !== terminal.threadId ||
       task.runId !== terminal.runId ||
       task.status !== "in_progress" ||
+      task.backgroundTask === true ||
       (terminal.roundId &&
         task.roundId &&
         normalizeSubtaskRoundId(task.roundId) !==

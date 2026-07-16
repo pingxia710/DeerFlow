@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
@@ -35,6 +38,67 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+
+_LARK_WS_URL_RE = re.compile(r"(wss://[^?\s]+)\?[^\s]+")
+_LARK_CONN_ID_RE = re.compile(r"\[conn_id=[^\]]+\]")
+
+
+def _redact_lark_log_message(message: str) -> str:
+    redacted = _LARK_WS_URL_RE.sub(r"\1?<redacted>", message)
+    return _LARK_CONN_ID_RE.sub("[conn_id=<redacted>]", redacted)
+
+
+def _is_normal_lark_close(error: object) -> bool:
+    return type(error).__name__ == "ConnectionClosedOK" and getattr(error, "code", None) == 1000
+
+
+def _handle_lark_ws_loop_exception(
+    loop: asyncio.AbstractEventLoop,
+    context: dict[str, Any],
+    *,
+    stop_requested: bool,
+) -> None:
+    if stop_requested and _is_normal_lark_close(context.get("exception")):
+        return
+    loop.default_exception_handler(context)
+
+
+def _disable_lark_websocket_proxy(websockets_module: Any) -> None:
+    """Keep only Feishu WebSocket connections out of the system SOCKS proxy."""
+    connect = websockets_module.connect
+    if getattr(connect, "_deerflow_feishu_proxy_patch", False):
+        return
+    try:
+        supports_proxy = "proxy" in inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        supports_proxy = False
+    if not supports_proxy:
+        return
+
+    def connect_without_feishu_proxy(uri: str, *args: Any, **kwargs: Any) -> Any:
+        hostname = urlparse(uri).hostname
+        if hostname == "feishu.cn" or (hostname is not None and hostname.endswith(".feishu.cn")):
+            kwargs["proxy"] = None
+        return connect(uri, *args, **kwargs)
+
+    connect_without_feishu_proxy._deerflow_feishu_proxy_patch = True  # type: ignore[attr-defined]
+    websockets_module.connect = connect_without_feishu_proxy
+
+
+class _LarkWebSocketLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = _redact_lark_log_message(record.getMessage())
+        if "receive message loop exit, err: sent 1000 (OK)" in message:
+            record.levelno = logging.INFO
+            record.levelname = logging.getLevelName(logging.INFO)
+        record.msg = message
+        record.args = ()
+        return True
+
+
+_lark_logger = logging.getLogger("Lark")
+if not any(isinstance(log_filter, _LarkWebSocketLogFilter) for log_filter in _lark_logger.filters):
+    _lark_logger.addFilter(_LarkWebSocketLogFilter())
 
 
 def _is_feishu_command(text: str) -> bool:
@@ -204,6 +268,13 @@ class FeishuChannel(Channel):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._ws_loop = loop
+        loop.set_exception_handler(
+            lambda active_loop, context: _handle_lark_ws_loop_exception(
+                active_loop,
+                context,
+                stop_requested=self._stop_requested,
+            )
+        )
         ws_client = None
         try:
             import lark_oapi as lark
@@ -213,6 +284,7 @@ class FeishuChannel(Channel):
             # this thread's (non-running) event loop instead of the main
             # thread's uvloop.
             _ws_client_mod.loop = loop
+            _disable_lark_websocket_proxy(_ws_client_mod.websockets)
 
             event_handler = self._build_event_handler(lark)
             ws_client = lark.ws.Client(

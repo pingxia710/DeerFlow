@@ -1,6 +1,11 @@
 import { expect, test } from "@rstest/core";
 
-import { buildCommandRoomReadModel } from "@/core/threads/command-room-read-model";
+import {
+  buildCommandRoomReadModel,
+  buildCommandRoomTrajectory,
+  groupCommandRoomTrajectoryByWorkPackage,
+  splitCommandRoomTrajectory,
+} from "@/core/threads/command-room-read-model";
 
 test("command-room read model separates strong current-round lanes from legacy lanes", () => {
   const model = buildCommandRoomReadModel({
@@ -74,4 +79,173 @@ test("command-room read model never admits another thread into the projection", 
 
   expect(model.taskLanes).toEqual([]);
   expect(model.legacyTaskLanes).toEqual([]);
+});
+
+test("trajectory groups only explicit containers and preserves delivery cycles", () => {
+  const trajectory = buildCommandRoomTrajectory([
+    {
+      id: "plan-forward",
+      threadId: "thread-1",
+      runId: "run-plan",
+      status: "completed",
+      subagent_type: "planner",
+      description: "Forward plan",
+      prompt: "",
+      commandRoomContainer: "planning",
+      startedAt: 10,
+    },
+    {
+      id: "plan-opposition",
+      threadId: "thread-1",
+      runId: "run-plan",
+      status: "completed",
+      subagent_type: "opposition",
+      description: "Opposition plan",
+      prompt: "",
+      commandRoomContainer: "planning",
+      startedAt: 11,
+    },
+    {
+      id: "execution-1",
+      threadId: "thread-1",
+      runId: "run-execution-1",
+      status: "completed",
+      subagent_type: "executor",
+      description: "Execution",
+      prompt: "",
+      commandRoomContainer: "execution",
+      deliveryCycleIndex: 1,
+      result: "Execution result",
+      startedAt: 20,
+    },
+    {
+      id: "review-1",
+      threadId: "thread-1",
+      runId: "run-review-1",
+      status: "completed",
+      subagent_type: "reviewer",
+      description: "Review",
+      prompt: "",
+      commandRoomContainer: "review",
+      deliveryCycleIndex: 1,
+      result: "Review result",
+      startedAt: 30,
+    },
+    {
+      id: "ordinary-task",
+      threadId: "thread-1",
+      runId: "run-ordinary",
+      status: "completed",
+      subagent_type: "general",
+      description: "Contains planning words but no declared container",
+      prompt: "",
+      startedAt: 40,
+    },
+  ]);
+
+  expect(
+    trajectory.map((step) => [
+      step.container,
+      step.deliveryCycleIndex,
+      step.tasks.map((task) => task.id),
+    ]),
+  ).toEqual([
+    ["planning", undefined, ["plan-forward", "plan-opposition"]],
+    ["execution", 1, ["execution-1"]],
+    ["review", 1, ["review-1"]],
+  ]);
+});
+
+test("trajectory separates plan research and a recorded plan from delivery", () => {
+  const sections = splitCommandRoomTrajectory(
+    buildCommandRoomTrajectory([
+      {
+        id: "forward",
+        threadId: "thread-1",
+        runId: "run-1",
+        status: "completed",
+        subagent_type: "planner",
+        description: "Forward plan",
+        prompt: "",
+        commandRoomContainer: "planning",
+        containerArtifactKind: "planning-forward",
+      },
+      {
+        id: "spec",
+        threadId: "thread-1",
+        runId: "run-2",
+        status: "completed",
+        subagent_type: "recorder",
+        description: "Record plan",
+        prompt: "",
+        commandRoomContainer: "planning",
+        containerArtifactKind: "spec",
+      },
+      {
+        id: "execution",
+        threadId: "thread-1",
+        runId: "run-3",
+        status: "in_progress",
+        subagent_type: "executor",
+        description: "Execution",
+        prompt: "",
+        commandRoomContainer: "execution",
+      },
+    ]),
+  );
+
+  expect(sections.planResearch.map((step) => step.tasks[0]?.id)).toEqual([
+    "forward",
+  ]);
+  expect(sections.planProposals.map((step) => step.tasks[0]?.id)).toEqual([
+    "spec",
+  ]);
+  expect(sections.delivery.map((step) => step.tasks[0]?.id)).toEqual([
+    "execution",
+  ]);
+});
+
+test("trajectory keeps context and delivery steps in separate work packages", () => {
+  const trajectory = buildCommandRoomTrajectory([
+    {
+      id: "package-a-execution",
+      threadId: "thread-1",
+      runId: "run-a",
+      status: "in_progress",
+      subagent_type: "executor",
+      description: "Execute package A",
+      prompt: "",
+      commandRoomContainer: "execution",
+      deliveryCycleIndex: 1,
+      workPackageId: "package-a",
+      startedAt: 10,
+    },
+    {
+      id: "package-b-context",
+      threadId: "thread-1",
+      runId: "run-b",
+      status: "completed",
+      subagent_type: "planner",
+      description: "Discover package B",
+      prompt: "",
+      commandRoomContainer: "context",
+      containerArtifactKind: "context-discovery",
+      workPackageId: "package-b",
+      startedAt: 11,
+    },
+  ]);
+
+  const packages = groupCommandRoomTrajectoryByWorkPackage(trajectory);
+  expect(
+    packages.map((workPackage) => [
+      workPackage.workPackageId,
+      workPackage.steps.map((step) => step.container),
+    ]),
+  ).toEqual([
+    ["package-a", ["execution"]],
+    ["package-b", ["context"]],
+  ]);
+  expect(splitCommandRoomTrajectory(packages[1]!.steps).context).toHaveLength(
+    1,
+  );
 });

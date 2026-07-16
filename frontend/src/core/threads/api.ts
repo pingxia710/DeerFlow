@@ -5,11 +5,46 @@ import {
 import { getBackendBaseURL } from "@/core/config";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import {
+  parseThreadTimelinePage,
+  type ThreadTimelinePage,
+} from "./thread-timeline";
 import type {
   ThreadContextDetail,
   ThreadContextUsageResponse,
   ThreadTokenUsageResponse,
 } from "./types";
+
+export class ThreadTimelineRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ThreadTimelineRequestError";
+  }
+}
+
+export async function fetchThreadTimeline(
+  threadId: string,
+  cursor?: string,
+): Promise<ThreadTimelinePage> {
+  const query = cursor ? `?${new URLSearchParams({ cursor }).toString()}` : "";
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL().replace(/\/$/, "")}/api/threads/${encodeURIComponent(threadId)}/timeline${query}`,
+    {
+      method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    },
+  );
+  if (!response.ok) {
+    throw new ThreadTimelineRequestError(
+      response.status,
+      "Failed to load thread timeline.",
+    );
+  }
+  return parseThreadTimelinePage(await response.json(), threadId);
+}
 
 export async function fetchThreadTokenUsage(
   threadId: string,

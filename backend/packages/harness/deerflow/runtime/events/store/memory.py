@@ -7,9 +7,10 @@ since all mutations happen within the same event loop).
 from __future__ import annotations
 
 import bisect
+import copy
 from datetime import UTC, datetime
 
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, ThreadTimelinePage
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 
@@ -149,6 +150,36 @@ class MemoryRunEventStore(RunEventStore):
         if after_seq is not None:
             return window[:limit]
         return window[-limit:]
+
+    async def read_thread_timeline(
+        self,
+        thread_id: str,
+        *,
+        categories: set[str],
+        limit: int = 100,
+        after_seq: int | None = None,
+        user_id: str | None = None,
+    ) -> ThreadTimelinePage:
+        events = self._events.get(thread_id, [])
+        if user_id is not None:
+            events = [event for event in events if self._matches_user(event, user_id)]
+        timeline = [event for event in events if event.get("category") in categories]
+        watermark_seq = max((int(event["seq"]) for event in timeline), default=0)
+        if after_seq is not None:
+            available = [event for event in timeline if after_seq < event["seq"] <= watermark_seq]
+            records = available[:limit]
+            return ThreadTimelinePage(
+                records=copy.deepcopy(records),
+                watermark_seq=watermark_seq,
+                has_more=len(available) > len(records),
+            )
+
+        records = timeline[-limit:]
+        return ThreadTimelinePage(
+            records=copy.deepcopy(records),
+            watermark_seq=watermark_seq,
+            truncated=len(timeline) > len(records),
+        )
 
     async def count_messages(self, thread_id, *, user_id=None):
         messages = self._messages.get(thread_id, [])

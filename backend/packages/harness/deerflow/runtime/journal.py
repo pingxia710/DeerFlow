@@ -30,7 +30,6 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from deerflow.command_room.plan import update_planned_lane_status_by_linked_task_id
 from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
@@ -110,6 +109,10 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._tool_runs: dict[str, dict[str, Any]] = {}
+        # A Command Room background-task receipt is an explicit transport fact.
+        # The Chair's subsequent plain-text reply in the same run is a stage
+        # update, not a main conversation answer.
+        self._command_room_background_task_seen = False
 
     # -- Lifecycle callbacks --
 
@@ -387,6 +390,8 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
+            is_command_room_step = self._command_room_background_task_seen and caller == "lead_agent" and getattr(message, "type", None) == "ai" and not getattr(message, "tool_calls", None) and bool(self._message_text(message).strip())
+
             # Trace event: llm_response (OpenAI completion format)
             self._put(
                 event_type="llm.ai.response",
@@ -397,6 +402,7 @@ class RunJournal(BaseCallbackHandler):
                     "usage": usage_dict,
                     "latency_ms": latency_ms,
                     "llm_call_index": call_index,
+                    **({"command_room_step": True} if is_command_room_step else {}),
                 },
             )
             if rid not in self._counted_message_llm_run_ids:
@@ -457,9 +463,7 @@ class RunJournal(BaseCallbackHandler):
         tool_call_id = str(run_id)
         try:
             if isinstance(output, ToolMessage):
-                msg = cast(ToolMessage, output)
-                self._put(event_type="llm.tool.result", category="message", content=msg.model_dump())
-                self._record_message_summary(msg)
+                self.record_tool_message(cast(ToolMessage, output))
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 artifacts = cmd.update.get("artifacts", [])
@@ -490,6 +494,14 @@ class RunJournal(BaseCallbackHandler):
         finally:
             self._tool_runs.pop(tool_call_id, None)
             logger.debug("Tool end for node %s", run_id)
+
+    def record_tool_message(self, message: ToolMessage) -> None:
+        """Persist a complete tool result outside a LangChain callback."""
+        additional_kwargs = message.additional_kwargs
+        if message.name == "task" and isinstance(additional_kwargs, dict) and additional_kwargs.get("background_task") is True:
+            self._command_room_background_task_seen = True
+        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+        self._record_message_summary(message)
 
     # -- Internal methods --
 
@@ -670,79 +682,6 @@ class RunJournal(BaseCallbackHandler):
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
 
-    @staticmethod
-    def _planned_lane_status_for_task_event(event: dict[str, Any]) -> str | None:
-        event_type = event.get("type")
-        status = event.get("status")
-        if event_type in {"task_started", "task_running"} or status == "in_progress":
-            return "running"
-        if event_type == "task_completed" or status == "completed":
-            return "completed"
-        if event_type == "task_failed" or status == "failed":
-            return "failed"
-        if event_type in {"task_cancelled", "task_timed_out"} or status in {"cancelled", "timed_out"}:
-            return "blocked"
-        return None
-
-    @staticmethod
-    def _task_event_ref_lists(event: dict[str, Any]) -> dict[str, list[str]]:
-        def collect(*values: Any) -> list[str]:
-            refs: list[str] = []
-            seen: set[str] = set()
-
-            def add(value: Any) -> None:
-                text: str | None = None
-                if isinstance(value, str):
-                    text = value.strip()
-                elif isinstance(value, dict):
-                    for key in ("ref", "uri", "url", "path", "artifact_id", "id", "name"):
-                        item = value.get(key)
-                        if isinstance(item, str) and item.strip():
-                            text = item.strip()
-                            break
-                if text and text not in seen:
-                    seen.add(text)
-                    refs.append(text)
-
-            for value in values:
-                if isinstance(value, list):
-                    for item in value:
-                        add(item)
-                else:
-                    add(value)
-            return refs[:10]
-
-        action_result = event.get("action_result") if isinstance(event.get("action_result"), dict) else {}
-        handoff = event.get("handoff_envelope") if isinstance(event.get("handoff_envelope"), dict) else {}
-        return {
-            "evidence_refs": collect(action_result.get("evidence_refs"), handoff.get("evidenceRefs"), handoff.get("evidence_refs"), event.get("evidence_refs")),
-            "artifact_refs": collect(event.get("artifact_refs"), action_result.get("artifact_refs"), handoff.get("artifactRefs"), handoff.get("artifact_refs")),
-            "output_refs": collect(action_result.get("output_ref"), action_result.get("output_refs"), handoff.get("outputRefs"), handoff.get("output_refs"), event.get("output_refs")),
-        }
-
-    def _update_linked_planned_lane_for_task_event(self, event: dict[str, Any]) -> None:
-        planned_status = self._planned_lane_status_for_task_event(event)
-        if planned_status is None:
-            return
-        task_id = event.get("task_id")
-        if not isinstance(task_id, str) or not task_id:
-            return
-        refs = self._task_event_ref_lists(event)
-        try:
-            update_planned_lane_status_by_linked_task_id(
-                thread_id=self.thread_id,
-                user_id=self.user_id,
-                run_id=self.run_id,
-                round_id=self.round_id,
-                linked_task_id=task_id,
-                status=planned_status,
-                evidence_refs=refs["evidence_refs"] or None,
-                artifact_refs=refs["artifact_refs"] or None,
-                output_refs=refs["output_refs"] or None,
-            )
-        except Exception:
-            logger.warning("Failed to update linked planned lane for task %s in run %s", task_id, self.run_id, exc_info=True)
-
     def record_task_event(self, event: dict[str, Any]) -> None:
         """Persist subagent task events so switched chats can replay task state."""
         event_type = event.get("type")
@@ -781,7 +720,6 @@ class RunJournal(BaseCallbackHandler):
         )
         if isinstance(event_to_store, dict):
             self._pending_task_lane_events.append(event_to_store)
-            self._update_linked_planned_lane_for_task_event(event_to_store)
         self._flush_sync()
 
     def record_run_terminal(self, *, status: str, terminal_reason: str) -> None:
@@ -793,6 +731,24 @@ class RunJournal(BaseCallbackHandler):
             metadata={"caller": "runtime"},
         )
         self._flush_sync()
+
+    def fork_for_background_task(self) -> RunJournal:
+        """Create an independent writer for events that outlive this run worker.
+
+        The child keeps the source run identity for task-lane replay, while its
+        buffers and flush tasks remain isolated from the worker's final flush.
+        """
+
+        return RunJournal(
+            run_id=self.run_id,
+            thread_id=self.thread_id,
+            event_store=self._store,
+            user_id=self.user_id,
+            track_token_usage=False,
+            flush_threshold=self._flush_threshold,
+            round_store=self._round_store,
+            round_id=self.round_id,
+        )
 
     def _jsonable(self, value: Any) -> Any:
         if isinstance(value, dict):

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "schema_version": "deerflow.thread-timeline/v1",
+  "description": "Cross-component contract for the owner-scoped, persisted factual work record of one thread.",
+  "route": "/api/threads/{thread_id}/timeline",
+  "method": "GET",
+  "query": {
+    "cursor": "optional opaque HMAC-authenticated cursor returned by the prior response",
+    "limit": {
+      "default": 100,
+      "minimum": 1,
+      "maximum": 500
+    }
+  },
+  "categories": ["message", "lifecycle", "artifact"],
+  "record_required_fields": [
+    "event_id",
+    "seq",
+    "run_id",
+    "event_type",
+    "category",
+    "content",
+    "metadata",
+    "created_at"
+  ],
+  "response_required_fields": [
+    "thread_id",
+    "records",
+    "after_seq",
+    "watermark_seq",
+    "cursor",
+    "has_more",
+    "truncated"
+  ],
+  "identity": {
+    "event_id": "{thread_id}:{seq}",
+    "sequence": "strictly increasing and immutable within one persisted thread"
+  },
+  "cursor_integrity": "HMAC-SHA-256 signed with the server authentication secret; unsigned or modified cursors are invalid.",
+  "paging": {
+    "initial": "returns the latest bounded factual window and a cursor at its watermark; truncated is true when older matching facts exist",
+    "incremental": "a returned cursor reads factual records after its confirmed sequence through the response watermark, in ascending seq order",
+    "has_more": "when true, send the returned cursor again before advancing the confirmed projection watermark"
+  },
+  "errors": {
+    "409": "cursor is invalid, bound to another owner/thread, or ahead of the available factual watermark; discard the local projection and re-read without a cursor",
+    "503": "timeline storage is unavailable"
+  },
+  "consumer_rules": [
+    "Treat cursor as opaque and do not construct it in the browser.",
+    "Deduplicate by event_id and order only by seq; browser arrival order is not factual order.",
+    "The endpoint exposes persisted facts only. It does not decide task quality, acceptance, rework, or a next action.",
+    "The current endpoint is forward-only. A truncated initial window is not a claim that the browser holds the complete thread history."
+  ]
+}

@@ -8,7 +8,9 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
@@ -16,9 +18,23 @@ from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 
+from deerflow.command_room.ai_workspace import (
+    CommandRoomContainer,
+    CommandRoomContainerTask,
+    ContainerArtifact,
+    container_artifact_is_ai_authored,
+    ensure_command_room_ai_workspace,
+    format_ai_workspace_for_model,
+    format_container_task_for_model,
+    prepare_command_room_container_task,
+    record_container_task_completion,
+    record_container_task_terminal,
+    validate_work_package_id,
+)
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config.paths import ensure_directory_no_symlinks
 from deerflow.config.subagents_config import get_subagents_app_config
+from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import is_unrestricted_host_access_allowed
 from deerflow.subagents.audit import record_subagent_handoff
@@ -34,6 +50,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1"
 _EVENT_PREVIEW_MAX_CHARS = 240
+_REVIEW_TASK_TIMEOUT_SECONDS = 900
+_BACKGROUND_DISPATCHER_CONTEXT_KEY = "__command_room_background_dispatcher"
+_BACKGROUND_WAKE_CONTEXT_KEYS = frozenset(
+    {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "reasoning_summary",
+        "text_verbosity",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "agent_name",
+    }
+)
 _SAFE_ACTION_RESULT_EVENT_KEYS = {
     "action_id",
     "description",
@@ -57,6 +89,7 @@ _TASK_EVENT_IDENTITY_KEYS = {
     "started_at",
     "completed_at",
     "duration_ms",
+    "work_package_id",
 }
 _SECRET_LIKE_RE = re.compile(
     r"(?i)(sk-[a-z0-9_-]{12,}|ak(?:ia|as)[a-z0-9]{12,}|"
@@ -255,16 +288,130 @@ def _terminal_task_message(
     tool_call_id: str,
     status: SubagentStatusValue,
     round_id: str | None,
+    container_task: CommandRoomContainerTask | None = None,
+    container_artifact_written: bool | None = None,
 ) -> ToolMessage:
     additional_kwargs = make_subagent_additional_kwargs(status)
     if round_id:
         additional_kwargs["round_id"] = round_id
+    if container_task is not None:
+        additional_kwargs["command_room_container"] = container_task.container
+        if container_task.work_package_id is not None:
+            additional_kwargs["work_package_id"] = container_task.work_package_id
+        additional_kwargs["container_artifact_path"] = str(container_task.output_path)
+        additional_kwargs["container_artifact_kind"] = container_task.artifact_kind
+        if container_task.delivery_cycle_index is not None:
+            additional_kwargs["delivery_cycle_index"] = container_task.delivery_cycle_index
+        if container_artifact_written is not None:
+            additional_kwargs["container_artifact_written"] = container_artifact_written
     return ToolMessage(
         content=content,
         name="task",
         tool_call_id=tool_call_id,
         additional_kwargs=additional_kwargs,
     )
+
+
+def _record_persisted_terminal_task_message(
+    recorder: Any | None,
+    *,
+    content: str,
+    task_id: str,
+    status: SubagentStatusValue,
+    runtime: Any,
+    container_task: CommandRoomContainerTask | None,
+    container_artifact_written: bool | None,
+) -> None:
+    record_tool_message = getattr(recorder, "record_tool_message", None)
+    if callable(record_tool_message):
+        record_tool_message(
+            _terminal_task_message(
+                content,
+                tool_call_id=task_id,
+                status=status,
+                round_id=_runtime_round_id(runtime),
+                container_task=container_task,
+                container_artifact_written=container_artifact_written,
+            )
+        )
+
+
+def _background_task_message(
+    *,
+    tool_call_id: str,
+    round_id: str | None,
+    task_fields: Mapping[str, Any],
+) -> ToolMessage:
+    additional_kwargs: dict[str, Any] = {
+        "background_task": True,
+        "background_task_id": tool_call_id,
+        **task_fields,
+    }
+    if round_id:
+        additional_kwargs["round_id"] = round_id
+    return ToolMessage(
+        content=(f"Task {tool_call_id} was accepted for background execution. Do not claim or infer its result. End this turn after a short status update; the completed child result will automatically wake the Command Room."),
+        name="task",
+        tool_call_id=tool_call_id,
+        additional_kwargs=additional_kwargs,
+    )
+
+
+def _command_room_background_dispatcher(context: Mapping[str, Any]) -> Any | None:
+    dispatcher = context.get(_BACKGROUND_DISPATCHER_CONTEXT_KEY)
+    return dispatcher if callable(getattr(dispatcher, "dispatch", None)) else None
+
+
+def _background_wake_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    wake_context = {key: context[key] for key in _BACKGROUND_WAKE_CONTEXT_KEYS if key in context}
+    wake_context["agent_name"] = "command-room"
+    wake_context["subagent_enabled"] = True
+    return wake_context
+
+
+def _fork_background_runtime(runtime: Any) -> tuple[Any, Any | None]:
+    context = getattr(runtime, "context", None)
+    background_context = dict(context) if isinstance(context, Mapping) else {}
+    background_context.pop(_BACKGROUND_DISPATCHER_CONTEXT_KEY, None)
+    recorder = _find_task_event_recorder(runtime)
+    fork = getattr(recorder, "fork_for_background_task", None)
+    background_recorder = fork() if callable(fork) else recorder
+    if background_recorder is not None:
+        background_context["__run_journal"] = background_recorder
+
+    config = getattr(runtime, "config", None)
+    background_config = dict(config) if isinstance(config, Mapping) else {}
+    return SimpleNamespace(context=background_context, config=background_config), background_recorder
+
+
+def _container_task_event_fields(
+    container_task: CommandRoomContainerTask | None,
+    *,
+    container: CommandRoomContainer | None = None,
+    delivery_cycle_index: int | None = None,
+    work_package_id: str | None = None,
+    container_artifact_written: bool | None = None,
+) -> dict[str, Any]:
+    """Expose factual AI-AI handoff metadata without interpreting AI prose."""
+
+    fields: dict[str, Any] = {}
+    if container_task is not None:
+        fields.update(
+            command_room_container=container_task.container,
+            container_artifact_path=str(container_task.output_path),
+            container_artifact_kind=container_task.artifact_kind,
+        )
+    elif container is not None:
+        fields["command_room_container"] = container
+    package_id = container_task.work_package_id if container_task is not None else work_package_id
+    cycle_index = container_task.delivery_cycle_index if container_task is not None else delivery_cycle_index
+    if package_id is not None:
+        fields["work_package_id"] = package_id
+    if cycle_index is not None:
+        fields["delivery_cycle_index"] = cycle_index
+    if container_artifact_written is not None:
+        fields["container_artifact_written"] = container_artifact_written
+    return fields
 
 
 def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
@@ -319,6 +466,8 @@ def _task_worker_prompt(
     subagent_type: str,
     prompt: str,
     task_paths: dict[str, str],
+    container_task: CommandRoomContainerTask | None = None,
+    container: CommandRoomContainer | None = None,
 ) -> str:
     role = get_subagent_config(subagent_type, app_config=app_config)
     role_prompt = getattr(role, "system_prompt", None) or getattr(role, "description", None)
@@ -342,6 +491,27 @@ def _task_worker_prompt(
         path_lines.append(f"- Output artifacts (write): {outputs_path}")
     path_lines.append("- Any /mnt/user-data paths in the handoff refer to the matching host paths above.")
     sections.append("# DeerFlow task paths\n\n" + "\n".join(path_lines))
+    if ai_workspace := format_ai_workspace_for_model(task_paths.get("ai_workspace_path")):
+        sections.append("# AI-AI workspace\n\n" + ai_workspace)
+    if container_task is not None:
+        sections.append("# Required Command Room handoff\n\n" + format_container_task_for_model(container_task))
+        if container_task.container == "review":
+            sections.append(
+                "# Review boundary\n\n"
+                "Verify only whether the bounded execution landed as requested. Read the relevant execution note and "
+                "inspect the actual changed result. Use the smallest targeted check needed to support that judgment. "
+                "Do not implement, repair, refactor, or broaden the review, and do not run a full test suite unless the "
+                "Chair explicitly named it as an acceptance check. Record concrete landed facts and any exact gaps, then "
+                "stop. Stop as soon as the landing judgment is supported."
+            )
+    elif container == "review":
+        sections.append(
+            "# Review boundary\n\n"
+            "Verify only whether the bounded execution landed as requested. Inspect the actual changed result and "
+            "use the smallest targeted check needed to support that judgment. Do not implement, repair, refactor, or "
+            "broaden the review, and do not run a full test suite unless the Chair explicitly named it as an acceptance "
+            "check. Record concrete landed facts and any exact gaps, then stop. Stop as soon as the landing judgment is supported."
+        )
     return "\n\n".join(sections)
 
 
@@ -364,6 +534,21 @@ def _ensure_task_paths(task_paths: dict[str, str]) -> dict[str, str]:
         raise RuntimeError(f"Codex CLI task paths could not be prepared: {exc}") from exc
 
 
+def _add_command_room_ai_workspace(
+    task_paths: dict[str, str],
+    *,
+    agent_name: Any,
+    workspace_key: Any,
+) -> dict[str, str]:
+    if agent_name != "command-room" or not isinstance(workspace_key, str) or not workspace_key:
+        return task_paths
+    try:
+        ai_workspace_path = ensure_command_room_ai_workspace(task_paths["workspace_path"], workspace_key)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Command Room AI-AI workspace could not be prepared: {exc}") from exc
+    return {**task_paths, "ai_workspace_path": str(ai_workspace_path)}
+
+
 async def _record_terminal_task(
     *,
     writer: Any,
@@ -381,6 +566,8 @@ async def _record_terminal_task(
     started_monotonic: float,
     result: str | None = None,
     error: str | None = None,
+    container_task: CommandRoomContainerTask | None = None,
+    container_artifact_written: bool | None = None,
 ) -> None:
     terminal_reason = "user_cancelled" if status == "cancelled" else status
     action_result = task_action_result_from_terminal_event(
@@ -429,7 +616,196 @@ async def _record_terminal_task(
             "error_preview": _redacted_preview(error, fallback=f"Task {status.replace('_', ' ')}") if error is not None else None,
             "artifact_refs": _artifact_refs(action_result),
             "action_result": _compact_action_result_event(action_result),
+            **_container_task_event_fields(
+                container_task,
+                container_artifact_written=container_artifact_written,
+            ),
         },
+    )
+
+
+async def _execute_started_task(
+    *,
+    writer: Any,
+    runtime: Any,
+    recorder_to_flush: Any | None,
+    task_id: str,
+    thread_id: str,
+    run_id: str,
+    trace_id: str,
+    user_id: str | None,
+    subagent_type: str,
+    description: str,
+    worker_prompt: str,
+    started_at: str,
+    started_monotonic: float,
+    prepared_paths: dict[str, str],
+    timeout_seconds: int,
+    model: str | None,
+    reasoning_effort: str | None,
+    sandbox_mode: CodexSandboxMode,
+    container_task: CommandRoomContainerTask | None,
+) -> CommandRoomBackgroundOutcome:
+    container_artifact_written: bool | None = None
+    try:
+        result = await run_codex_cli_task(
+            worker_prompt,
+            workspace_path=prepared_paths["workspace_path"],
+            timeout_seconds=timeout_seconds,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox_mode=sandbox_mode,
+            additional_writable_paths=([prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []),
+        )
+    except TimeoutError as exc:
+        error = str(exc)
+        if container_task is not None:
+            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
+            await asyncio.to_thread(record_container_task_terminal, container_task, status="timed_out")
+        await _record_terminal_task(
+            writer=writer,
+            runtime=runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            subagent_type=subagent_type,
+            description=description,
+            prompt=worker_prompt,
+            status="timed_out",
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            error=error,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        _record_persisted_terminal_task_message(
+            recorder_to_flush,
+            content=f"Task timed out. Error: {_redacted_tool_text(error)}",
+            task_id=task_id,
+            status="timed_out",
+            runtime=runtime,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        return CommandRoomBackgroundOutcome(
+            status="timed_out",
+            error=error,
+            container_artifact_written=container_artifact_written,
+        )
+    except RuntimeError as exc:
+        error = str(exc)
+        if container_task is not None:
+            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
+            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
+        await _record_terminal_task(
+            writer=writer,
+            runtime=runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            subagent_type=subagent_type,
+            description=description,
+            prompt=worker_prompt,
+            status="failed",
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            error=error,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        _record_persisted_terminal_task_message(
+            recorder_to_flush,
+            content=f"Task failed. Error: {_redacted_tool_text(error)}",
+            task_id=task_id,
+            status="failed",
+            runtime=runtime,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        return CommandRoomBackgroundOutcome(
+            status="failed",
+            error=error,
+            container_artifact_written=container_artifact_written,
+        )
+    except asyncio.CancelledError:
+        error = "Background task cancelled"
+        if container_task is not None:
+            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
+            await asyncio.to_thread(record_container_task_terminal, container_task, status="cancelled")
+        await _record_terminal_task(
+            writer=writer,
+            runtime=runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            subagent_type=subagent_type,
+            description=description,
+            prompt=worker_prompt,
+            status="cancelled",
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            error=error,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        _record_persisted_terminal_task_message(
+            recorder_to_flush,
+            content=f"Task cancelled by user. Error: {_redacted_tool_text(error)}",
+            task_id=task_id,
+            status="cancelled",
+            runtime=runtime,
+            container_task=container_task,
+            container_artifact_written=container_artifact_written,
+        )
+        raise
+    finally:
+        flush = getattr(recorder_to_flush, "flush", None)
+        if callable(flush):
+            await flush()
+
+    if container_task is not None:
+        container_artifact_written = await asyncio.to_thread(record_container_task_completion, container_task)
+
+    await _record_terminal_task(
+        writer=writer,
+        runtime=runtime,
+        task_id=task_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        trace_id=trace_id,
+        user_id=user_id,
+        subagent_type=subagent_type,
+        description=description,
+        prompt=worker_prompt,
+        status="completed",
+        started_at=started_at,
+        started_monotonic=started_monotonic,
+        result=result,
+        container_task=container_task,
+        container_artifact_written=container_artifact_written,
+    )
+    _record_persisted_terminal_task_message(
+        recorder_to_flush,
+        content=result,
+        task_id=task_id,
+        status="completed",
+        runtime=runtime,
+        container_task=container_task,
+        container_artifact_written=container_artifact_written,
+    )
+    flush = getattr(recorder_to_flush, "flush", None)
+    if callable(flush):
+        await flush()
+    return CommandRoomBackgroundOutcome(
+        status="completed",
+        result=result,
+        container_artifact_written=container_artifact_written,
     )
 
 
@@ -440,20 +816,34 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    container: CommandRoomContainer | None = None,
+    container_artifact: ContainerArtifact | None = None,
+    delivery_cycle_index: int | None = None,
+    work_package_id: str | None = None,
 ) -> ToolMessage:
     """Delegate one natural-language task to the installed Codex CLI.
 
     DeerFlow combines the selected developer-authored professional role context
-    with the lead AI's task prompt, records factual lifecycle events, and
-    returns the complete final answer unchanged. Codex CLI owns planning, tool
-    use, and task completion. ``subagent_type`` selects natural-language role
-    context and may select a Codex model override; it never selects a tool
-    allowlist, turn loop, quality gate, reviewer, or rework policy.
+    with the lead AI's task prompt and records factual lifecycle events. Ordinary
+    agents wait and receive the complete final answer unchanged. Command Room
+    receives an admission receipt immediately; the Gateway runs that child in
+    the background and starts a fresh sequential Chair run with the complete
+    result. Codex CLI owns planning, tool use, and task completion.
+
+    Command Room may call this tool with only description, prompt, and role.
+    Container, cycle, package, and artifact fields are optional factual labels
+    for display and optional Markdown routing. The tool validates their local
+    shape and prevents concurrent writes to one requested artifact; it never
+    uses them to authorize, block, sequence, or choose a task.
 
     Args:
         description: A short task label for the user interface and audit log.
         prompt: Complete instructions for the Codex CLI worker.
         subagent_type: The professional role label selected by the lead AI.
+        container: Optional factual label for display and artifact routing.
+        container_artifact: Optional request for a fixed Command Room Markdown artifact.
+        delivery_cycle_index: Optional factual cycle label.
+        work_package_id: Optional namespace label and artifact path scope.
     """
     state = getattr(runtime, "state", None)
     state = state if isinstance(state, dict) else {}
@@ -480,10 +870,56 @@ async def task_tool(
     model, reasoning_effort = _task_model_options(runtime_app_config, subagent_type)
     sandbox_mode = _task_sandbox_mode(runtime_app_config)
     worker_prompt = prompt
+    is_command_room = context.get("agent_name") == "command-room"
+    if is_command_room and container == "review":
+        timeout_seconds = min(timeout_seconds, _REVIEW_TASK_TIMEOUT_SECONDS)
+    background_dispatcher = _command_room_background_dispatcher(context) if is_command_room else None
+    container_task: CommandRoomContainerTask | None = None
+    task_fields: dict[str, Any] = {}
 
     try:
         prepared_paths = _ensure_task_paths(_task_paths(thread_data))
-        worker_prompt = _task_worker_prompt(runtime_app_config, subagent_type, prompt, prepared_paths)
+        prepared_paths = _add_command_room_ai_workspace(
+            prepared_paths,
+            agent_name=context.get("agent_name"),
+            workspace_key=thread_id,
+        )
+        if is_command_room:
+            ai_workspace_path = prepared_paths.get("ai_workspace_path")
+            if not ai_workspace_path:
+                raise RuntimeError("Command Room task requires an active run workspace.")
+            try:
+                package_id = validate_work_package_id(work_package_id)
+                if container_artifact is not None and container is None:
+                    raise ValueError("container_artifact requires a container label for artifact routing.")
+                if delivery_cycle_index is not None and (isinstance(delivery_cycle_index, bool) or not isinstance(delivery_cycle_index, int) or delivery_cycle_index < 1):
+                    raise ValueError("delivery_cycle_index must be a positive integer when provided.")
+                prepare_artifact = container_artifact is not None or (container in {"execution", "review", "project-steward"} and delivery_cycle_index is not None) or container in {"debt-curation", "learning-curation"}
+                if prepare_artifact:
+                    container_task = prepare_command_room_container_task(
+                        ai_workspace_path,
+                        container=container,
+                        task_id=task_id,
+                        container_artifact=container_artifact,
+                        delivery_cycle_index=delivery_cycle_index,
+                        work_package_id=package_id,
+                    )
+                task_fields = _container_task_event_fields(
+                    container_task,
+                    container=container,
+                    delivery_cycle_index=delivery_cycle_index,
+                    work_package_id=package_id,
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+        worker_prompt = _task_worker_prompt(
+            runtime_app_config,
+            subagent_type,
+            prompt,
+            prepared_paths,
+            container_task=container_task,
+            container=container,
+        )
         await _record_subagent_handoff_async(
             thread_id=thread_id,
             run_id=run_id,
@@ -509,44 +945,15 @@ async def task_tool(
                 "description": description,
                 "subagent_type": subagent_type,
                 "status": "in_progress",
+                "background_task": background_dispatcher is not None,
                 "summary": _redacted_preview(description, fallback="Task started"),
+                **task_fields,
             },
-        )
-        result = await run_codex_cli_task(
-            worker_prompt,
-            workspace_path=prepared_paths["workspace_path"],
-            timeout_seconds=timeout_seconds,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            sandbox_mode=sandbox_mode,
-            additional_writable_paths=([prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []),
-        )
-    except TimeoutError as exc:
-        error = str(exc)
-        await _record_terminal_task(
-            writer=writer,
-            runtime=runtime,
-            task_id=task_id,
-            thread_id=thread_id,
-            run_id=run_id,
-            trace_id=trace_id,
-            user_id=user_id,
-            subagent_type=subagent_type,
-            description=description,
-            prompt=worker_prompt,
-            status="timed_out",
-            started_at=started_at,
-            started_monotonic=started_monotonic,
-            error=error,
-        )
-        return _terminal_task_message(
-            f"Task timed out. Error: {_redacted_tool_text(error)}",
-            tool_call_id=tool_call_id,
-            status="timed_out",
-            round_id=round_id,
         )
     except RuntimeError as exc:
         error = str(exc)
+        if container_task is not None:
+            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
         await _record_terminal_task(
             writer=writer,
             runtime=runtime,
@@ -562,36 +969,96 @@ async def task_tool(
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
+            container_task=container_task,
+            container_artifact_written=None,
         )
         return _terminal_task_message(
             f"Task failed. Error: {_redacted_tool_text(error)}",
             tool_call_id=tool_call_id,
             status="failed",
             round_id=round_id,
+            container_task=container_task,
+            container_artifact_written=None,
         )
-    except asyncio.CancelledError:
-        error = "Parent run cancelled"
-        await _record_terminal_task(
-            writer=writer,
-            runtime=runtime,
-            task_id=task_id,
-            thread_id=thread_id,
-            run_id=run_id,
-            trace_id=trace_id,
-            user_id=user_id,
-            subagent_type=subagent_type,
-            description=description,
-            prompt=worker_prompt,
-            status="cancelled",
-            started_at=started_at,
-            started_monotonic=started_monotonic,
-            error=error,
-        )
-        raise
 
-    await _record_terminal_task(
+    if background_dispatcher is not None:
+        if not isinstance(thread_id, str) or not thread_id or not isinstance(run_id, str) or not run_id:
+            raise RuntimeError("Command Room background dispatch requires complete thread and run identity.")
+        background_runtime, background_recorder = _fork_background_runtime(runtime)
+
+        async def execute_background() -> CommandRoomBackgroundOutcome:
+            return await _execute_started_task(
+                writer=lambda _event: None,
+                runtime=background_runtime,
+                recorder_to_flush=background_recorder,
+                task_id=task_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                user_id=user_id,
+                subagent_type=subagent_type,
+                description=description,
+                worker_prompt=worker_prompt,
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                prepared_paths=prepared_paths,
+                timeout_seconds=timeout_seconds,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                sandbox_mode=sandbox_mode,
+                container_task=container_task,
+            )
+
+        job = CommandRoomBackgroundJob(
+            thread_id=thread_id,
+            source_run_id=run_id,
+            task_id=task_id,
+            description=description,
+            subagent_type=subagent_type,
+            execute=execute_background,
+            wake_context=_background_wake_context(context),
+            command_room_container=task_fields.get("command_room_container"),
+            container_artifact_path=task_fields.get("container_artifact_path"),
+            delivery_cycle_index=task_fields.get("delivery_cycle_index"),
+            work_package_id=task_fields.get("work_package_id"),
+        )
+        try:
+            await background_dispatcher.dispatch(job)
+        except Exception as exc:
+            error = f"Command Room background task could not be scheduled: {exc}"
+            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
+            await _record_terminal_task(
+                writer=writer,
+                runtime=runtime,
+                task_id=task_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                user_id=user_id,
+                subagent_type=subagent_type,
+                description=description,
+                prompt=worker_prompt,
+                status="failed",
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                error=error,
+                container_task=container_task,
+                container_artifact_written=None,
+            )
+            return _terminal_task_message(
+                f"Task failed. Error: {_redacted_tool_text(error)}",
+                tool_call_id=tool_call_id,
+                status="failed",
+                round_id=round_id,
+                container_task=container_task,
+                container_artifact_written=None,
+            )
+        return _background_task_message(tool_call_id=tool_call_id, round_id=round_id, task_fields=task_fields)
+
+    outcome = await _execute_started_task(
         writer=writer,
         runtime=runtime,
+        recorder_to_flush=None,
         task_id=task_id,
         thread_id=thread_id,
         run_id=run_id,
@@ -599,15 +1066,27 @@ async def task_tool(
         user_id=user_id,
         subagent_type=subagent_type,
         description=description,
-        prompt=worker_prompt,
-        status="completed",
+        worker_prompt=worker_prompt,
         started_at=started_at,
         started_monotonic=started_monotonic,
-        result=result,
+        prepared_paths=prepared_paths,
+        timeout_seconds=timeout_seconds,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        sandbox_mode=sandbox_mode,
+        container_task=container_task,
     )
+    if outcome.status == "completed":
+        content = outcome.result or ""
+    elif outcome.status == "timed_out":
+        content = f"Task timed out. Error: {_redacted_tool_text(outcome.error or '')}"
+    else:
+        content = f"Task failed. Error: {_redacted_tool_text(outcome.error or '')}"
     return _terminal_task_message(
-        result,
+        content,
         tool_call_id=tool_call_id,
-        status="completed",
+        status=outcome.status,
         round_id=round_id,
+        container_task=container_task,
+        container_artifact_written=outcome.container_artifact_written,
     )

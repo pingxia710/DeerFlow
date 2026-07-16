@@ -233,7 +233,14 @@ def test_command_room_runtime_snapshot_reports_direct_and_codex_transport_facts(
     assert runtime["skills"]["missing"] == ["missing-skill"]
     assert runtime["direct"]["include_mcp"] is False
     assert runtime["direct"]["tool_groups"] == []
-    assert runtime["direct"]["configured_tools"] == ["ask_clarification", "present_files", "task"]
+    assert runtime["direct"]["configured_tools"] == [
+        "accept_handoff",
+        "ask_clarification",
+        "close_task",
+        "present_files",
+        "project_status",
+        "task",
+    ]
     assert "bash" not in runtime["direct"]["configured_tools"]
     assert runtime["task_transport"] == {
         "runtime": "codex-cli-one-shot",

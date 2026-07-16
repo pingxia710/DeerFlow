@@ -701,7 +701,6 @@ class DeerFlowClient:
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-        latest_ai_text = ""
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
             """Add *usage* to cumulative totals if this id has not been counted.
@@ -809,9 +808,6 @@ class DeerFlowClient:
             for msg in messages:
                 if isinstance(msg, AIMessage):
                     text = self._extract_text(msg.content)
-                    if text:
-                        latest_ai_text = text
-
                 msg_id = getattr(msg, "id", None)
                 if msg_id and msg_id in seen_ids:
                     continue
@@ -875,33 +871,6 @@ class DeerFlowClient:
                     "artifacts": chunk.get("artifacts", []),
                 },
             )
-
-        if self._agent_name == "command-room":
-            try:
-                from deerflow.command_room.round_record import record_command_room_round
-
-                round_record_path = record_command_room_round(
-                    thread_id=thread_id,
-                    agent_name=self._agent_name,
-                    user_id=get_effective_user_id(),
-                    final_text=latest_ai_text,
-                    user_message=message,
-                    run_id=run_id,
-                    usage=cumulative_usage,
-                    source="client",
-                )
-                if round_record_path is not None:
-                    from deerflow.command_room.round_record import latest_command_room_round
-
-                    latest_command_room_round(
-                        thread_id=thread_id,
-                        user_id=get_effective_user_id(),
-                    )
-                    # Keep Round signals in the audit ledger / model memory only.
-                    # They are internal Command Room working context and must not
-                    # be emitted as user-visible custom stream events.
-            except Exception:
-                logger.debug("Failed to record command-room RoundRecord", exc_info=True)
 
         yield StreamEvent(type="end", data={"usage": cumulative_usage})
 

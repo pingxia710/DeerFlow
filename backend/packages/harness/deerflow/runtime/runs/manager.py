@@ -760,6 +760,9 @@ class RunManager:
             "parent_round_id": info.get("parent_round_id"),
             "current_intent": current_intent or info.get("current_intent"),
         }
+        parent_intent = info.get("parent_intent")
+        if isinstance(parent_intent, str) and parent_intent:
+            context["parent_intent"] = parent_intent
         for key in ("artifact_refs", "evidence_refs"):
             refs = info.get(key)
             if isinstance(refs, list):

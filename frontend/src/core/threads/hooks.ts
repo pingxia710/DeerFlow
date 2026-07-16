@@ -49,7 +49,9 @@ import {
 import {
   fetchThreadContextDetail,
   fetchThreadContextUsage,
+  fetchThreadTimeline,
   fetchThreadTokenUsage,
+  ThreadTimelineRequestError,
 } from "./api";
 import {
   applyNativeRoundsToSnapshotRuns,
@@ -147,6 +149,12 @@ import {
   DEFAULT_THREAD_SEARCH_PARAMS,
   type ThreadSearchParams,
 } from "./thread-search-query";
+import {
+  ThreadTimelineConflictError,
+  mergeThreadTimelinePage,
+  shouldPollThreadTimeline,
+  type ThreadTimelineProjection,
+} from "./thread-timeline";
 import {
   threadContextUsageQueryKey,
   threadTokenUsageQueryKey,
@@ -1376,6 +1384,9 @@ export function markThreadCancellingInCaches(
   void queryClient.invalidateQueries({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.thread.timeline(threadId),
+  });
 }
 
 export function beginLocalRunCancellation({
@@ -1706,6 +1717,9 @@ export function reconcileTaskEventRunHistory(
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
   });
   void queryClient.invalidateQueries({
+    queryKey: queryKeys.thread.timeline(threadId),
+  });
+  void queryClient.invalidateQueries({
     queryKey: threadTokenUsageQueryKey(threadId),
   });
   void queryClient.invalidateQueries({
@@ -1774,6 +1788,9 @@ export function invalidateTerminalRunQueries(
   });
   void queryClient.invalidateQueries({
     queryKey: threadRuntimeSnapshotQueryKey(threadId),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.thread.timeline(threadId),
   });
   void queryClient.invalidateQueries({
     queryKey: threadTokenUsageQueryKey(threadId),
@@ -1951,6 +1968,31 @@ function isThreadMissingError(error: unknown): boolean {
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
   // exists; callers render an empty state without changing the browser route.
   return status === 403 || status === 404;
+}
+
+export function getMissingThreadHistoryError({
+  enabled,
+  threadId,
+  tombstoned,
+  snapshotError,
+  runsError,
+}: {
+  enabled: boolean;
+  threadId?: string | null;
+  tombstoned: boolean;
+  snapshotError?: unknown;
+  runsError?: unknown;
+}): unknown | null {
+  if (!enabled || !threadId || tombstoned) {
+    return null;
+  }
+  if (isThreadMissingError(snapshotError)) {
+    return snapshotError;
+  }
+  if (isThreadMissingError(runsError)) {
+    return runsError;
+  }
+  return null;
 }
 
 export function isThreadDeleteNotFound(error: unknown): boolean {
@@ -3875,10 +3917,100 @@ export function shouldEnableThreadRuntimeSnapshotQuery({
   staticMode: boolean;
   deleted: boolean;
 }) {
-  return enabled && Boolean(threadId) && !staticMode && !deleted;
+  return enabled && hasPersistedThreadId(threadId) && !staticMode && !deleted;
 }
 
-function useThreadRuntimeSnapshot(
+export function hasPersistedThreadId(
+  threadId?: string | null,
+): threadId is string {
+  return (
+    typeof threadId === "string" && threadId.length > 0 && threadId !== "new"
+  );
+}
+
+export const THREAD_RUNTIME_BACKGROUND_POLL_INTERVAL_MS = 1500;
+export const THREAD_RUNTIME_BACKGROUND_WAKE_GRACE_MS = 15_000;
+export const THREAD_RUNTIME_ERROR_POLL_INTERVAL_MS = 15_000;
+const THREAD_RUNTIME_ACTIVITY_OWNER_ID = "command-room-background";
+const ACTIVE_TASK_LANE_STATUSES = new Set([
+  "in_progress",
+  "running",
+  "pending",
+  "executing",
+]);
+
+type RuntimeSnapshotPollingState = {
+  runs?: Array<{ status?: unknown }>;
+  task_lanes?: Array<{
+    status?: unknown;
+    completed_at?: unknown;
+    finished_at?: unknown;
+    updated_at?: unknown;
+  }>;
+};
+
+export function shouldPollThreadRuntimeSnapshot(
+  snapshot: RuntimeSnapshotPollingState | undefined,
+  nowMs: number = Date.now(),
+) {
+  if (!snapshot) {
+    return false;
+  }
+  if (snapshot.runs?.some((run) => isActiveRunStatus(run.status))) {
+    return true;
+  }
+  return Boolean(
+    snapshot.task_lanes?.some((lane) => {
+      if (
+        typeof lane.status === "string" &&
+        ACTIVE_TASK_LANE_STATUSES.has(lane.status)
+      ) {
+        return true;
+      }
+      const terminalAt =
+        lane.completed_at ?? lane.finished_at ?? lane.updated_at;
+      if (typeof terminalAt !== "string") {
+        return false;
+      }
+      const terminalAtMs = Date.parse(terminalAt);
+      const ageMs = nowMs - terminalAtMs;
+      return (
+        Number.isFinite(terminalAtMs) &&
+        ageMs >= 0 &&
+        ageMs <= THREAD_RUNTIME_BACKGROUND_WAKE_GRACE_MS
+      );
+    }),
+  );
+}
+
+export function hasRuntimeSnapshotActivity(
+  snapshot: RuntimeSnapshotPollingState | undefined,
+) {
+  if (snapshot?.runs?.some((run) => isActiveRunStatus(run.status))) {
+    return true;
+  }
+  return Boolean(
+    snapshot?.task_lanes?.some(
+      (lane) =>
+        typeof lane.status === "string" &&
+        ACTIVE_TASK_LANE_STATUSES.has(lane.status),
+    ),
+  );
+}
+
+export function getThreadRuntimeSnapshotRefetchInterval(
+  snapshot: RuntimeSnapshotPollingState | undefined,
+  hasError: boolean,
+) {
+  if (hasError) {
+    return THREAD_RUNTIME_ERROR_POLL_INTERVAL_MS;
+  }
+  return shouldPollThreadRuntimeSnapshot(snapshot)
+    ? THREAD_RUNTIME_BACKGROUND_POLL_INTERVAL_MS
+    : false;
+}
+
+export function useThreadRuntimeSnapshot(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
@@ -3908,6 +4040,80 @@ function useThreadRuntimeSnapshot(
     retry: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
+    refetchInterval: (query) =>
+      getThreadRuntimeSnapshotRefetchInterval(
+        query.state.data,
+        query.state.error !== null,
+      ),
+  });
+}
+
+const THREAD_TIMELINE_POLL_INTERVAL_MS = 1_500;
+const THREAD_TIMELINE_CATCH_UP_INTERVAL_MS = 100;
+
+export function useThreadTimeline(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  const staticMode = isStaticWebsiteOnly();
+  const queryClient = useQueryClient();
+  const runtimeSnapshot = useThreadRuntimeSnapshot(threadId, { enabled });
+  const queryKey = queryKeys.thread.timeline(threadId);
+
+  return useQuery<ThreadTimelineProjection>({
+    queryKey,
+    queryFn: async () => {
+      if (!threadId) {
+        throw new Error("Missing thread id.");
+      }
+      const previous =
+        queryClient.getQueryData<ThreadTimelineProjection>(queryKey);
+      const recoverSnapshot = async () =>
+        mergeThreadTimelinePage(
+          previous,
+          await fetchThreadTimeline(threadId),
+          "snapshot",
+        );
+
+      try {
+        const page = await fetchThreadTimeline(threadId, previous?.cursor);
+        return mergeThreadTimelinePage(
+          previous,
+          page,
+          previous ? "incremental" : "snapshot",
+        );
+      } catch (error) {
+        if (
+          previous &&
+          (error instanceof ThreadTimelineConflictError ||
+            (error instanceof ThreadTimelineRequestError &&
+              error.status === 409))
+        ) {
+          return recoverSnapshot();
+        }
+        throw error;
+      }
+    },
+    enabled:
+      enabled &&
+      hasPersistedThreadId(threadId) &&
+      !staticMode &&
+      !isDeletedThreadTombstoned(threadId),
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const projection = query.state.data;
+      if (projection?.hasMore) {
+        return THREAD_TIMELINE_CATCH_UP_INTERVAL_MS;
+      }
+      return shouldPollThreadTimeline(
+        projection,
+        hasRuntimeSnapshotActivity(runtimeSnapshot.data),
+      )
+        ? THREAD_TIMELINE_POLL_INTERVAL_MS
+        : false;
+    },
   });
 }
 
@@ -3938,6 +4144,8 @@ export function useThreadHistory(
   const historyScopeRunIdRef = useRef<string | null>(null);
   const updateSubtask = useUpdateSubtask();
   const settleRunSubtasks = useSettleRunningSubtasksForRun();
+  const queryClient = useQueryClient();
+  const clearSubtasksForThread = useClearSubtasksForThread();
   const updateSubtaskRef = useRef(updateSubtask);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -3971,6 +4179,56 @@ export function useThreadHistory(
       }),
     [runsData, snapshot.data?.rounds, snapshot.data?.task_lanes, threadId],
   );
+  const runtimeSnapshotActive = hasRuntimeSnapshotActivity(snapshot.data);
+  const latestRuntimeStatus = snapshot.data?.runs?.[0]?.status;
+
+  useEffect(() => {
+    const scope = { runtimeOwnerId: THREAD_RUNTIME_ACTIVITY_OWNER_ID };
+    if (
+      enabled &&
+      snapshot.data?.thread_id === threadId &&
+      runtimeSnapshotActive
+    ) {
+      markThreadBusyInCaches(queryClient, threadId, scope);
+      return;
+    }
+    if (!hasActiveThreadActivityOwner(threadId, scope)) {
+      return;
+    }
+    if (latestRuntimeStatus === "success") {
+      markThreadFinished(threadId, scope);
+    } else {
+      clearThreadActivity(threadId, scope);
+    }
+    if (
+      enabled &&
+      snapshot.data?.thread_id === threadId &&
+      typeof latestRuntimeStatus === "string"
+    ) {
+      setThreadStatusInCaches(
+        queryClient,
+        threadId,
+        latestRuntimeStatus === "success" ? "idle" : latestRuntimeStatus,
+      );
+    }
+  }, [
+    enabled,
+    latestRuntimeStatus,
+    queryClient,
+    runtimeSnapshotActive,
+    snapshot.data?.thread_id,
+    threadId,
+  ]);
+
+  useEffect(
+    () => () => {
+      const scope = { runtimeOwnerId: THREAD_RUNTIME_ACTIVITY_OWNER_ID };
+      if (hasActiveThreadActivityOwner(threadId, scope)) {
+        clearThreadActivity(threadId, scope);
+      }
+    },
+    [threadId],
+  );
 
   const supersededRunIds = useMemo(() => {
     return getSupersededRunIds(runsData, pendingSupersededRunIds);
@@ -3987,6 +4245,36 @@ export function useThreadHistory(
   const terminalNotice = useMemo(
     () => getLatestRunTerminalNotice(runsData, messageRows),
     [messageRows, runsData],
+  );
+
+  const clearMissingThreadHistoryState = useCallback(
+    (missingThreadId: string, missingError: unknown) => {
+      clearDeletedThreadClientState(queryClient, missingThreadId, {
+        clearSubtasksForThread,
+      });
+      if (missingThreadId !== threadIdRef.current) {
+        return;
+      }
+      loadGenerationRef.current += 1;
+      historyLoadAbortRef.current?.abort();
+      historyLoadAbortRef.current = null;
+      runsRef.current = [];
+      indexRef.current = -1;
+      pendingLoadRef.current = false;
+      loadingRunIdRef.current = null;
+      loadedRunIdsRef.current = new Set();
+      runBeforeSeqRef.current = new Map();
+      autoLoadedLatestRunIdRef.current = null;
+      activeRunIdsRef.current = new Set();
+      pendingRefreshRunIdsRef.current = new Set();
+      appliedTaskEventKeysRef.current = new Set();
+      loadingRef.current = false;
+      setLoading(false);
+      setError(missingError);
+      setMessageRows([]);
+      setAppendedMessages([]);
+    },
+    [clearSubtasksForThread, queryClient],
   );
 
   const loadMessages = useCallback(async () => {
@@ -4009,6 +4297,7 @@ export function useThreadHistory(
       return;
     }
 
+    let requestThreadId = threadIdRef.current;
     loadingRef.current = true;
     setLoading(true);
     setError(null);
@@ -4045,7 +4334,7 @@ export function useThreadHistory(
           return;
         }
 
-        const requestThreadId = threadIdRef.current;
+        requestThreadId = threadIdRef.current;
         if (isDeletedThreadTombstoned(requestThreadId)) {
           return;
         }
@@ -4140,6 +4429,10 @@ export function useThreadHistory(
       if (isAbortError(err)) {
         return;
       }
+      if (isThreadMissingError(err)) {
+        clearMissingThreadHistoryState(requestThreadId, err);
+        return;
+      }
       console.warn("Failed to load thread history.", err);
       setError(err);
     } finally {
@@ -4152,7 +4445,29 @@ export function useThreadHistory(
         setLoading(false);
       }
     }
-  }, [enabled]);
+  }, [clearMissingThreadHistoryState, enabled]);
+
+  useEffect(() => {
+    const missingError = getMissingThreadHistoryError({
+      enabled,
+      threadId,
+      tombstoned: isDeletedThreadTombstoned(threadId),
+      snapshotError: snapshot.isError ? snapshot.error : null,
+      runsError: runs.isError ? runs.error : null,
+    });
+    if (!missingError) {
+      return;
+    }
+    clearMissingThreadHistoryState(threadId, missingError);
+  }, [
+    clearMissingThreadHistoryState,
+    enabled,
+    runs.error,
+    runs.isError,
+    snapshot.error,
+    snapshot.isError,
+    threadId,
+  ]);
 
   useEffect(() => {
     const data = snapshot.data;
@@ -4448,6 +4763,10 @@ export function useThreadHistory(
     if (action === "refetch-runs") {
       const result = await refetchRuns();
       if (result.error) {
+        if (isThreadMissingError(result.error)) {
+          clearMissingThreadHistoryState(threadId, result.error);
+          return;
+        }
         if (snapshot.data) {
           toast.error("Failed to load thread history.");
         } else {
@@ -4479,6 +4798,10 @@ export function useThreadHistory(
     if (action === "fetch-next-page") {
       const result = await fetchNextRunPage();
       if (result.error) {
+        if (isThreadMissingError(result.error)) {
+          clearMissingThreadHistoryState(threadId, result.error);
+          return;
+        }
         setError(result.error);
         return;
       }
@@ -4505,6 +4828,7 @@ export function useThreadHistory(
   }, [
     fetchNextRunPage,
     hasNextRunPage,
+    clearMissingThreadHistoryState,
     loadMessages,
     nextRunPageIsError,
     refetchRuns,
@@ -4554,7 +4878,7 @@ export function useThreadHistory(
     }
   }, [enabled, refreshRuns, runsData, settleRunSubtasks, threadId]);
 
-  const hasThreadId = Boolean(threadId);
+  const hasThreadId = hasPersistedThreadId(threadId);
   const hasUnloadedRuns = Boolean(
     runsData?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
   );
@@ -4763,7 +5087,9 @@ export function useThreadRuns(
         : undefined,
     select: (data) => data.pages.flat(),
     enabled:
-      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
+      enabled &&
+      hasPersistedThreadId(threadId) &&
+      !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
@@ -4795,7 +5121,9 @@ export function useThreadMetadata(
       }
     },
     enabled:
-      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
+      enabled &&
+      hasPersistedThreadId(threadId) &&
+      !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4814,7 +5142,9 @@ export function useThreadTokenUsage(
       return fetchThreadTokenUsage(threadId);
     },
     enabled:
-      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
+      enabled &&
+      hasPersistedThreadId(threadId) &&
+      !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4833,7 +5163,9 @@ export function useThreadContextUsage(
       return fetchThreadContextUsage(threadId);
     },
     enabled:
-      enabled && Boolean(threadId) && !isDeletedThreadTombstoned(threadId),
+      enabled &&
+      hasPersistedThreadId(threadId) &&
+      !isDeletedThreadTombstoned(threadId),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -4855,7 +5187,7 @@ export function useThreadContextDetail(
     },
     enabled:
       enabled &&
-      Boolean(threadId) &&
+      hasPersistedThreadId(threadId) &&
       Boolean(runId) &&
       seq !== undefined &&
       seq !== null &&

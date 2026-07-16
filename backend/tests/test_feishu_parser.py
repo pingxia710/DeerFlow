@@ -1,15 +1,22 @@
 import asyncio
 import json
+import logging
 import tempfile
 import threading
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.feishu import FeishuChannel
+from app.channels.feishu import (
+    FeishuChannel,
+    _disable_lark_websocket_proxy,
+    _handle_lark_ws_loop_exception,
+    _LarkWebSocketLogFilter,
+)
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
@@ -43,6 +50,74 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def test_lark_websocket_log_filter_redacts_connection_credentials():
+    record = logging.LogRecord(
+        "Lark",
+        logging.INFO,
+        __file__,
+        1,
+        "connected to wss://msg-frontier.feishu.cn/ws/v2?device_id=123&access_key=secret&ticket=ticket [conn_id=123]",
+        (),
+        None,
+    )
+
+    assert _LarkWebSocketLogFilter().filter(record) is True
+    assert record.getMessage() == "connected to wss://msg-frontier.feishu.cn/ws/v2?<redacted> [conn_id=<redacted>]"
+    assert "access_key" not in record.getMessage()
+    assert "ticket" not in record.getMessage()
+
+
+def test_lark_websocket_log_filter_demotes_normal_close():
+    record = logging.LogRecord(
+        "Lark",
+        logging.ERROR,
+        __file__,
+        1,
+        "receive message loop exit, err: sent 1000 (OK); then received 1000 (OK) bye",
+        (),
+        None,
+    )
+
+    assert _LarkWebSocketLogFilter().filter(record) is True
+    assert record.levelno == logging.INFO
+    assert record.levelname == "INFO"
+
+
+def test_lark_websocket_proxy_is_disabled_only_for_feishu_hosts():
+    calls: list[tuple[str, dict]] = []
+    unset = object()
+
+    def connect(uri: str, *, proxy: object = unset, **kwargs):
+        captured = dict(kwargs)
+        if proxy is not unset:
+            captured["proxy"] = proxy
+        calls.append((uri, captured))
+        return object()
+
+    websockets_module = SimpleNamespace(connect=connect)
+    _disable_lark_websocket_proxy(websockets_module)
+
+    websockets_module.connect("wss://msg-frontier.feishu.cn/ws/v2", proxy="socks5://localhost:1080")
+    websockets_module.connect("wss://example.com/socket")
+
+    assert calls == [
+        ("wss://msg-frontier.feishu.cn/ws/v2", {"proxy": None}),
+        ("wss://example.com/socket", {}),
+    ]
+
+
+def test_feishu_ws_loop_handler_suppresses_normal_close_only_after_stop():
+    loop = MagicMock()
+    normal_close = type("ConnectionClosedOK", (), {"code": 1000})()
+    context = {"exception": normal_close, "message": "Task exception was never retrieved"}
+
+    _handle_lark_ws_loop_exception(loop, context, stop_requested=True)
+    loop.default_exception_handler.assert_not_called()
+
+    _handle_lark_ws_loop_exception(loop, context, stop_requested=False)
+    loop.default_exception_handler.assert_called_once_with(context)
 
 
 def test_feishu_on_message_plain_text():

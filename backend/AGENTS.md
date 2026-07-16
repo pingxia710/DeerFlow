@@ -47,18 +47,48 @@ agent loop:
 3. DeerFlow adds the task and applicable path/`AGENTS.md` orientation once, then
    sends that same audited prompt on stdin to one `codex exec --ephemeral`
    process. Codex owns its plan, native tool use, checks, and response.
-4. On success, the complete final Codex text becomes the `ToolMessage` result
-   without previewing, parsing, summarizing, scoring, or truncating it. The
-   child process and descendants end.
-5. The lead sends that natural result to a different checking AI and obtains an
-   independent opposition result, then makes the final judgment from the text.
+4. On success, ordinary agents receive the complete final Codex text as the
+   `ToolMessage` result. Command Room receives an immediate background receipt;
+   Gateway preserves the terminal task event and starts a new sequential Chair
+   Run with the complete result. No prose is parsed, scored, or truncated.
+5. An explicit `work_package_id` isolates Context, Planning, Delivery,
+   Governance, and parent-owned receipts under `packages/<work_package_id>/`.
+   Optional Context runs independent discovery handoffs before a Recorder
+   preserves `00-context/context.md`. Optional Planning and Technical Design
+   use independent forward and opposition AIs from the same factual snapshot;
+   a Recorder preserves the Chair's unified decision in `01-planning/spec.md`
+   or `02-technical-design/technical-plan.md`. The Chair then presents that
+   plan to the human and waits for explicit confirmation or revision before it
+   starts Execution.
+   Calls without an ID remain in one legacy package for compatibility. Once
+   that package has Delivery activity, a new Context, Planning, or Technical
+   Design handoff must provide an explicit ID; program code never infers one.
+6. A work package never overlaps Planning and Execution. Real work uses
+   `execution` cycle N and must be followed by a different AI in `review` cycle
+   N only after every admitted Execution N handoff is terminal. Execution tasks
+   declared by the Chair may run in parallel within that cycle. A confirmed
+   package may execute in parallel with Context/Planning for a separately scoped
+   package. The Chair alone decides whether to re-plan, call Execution N+1, or
+   accept with `close_task`.
+   Markdown and the real workspace carry shared state between one-shot AIs.
+7. `close_task` deterministically starts Project Steward only after explicit
+   Chair acceptance. The Chair then emits `continue`, `project_complete`, or
+   `blocked`; only explicit `project_complete` starts fixed Debt and Learning
+   Curators. Their updates still require a later Execution → Review and explicit
+   terminal `closed`.
+8. A failed Planning or Technical Design angle may be retried with a new task.
+   If its assigned Markdown changed before transport failure, only the Chair
+   may inspect and explicitly accept it with `accept_handoff`; the program
+   records hashes/status but does not judge completeness or quality.
 
 The transport may emit `task_started` and exactly one terminal factual event
 (`task_completed`, `task_failed`, `task_timed_out`, or `task_cancelled`). Do not
-reintroduce `task_running` heartbeats, polling, child turns, graph nodes,
+reintroduce `task_running` heartbeats, child turns, broad graph nodes,
 resident workers, structured handoff packets, program-generated plans, or
-programmatic checking/rework. Persisted historical statuses may remain readable
-for compatibility but are not current behavior.
+programmatic checking/rework. Short frontend snapshot polling while background
+work or wakeup is pending is transport observability, not child polling. The
+approved optional-stage, delivery-cycle, and fixed lifecycle admission boundary
+is structural only.
 
 A single lead model response can contain at most six task calls. This limit is
 enforced at the response boundary; it is not a global queue or concurrency
@@ -108,8 +138,16 @@ submitted. They may calculate only objective metadata such as IDs, ownership,
 timestamps, explicit statuses, source kinds, hashes, byte counts, and counts.
 
 They must not parse natural-language prompts/results to derive fields; infer
-evidence strength, completion, correctness, safety, verdicts, gaps, warnings, or
-next actions; or dispatch an AI. Compatibility fields such as
+evidence strength, correctness, safety, verdicts, gaps, warnings, or next
+actions; or dynamically dispatch an AI. After explicit Chair lifecycle status,
+Gateway may dispatch only fixed Project Steward, Debt Curator, and Learning
+Curator roles and wake the Chair after terminal work. Gateway may retry a
+failed sequential Chair wake a bounded number of times and include sibling task
+IDs, roles, and statuses as factual context. The handoff transport may derive only explicit
+container/cycle labels, terminal status, artifact path/hash/size, and
+whether the assigned artifact differs from its pre-dispatch content. It
+may reject structural order violations but never decides whether the artifact
+is adequate. Compatibility fields such as
 `quality_verdict`, `next_round_is_safe`, and `auto_rework` stay neutral. API
 read models must distinguish explicit AI-authored content from factual program
 metadata. The lead AI, checker AI, and opposition AI perform judgment.

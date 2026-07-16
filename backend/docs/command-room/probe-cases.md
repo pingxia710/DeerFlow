@@ -39,7 +39,7 @@ Purpose: scenarios for an independent AI to review skills and Obsidian maintenan
 
 ## command-room-quality-boundary
 
-- Scenario: Round/ActionResult/task metadata reports status plus possible gaps after a subtask.
+- Scenario: task metadata reports status plus possible gaps after a subtask.
 - Review expectation: give exact references and objective state transitions to the review AI; that AI identifies gaps or boundary concerns for the Command Room.
 - Decision owner: the lead AI must obtain a different checking AI result and an independent opposition AI result, then decides whether to answer or request further execution from their natural-language findings.
 - Raise a concern when the program layer automatically judges quality, triggers rework, or requires a worker/reviewer subtask to self-certify completion.

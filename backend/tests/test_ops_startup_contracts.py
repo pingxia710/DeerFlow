@@ -43,7 +43,16 @@ def test_local_launcher_builds_before_start_and_monitors_services():
     assert './scripts/wait-for-port.sh "$port" "$timeout" "$name" "$pid"' in script
     assert "SERVICE_PIDS" in script
     assert "_wait_for_any_service_exit" in script
+    assert '_wait_for_port_release "$GATEWAY_PORT" "Gateway"' in script
     assert "wait -n" not in script
+
+
+def test_local_gateway_keeps_ambient_proxy_and_protects_its_log():
+    script = _read("scripts/serve.sh")
+
+    assert "NO_PROXY='*' no_proxy='*'" not in script
+    assert ": > logs/gateway.log" in script
+    assert "chmod 600 logs/gateway.log" in script
 
 
 def test_wait_for_port_fails_fast_when_service_pid_exits():

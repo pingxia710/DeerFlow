@@ -84,6 +84,83 @@ function makeLocalStorage(): Storage {
   } as Storage;
 }
 
+test("runtime snapshot polling stays active for background tasks and their wakeup grace window", async () => {
+  const {
+    getThreadRuntimeSnapshotRefetchInterval,
+    hasRuntimeSnapshotActivity,
+    shouldPollThreadRuntimeSnapshot,
+  } = await import("@/core/threads/hooks");
+  const now = Date.parse("2026-07-15T10:00:10.000Z");
+
+  expect(
+    shouldPollThreadRuntimeSnapshot(
+      {
+        runs: [],
+        task_lanes: [{ status: "in_progress" }],
+      },
+      now,
+    ),
+  ).toBe(true);
+  expect(
+    shouldPollThreadRuntimeSnapshot(
+      {
+        runs: [],
+        task_lanes: [
+          {
+            status: "completed",
+            completed_at: "2026-07-15T10:00:05.000Z",
+          },
+        ],
+      },
+      now,
+    ),
+  ).toBe(true);
+  expect(
+    shouldPollThreadRuntimeSnapshot(
+      {
+        runs: [],
+        task_lanes: [
+          {
+            status: "completed",
+            completed_at: "2026-07-15T09:59:00.000Z",
+          },
+        ],
+      },
+      now,
+    ),
+  ).toBe(false);
+  expect(
+    hasRuntimeSnapshotActivity({
+      runs: [],
+      task_lanes: [{ status: "in_progress" }],
+    }),
+  ).toBe(true);
+  expect(
+    hasRuntimeSnapshotActivity({
+      runs: [{ status: "running" }],
+      task_lanes: [{ status: "completed" }],
+    }),
+  ).toBe(true);
+  expect(
+    hasRuntimeSnapshotActivity({
+      runs: [{ status: "success" }],
+      task_lanes: [{ status: "completed" }],
+    }),
+  ).toBe(false);
+  expect(
+    getThreadRuntimeSnapshotRefetchInterval(
+      { runs: [], task_lanes: [{ status: "in_progress" }] },
+      false,
+    ),
+  ).toBe(1_500);
+  expect(
+    getThreadRuntimeSnapshotRefetchInterval(
+      { runs: [], task_lanes: [{ status: "in_progress" }] },
+      true,
+    ),
+  ).toBe(15_000);
+});
+
 function stubBrowserWindow(storage = makeLocalStorage()) {
   rs.stubGlobal("localStorage", storage);
   rs.stubGlobal("window", {
@@ -1025,6 +1102,38 @@ test("mergeRunsWithTerminalPrecedence preserves queried new runs and snapshot-on
       status: "success",
       terminal_reason: "success",
     }),
+  ]);
+});
+
+test("mergeRunsWithTerminalPrecedence promotes a newer snapshot-only background run", async () => {
+  const { mergeRunsWithTerminalPrecedence } =
+    await import("@/core/threads/hooks");
+
+  const result = mergeRunsWithTerminalPrecedence({
+    snapshotRuns: [
+      {
+        run_id: "background-wakeup",
+        status: "success",
+        created_at: "2026-07-15T11:02:44.000Z",
+      } as unknown as Run,
+      {
+        run_id: "human-run",
+        status: "success",
+        created_at: "2026-07-15T10:58:29.000Z",
+      } as unknown as Run,
+    ],
+    queriedRuns: [
+      {
+        run_id: "human-run",
+        status: "success",
+        created_at: "2026-07-15T10:58:29.000Z",
+      } as unknown as Run,
+    ],
+  });
+
+  expect(result?.map((run) => run.run_id)).toEqual([
+    "background-wakeup",
+    "human-run",
   ]);
 });
 
@@ -2584,6 +2693,92 @@ test("readRunMessagesPageResponse preserves HTTP status on history load errors",
   expect(getThreadHistoryLoadErrorKind({ status: 403 })).toBe("forbidden");
   expect(getThreadHistoryLoadErrorKind({ status: 404 })).toBe("not-found");
   expect(getThreadHistoryLoadErrorKind(new Error("network"))).toBe("failed");
+});
+
+test("getMissingThreadHistoryError recognizes only enabled missing thread history errors", async () => {
+  const { getMissingThreadHistoryError } = await import("@/core/threads/hooks");
+  const notFoundError = { status: 404 };
+  const forbiddenError = { status: 403 };
+  const networkError = new Error("network");
+
+  expect(
+    getMissingThreadHistoryError({
+      enabled: true,
+      threadId: "deleted-thread",
+      tombstoned: false,
+      snapshotError: notFoundError,
+      runsError: networkError,
+    }),
+  ).toBe(notFoundError);
+  expect(
+    getMissingThreadHistoryError({
+      enabled: true,
+      threadId: "deleted-thread",
+      tombstoned: false,
+      snapshotError: networkError,
+      runsError: forbiddenError,
+    }),
+  ).toBe(forbiddenError);
+  expect(
+    getMissingThreadHistoryError({
+      enabled: false,
+      threadId: "deleted-thread",
+      tombstoned: false,
+      snapshotError: notFoundError,
+    }),
+  ).toBeNull();
+  expect(
+    getMissingThreadHistoryError({
+      enabled: true,
+      threadId: "deleted-thread",
+      tombstoned: true,
+      snapshotError: notFoundError,
+    }),
+  ).toBeNull();
+  expect(
+    getMissingThreadHistoryError({
+      enabled: true,
+      threadId: "deleted-thread",
+      tombstoned: false,
+      snapshotError: networkError,
+    }),
+  ).toBeNull();
+});
+
+test("missing thread cleanup stays scoped to the failed history request", () => {
+  const hooksSource = readFileSync(
+    resolve(__dirname, "../../../../src/core/threads/hooks.ts"),
+    "utf-8",
+  );
+  const cleanupStart = hooksSource.indexOf(
+    "const clearMissingThreadHistoryState = useCallback",
+  );
+  const cleanupEnd = hooksSource.indexOf(
+    "\n\n  const loadMessages = useCallback",
+    cleanupStart,
+  );
+  const cleanupSource = hooksSource.slice(cleanupStart, cleanupEnd);
+  const loadMessagesStart = hooksSource.indexOf(
+    "const loadMessages = useCallback",
+  );
+  const loadMessagesEnd = hooksSource.indexOf(
+    "\n\n  useEffect(() => {",
+    loadMessagesStart,
+  );
+  const loadMessagesSource = hooksSource.slice(
+    loadMessagesStart,
+    loadMessagesEnd,
+  );
+
+  expect(cleanupSource).toContain(
+    "if (missingThreadId !== threadIdRef.current)",
+  );
+  expect(loadMessagesSource).toContain(
+    "let requestThreadId = threadIdRef.current;",
+  );
+  expect(loadMessagesSource).toContain(
+    "clearMissingThreadHistoryState(requestThreadId, err);",
+  );
 });
 
 test("fallback history continues from a control-only latest run to older visible messages", async () => {

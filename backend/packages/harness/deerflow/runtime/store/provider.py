@@ -3,8 +3,9 @@
 Provides a **sync singleton** and a **sync context manager** for CLI tools
 and the embedded :class:`~deerflow.client.DeerFlowClient`.
 
-The backend mirrors the configured checkpointer so that both always use the
-same persistence technology.  Supported backends: memory, sqlite, postgres.
+The backend mirrors the configured legacy checkpointer or unified database so
+both use the same persistence technology. Supported backends: memory, sqlite,
+postgres.
 
 Usage::
 
@@ -96,6 +97,47 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
     raise ValueError(f"Unknown store backend type: {config.type!r}")
 
 
+@contextlib.contextmanager
+def _sync_store_from_database(db_config) -> Iterator[BaseStore]:
+    """Construct a Store from the unified DatabaseConfig."""
+    if db_config.backend == "memory":
+        from langgraph.store.memory import InMemoryStore
+
+        yield InMemoryStore()
+        return
+
+    if db_config.backend == "sqlite":
+        try:
+            from langgraph.store.sqlite import SqliteStore
+        except ImportError as exc:
+            raise ImportError(SQLITE_STORE_INSTALL) from exc
+
+        conn_str = db_config.sqlite_path
+        ensure_sqlite_parent_dir(conn_str)
+        with SqliteStore.from_conn_string(conn_str) as store:
+            store.setup()
+            logger.info("Store: using SqliteStore (%s)", conn_str)
+            yield store
+        return
+
+    if db_config.backend == "postgres":
+        try:
+            from langgraph.store.postgres import PostgresStore  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(POSTGRES_STORE_INSTALL) from exc
+
+        if not db_config.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+
+        with PostgresStore.from_conn_string(db_config.postgres_url) as store:
+            store.setup()
+            logger.info("Store: using PostgresStore")
+            yield store
+        return
+
+    raise ValueError(f"Unknown database backend: {db_config.backend!r}")
+
+
 # ---------------------------------------------------------------------------
 # Sync singleton
 # ---------------------------------------------------------------------------
@@ -108,8 +150,8 @@ _store_lock = threading.Lock()
 def get_store() -> BaseStore:
     """Return the global sync Store singleton, creating it on first call.
 
-    Returns an :class:`~langgraph.store.memory.InMemoryStore` when no
-    checkpointer is configured in *config.yaml* (emits a WARNING in that case).
+    Returns an :class:`~langgraph.store.memory.InMemoryStore` when neither
+    persistence configuration selects a durable backend.
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
@@ -131,15 +173,25 @@ def get_store() -> BaseStore:
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         config = get_checkpointer_config()
+        if config is not None:
+            store_ctx = _sync_store_cm(config)
+        else:
+            try:
+                db_config = get_app_config().database
+            except FileNotFoundError:
+                db_config = None
+            if db_config is not None and db_config.backend != "memory":
+                store_ctx = _sync_store_from_database(db_config)
+            else:
+                store_ctx = None
 
-        if config is None:
+        if store_ctx is None:
             from langgraph.store.memory import InMemoryStore
 
-            logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
+            logger.warning("No persistent store backend configured — using InMemoryStore. Thread list will be lost on server restart. Configure sqlite or postgres persistence.")
             _store = InMemoryStore()
             return _store
 
-        store_ctx = _sync_store_cm(config)
         store = store_ctx.__enter__()
         _store_ctx = store_ctx
         _store = store
@@ -179,16 +231,22 @@ def store_context() -> Iterator[BaseStore]:
         with store_context() as store:
             store.put(("threads",), thread_id, {...})
 
-    Yields an :class:`~langgraph.store.memory.InMemoryStore` when no
-    checkpointer is configured in *config.yaml*.
+    Yields an :class:`~langgraph.store.memory.InMemoryStore` when neither
+    persistence configuration selects a durable backend.
     """
     config = get_app_config()
-    if config.checkpointer is None:
-        from langgraph.store.memory import InMemoryStore
-
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        yield InMemoryStore()
+    if config.checkpointer is not None:
+        with _sync_store_cm(config.checkpointer) as store:
+            yield store
         return
 
-    with _sync_store_cm(config.checkpointer) as store:
-        yield store
+    db_config = getattr(config, "database", None)
+    if db_config is not None and db_config.backend != "memory":
+        with _sync_store_from_database(db_config) as store:
+            yield store
+        return
+
+    from langgraph.store.memory import InMemoryStore
+
+    logger.warning("No persistent store backend configured — using InMemoryStore. Thread list will be lost on server restart. Configure sqlite or postgres persistence.")
+    yield InMemoryStore()

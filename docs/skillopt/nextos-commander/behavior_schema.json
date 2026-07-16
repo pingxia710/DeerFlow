@@ -8,8 +8,8 @@
     "assessment": { "type": "string" },
     "scenario_reviews": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
+      "minItems": 8,
+      "maxItems": 8,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -18,8 +18,13 @@
           "id": {
             "type": "string",
             "enum": [
-              "review-observed-implementation",
-              "small-fact-delegation",
+              "clear-direct-execution",
+              "optional-planning-angles",
+              "optional-technical-design",
+              "execution-review-rework",
+              "no-program-container-controller",
+              "background-control-lane",
+              "project-lifecycle",
               "bottom-boundary-confirmation"
             ]
           },

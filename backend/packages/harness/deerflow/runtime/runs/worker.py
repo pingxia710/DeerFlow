@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, cast
 
-from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.config.app_config import AppConfig
@@ -76,6 +75,7 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    command_room_background_dispatcher: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -95,6 +95,8 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if command_room_background_dispatcher is not None:
+        runtime_ctx["__command_room_background_dispatcher"] = command_room_background_dispatcher
     return runtime_ctx
 
 
@@ -126,6 +128,7 @@ class RunContext:
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     round_store: Any | None = field(default=None)
+    command_room_background_dispatcher: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -139,6 +142,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context["__run_journal"] = runtime_context["__run_journal"]
         if "round_context" in runtime_context:
             existing_context["round_context"] = runtime_context["round_context"]
+        if "__command_room_background_dispatcher" in runtime_context:
+            existing_context["__command_room_background_dispatcher"] = runtime_context["__command_room_background_dispatcher"]
         return
 
     config["context"] = dict(runtime_context)
@@ -249,7 +254,6 @@ async def run_agent(
     # empty thread during rollback.
     snapshot_capture_failed = checkpointer is not None
     llm_error_fallback_message: str | None = None
-    latest_command_room_ai_text = ""
     owner_task = asyncio.current_task()
     lease_control_task: asyncio.Task | None = None
     terminal_committed = False
@@ -337,7 +341,13 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            ctx.command_room_background_dispatcher,
+        )
         round_context = (record.metadata or {}).get("round_context")
         if isinstance(round_context, dict):
             runtime_ctx["round_context"] = round_context
@@ -455,7 +465,6 @@ async def run_agent(
                 logger.info("Run %s abort requested — stopping", run_id)
                 break
             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
-            latest_command_room_ai_text = _extract_latest_ai_text_from_values(chunk, latest_command_room_ai_text) if record.assistant_id == "command-room" and mode == "values" else latest_command_room_ai_text
             sse_event = _lg_mode_to_sse_event(mode)
             await _publish_stream_frame(
                 bridge,
@@ -490,16 +499,24 @@ async def run_agent(
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
-        else:
-            if record.assistant_id == "command-room":
-                await _record_command_room_round_from_worker(
+            if checkpointer is not None:
+                terminal_committed = await _finalize_rollback(
+                    run_manager,
+                    journal,
+                    bridge,
+                    checkpointer=checkpointer,
                     thread_id=thread_id,
+                    user_id=record.user_id,
                     run_id=run_id,
-                    user_message=_extract_first_human_text(graph_input),
-                    final_text=latest_command_room_ai_text,
-                    model_name=record.model_name,
+                    pre_run_checkpoint_id=pre_run_checkpoint_id,
+                    pre_run_snapshot=pre_run_snapshot,
+                    snapshot_capture_failed=snapshot_capture_failed,
+                    terminal_reason="failed",
+                    error=error_msg,
                 )
+            else:
+                terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="failed", error=error_msg, bridge=bridge, thread_id=thread_id)
+        else:
             terminal_committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.success, terminal_reason="success", bridge=bridge, thread_id=thread_id)
 
     except asyncio.CancelledError:
@@ -803,6 +820,8 @@ async def _finalize_rollback(
     pre_run_checkpoint_id: str | None,
     pre_run_snapshot: dict[str, Any] | None,
     snapshot_capture_failed: bool,
+    terminal_reason: str = "rolled_back",
+    error: str = "Rolled back by user",
 ) -> bool:
     try:
         await _rollback_to_pre_run_checkpoint(
@@ -823,7 +842,7 @@ async def _finalize_rollback(
         logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
         return await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rollback_failed", error=error, bridge=bridge, thread_id=thread_id)
     else:
-        committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason="rolled_back", error="Rolled back by user", bridge=bridge, thread_id=thread_id)
+        committed = await _set_terminal_status(run_manager, journal, run_id, RunStatus.error, terminal_reason=terminal_reason, error=error, bridge=bridge, thread_id=thread_id)
         logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
         return committed
 
@@ -1015,86 +1034,6 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
-
-
-def _extract_latest_ai_text_from_values(value: Any, current: str) -> str:
-    if not isinstance(value, dict):
-        return current
-    messages = value.get("messages")
-    if not isinstance(messages, (list, tuple)):
-        return current
-
-    latest = current
-    for msg in messages:
-        text = ""
-        if isinstance(msg, AIMessage):
-            from deerflow.command_room.round_record import extract_text
-
-            text = extract_text(msg.content)
-        elif isinstance(msg, dict) and msg.get("type") == "ai":
-            from deerflow.command_room.round_record import extract_text
-
-            text = extract_text(msg.get("content"))
-        if text:
-            latest = text
-    return latest
-
-
-def _extract_first_human_text(graph_input: dict) -> str | None:
-    messages = graph_input.get("messages") if isinstance(graph_input, dict) else None
-    if not isinstance(messages, (list, tuple)):
-        return None
-
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            from deerflow.command_room.round_record import extract_text
-
-            return extract_text(msg.content)
-        if isinstance(msg, dict) and msg.get("type") in {"human", "user"}:
-            from deerflow.command_room.round_record import extract_text
-
-            return extract_text(msg.get("content"))
-    return None
-
-
-async def _record_command_room_round_from_worker(
-    *,
-    thread_id: str,
-    run_id: str,
-    user_message: str | None,
-    final_text: str | None,
-    model_name: str | None,
-) -> None:
-    try:
-        from deerflow.command_room.round_record import record_command_room_round
-
-        record_task = asyncio.create_task(
-            asyncio.to_thread(
-                record_command_room_round,
-                thread_id=thread_id,
-                agent_name="command-room",
-                user_id=get_effective_user_id(),
-                final_text=final_text,
-                user_message=user_message,
-                run_id=run_id,
-                usage=None,
-                source="gateway",
-            )
-        )
-        try:
-            await asyncio.shield(record_task)
-        except asyncio.CancelledError:
-            # The agent stream has already produced its final answer. Keep the
-            # RoundRecord and terminal run projection on the same success side
-            # of this post-processing cancellation boundary.
-            await record_task
-    except Exception:
-        logger.debug(
-            "Failed to record command-room RoundRecord for run %s model=%s",
-            run_id,
-            model_name,
-            exc_info=True,
-        )
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:

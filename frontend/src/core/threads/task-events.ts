@@ -1,5 +1,14 @@
-import type { SubtaskUpdate } from "../tasks/context";
+import {
+  getSubtaskStorageKey,
+  mergeSubtaskUpdate,
+  type SubtaskUpdate,
+} from "../tasks/context";
 import { parseSubtaskResult } from "../tasks/subtask-result";
+import type {
+  CommandRoomArtifactKind,
+  CommandRoomContainer,
+  Subtask,
+} from "../tasks/types";
 
 import type { TaskLaneSnapshot } from "./command-room-read-model";
 import type { RunMessage } from "./types";
@@ -39,11 +48,19 @@ type PersistedTaskEvent = {
   duration_ms?: unknown;
   description?: unknown;
   subagent_type?: unknown;
+  background_task?: unknown;
   prompt?: unknown;
   message?: unknown;
   result?: unknown;
   error?: unknown;
   action_result?: unknown;
+  command_room_container?: unknown;
+  work_package_id?: unknown;
+  delivery_cycle_index?: unknown;
+  collaboration_round_index?: unknown;
+  container_artifact_path?: unknown;
+  container_artifact_written?: unknown;
+  container_artifact_kind?: unknown;
   metadata?: unknown;
   content?: unknown;
 };
@@ -134,9 +151,38 @@ export function applyTaskToolResultRunMessages(
         objectStringValue(row.metadata, "round_id") ??
         taskRoundIds.get(taskId),
       ...parsed,
+      ...commandRoomContainerFacts(additionalKwargs),
       notify: false,
     });
   }
+}
+
+export function terminalTaskToolResult(messages: RunMessage[], taskId: string) {
+  for (const row of [...messages].reverse()) {
+    if (typeof row.content !== "object" || row.content === null) {
+      continue;
+    }
+    const message = row.content as Record<string, unknown>;
+    if (
+      message.type !== "tool" ||
+      message.name !== "task" ||
+      message.tool_call_id !== taskId
+    ) {
+      continue;
+    }
+    const additionalKwargs =
+      typeof message.additional_kwargs === "object" &&
+      message.additional_kwargs !== null
+        ? (message.additional_kwargs as Record<string, unknown>)
+        : undefined;
+    const content = taskToolMessageText(message);
+    if (
+      parseSubtaskResult(content, additionalKwargs).status !== "in_progress"
+    ) {
+      return content;
+    }
+  }
+  return undefined;
 }
 
 export function stringValue(value: unknown) {
@@ -148,6 +194,134 @@ function objectStringValue(value: unknown, field: string) {
     return undefined;
   }
   return stringValue((value as Record<string, unknown>)[field]);
+}
+
+function objectNumberValue(value: unknown, field: string) {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const fieldValue = (value as Record<string, unknown>)[field];
+  return typeof fieldValue === "number" && Number.isFinite(fieldValue)
+    ? fieldValue
+    : undefined;
+}
+
+function objectBooleanValue(value: unknown, field: string) {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const fieldValue = (value as Record<string, unknown>)[field];
+  return typeof fieldValue === "boolean" ? fieldValue : undefined;
+}
+
+function firstDefinedValue<T>(
+  values: unknown[],
+  read: (value: unknown) => T | undefined,
+) {
+  for (const value of values) {
+    const parsed = read(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function commandRoomContainerValue(
+  value: unknown,
+): CommandRoomContainer | undefined {
+  return value === "planning" ||
+    value === "context" ||
+    value === "technical-design" ||
+    value === "execution" ||
+    value === "review" ||
+    value === "project-steward" ||
+    value === "debt-curation" ||
+    value === "learning-curation" ||
+    value === "collaboration" ||
+    value === "evaluation"
+    ? value
+    : undefined;
+}
+
+function commandRoomArtifactKindValue(
+  value: unknown,
+): CommandRoomArtifactKind | undefined {
+  return value === "spec" ||
+    value === "context-discovery" ||
+    value === "context" ||
+    value === "planning-forward" ||
+    value === "planning-opposition" ||
+    value === "technical-forward" ||
+    value === "technical-opposition" ||
+    value === "technical-plan" ||
+    value === "execution" ||
+    value === "findings" ||
+    value === "project-status" ||
+    value === "debt" ||
+    value === "learning" ||
+    value === "round-note" ||
+    value === "evaluation" ||
+    value === "chair-decision"
+    ? value
+    : undefined;
+}
+
+function commandRoomContainerFacts(
+  ...sources: unknown[]
+): Pick<
+  SubtaskUpdate,
+  | "commandRoomContainer"
+  | "workPackageId"
+  | "deliveryCycleIndex"
+  | "collaborationRoundIndex"
+  | "containerArtifactPath"
+  | "containerArtifactWritten"
+  | "containerArtifactKind"
+> {
+  const container = firstDefinedValue(sources, (source) =>
+    commandRoomContainerValue(
+      typeof source === "object" && source !== null
+        ? (source as Record<string, unknown>).command_room_container
+        : undefined,
+    ),
+  );
+  const deliveryCycleIndex = firstDefinedValue(sources, (source) =>
+    objectNumberValue(source, "delivery_cycle_index"),
+  );
+  const workPackageId = firstDefinedValue(sources, (source) =>
+    objectStringValue(source, "work_package_id"),
+  );
+  const collaborationRoundIndex = firstDefinedValue(sources, (source) =>
+    objectNumberValue(source, "collaboration_round_index"),
+  );
+  const containerArtifactPath = firstDefinedValue(sources, (source) =>
+    objectStringValue(source, "container_artifact_path"),
+  );
+  const containerArtifactWritten = firstDefinedValue(sources, (source) =>
+    objectBooleanValue(source, "container_artifact_written"),
+  );
+  const containerArtifactKind = firstDefinedValue(sources, (source) =>
+    commandRoomArtifactKindValue(
+      typeof source === "object" && source !== null
+        ? (source as Record<string, unknown>).container_artifact_kind
+        : undefined,
+    ),
+  );
+
+  return {
+    ...(container ? { commandRoomContainer: container } : {}),
+    ...(workPackageId ? { workPackageId } : {}),
+    ...(deliveryCycleIndex !== undefined ? { deliveryCycleIndex } : {}),
+    ...(collaborationRoundIndex !== undefined
+      ? { collaborationRoundIndex }
+      : {}),
+    ...(containerArtifactPath ? { containerArtifactPath } : {}),
+    ...(containerArtifactWritten !== undefined
+      ? { containerArtifactWritten }
+      : {}),
+    ...(containerArtifactKind ? { containerArtifactKind } : {}),
+  };
 }
 
 export function taskEventType(event: PersistedTaskEvent | null | undefined) {
@@ -294,6 +468,7 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     prompt,
     actionResultStatus: lane.status,
     notify: true,
+    ...commandRoomContainerFacts(lane.handoff, lane.metadata, lane.details),
   };
   const refs: Record<string, unknown> = {};
   for (const key of [
@@ -341,6 +516,27 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     update.terminalReason = lane.status;
   }
   return update;
+}
+
+export function mergeTaskLaneSubtasks(
+  lanes: TaskLaneSnapshot[],
+  liveTasks: Subtask[],
+) {
+  const tasks = new Map<string, Subtask>();
+  for (const lane of lanes) {
+    const task = mergeSubtaskUpdate(undefined, taskLaneSubtaskUpdate(lane));
+    tasks.set(getSubtaskStorageKey(task), task);
+  }
+  for (const task of liveTasks) {
+    const key = getSubtaskStorageKey(task);
+    tasks.set(key, mergeSubtaskUpdate(tasks.get(key), task));
+  }
+  return [...tasks.values()].sort(
+    (left, right) =>
+      (left.startedAt ?? Number.MAX_SAFE_INTEGER) -
+        (right.startedAt ?? Number.MAX_SAFE_INTEGER) ||
+      left.id.localeCompare(right.id),
+  );
 }
 
 function actionResultString(event: PersistedTaskEvent, field: string) {
@@ -440,7 +636,13 @@ export function applyTaskEventToSubtask(
     id: taskId,
     threadId,
     runId,
+    ...(taskEvent.background_task === true ? { backgroundTask: true } : {}),
     ...(roundId ? { roundId } : {}),
+    ...commandRoomContainerFacts(
+      taskEvent,
+      taskEvent.metadata,
+      taskEvent.content,
+    ),
     notify: true,
     ...(durationMs !== undefined ? { durationMs } : {}),
   };

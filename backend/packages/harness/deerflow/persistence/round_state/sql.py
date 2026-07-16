@@ -7,6 +7,7 @@ lanes. It does not judge quality or choose the next AI role.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -165,8 +166,49 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
 
 
 def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
-    handoff = event.get("handoff_envelope")
-    return dict(handoff) if isinstance(handoff, dict) and handoff else None
+    handoff = _safe_dict(event.get("handoff_envelope"))
+    container = event.get("command_room_container")
+    if isinstance(container, str) and container in {
+        "context",
+        "planning",
+        "technical-design",
+        "execution",
+        "review",
+        "project-steward",
+        "debt-curation",
+        "learning-curation",
+    }:
+        handoff["command_room_container"] = container
+    work_package_id = event.get("work_package_id")
+    if isinstance(work_package_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", work_package_id):
+        handoff["work_package_id"] = work_package_id
+    delivery_cycle_index = event.get("delivery_cycle_index")
+    if isinstance(delivery_cycle_index, int) and not isinstance(delivery_cycle_index, bool) and delivery_cycle_index >= 1:
+        handoff["delivery_cycle_index"] = delivery_cycle_index
+    artifact_path = event.get("container_artifact_path")
+    if isinstance(artifact_path, str) and artifact_path.strip():
+        handoff["container_artifact_path"] = artifact_path
+    artifact_written = event.get("container_artifact_written")
+    if isinstance(artifact_written, bool):
+        handoff["container_artifact_written"] = artifact_written
+    artifact_kind = event.get("container_artifact_kind")
+    if isinstance(artifact_kind, str) and artifact_kind in {
+        "context-discovery",
+        "context",
+        "planning-forward",
+        "planning-opposition",
+        "spec",
+        "technical-forward",
+        "technical-opposition",
+        "technical-plan",
+        "execution",
+        "findings",
+        "project-status",
+        "debt",
+        "learning",
+    }:
+        handoff["container_artifact_kind"] = artifact_kind
+    return handoff or None
 
 
 def _assert_allowed_transition(previous: str, state: str) -> None:
@@ -346,6 +388,7 @@ class RoundStateRepository:
                 previous_run_id = round_row.current_run_id if round_row is not None else None
                 previous_intent = round_row.current_intent if round_row is not None else None
                 previous_updated_at = coerce_iso(round_row.updated_at) if round_row is not None else None
+                parent_intent = latest.current_intent if round_row is None and latest is not None else None
                 if round_row is None:
                     round_row = RoundRow(
                         round_id=str(uuid.uuid4()),
@@ -401,7 +444,10 @@ class RoundStateRepository:
                         "previous_updated_at": previous_updated_at,
                     },
                 )
-                return _row_to_dict(round_row)
+                result = _row_to_dict(round_row)
+                if isinstance(parent_intent, str) and parent_intent:
+                    result["parent_intent"] = parent_intent
+                return result
 
     async def rollback_run_binding(self, run_id: str) -> bool:
         async with self._sf() as session:
@@ -644,7 +690,9 @@ class RoundStateRepository:
                         session.add(lane)
                     lane.round_id = row.round_id
                     lane.user_id = row.user_id
-                    lane.status = str(event.get("status") or lane.status)
+                    incoming_status = event.get("status")
+                    if not (lane.status in {"completed", "failed", "timed_out", "cancelled"} and incoming_status == "in_progress"):
+                        lane.status = str(incoming_status or lane.status)
                     lane.role = _clip(event.get("subagent_type"), 64) or lane.role
                     lane.description = _clip(event.get("description"), 1000) or lane.description
                     lane.result = _clip(event.get("result_preview"), 4000) or lane.result
@@ -659,7 +707,9 @@ class RoundStateRepository:
                     lane.evidence_refs_json = _dedupe_refs([*(lane.evidence_refs_json or []), *ref_lists["evidence_refs"]]) or lane.evidence_refs_json
                     lane.artifact_refs_json = _dedupe_refs([*(lane.artifact_refs_json or []), *ref_lists["artifact_refs"]]) or lane.artifact_refs_json
                     lane.output_refs_json = _dedupe_refs([*(lane.output_refs_json or []), *ref_lists["output_refs"]]) or lane.output_refs_json
-                    lane.handoff_json = _task_handoff(event) or lane.handoff_json
+                    handoff = _task_handoff(event)
+                    if handoff:
+                        lane.handoff_json = {**(lane.handoff_json or {}), **handoff}
                     lane.error = _clip(event.get("error_preview"), 2000) or lane.error
                     lane.updated_at = _now()
                     await self._append_event(
@@ -714,3 +764,182 @@ class RoundStateRepository:
         stmt = stmt.order_by(TaskLaneRow.updated_at.desc()).limit(limit)
         async with self._sf() as session:
             return [_task_lane_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+
+    async def get_task_lane(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        stmt = select(TaskLaneRow).where(
+            TaskLaneRow.thread_id == thread_id,
+            TaskLaneRow.run_id == run_id,
+            TaskLaneRow.task_id == task_id,
+        )
+        if user_id is None:
+            stmt = stmt.where(TaskLaneRow.user_id.is_(None))
+        else:
+            stmt = stmt.where(TaskLaneRow.user_id == user_id)
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _task_lane_to_dict(row) if row is not None else None
+
+    async def claim_background_wake(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        """Atomically lease one persisted background wake across Gateway instances."""
+        stmt = update(TaskLaneRow).where(
+            TaskLaneRow.thread_id == thread_id,
+            TaskLaneRow.run_id == run_id,
+            TaskLaneRow.task_id == task_id,
+            or_(
+                TaskLaneRow.wake_claim_id.is_(None),
+                TaskLaneRow.wake_claim_expires_at.is_(None),
+                TaskLaneRow.wake_claim_expires_at <= now,
+            ),
+        )
+        if user_id is None:
+            stmt = stmt.where(TaskLaneRow.user_id.is_(None))
+        else:
+            stmt = stmt.where(TaskLaneRow.user_id == user_id)
+        async with self._sf() as session:
+            async with session.begin():
+                result = await session.execute(
+                    stmt.values(
+                        wake_claim_id=claim_id,
+                        wake_claim_expires_at=lease_expires_at,
+                        updated_at=now,
+                    )
+                )
+                return result.rowcount == 1
+
+    async def renew_background_wake_claim(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        stmt = update(TaskLaneRow).where(
+            TaskLaneRow.thread_id == thread_id,
+            TaskLaneRow.run_id == run_id,
+            TaskLaneRow.task_id == task_id,
+            TaskLaneRow.wake_claim_id == claim_id,
+            TaskLaneRow.wake_claim_expires_at > now,
+        )
+        if user_id is None:
+            stmt = stmt.where(TaskLaneRow.user_id.is_(None))
+        else:
+            stmt = stmt.where(TaskLaneRow.user_id == user_id)
+        async with self._sf() as session:
+            async with session.begin():
+                result = await session.execute(stmt.values(wake_claim_expires_at=lease_expires_at, updated_at=now))
+                return result.rowcount == 1
+
+    async def persist_claimed_background_wake(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+        now: datetime,
+        handoff: dict[str, Any],
+        event: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist wake facts only while this Gateway still owns the live claim."""
+        stmt = update(TaskLaneRow).where(
+            TaskLaneRow.thread_id == thread_id,
+            TaskLaneRow.run_id == run_id,
+            TaskLaneRow.task_id == task_id,
+            TaskLaneRow.wake_claim_id == claim_id,
+            TaskLaneRow.wake_claim_expires_at > now,
+        )
+        if user_id is None:
+            stmt = stmt.where(TaskLaneRow.user_id.is_(None))
+        else:
+            stmt = stmt.where(TaskLaneRow.user_id == user_id)
+        async with self._sf() as session:
+            async with self._seq_write_guard(session), session.begin():
+                values: dict[str, Any] = {"handoff_json": handoff, "updated_at": now}
+                if event is not None and isinstance(event.get("status"), str):
+                    values["status"] = event["status"]
+                if event is not None and isinstance(event.get("result_preview"), str):
+                    values["result"] = _clip(event["result_preview"], 4000)
+                if event is not None and isinstance(event.get("error_preview"), str):
+                    values["error"] = _clip(event["error_preview"], 2000)
+                result = await session.execute(stmt.values(**values))
+                if result.rowcount != 1:
+                    return False
+                if event is not None:
+                    lane = await session.get(TaskLaneRow, {"thread_id": thread_id, "run_id": run_id, "task_id": task_id})
+                    if lane is not None:
+                        await self._append_event(
+                            session,
+                            round_id=lane.round_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            task_id=task_id,
+                            user_id=lane.user_id,
+                            event_type=str(event.get("type") or "task.event"),
+                            content={
+                                "status": lane.status,
+                                "role": lane.role,
+                                "description": lane.description,
+                                "result": lane.result,
+                                "started_at": coerce_iso(lane.started_at) if lane.started_at else None,
+                                "finished_at": coerce_iso(lane.finished_at) if lane.finished_at else None,
+                                "duration_ms": lane.duration_ms,
+                                "result_ref": lane.result_ref,
+                                "evidence_ref": lane.evidence_ref,
+                                "evidence_refs": lane.evidence_refs_json or [],
+                                "artifact_refs": lane.artifact_refs_json or [],
+                                "output_refs": lane.output_refs_json or [],
+                                "handoff": lane.handoff_json,
+                            },
+                        )
+                return True
+
+    async def release_background_wake_claim(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        task_id: str,
+        user_id: str | None,
+        claim_id: str,
+    ) -> None:
+        stmt = update(TaskLaneRow).where(
+            TaskLaneRow.thread_id == thread_id,
+            TaskLaneRow.run_id == run_id,
+            TaskLaneRow.task_id == task_id,
+            TaskLaneRow.wake_claim_id == claim_id,
+        )
+        if user_id is None:
+            stmt = stmt.where(TaskLaneRow.user_id.is_(None))
+        else:
+            stmt = stmt.where(TaskLaneRow.user_id == user_id)
+        async with self._sf() as session:
+            async with session.begin():
+                await session.execute(stmt.values(wake_claim_id=None, wake_claim_expires_at=None, updated_at=_now()))
+
+    async def list_background_task_lanes(self) -> list[dict[str, Any]]:
+        """Return task lanes carrying Gateway-owned background recovery facts."""
+        async with self._sf() as session:
+            rows = list((await session.execute(select(TaskLaneRow).where(TaskLaneRow.handoff_json.is_not(None)).order_by(TaskLaneRow.updated_at.asc()))).scalars())
+            return [lane for row in rows if isinstance((lane := _task_lane_to_dict(row)).get("handoff"), dict) and isinstance(lane["handoff"].get("background_recovery"), dict)]

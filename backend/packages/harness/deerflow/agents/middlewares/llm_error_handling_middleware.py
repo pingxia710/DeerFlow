@@ -61,6 +61,18 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
+_CONTEXT_LENGTH_PATTERNS = (
+    "context_length_exceeded",
+    "context window",
+    "context length",
+    "maximum context",
+    "input is too long",
+    "input too long",
+    "too many input tokens",
+    "max input tokens",
+    "exceeds the maximum context",
+    "prompt is too long",
+)
 _TRANSIENT_CONNECTION_PATTERNS = (
     "unexpected_eof_while_reading",
     "eof occurred in violation of protocol",
@@ -197,6 +209,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
+        if _matches_any(lowered, _CONTEXT_LENGTH_PATTERNS):
+            return False, "context"
         if _matches_any(lowered, _TRANSIENT_CONNECTION_PATTERNS):
             return True, "transient"
 
@@ -262,6 +276,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
             return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
+        if reason == "context":
+            return "The current conversation is too large for the configured LLM provider. Start a new chat, summarize the thread, or shorten the request before trying again."
         if reason in {"busy", "transient"}:
             # Stream-drop failures (chunk-gap timeout, peer-closed connection,
             # raw read error) almost always point at a single oversized

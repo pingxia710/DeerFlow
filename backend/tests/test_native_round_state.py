@@ -1,11 +1,11 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.routers import thread_runs
 from deerflow.agents.middlewares.round_context_middleware import format_native_round_context_for_model
-from deerflow.command_room.plan import build_planned_lane, list_planned_lanes, record_planned_lane
 from deerflow.persistence.base import Base
 from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -335,6 +335,7 @@ async def test_completed_run_round_followup_starts_new_round_without_next_action
     context = second.metadata["round_context"]
     assert context["parent_round_id"] == first.round_id
     assert context["current_intent"] == "好的，下一步"
+    assert context["parent_intent"] == "全面检查 DeerFlow"
     assert "accepted_next_action" not in context
     assert "next_action" not in context
 
@@ -442,6 +443,18 @@ def test_round_context_keeps_row_next_action_out_of_model_context():
     assert "next_action" not in context
 
 
+def test_native_round_context_labels_parent_intent_as_history_not_authorization():
+    text = format_native_round_context_for_model(
+        {
+            "current_intent": "继续",
+            "parent_intent": "完成 DeerFlow 前后端修复",
+        }
+    )
+
+    assert "Current user goal: 继续" in text
+    assert "Previous round user goal (historical fact, not current authorization): 完成 DeerFlow 前后端修复" in text
+
+
 @pytest.mark.anyio
 async def test_task_event_updates_task_lane_outside_visible_history():
     event_store = MemoryRunEventStore()
@@ -479,67 +492,6 @@ async def test_task_event_updates_task_lane_outside_visible_history():
 
 
 @pytest.mark.anyio
-async def test_task_event_updates_linked_planned_lane_without_affecting_task_lane(tmp_path, monkeypatch):
-    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
-    event_store = MemoryRunEventStore()
-    round_store = MemoryRoundStateStore()
-    round_info = await round_store.bind_run(thread_id="thread-linked", run_id="run-linked", current_intent="start")
-    lane = build_planned_lane(
-        thread_id="thread-linked",
-        run_id="run-linked",
-        round_id=round_info["round_id"],
-        target_role="Evidence",
-        reason="Find proof",
-        linked_task_id="task-linked",
-    )
-    record_planned_lane(lane, base_dir=tmp_path / "audit")
-    journal = RunJournal("run-linked", "thread-linked", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
-
-    journal.record_task_event({"type": "task_completed", "task_id": "task-linked", "thread_id": "thread-linked", "run_id": "run-linked", "status": "completed"})
-    await journal.flush()
-
-    rows = list_planned_lanes(thread_id="thread-linked", user_id=None, run_id="run-linked", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
-    assert rows[0]["status"] == "completed"
-    assert ("thread-linked", "run-linked", "task-linked") in round_store.task_lanes
-
-
-@pytest.mark.anyio
-async def test_task_event_without_matching_linked_planned_lane_is_noop(tmp_path, monkeypatch):
-    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
-    event_store = MemoryRunEventStore()
-    round_store = MemoryRoundStateStore()
-    round_info = await round_store.bind_run(thread_id="thread-missing", run_id="run-missing", current_intent="start")
-    lane = build_planned_lane(thread_id="thread-missing", run_id="run-missing", round_id=round_info["round_id"], target_role="Evidence", reason="Find proof", linked_task_id="task-existing")
-    record_planned_lane(lane, base_dir=tmp_path / "audit")
-    journal = RunJournal("run-missing", "thread-missing", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
-
-    journal.record_task_event({"type": "task_completed", "task_id": "task-other", "thread_id": "thread-missing", "run_id": "run-missing", "status": "completed"})
-    await journal.flush()
-
-    rows = list_planned_lanes(thread_id="thread-missing", user_id=None, run_id="run-missing", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
-    assert len(rows) == 1
-    assert rows[0]["status"] == "planned"
-    assert rows[0]["linked_task_id"] == "task-existing"
-
-
-@pytest.mark.anyio
-async def test_task_event_maps_timed_out_to_blocked_planned_lane(tmp_path, monkeypatch):
-    monkeypatch.setattr("deerflow.command_room.plan.get_paths", lambda: type("Paths", (), {"thread_dir": lambda self, thread_id, user_id=None: tmp_path})())
-    event_store = MemoryRunEventStore()
-    round_store = MemoryRoundStateStore()
-    round_info = await round_store.bind_run(thread_id="thread-blocked", run_id="run-blocked", current_intent="start")
-    lane = build_planned_lane(thread_id="thread-blocked", run_id="run-blocked", round_id=round_info["round_id"], target_role="Evidence", reason="Find proof", linked_task_id="task-timeout")
-    record_planned_lane(lane, base_dir=tmp_path / "audit")
-    journal = RunJournal("run-blocked", "thread-blocked", event_store, flush_threshold=100, round_store=round_store, round_id=round_info["round_id"])
-
-    journal.record_task_event({"type": "task_timed_out", "task_id": "task-timeout", "thread_id": "thread-blocked", "run_id": "run-blocked", "status": "timed_out"})
-    await journal.flush()
-
-    rows = list_planned_lanes(thread_id="thread-blocked", user_id=None, run_id="run-blocked", round_id=round_info["round_id"], base_dir=tmp_path / "audit")
-    assert rows[0]["status"] == "blocked"
-
-
-@pytest.mark.anyio
 async def test_memory_round_state_preserves_handoff_envelope():
     round_store = MemoryRoundStateStore()
     round_info = await round_store.bind_run(
@@ -555,6 +507,14 @@ async def test_memory_round_state_preserves_handoff_envelope():
         "evidenceStrength": "Strong",
         "rawInputSha256": "abc123",
     }
+    container_facts = {
+        "command_room_container": "execution",
+        "work_package_id": "package-a",
+        "delivery_cycle_index": 1,
+        "container_artifact_path": "03-delivery/cycle-01/execution.md",
+        "container_artifact_written": True,
+        "container_artifact_kind": "execution",
+    }
 
     await round_store.record_task_events(
         [
@@ -566,12 +526,13 @@ async def test_memory_round_state_preserves_handoff_envelope():
                 "subagent_type": "evidence",
                 "status": "completed",
                 "handoff_envelope": handoff,
+                **container_facts,
             }
         ]
     )
 
     [lane] = await round_store.list_task_lanes_by_round(thread_id="thread-handoff", round_id=round_info["round_id"])
-    assert lane["handoff"] == handoff
+    assert lane["handoff"] == {**handoff, **container_facts}
 
 
 @pytest.mark.anyio
@@ -593,6 +554,14 @@ async def test_sql_round_state_preserves_handoff_envelope(tmp_path):
         "evidenceStrength": "Unverified",
         "rawInputSha256": "def456",
     }
+    container_facts = {
+        "command_room_container": "review",
+        "work_package_id": "package-b",
+        "delivery_cycle_index": 1,
+        "container_artifact_path": "03-delivery/cycle-01/review.md",
+        "container_artifact_written": False,
+        "container_artifact_kind": "findings",
+    }
 
     try:
         await round_store.record_task_events(
@@ -605,12 +574,13 @@ async def test_sql_round_state_preserves_handoff_envelope(tmp_path):
                     "subagent_type": "evidence",
                     "status": "completed",
                     "handoff_envelope": handoff,
+                    **container_facts,
                 }
             ]
         )
 
         [lane] = await round_store.list_task_lanes_by_round(thread_id="thread-sql-handoff", round_id=round_info["round_id"])
-        assert lane["handoff"] == handoff
+        assert lane["handoff"] == {**handoff, **container_facts}
         assert "handoff_json" not in lane
     finally:
         await engine.dispose()
@@ -1021,3 +991,141 @@ async def test_projection_repair_scopes_same_task_id_to_run_id():
     assert repaired is True
     assert [(lane["run_id"], lane["task_id"], lane["status"]) for lane in first_lanes] == [("run-1", "task-shared", "completed")]
     assert [(lane["run_id"], lane["task_id"], lane["status"]) for lane in second_lanes] == [("run-2", "task-shared", "failed")]
+
+
+async def _assert_background_recovery_facts_survive_task_event_replay(round_store):
+    await round_store.bind_run(thread_id="thread-background", run_id="run-background")
+    admission = {
+        "version": 1,
+        "thread_id": "thread-background",
+        "source_run_id": "run-background",
+        "task_id": "task-background",
+        "work_package_id": "package-a",
+        "outcome": None,
+        "wake": {"state": "pending", "attempts": 0},
+    }
+    await round_store.record_task_events(
+        [
+            {
+                "type": "task_started",
+                "thread_id": "thread-background",
+                "run_id": "run-background",
+                "task_id": "task-background",
+                "status": "in_progress",
+                "handoff_envelope": {"background_recovery": admission},
+            },
+            {
+                "type": "task_completed",
+                "thread_id": "thread-background",
+                "run_id": "run-background",
+                "task_id": "task-background",
+                "status": "completed",
+                "handoff_envelope": {
+                    "background_recovery": {
+                        **admission,
+                        "outcome": {"status": "completed", "result": "done"},
+                        "wake": {"state": "pending", "attempts": 0},
+                    }
+                },
+            },
+            {
+                "type": "task_started",
+                "thread_id": "thread-background",
+                "run_id": "run-background",
+                "task_id": "task-background",
+                "status": "in_progress",
+            },
+        ]
+    )
+
+    rows = await round_store.list_background_task_lanes()
+    assert len(rows) == 1
+    lane = rows[0]
+    assert lane["status"] == "completed"
+    assert lane["handoff"]["background_recovery"]["work_package_id"] == "package-a"
+    assert lane["handoff"]["background_recovery"]["outcome"]["result"] == "done"
+
+
+@pytest.mark.anyio
+async def test_memory_background_recovery_facts_survive_task_event_replay():
+    await _assert_background_recovery_facts_survive_task_event_replay(MemoryRoundStateStore())
+
+
+@pytest.mark.anyio
+async def test_sql_background_recovery_facts_survive_task_event_replay(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'background-recovery.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        await _assert_background_recovery_facts_survive_task_event_replay(RoundStateRepository(async_sessionmaker(engine, expire_on_commit=False)))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_sql_background_wake_claim_is_atomic_and_expired_claims_are_recoverable(tmp_path):
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'background-wake-claim.db'}"
+    first_engine = create_async_engine(database_url, connect_args={"timeout": 30})
+    second_engine = create_async_engine(database_url, connect_args={"timeout": 30})
+    async with first_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    first = RoundStateRepository(async_sessionmaker(first_engine, expire_on_commit=False))
+    second = RoundStateRepository(async_sessionmaker(second_engine, expire_on_commit=False))
+    try:
+        await first.bind_run(thread_id="thread-wake-claim", run_id="run-wake-claim")
+        await first.record_task_events(
+            [
+                {
+                    "type": "task_started",
+                    "thread_id": "thread-wake-claim",
+                    "run_id": "run-wake-claim",
+                    "task_id": "task-wake-claim",
+                    "status": "in_progress",
+                }
+            ]
+        )
+        now = datetime.now(UTC)
+        lease_expires_at = now + timedelta(minutes=1)
+        claims = await asyncio.gather(
+            first.claim_background_wake(
+                thread_id="thread-wake-claim",
+                run_id="run-wake-claim",
+                task_id="task-wake-claim",
+                user_id=None,
+                claim_id="gateway-a",
+                now=now,
+                lease_expires_at=lease_expires_at,
+            ),
+            second.claim_background_wake(
+                thread_id="thread-wake-claim",
+                run_id="run-wake-claim",
+                task_id="task-wake-claim",
+                user_id=None,
+                claim_id="gateway-b",
+                now=now,
+                lease_expires_at=lease_expires_at,
+            ),
+        )
+
+        assert claims.count(True) == 1
+        assert not await second.claim_background_wake(
+            thread_id="thread-wake-claim",
+            run_id="run-wake-claim",
+            task_id="task-wake-claim",
+            user_id=None,
+            claim_id="gateway-b-retry",
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+        assert await second.claim_background_wake(
+            thread_id="thread-wake-claim",
+            run_id="run-wake-claim",
+            task_id="task-wake-claim",
+            user_id=None,
+            claim_id="gateway-after-crash",
+            now=lease_expires_at + timedelta(seconds=1),
+            lease_expires_at=lease_expires_at + timedelta(minutes=1),
+        )
+    finally:
+        await first_engine.dispose()
+        await second_engine.dispose()

@@ -13,12 +13,28 @@ export const queryKeys = {
     runs: (threadId?: string | null) => ["thread", threadId, "runs"] as const,
     runtimeSnapshot: (threadId?: string | null) =>
       ["thread", threadId, "runtime-snapshot"] as const,
+    timeline: (threadId?: string | null) =>
+      ["thread", threadId, "timeline"] as const,
     capabilitySnapshot: (threadId?: string | null) =>
       ["capability-snapshot", threadId ?? "global"] as const,
     metadata: (threadId?: string | null, isMock = false) =>
       ["thread", "metadata", threadId, isMock] as const,
     run: (threadId: string, runId: string) =>
       ["thread", threadId, "run", runId] as const,
+    taskResult: (threadId: string, runId: string, taskId: string) =>
+      ["thread", threadId, "task-result", runId, taskId] as const,
+    commandRoomPlanArtifact: (
+      threadId: string,
+      runId: string,
+      taskId: string,
+    ) =>
+      [
+        "thread",
+        threadId,
+        "command-room-plan-artifact",
+        runId,
+        taskId,
+      ] as const,
     tokenUsage: (threadId?: string | null) =>
       ["thread-token-usage", threadId] as const,
     contextUsage: (threadId?: string | null) =>
@@ -50,7 +66,10 @@ export function isThreadScopedQueryKey(
     queryKey[1] === threadId &&
     (queryKey[2] === "runs" ||
       queryKey[2] === "runtime-snapshot" ||
-      queryKey[2] === "run")
+      queryKey[2] === "timeline" ||
+      queryKey[2] === "run" ||
+      queryKey[2] === "task-result" ||
+      queryKey[2] === "command-room-plan-artifact")
   ) {
     return true;
   }

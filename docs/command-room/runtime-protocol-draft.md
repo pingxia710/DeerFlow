@@ -1,7 +1,13 @@
 # Runtime protocol draft
 
-This draft describes a deliberately narrow runtime role: carry requests and results, record observable facts, and enforce hard permissions.
+Runtime carries prompts and natural results, records observable facts, enforces
+hard permissions, and enforces the approved handoff boundary.
 
-The runtime must not infer project quality, select a role or next action, dispatch review or rework, declare completion, or convert a missing artifact into a task failure. The Command Room AI remains responsible for prompting a different checking AI and an independent opposition AI before making its own judgment.
+It may reject an unfinished optional Planning or Technical Design stage, Review
+without same-cycle Execution, Execution N+1 without Review N, an invalid cycle,
+or an unchanged assigned Markdown artifact. It must not infer project quality,
+select a role or next action, parse findings, dispatch review/rework, or declare
+completion.
 
-Any future runtime contract should preserve this separation and avoid turning coordination metadata into a mandatory governance workflow.
+Any future runtime contract must preserve this separation and avoid turning
+coordination metadata into a programmatic decision engine.

@@ -1,27 +1,45 @@
 [
   {
-    "id": "train-lead-brain",
+    "id": "train-clear-direct-execution",
     "split": "train",
-    "intent": "指挥室要推进一个大型项目，同时保护主上下文不被执行细节耗尽。",
-    "required_rules": ["lead-brain", "prompt-contract", "professional-roles"]
+    "intent": "用户明确要求把一个已知文件复制到指定下载目录，目标、边界和完成标准都清楚。",
+    "required_rules": ["lead-brain", "prompt-contract", "optional-planning", "execution-review"]
   },
   {
-    "id": "val-worker-review",
+    "id": "val-planning-angles",
     "split": "val",
-    "intent": "一个子AI已经返回实现结果，指挥室需要决定如何核对后再采信。",
-    "required_rules": ["ai-review", "lead-brain"]
+    "intent": "用户方向和边界还没有收敛，需要两个AI从正反角度独立思考后由指挥室统一判断。",
+    "required_rules": ["planning-angles", "lead-brain"]
   },
   {
-    "id": "test-opposition",
+    "id": "test-technical-design",
     "split": "test",
-    "intent": "现有方案和实现看起来正确，但需要从另一个方向暴露遗漏角度。",
-    "required_rules": ["opposition", "lead-brain"]
+    "intent": "目标明确，但实现涉及API、数据和回滚，需要技术方案而不是重新规划用户目标。",
+    "required_rules": ["optional-planning", "optional-technical-design", "lead-brain"]
+  },
+  {
+    "id": "test-review-loop",
+    "split": "test",
+    "intent": "执行完成后审查发现真实偏差，需要把自然语言findings传给下一轮执行。",
+    "required_rules": ["execution-review", "findings-loop", "prompt-contract"]
   },
   {
     "id": "test-no-program-controller",
     "split": "test",
-    "intent": "有人建议由程序根据状态、分数和缺失证据自动选择角色、复核和返工。",
-    "required_rules": ["no-program-control", "prompt-contract"]
+    "intent": "有人建议程序解析findings、选择角色、自动判定通过并触发返工。",
+    "required_rules": ["no-program-control", "findings-loop"]
+  },
+  {
+    "id": "test-background-control-lane",
+    "split": "test",
+    "intent": "子AI执行时间较长，但人与指挥室必须继续讨论；完成结果要自动回到新的顺序Chair Run。",
+    "required_rules": ["background-control-lane", "lead-brain"]
+  },
+  {
+    "id": "test-project-lifecycle",
+    "split": "test",
+    "intent": "审查接受后自动进入项目管家；项目完成时进入债务和学习沉淀，再经过治理执行与审查后关闭。",
+    "required_rules": ["project-lifecycle", "execution-review", "no-program-control"]
   },
   {
     "id": "test-hard-boundary-confirmation",

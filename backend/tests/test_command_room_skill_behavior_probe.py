@@ -58,10 +58,15 @@ def test_behavior_prompt_contains_skill_and_all_scenarios():
     prompt = probe.build_prompt("# NextOS Commander\nKeep the lead brain clear.")
 
     assert "# NextOS Commander" in prompt
-    assert "review-observed-implementation" in prompt
-    assert "small-fact-delegation" in prompt
+    assert "clear-direct-execution" in prompt
+    assert "optional-planning-angles" in prompt
+    assert "optional-technical-design" in prompt
+    assert "no-program-container-controller" in prompt
+    assert "execution-review-rework" in prompt
     assert "bottom-boundary-confirmation" in prompt
     assert "independent review AI" in prompt
     assert "Set `passed` from your own semantic review" in prompt
-    assert "Treat either one as optional" in prompt
+    assert "Every Execution N is followed by Review N" in prompt
+    assert "independent forward and" in prompt
+    assert "mandatory planning for a" in prompt
     assert "Do not execute tools" in prompt

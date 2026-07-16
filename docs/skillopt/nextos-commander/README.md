@@ -1,22 +1,18 @@
 # NextOS Commander SkillOpt Probe
 
-SkillOpt gate for the local `skills/custom/nextos-commander/SKILL.md`.
-
-Run from the NextOS repo root:
+SkillOpt gate for `skills/custom/nextos-commander/SKILL.md`.
 
 ```bash
 bash scripts/skillopt-probe.sh
 ```
 
-The entrypoint first checks static rule coverage, then runs a read-only,
-model-backed behavioral rollout for three high-signal decisions: require a
-different checking AI and independent opposition before relying on worker
-output, delegate even a small fact out of the lead context, and request
-confirmation at the bottom boundary. The behavior gate writes
-`behavior_report.json` and fails the command on semantic drift.
+The gate also runs the static `command-room-evidence` regression for an E3 SSE
+replay that only prints values. The Commander checks that conversation and clear direct work skip unnecessary
+planning; optional Planning and Technical Design use independent forward and
+opposition angles; every Execution N receives an independent Review N; findings
+return to the Chair rather than triggering automatic rework; and high-impact
+boundaries still require confirmation. The behavior rollout is read-only and
+writes `behavior_report.json`.
 
 Use `SKILLOPT_STATIC_ONLY=1` only when model execution is intentionally
-unavailable. `SKILLOPT_DRY_RUN=1` validates behavioral probe setup without a
-model call. This probe follows the WorkOS lesson: keep skills small,
-failure-driven, and evidence-backed instead of turning them into broad project
-encyclopedias.
+unavailable. `SKILLOPT_DRY_RUN=1` validates probe setup without a model call.

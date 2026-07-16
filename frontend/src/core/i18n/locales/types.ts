@@ -261,6 +261,65 @@ export interface Translations {
     runRecoveryTerminalDescription: (reason?: string) => string;
     retryRecovery: string;
     reviewTurn: string;
+    steps: {
+      count: (count: number) => string;
+      toggle: (count: number) => string;
+    };
+    trajectory: {
+      title: string;
+      chairOutput: string;
+      context: string;
+      workPackage: (id: string) => string;
+      planning: string;
+      technicalDesign: string;
+      execution: string;
+      review: string;
+      evaluation: string;
+      cycle: (label: string, index: number) => string;
+      tasks: (count: number) => string;
+      running: string;
+      completed: string;
+      failed: string;
+      mixed: string;
+      result: string;
+      executionResult: string;
+      reviewResult: string;
+      subtasks: string;
+      plan: string;
+      planResearch: string;
+      planProposal: string;
+      technicalPlan: string;
+      planForming: string;
+      planArtifactNotWritten: string;
+      planArtifactUnavailable: string;
+      delivery: string;
+      otherProcess: string;
+      previousOutputs: (count: number) => string;
+      startedAt: string;
+      finishedAt: string;
+      elapsed: string;
+      recordedAt: string;
+      resultUnavailable: string;
+    };
+    workRecord: {
+      title: string;
+      open: string;
+      close: string;
+      retry: string;
+      loading: string;
+      empty: string;
+      unavailable: string;
+      truncated: string;
+      taskStarted: string;
+      taskCompleted: string;
+      taskFailed: string;
+      taskCancelled: string;
+      taskTimedOut: string;
+      runLifecycle: string;
+      artifactRecorded: string;
+      runRunning: string;
+      tasksRunning: (count: number) => string;
+    };
   };
 
   // Channels

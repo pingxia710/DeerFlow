@@ -351,6 +351,94 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     assert round_store.seen_user_id == user_id
 
 
+def test_thread_timeline_returns_owner_scoped_cursor_page():
+    user_id = str(_TEST_USER_ID)
+    event_store = MemoryRunEventStore()
+    asyncio.run(
+        event_store.put_batch(
+            [
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "event_type": "llm.human.input",
+                    "category": "message",
+                    "content": {"type": "human", "content": "first"},
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "event_type": "llm.context",
+                    "category": "trace",
+                    "content": {"hidden": True},
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "event_type": "task_started",
+                    "category": "message",
+                    "content": {"task_id": "task-1", "type": "task_started"},
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-1",
+                    "event_type": "run.terminal",
+                    "category": "lifecycle",
+                    "content": {"status": "success", "terminal_reason": "success"},
+                    "user_id": user_id,
+                },
+                {
+                    "thread_id": "thread-1",
+                    "run_id": "run-other-owner",
+                    "event_type": "task_completed",
+                    "category": "message",
+                    "content": {"task_id": "other", "type": "task_completed"},
+                    "user_id": "other-owner",
+                },
+            ]
+        )
+    )
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        first = client.get("/api/threads/thread-1/timeline?limit=2")
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["thread_id"] == "thread-1"
+    assert body["after_seq"] == 0
+    assert body["watermark_seq"] == 4
+    assert [record["seq"] for record in body["records"]] == [3, 4]
+    assert [record["event_id"] for record in body["records"]] == ["thread-1:3", "thread-1:4"]
+    assert body["truncated"] is True
+    assert body["has_more"] is False
+
+    asyncio.run(
+        event_store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="task_completed",
+            category="message",
+            content={"task_id": "task-1", "type": "task_completed"},
+            user_id=user_id,
+        )
+    )
+    tampered_cursor = f"{body['cursor'][:-1]}{'A' if body['cursor'][-1] != 'A' else 'B'}"
+    with TestClient(app) as client:
+        next_page = client.get(f"/api/threads/thread-1/timeline?cursor={body['cursor']}")
+        invalid = client.get("/api/threads/thread-1/timeline?cursor=not-a-timeline-cursor")
+        tampered = client.get(f"/api/threads/thread-1/timeline?cursor={tampered_cursor}")
+
+    assert next_page.status_code == 200
+    assert next_page.json()["after_seq"] == 4
+    assert [record["seq"] for record in next_page.json()["records"]] == [6]
+    assert next_page.json()["watermark_seq"] == 6
+    assert invalid.status_code == 409
+    assert tampered.status_code == 409
+
+
 def test_runtime_snapshot_loads_message_pages_concurrently():
     class SlowEventStore:
         def __init__(self) -> None:
@@ -1280,6 +1368,53 @@ def test_list_thread_messages_attaches_display_visibility_contract():
         "surface": "control",
         "reason": "task_event",
         "message_type": "task_event",
+        "payload_types": [],
+    }
+
+
+def test_list_thread_messages_projects_background_chair_update_to_round_summary():
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.tool.result",
+            "category": "message",
+            "content": {
+                "type": "tool",
+                "name": "task",
+                "content": "accepted",
+                "additional_kwargs": {"background_task": True},
+            },
+            "metadata": {"caller": "lead_agent"},
+        },
+        {
+            "seq": 2,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "content": "Stage update"},
+            "metadata": {"caller": "lead_agent"},
+        },
+    ]
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data[1]["display"] == {
+        "visible_in_chat": False,
+        "surface": "audit",
+        "reason": "command_room_step",
+        "message_type": "round_summary",
         "payload_types": [],
     }
 

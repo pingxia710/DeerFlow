@@ -1,5 +1,7 @@
 import type { Run } from "@langchain/langgraph-sdk";
 
+import type { CommandRoomContainer, Subtask } from "../tasks/types";
+
 import { hasStrongCommandRoomIdentity } from "./owner-scope";
 import { isActiveRunStatus, isTerminalRunStatus } from "./run-status";
 
@@ -58,8 +60,157 @@ export type CommandRoomReadModel = {
   legacyTaskLanes: TaskLaneSnapshot[];
 };
 
+export type CommandRoomTrajectoryStep = {
+  id: string;
+  container: CommandRoomContainer;
+  workPackageId?: string;
+  runId?: string;
+  roundId?: string;
+  deliveryCycleIndex?: number;
+  status: "in_progress" | "completed" | "failed" | "mixed";
+  tasks: Subtask[];
+};
+
+export type CommandRoomTrajectorySections = {
+  context: CommandRoomTrajectoryStep[];
+  planResearch: CommandRoomTrajectoryStep[];
+  planProposals: CommandRoomTrajectoryStep[];
+  delivery: CommandRoomTrajectoryStep[];
+  other: CommandRoomTrajectoryStep[];
+};
+
+export type CommandRoomWorkPackageTrajectory = {
+  workPackageId?: string;
+  steps: CommandRoomTrajectoryStep[];
+};
+
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function trajectoryStatus(
+  tasks: Subtask[],
+): CommandRoomTrajectoryStep["status"] {
+  const statuses = new Set(tasks.map((task) => task.status));
+  if (statuses.size === 1) {
+    return tasks[0]?.status ?? "mixed";
+  }
+  return "mixed";
+}
+
+/**
+ * Groups only explicit Command Room handoff facts. It never infers a phase
+ * from task prose or decides which phase should run next.
+ */
+export function buildCommandRoomTrajectory(tasks: Subtask[]) {
+  const grouped = new Map<string, CommandRoomTrajectoryStep>();
+  for (const task of tasks) {
+    const container = task.commandRoomContainer;
+    if (!container) {
+      continue;
+    }
+    const key = JSON.stringify([
+      task.runId ?? "",
+      task.roundId ?? "",
+      task.workPackageId ?? "",
+      container,
+      task.deliveryCycleIndex ?? "",
+    ]);
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.tasks.push(task);
+      existing.status = trajectoryStatus(existing.tasks);
+      continue;
+    }
+    grouped.set(key, {
+      id: key,
+      container,
+      ...(task.workPackageId ? { workPackageId: task.workPackageId } : {}),
+      ...(task.runId ? { runId: task.runId } : {}),
+      ...(task.roundId ? { roundId: task.roundId } : {}),
+      ...(task.deliveryCycleIndex !== undefined
+        ? { deliveryCycleIndex: task.deliveryCycleIndex }
+        : {}),
+      status: task.status,
+      tasks: [task],
+    });
+  }
+  return [...grouped.values()].sort((left, right) => {
+    const leftStartedAt = Math.min(
+      ...left.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+    );
+    const rightStartedAt = Math.min(
+      ...right.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+    );
+    return leftStartedAt - rightStartedAt;
+  });
+}
+
+export function splitCommandRoomTrajectory(
+  steps: CommandRoomTrajectoryStep[],
+): CommandRoomTrajectorySections {
+  const sections: CommandRoomTrajectorySections = {
+    context: [],
+    planResearch: [],
+    planProposals: [],
+    delivery: [],
+    other: [],
+  };
+  for (const step of steps) {
+    if (step.container === "context") {
+      sections.context.push(step);
+      continue;
+    }
+    if (step.container === "execution" || step.container === "review") {
+      sections.delivery.push(step);
+      continue;
+    }
+    if (
+      step.container === "planning" ||
+      step.container === "technical-design"
+    ) {
+      const isProposal = step.tasks.some(
+        (task) =>
+          task.containerArtifactKind === "spec" ||
+          task.containerArtifactKind === "technical-plan",
+      );
+      (isProposal ? sections.planProposals : sections.planResearch).push(step);
+      continue;
+    }
+    sections.other.push(step);
+  }
+  return sections;
+}
+
+export function groupCommandRoomTrajectoryByWorkPackage(
+  steps: CommandRoomTrajectoryStep[],
+): CommandRoomWorkPackageTrajectory[] {
+  const grouped = new Map<string, CommandRoomWorkPackageTrajectory>();
+  for (const step of steps) {
+    const key = step.workPackageId ?? "__legacy__";
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.steps.push(step);
+      continue;
+    }
+    grouped.set(key, {
+      ...(step.workPackageId ? { workPackageId: step.workPackageId } : {}),
+      steps: [step],
+    });
+  }
+  return [...grouped.values()].sort((left, right) => {
+    const leftStartedAt = Math.min(
+      ...left.steps.flatMap((step) =>
+        step.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+      ),
+    );
+    const rightStartedAt = Math.min(
+      ...right.steps.flatMap((step) =>
+        step.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+      ),
+    );
+    return leftStartedAt - rightStartedAt;
+  });
 }
 
 export function roundIdOfRun(run: Run | CommandRoomRun | undefined) {
@@ -208,7 +359,23 @@ export function mergeRunsWithTerminalPrecedence({
       mergedRuns.push(snapshotRun);
     }
   }
-  return mergedRuns;
+  const runsWithCreatedAt = mergedRuns.map((run, index) => {
+    const createdAt = Reflect.get(run, "created_at");
+    const createdAtMs =
+      typeof createdAt === "string" ? Date.parse(createdAt) : Number.NaN;
+    return { run, index, createdAtMs };
+  });
+  if (
+    runsWithCreatedAt.some(({ createdAtMs }) => !Number.isFinite(createdAtMs))
+  ) {
+    return mergedRuns;
+  }
+  return runsWithCreatedAt
+    .sort(
+      (left, right) =>
+        right.createdAtMs - left.createdAtMs || left.index - right.index,
+    )
+    .map(({ run }) => run);
 }
 
 export function latestRoundIdFromSnapshot(

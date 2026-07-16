@@ -1,4 +1,3 @@
-from deerflow.command_room.round import RoundItemStatus
 from deerflow.command_room.task_action_result import (
     task_action_result_event,
     task_action_result_from_terminal_event,
@@ -15,7 +14,7 @@ def test_task_terminal_string_result_becomes_summary_not_evidence():
 
     assert result.action_id == "task-1"
     assert result.description == "check files"
-    assert result.status == RoundItemStatus.COMPLETED
+    assert result.status == "completed"
     assert result.summary == "done"
     assert result.evidence_refs == []
 
@@ -48,7 +47,7 @@ def test_task_terminal_cancelled_is_not_boundary_blocked():
         terminal_reason="user_cancelled",
     )
 
-    assert result.status == RoundItemStatus.CANCELLED
+    assert result.status == "cancelled"
     assert result.terminal_reason == "user_cancelled"
 
 
@@ -61,7 +60,7 @@ def test_task_terminal_timeout_keeps_timeout_status():
         terminal_reason="timed_out",
     )
 
-    assert result.status == RoundItemStatus.TIMED_OUT
+    assert result.status == "timed_out"
     assert result.terminal_reason == "timed_out"
 
 

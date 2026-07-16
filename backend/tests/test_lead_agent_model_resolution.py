@@ -292,6 +292,54 @@ def test_make_lead_agent_records_the_configured_default_reasoning_effort(monkeyp
     assert config["metadata"]["reasoning_effort"] == "max"
 
 
+def test_make_lead_agent_caps_command_room_reasoning_effort(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model(
+                "terra",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["medium", "high", "xhigh", "max"],
+                default_reasoning_effort="max",
+            )
+        ]
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda name: AgentConfig(name="command-room", model="terra", tool_groups=[], skills=[]),
+    )
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_chat_model",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config = {
+        "configurable": {
+            "agent_name": "command-room",
+            "model_name": "terra",
+            "thinking_enabled": True,
+            "reasoning_effort": "xhigh",
+        }
+    }
+
+    lead_agent_module.make_lead_agent(config)
+
+    assert captured["reasoning_effort"] == "medium"
+    assert config["metadata"]["reasoning_effort"] == "medium"
+
+
 def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     app_config = _make_app_config(
         [
@@ -425,13 +473,23 @@ def test_command_room_filters_non_coordination_builtin_tools():
         SimpleNamespace(name="read_file"),
         SimpleNamespace(name="view_image"),
         SimpleNamespace(name="task"),
+        SimpleNamespace(name="accept_handoff"),
+        SimpleNamespace(name="close_task"),
+        SimpleNamespace(name="project_status"),
         SimpleNamespace(name="ask_clarification"),
         SimpleNamespace(name="present_files"),
     ]
 
     filtered = lead_agent_module._filter_coordinator_tools("command-room", tools)
 
-    assert [tool.name for tool in filtered] == ["task", "ask_clarification", "present_files"]
+    assert [tool.name for tool in filtered] == [
+        "task",
+        "accept_handoff",
+        "close_task",
+        "project_status",
+        "ask_clarification",
+        "present_files",
+    ]
     assert lead_agent_module._filter_coordinator_tools("builder", tools) == tools
 
 

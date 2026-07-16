@@ -34,7 +34,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, ThreadTimelinePage
 from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, get_current_user, resolve_user_id
 from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
@@ -526,6 +526,37 @@ class JsonlRunEventStore(RunEventStore):
             return filtered[:limit]
         else:
             return filtered[-limit:] if len(filtered) > limit else filtered
+
+    async def read_thread_timeline(
+        self,
+        thread_id: str,
+        *,
+        categories: set[str],
+        limit: int = 100,
+        after_seq: int | None = None,
+        user_id: str | None = None,
+    ) -> ThreadTimelinePage:
+        resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.read_thread_timeline")
+        async with self._get_write_lock(thread_id):
+            events = await asyncio.to_thread(self._read_thread_events, thread_id, resolved_user_id)
+        events = self._filter_user(events, resolved_user_id)
+        timeline = [event for event in events if event.get("category") in categories]
+        watermark_seq = max((int(event.get("seq", 0)) for event in timeline), default=0)
+        if after_seq is not None:
+            available = [event for event in timeline if after_seq < event.get("seq", 0) <= watermark_seq]
+            records = available[:limit]
+            return ThreadTimelinePage(
+                records=records,
+                watermark_seq=watermark_seq,
+                has_more=len(available) > len(records),
+            )
+
+        records = timeline[-limit:]
+        return ThreadTimelinePage(
+            records=records,
+            watermark_seq=watermark_seq,
+            truncated=len(timeline) > len(records),
+        )
 
     async def count_messages(self, thread_id, *, user_id=None):
         resolved_user_id = self._resolve_filter_user_id(user_id, method_name="JsonlRunEventStore.count_messages")

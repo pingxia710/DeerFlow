@@ -3,7 +3,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, call
 from uuid import uuid4
 
 import pytest
@@ -608,106 +608,6 @@ async def test_run_agent_success_path_persists_terminal_runtime_state_without_sn
 
 
 @pytest.mark.anyio
-async def test_command_room_round_record_is_written_before_stream_end():
-    """Next-round wakeups should observe persisted RoundRecord after SSE end."""
-    run_manager = RunManager()
-    record = await run_manager.create("thread-1", assistant_id="command-room")
-    events: list[str] = []
-
-    class Bridge:
-        async def publish(self, run_id, event, data):
-            events.append(f"publish:{event}")
-
-        async def publish_end(self, run_id):
-            events.append("publish_end")
-
-        async def cleanup(self, run_id, delay=60):
-            events.append("cleanup")
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            yield {"messages": [AIMessage(content="final command room answer")]}
-
-    def factory(*, config):
-        return DummyAgent()
-
-    def fake_record_command_room_round(**kwargs):
-        events.append("record_round")
-        assert kwargs["thread_id"] == "thread-1"
-        assert kwargs["run_id"] == record.run_id
-
-    with patch("deerflow.command_room.round_record.record_command_room_round", side_effect=fake_record_command_room_round):
-        await run_agent(
-            Bridge(),
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=None),
-            agent_factory=factory,
-            graph_input={"messages": []},
-            config={},
-        )
-
-    assert events.index("record_round") < events.index("publish_end")
-    fetched = await run_manager.get(record.run_id)
-    assert fetched is not None
-    assert fetched.status == RunStatus.success
-
-
-@pytest.mark.anyio
-async def test_command_room_round_record_cancellation_does_not_regress_completed_run():
-    run_manager = RunManager()
-    record = await run_manager.create(
-        "thread-round-record-cancel",
-        assistant_id="command-room",
-    )
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    record_started = threading.Event()
-    release_record = threading.Event()
-    persisted_run_ids: list[str] = []
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            yield {"messages": [AIMessage(content="final command room answer")]}
-
-    def blocking_record_command_room_round(**kwargs):
-        persisted_run_ids.append(kwargs["run_id"])
-        record_started.set()
-        release_record.wait(timeout=2)
-
-    with patch(
-        "deerflow.command_room.round_record.record_command_room_round",
-        side_effect=blocking_record_command_room_round,
-    ):
-        worker_task = asyncio.create_task(
-            run_agent(
-                bridge,
-                run_manager,
-                record,
-                ctx=RunContext(checkpointer=None),
-                agent_factory=lambda *, config: DummyAgent(),
-                graph_input={"messages": []},
-                config={},
-            )
-        )
-        assert await asyncio.to_thread(record_started.wait, 2)
-        worker_task.cancel()
-        await asyncio.sleep(0.05)
-        release_record.set()
-        await worker_task
-
-    fetched = await run_manager.get(record.run_id)
-    assert persisted_run_ids == [record.run_id]
-    assert fetched is not None
-    assert fetched.status == RunStatus.success
-    assert fetched.terminal_reason == "success"
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-@pytest.mark.anyio
 async def test_command_room_run_clears_todos_inherited_from_another_assistant():
     run_manager = RunManager()
     record = await run_manager.create("thread-command-room-todos", assistant_id="command-room")
@@ -782,6 +682,82 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched is not None
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_rolls_back_checkpoint_after_llm_error_fallback():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-llm-error", user_id="owner-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    pre_run_checkpoint = {
+        "id": "ckpt-before",
+        "channel_versions": {"messages": 2},
+        "channel_values": {"messages": [HumanMessage(content="before"), AIMessage(content="ok")]},
+    }
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(
+            return_value=SimpleNamespace(
+                config={"configurable": {"checkpoint_id": "ckpt-before", "checkpoint_ns": ""}},
+                checkpoint=pre_run_checkpoint,
+                metadata={"source": "before"},
+                pending_writes=[],
+            )
+        ),
+        aput=AsyncMock(
+            return_value=owner_checkpoint_config(
+                "thread-llm-error",
+                "owner-1",
+                checkpoint_ns="",
+                checkpoint_id="ckpt-restored",
+            )
+        ),
+        adelete_thread=AsyncMock(),
+        aput_writes=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                        additional_kwargs={
+                            "deerflow_error_fallback": True,
+                            "error_type": "CodexRetryExhaustedError",
+                            "error_reason": "transient",
+                            "error_detail": "Codex provider retry budget exhausted after 3 attempts",
+                        },
+                    )
+                ]
+            }
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={"messages": [HumanMessage(content="this run will fail")]},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.terminal_reason == "failed"
+    assert fetched.error == "Codex provider retry budget exhausted after 3 attempts"
+    checkpointer.adelete_thread.assert_not_awaited()
+    checkpointer.aput.assert_awaited_once()
+    _, restored_checkpoint, restored_metadata, restored_versions = checkpointer.aput.await_args.args
+    assert restored_checkpoint["id"] != "ckpt-before"
+    assert restored_checkpoint["channel_values"] == pre_run_checkpoint["channel_values"]
+    assert restored_metadata == {"source": "before"}
+    assert restored_versions == {"messages": 2}
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

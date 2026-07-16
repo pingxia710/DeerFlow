@@ -12,10 +12,12 @@ import {
   ChatBox,
   getThreadNavigationGeneration,
   isThreadFinishForVisibleChat,
+  WorkRecordActivityTrigger,
   shouldCommitThreadStart,
   shouldShowWelcomeMode,
   useSpecificChatMode,
   useThreadChat,
+  WorkRecordTrigger,
 } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
@@ -275,7 +277,6 @@ export default function ChatPage() {
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
-
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
@@ -303,7 +304,7 @@ export default function ChatPage() {
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
-      <ChatBox threadId={threadId}>
+      <ChatBox isNewThread={isNewThread} threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
@@ -336,6 +337,8 @@ export default function ChatPage() {
                 }
               />
               <ExportTrigger threadId={threadId} />
+              <WorkRecordActivityTrigger />
+              <WorkRecordTrigger />
               <ArtifactTrigger />
             </div>
           </header>
@@ -368,6 +371,9 @@ export default function ChatPage() {
                   className={cn("size-full", !isWelcomeMode && "pt-10")}
                   threadId={threadId}
                   thread={thread}
+                  isCommandRoom={
+                    threadMetadata.data?.metadata?.agent_name === "command-room"
+                  }
                   contextSnapshot={
                     threadContextUsage.data?.latest_lead ??
                     threadContextUsage.data?.latest ??

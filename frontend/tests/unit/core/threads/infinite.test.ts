@@ -1117,5 +1117,13 @@ describe("runtime snapshot query policy", () => {
         deleted: true,
       }),
     ).toBe(false);
+    expect(
+      shouldEnableThreadRuntimeSnapshotQuery({
+        enabled: true,
+        threadId: "new",
+        staticMode: false,
+        deleted: false,
+      }),
+    ).toBe(false);
   });
 });

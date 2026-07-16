@@ -1,5 +1,164 @@
 # Progress
 
+## 2026-07-16 — Unified SQLite Store and restart handover reliability
+
+- Fixed the Store providers so an absent legacy `checkpointer` section falls
+  through to the already-configured unified `database` backend, matching the
+  existing checkpointer priority. Local SQLite now persists thread metadata
+  across Gateway restarts instead of silently using `InMemoryStore`.
+- Made port readiness tolerate a just-stopped listener during daemon handover.
+  It waits for the new service to claim the port within its normal startup
+  timeout, while a persistent unrelated listener still fails deterministically.
+- Validation: focused backend store/checkpointer suite `43 passed`; Ruff and
+  formatting passed; `bash -n` and `scripts/test-wait-for-port.sh` passed,
+  including foreign-listener rejection and real handover. A clean `make stop`
+  then `make dev-daemon` logged `AsyncSqliteStore` on the unified database;
+  Gateway health returned `healthy`, Nginx `:2026` returned `200`, and all
+  three local service ports were listening. No production or business data was
+  changed and no credentials were printed, copied, or committed.
+
+## 2026-07-16 — Command Room factual trajectory and time visibility
+
+- Removed program-written follow-up instructions from background Chair wakes.
+  Wakes now transport only task identity, status, artifact facts, sibling status,
+  and each child AI's complete natural-language result; they do not direct a
+  `close_task`, `project_status`, or another execution cycle.
+- Made the Command Room task trajectory fact-led: only explicitly declared
+  containers group Planning, Technical Design, Execution, and Review. Task
+  lanes without a declared container remain independent subtasks; role names,
+  prompts, and natural-language results are not parsed to infer a stage.
+- The UI now shows full start/end date-times and actual durations for lanes and
+  work records. Completed execution/review results retain their complete source
+  Run tool result and are collapsed by default; opening a result fetches the
+  full persisted text instead of relying on a truncated lane preview.
+- Validation before restart: focused backend lifecycle suites passed `41`;
+  frontend unit suite passed `799`; `pnpm check`, Prettier, targeted Playwright,
+  and the production build passed; `git diff --check` passed. The completed
+  SkillOpt gate scored static hard/soft `1.0` for both skills and passed all
+  eight independent model-behavior scenarios without applying rule edits.
+- Local development stack was then cleanly restarted with `make stop` followed
+  by `make dev-daemon`. Gateway `/health` returned `healthy`, Nginx `:2026`
+  returned `200`, and Gateway `:8001`, Next.js `:3000`, and Nginx `:2026` are
+  listening under the new daemon processes. No production or business data was
+  changed and no credentials were printed, copied, or committed.
+
+## 2026-07-16 — Command Room evidence ceiling governance closure
+
+- Extended `command-room-evidence` so fixed-snapshot conclusions require a
+  reproducible manifest with same-freeze start/end comparison, and dynamic/E3
+  conclusions retain hard assertions, invocation, exit status, and harness
+  source hash. Print-only/reachability scripts are now explicitly narrow
+  evidence; SSE replay additionally requires ordered, complete, non-duplicated
+  event-ID suffix assertions.
+- Added the focused static SkillOpt case
+  `test-e3-replay-print-only-is-narrow` and made `make skillopt-probe` run it
+  with the existing Commander static probe.
+- Validation: `SKILLOPT_STATIC_ONLY=1 make skillopt-probe` exited `0`; the
+  Command Room evidence test scored hard/soft `1.0` with no candidate edits.
+  The model-backed behavioral gate was intentionally skipped because this
+  governance cycle forbids public/external-system access; this is not a
+  model-behavior pass claim.
+- Remaining unfixed debt stays separate: P1 `F-CR-001`, `F-CR-002`, and
+  `F-DEP-001`; P2 `F-API-001`; P3 `F-SC-001`; the E3 harness, SSE, cancel,
+  browser/recovery evidence gaps; and both observation items remain backlog,
+  not completed remediation.
+
+## 2026-07-15 — Responsive Command Room lifecycle and live planning exercise
+
+- Landed the user-confirmed AI-AI-AI lifecycle: ordinary discussion needs no
+  container; optional Planning and Technical Design use independent
+  forward/opposition angles; delivery uses Execution N -> Review N; an accepted
+  task automatically invokes Project Steward; `project_complete` invokes Debt
+  and Learning Curators followed by final governance Execution -> Review ->
+  `closed`. Program code transports facts and enforces structural admission but
+  does not judge AI prose, quality, or whether another delivery cycle is needed.
+- Moved one-shot child work onto a responsive background lane. The Chair run can
+  finish while children continue, each terminal child fact automatically wakes
+  the Command Room, and the human can keep discussing in the same thread.
+  Frontend history/read-model changes preserve background task facts across
+  sequential wake-up runs and reloads.
+- Real authenticated lifecycle run `e859554b-e7d8-478f-aaa2-415baae29c6e`
+  exercised Execution, Review, `close_task`, Project Steward, Debt/Learning,
+  final governance Execution/Review, and reached the factual `closed` state.
+- Validation passed: full backend `6184 passed, 20 skipped`; frontend `783
+  passed` plus `pnpm check`; Command Room contract check; SkillOpt static scores
+  `1.0` and all eight model-backed behavior scenarios. Nginx `:2026`, frontend
+  `:3000`, and Gateway `:8001/health` returned 200 after the final checks.
+- Live frontend-planning thread `37807bcd-89fa-4a1b-ab00-b518fd879099`
+  completed independent product Planning, a unified `spec.md`, and both
+  Technical Design angle documents without starting Execution or modifying
+  product code. Its failed-receipt/complete-artifact case was then recovered in
+  real Run `368e86b8-b705-4e30-a7d3-afdfc88cda1f`: Chair explicitly accepted
+  the hash-changed opposition handoff, Recorder task
+  `call_frBhos2W0jXp7IDrEm2LbhDr` wrote the 14,220-byte `technical-plan.md`, and
+  automatic wake Run `a85204b4-e928-4e13-a6b4-ed54385fba84` reported completion
+  without another human “continue”.
+- Closed the exercise's adjacent failures: rollback-aware regenerate now
+  returns a real checkpoint for the latest answer and a precise `409` for older
+  answers; failed-round goals are available as historical context without
+  overriding current authorization; active background task lanes keep task
+  cards and thread activity alive after the parent Run ends; failed snapshot
+  polling backs off; and failed optional artifacts can be retried or explicitly
+  accepted only with a trustworthy pre-task hash.
+- Restored the local Feishu WebSocket connection without a new dependency by
+  running the local Gateway with `NO_PROXY=*`. Added Lark WebSocket log
+  redaction so temporary query credentials and connection IDs are not emitted;
+  the pre-fix local gateway log was restricted to mode `0600` and was not
+  deleted without approval.
+- Added the continuation handoff at
+  `docs/superpowers/plans/2026-07-15-command-room-recovery-handoff.md`.
+- No code was pushed, no production or live business system was touched, no
+  customer data was accessed, and no credential was committed or copied into
+  the handoff.
+
+## 2026-07-15 — Command Room provider recovery and coordinator load cap
+
+- Fixed the live Command Room failure where Codex Responses returned HTTP 200
+  but ended the stream without `response.completed`, which surfaced to users as
+  the generic LLM provider unavailable message.
+- Kept one-shot child AIs on the configured high-effort path, but capped only
+  the `command-room` lead coordinator from `high`/`xhigh`/`max` to `medium` and
+  compacted completed `task()` prompt replay so old subtask handoffs are not
+  resent in full after their tool results already exist.
+- Replaced the bulky Command Room coordinator prompt with a compact AI-AI-AI
+  operating prompt while preserving the three-container handoff contract and
+  program-boundary rule that code transports facts but does not judge quality.
+- Validation: focused backend regressions `138 passed`; backend `make lint`;
+  frontend `pnpm check`; full backend suite `6162 passed, 20 skipped`; local
+  dev stack restarted; `http://127.0.0.1:2026/` and `http://127.0.0.1:3000/`
+  returned 200 after frontend readiness; Gateway `/health` returned healthy; a
+  real authenticated diagnostic Command Room run
+  `21c5b82f-ba02-43a1-a443-df0d1c0d68dc` completed successfully with
+  `reasoning_effort=medium`.
+- No code was pushed, no production system was touched, no live business data
+  was mutated, and no credentials were intentionally printed or committed.
+
+## 2026-07-14 — Command Room mandatory three-container AI-AI protocol
+
+- Replaced the earlier flat shared-file draft with one per-run natural-language
+  workspace divided into `01-planning/`, `02-collaboration/`, and
+  `03-evaluation/`. Planner writes `spec.md`; short-lived working/Evidence/
+  Opposition roles write one note per collaboration round; an independent
+  Evaluator writes `evaluation.md`; a Recorder may preserve an already-made
+  Chair decision.
+- For substantive Command Room delivery, `task()` now requires the Chair to
+  explicitly declare `planning`, `collaboration`, or `evaluation`. It admits
+  only Planning → Collaboration rounds 1/2/(optional 3) → Evaluation and
+  records objective task/artifact path/hash/size facts. It does not select
+  roles, judge Markdown, decide whether a third round is useful, advance a
+  stage, or trigger rework.
+- Injected the same workspace and stage-specific artifact path into both Chair
+  and one-shot worker prompts, added the independent `evaluator` role, and
+  aligned the Command Room skills and SkillOpt behavior probe. No per-role time
+  budget was added.
+
+## 2026-07-14 — Command Room path hygiene and missing-thread cleanup
+
+- Clarified that the active local development checkout is `/Users/pingxia/projects/deer-flow`, while `/Users/pingxia/Documents/DeerFlow` may contain abandoned experiments and must not be copied without re-auditing against the project contract.
+- Updated the local-worktree rule so active DeerFlow optimization can happen on the current branch, including `main`, when the user is iterating locally; push/history rewrite/evidence deletion still require explicit authorization.
+- Hardened frontend history recovery for deleted or inaccessible threads: snapshot, run-list, and run-message 403/404 errors now tombstone the thread locally, clear thread-scoped caches/subtasks/runtime state, and stop repeated stale polling.
+- Preserved AI-AI boundaries: the frontend change only treats HTTP missing/inaccessible state as transport cleanup; it does not judge AI output, dispatch reviewers, infer quality, or trigger rework.
+
 ## 2026-07-13 — Feishu Command Room independent top-level tasks
 
 - Command Room 的飞书顶层消息不再消费旧的 pending clarification 状态，因此每条新任务保留自己的 `message_id` / `topic_id`，可与其他任务并行；原飞书回复串仍沿用已有 DeerFlow thread。
@@ -675,3 +834,33 @@
 - Updated the active owner-scoped Command Room config and SOUL, the ignored local `config.yaml`, documentation, Docker inputs, capability snapshot, doctor checks, frontend result recovery, contracts, and SkillOpt assets. The active lead remains `gpt-5.6` and is independent from child configuration. The active memory keeps all historical entries and adds a confidence-1.0 correction that guarantees the frozen AI-AI-AI rules, current model/effort/timeout, mandatory different checker, and independent opposition are injected ahead of conflicting old memories.
 - Validation: backend full suite `6136 passed, 20 skipped`; focused cancellation/Command Room regressions `81 passed`; Ruff check and format check passed for all 760 Python files; frontend unit suite `772/772` and `pnpm check` passed; changed MDX passed Prettier; `git diff --check`, JSON parsing, `make check`, development Compose config, and production Compose config passed. Static SkillOpt train/validation/test hard and soft scores stayed at `1.0`, and the model-backed behavior probe passed all three scenarios with checking and opposition mandatory even for the small fact task.
 - A real configured Codex transport probe used `--model gpt-5.6-terra` and `model_reasoning_effort="xhigh"`, returned the exact expected final text in 13.615 seconds, removed its temporary output, and left no residual process. Docker image construction was not run because the local Docker daemon was stopped; both Compose configurations were validated. No secret was printed or exposed, and no production, customer, financial, or other live business state was accessed or mutated. Local changes outside Git are limited to the developer-authorized child config and owner-scoped Command Room SOUL/memory.
+
+## 2026-07-14 - Three-container AI-to-AI handoff protocol
+
+- Added a per-run, Markdown-based handoff workspace: Planning gives the Planner `01-planning/spec.md` and `plan.md`; Collaboration stores one natural-language note per selected role and round; independent Evaluation writes `03-evaluation/evaluation.md`. After the Chair has made its decision, an optional Recorder may preserve it as `03-evaluation/chair-decision.md`; that document remains inside Evaluation rather than adding a fourth container.
+- The declared order is now enforced without trying to replace AI judgment: Planning must complete before Collaboration; collaboration rounds 1 and 2 must complete before Evaluation; the Chair alone may explicitly request round 3 after round 2. Every admitted predecessor must have written its assigned Markdown artifact. A missing, failed, timed-out, or cancelled handoff blocks the later stage for that run rather than being silently bypassed or retried.
+- The program records only factual admission and artifact receipts outside the child workspace. It does not parse AI prose for quality, select roles, decide whether another round is useful, dispatch the next AI, fabricate verdicts, or trigger rework. Each child result remains a complete natural-language handoff for the Chair and other AIs to read.
+- Added explicit event fields and frontend rendering for planning specs, collaboration notes, independent evaluations, and Chair decision records. The frontend consumes declared protocol fields only and never infers a container or decision from a task title or AI body text.
+- Updated the Chair/Planner/Evidence/Opposition/Recorder Skills, Command Room docs, contracts, and SkillOpt behavior probes to match the same protocol. The trusted-host limitation is documented accurately: this is a hard workflow boundary with parent-owned receipts, not an OS-security claim when a host intentionally runs child AIs with unrestricted filesystem authority.
+- Validation: backend focused protocol regressions `81 passed`; final backend suite `6152 passed, 20 skipped`; backend `make lint`; frontend `pnpm check`, `pnpm test` (`778 passed`), and `pnpm format`; `make skillopt-probe` (static train/validation/test and model-backed behavior all passed); no-time-budget scan; and `git diff --check` all passed. No service was started, no secret was exposed, no live or production system was mutated, and no commit or deployment was performed.
+## 2026-07-16 - Command Room plan visibility and human confirmation
+
+- Made the Command Room's human loop explicit: after a Planning or Technical Design Recorder writes `spec.md` or `technical-plan.md`, the Chair presents it and waits for an explicit human confirmation or revision before entering Execution. Approval is never inferred from task state or artifact presence.
+- Reworked the Command Room chat projection into three layers: the latest Chair output is visible first, an owner-scoped Plan section renders the recorded plan and separates forward/opposition research, and Execution/Review remains available as a collapsed process trace.
+- Added a read-only plan-artifact endpoint keyed by thread, run, and task. It owner-checks the request, accepts only completed `spec`/`technical-plan` lanes, and resolves a fixed workspace path server-side instead of accepting an arbitrary file path from the browser.
+- Validation: focused backend plan-artifact tests, Command Room AI workspace tests, frontend trajectory tests, frontend `pnpm check`, and targeted backend Ruff passed. `make skillopt-probe`'s model-backed Command Room behavior probe passed; its static candidate gates reported unchanged `1.0` scores and `accepted=false` because they applied no skill edits.
+
+## 2026-07-16 - Package-scoped Context, planning, and delivery concurrency
+
+- Added the confirmed work-package SOP: `Context -> Planning -> human confirmation -> Execution -> Review`. Optional Context uses parallel bounded discovery handoffs followed by an AI-authored factual snapshot; if Context starts, Planning, Technical Design, and Execution wait for that snapshot in the same package.
+- `work_package_id` now isolates Markdown state, receipt ledgers, delivery cycles, project lifecycle records, background wake facts, task events, persistence, plan-artifact reads, and trajectory UI. A confirmed package may execute while a separately scoped package discovers or plans; the same package cannot overlap planning and execution.
+- Execution tasks declared for the same package/cycle may run in parallel. Review admission now waits until every admitted execution task in that cycle is terminal, while still requiring at least one completed execution artifact.
+- The Command Room UI now groups work by package, exposes Information Context separately from the recorded plan, sends the selected package ID with plan confirmation, and keeps execution/review process traces collapsed by default.
+- Validation: focused backend suite passed `117`; frontend `pnpm check` and focused task-event/trajectory unit tests passed; targeted Ruff and `git diff --check` passed. `make skillopt-probe` kept static candidate scores at `1.0`; its gates returned `accepted=false` only because no generated candidate edit was applied, while the model-backed Command Room behavior probe passed. No local service was restarted, no production/live system was mutated, and no secret was exposed.
+
+## 2026-07-16 - Work-package lifecycle legacy escape prevention
+
+- Root cause: a missing `work_package_id` deterministically routes a Command Room task to the thread-root legacy receipt ledger. After legacy Delivery starts, Planning therefore sees legacy delivery receipts and correctly closes that legacy stage, but cannot represent a new package.
+- Explicit package IDs remain isolated for paths, receipts, lifecycle records, task events, wakeup metadata, and UI replay. New Context, Planning, and Technical Design calls made beside legacy Delivery now require an explicit `work_package_id`; DeerFlow never guesses or allocates one from prompt prose. Missing IDs remain compatible only as continuation of the one legacy package.
+- Added regression coverage for legacy Delivery plus a full `package-b` Context -> Planning -> Technical Design sequence, task schema exposure, and background wake metadata.
+- Validation: focused backend suite passed `120`; targeted Ruff/format and `git diff --check` passed. No service was restarted, no live system was mutated, and no secret was exposed.

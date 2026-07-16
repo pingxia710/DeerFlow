@@ -1,0 +1,43 @@
+{
+  "skill_path": "skills/custom/command-room-evidence/SKILL.md",
+  "baseline": {
+    "train": {
+      "hard": 0.0,
+      "soft": 0.0,
+      "n": 0
+    },
+    "val": {
+      "hard": 0.0,
+      "soft": 0.0,
+      "n": 0
+    },
+    "test": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    }
+  },
+  "candidate": {
+    "train": {
+      "hard": 0.0,
+      "soft": 0.0,
+      "n": 0
+    },
+    "val": {
+      "hard": 0.0,
+      "soft": 0.0,
+      "n": 0
+    },
+    "test": {
+      "hard": 1.0,
+      "soft": 1.0,
+      "n": 1
+    }
+  },
+  "gate": {
+    "accepted": false,
+    "action": "reject",
+    "candidate_score": 1.0,
+    "applied_edits": []
+  }
+}

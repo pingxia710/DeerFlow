@@ -17,7 +17,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, ThreadTimelinePage
 from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -295,6 +295,41 @@ class DbRunEventStore(RunEventStore):
                 result = await session.execute(stmt)
                 rows = list(result.scalars())
                 return [self._row_to_dict(r) for r in reversed(rows)]
+
+    async def read_thread_timeline(
+        self,
+        thread_id: str,
+        *,
+        categories: set[str],
+        limit: int = 100,
+        after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> ThreadTimelinePage:
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.read_thread_timeline")
+        conditions = [RunEventRow.thread_id == thread_id, RunEventRow.category.in_(categories)]
+        if resolved_user_id is not None:
+            conditions.append(RunEventRow.user_id == resolved_user_id)
+
+        async with self._sf() as session:
+            watermark_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(*conditions)) or 0
+            if after_seq is not None:
+                stmt = select(RunEventRow).where(*conditions, RunEventRow.seq > after_seq, RunEventRow.seq <= watermark_seq).order_by(RunEventRow.seq.asc()).limit(limit + 1)
+                rows = list((await session.execute(stmt)).scalars())
+                has_more = len(rows) > limit
+                return ThreadTimelinePage(
+                    records=[self._row_to_dict(row) for row in rows[:limit]],
+                    watermark_seq=int(watermark_seq),
+                    has_more=has_more,
+                )
+
+            stmt = select(RunEventRow).where(*conditions, RunEventRow.seq <= watermark_seq).order_by(RunEventRow.seq.desc()).limit(limit + 1)
+            rows = list((await session.execute(stmt)).scalars())
+            truncated = len(rows) > limit
+            return ThreadTimelinePage(
+                records=[self._row_to_dict(row) for row in reversed(rows[:limit])],
+                watermark_seq=int(watermark_seq),
+                truncated=truncated,
+            )
 
     async def claim_legacy_by_thread(self, thread_id: str, owner_user_id: str) -> int:
         async with self._sf() as session:

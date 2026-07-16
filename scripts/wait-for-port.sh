@@ -67,6 +67,38 @@ is_service_running() {
     kill -0 "$SERVICE_PID" 2>/dev/null
 }
 
+is_service_descendant() {
+    local pid=$1 parent
+
+    while [ -n "$pid" ] && [ "$pid" != "0" ]; do
+        [ "$pid" = "$SERVICE_PID" ] && return 0
+        parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+        [ -n "$parent" ] && [ "$parent" != "$pid" ] || break
+        pid=$parent
+    done
+
+    return 1
+}
+
+is_port_owned_by_service() {
+    local listener_pid
+
+    # Without lsof we can still wait for a port, but cannot reliably connect a
+    # listener to the shell wrapper PID on every supported platform.
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+
+    while IFS= read -r listener_pid; do
+        [ -n "$listener_pid" ] || continue
+        if is_service_descendant "$listener_pid"; then
+            return 0
+        fi
+    done < <(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)
+
+    return 1
+}
+
 while :; do
     if ! is_service_running; then
         echo ""
@@ -74,6 +106,19 @@ while :; do
         exit 1
     fi
     if is_port_listening; then
+        if [ -n "$SERVICE_PID" ] && ! is_port_owned_by_service; then
+            # A just-stopped daemon can still own the port while its replacement
+            # is starting. Give that handover the normal startup window.
+            if [ "$elapsed" -ge "$TIMEOUT" ]; then
+                echo ""
+                echo "✗ $SERVICE could not claim port $PORT; it is owned by a different process"
+                exit 1
+            fi
+            printf "\r  Waiting for %s to claim port %s... %ds" "$SERVICE" "$PORT" "$elapsed"
+            sleep "$interval"
+            elapsed=$((elapsed + interval))
+            continue
+        fi
         break
     fi
     if [ "$elapsed" -ge "$TIMEOUT" ]; then

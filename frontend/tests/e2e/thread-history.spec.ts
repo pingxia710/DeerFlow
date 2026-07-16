@@ -95,6 +95,115 @@ test.describe("Thread history", () => {
     await expect(page.getByRole("button", { name: /loading/i })).toHaveCount(0);
   });
 
+  test("Command Room stage updates stay in the collapsed run trace", async ({
+    page,
+  }) => {
+    const stepUpdate = "STEPS-PANEL-ONLY-UPDATE";
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Command Room conversation",
+          updated_at: "2025-06-01T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "command-room-human",
+              content: "Run the audit",
+            },
+            {
+              type: "ai",
+              id: "command-room-step",
+              content: stepUpdate,
+              additional_kwargs: {
+                deerflow_display_message_type: "round_summary",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+
+    await expect(
+      page.getByRole("button", { name: "Chair output" }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByLabel("Run trace")).toBeVisible();
+    await expect(page.getByText(stepUpdate)).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Chair output" }).click();
+    await expect(page.getByText(stepUpdate)).toBeVisible();
+  });
+
+  test("Command Room shows unstaged subtasks with factual timing", async ({
+    page,
+  }) => {
+    const fullResult = "COMPLETE-RESULT-FROM-RUN";
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Command Room task trace",
+          agent_name: "command-room",
+          updated_at: "2025-06-01T12:00:00Z",
+          messages: [
+            {
+              type: "tool",
+              name: "task",
+              tool_call_id: "task-1",
+              content: fullResult,
+              additional_kwargs: { subagent_status: "completed" },
+            },
+          ],
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: "run-task-1",
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "command-room",
+                status: "success",
+                metadata: {},
+                kwargs: {},
+                created_at: "2025-06-01T12:00:00Z",
+                updated_at: "2025-06-01T12:01:05Z",
+              },
+            ],
+            task_lanes: [
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: "run-task-1",
+                round_id: "round-1",
+                task_id: "task-1",
+                role: "executor",
+                description: "Legacy execution task",
+                status: "completed",
+                result: "preview",
+                started_at: "2025-06-01T12:00:00Z",
+                finished_at: "2025-06-01T12:01:05Z",
+                duration_ms: 65_000,
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+
+    await expect(page.getByLabel("Run trace")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText("Subtasks")).toBeVisible();
+    await expect(page.getByText("Started:")).toBeVisible();
+    await expect(page.getByText("Finished:")).toBeVisible();
+    await expect(page.getByText("Elapsed: 00:01:05")).toBeVisible();
+    await expect(page.getByText(fullResult)).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Legacy execution task: Completed" })
+      .click();
+    await expect(page.getByText(fullResult)).toBeVisible();
+  });
+
   test("switching existing chats and reloading keeps histories isolated", async ({
     page,
   }) => {

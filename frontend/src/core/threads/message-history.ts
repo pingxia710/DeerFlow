@@ -176,7 +176,10 @@ function runMessageIdentity(message: RunMessage): string | undefined {
     : undefined;
 }
 
-function historyMessageFromRunMessage(message: VisibleRunMessage): Message {
+function historyMessageFromRunMessage(
+  message: VisibleRunMessage,
+  isCommandRoomStep = false,
+): Message {
   const identity = baseMessageIdentity(message.content);
   const result = {
     ...message.content,
@@ -189,6 +192,13 @@ function historyMessageFromRunMessage(message: VisibleRunMessage): Message {
       ...(typeof message.metadata?.caller === "string" &&
       message.metadata.caller.length > 0
         ? { deerflow_caller: message.metadata.caller }
+        : {}),
+      ...(isCommandRoomStep || typeof message.display?.message_type === "string"
+        ? {
+            deerflow_display_message_type: isCommandRoomStep
+              ? "round_summary"
+              : message.display?.message_type,
+          }
         : {}),
       [HISTORY_CREATED_AT_KEY]: message.created_at,
     },
@@ -416,6 +426,10 @@ export function isVisibleHistoryRunMessage(
   if (!isMessageContent(message.content)) {
     return false;
   }
+  const sourceRunId = message.content.additional_kwargs?.run_id;
+  if (typeof sourceRunId === "string" && sourceRunId !== message.run_id) {
+    return false;
+  }
   if (typeof message.display?.visible_in_chat === "boolean") {
     return message.display.visible_in_chat;
   }
@@ -430,22 +444,89 @@ export function isVisibleHistoryRunMessage(
   );
 }
 
+export function isCommandRoomStepHistoryRunMessage(
+  message: RunMessage,
+): message is VisibleRunMessage {
+  return (
+    isMessageContent(message.content) &&
+    message.content.type === "ai" &&
+    message.display?.message_type === "round_summary"
+  );
+}
+
+function isBackgroundTaskReceiptRunMessage(message: RunMessage) {
+  if (!isMessageContent(message.content) || message.content.type !== "tool") {
+    return false;
+  }
+  return (
+    message.content.name === "task" &&
+    message.content.additional_kwargs?.background_task === true
+  );
+}
+
+function isPlainLeadAiRunMessage(message: RunMessage) {
+  if (!isMessageContent(message.content) || message.content.type !== "ai") {
+    return false;
+  }
+  return (
+    message.metadata?.caller === "lead_agent" &&
+    !(message.content.tool_calls?.length ?? 0)
+  );
+}
+
+function legacyCommandRoomStepRows(messageRows: RunMessage[]) {
+  const rowsByRunId = new Map<string, RunMessage[]>();
+  for (const message of messageRows) {
+    const rows = rowsByRunId.get(message.run_id) ?? [];
+    rows.push(message);
+    rowsByRunId.set(message.run_id, rows);
+  }
+
+  const result = new Set<RunMessage>();
+  for (const rows of rowsByRunId.values()) {
+    let backgroundTaskSeen = false;
+    for (const row of [...rows].sort(
+      (left, right) => (left.seq ?? 0) - (right.seq ?? 0),
+    )) {
+      if (isBackgroundTaskReceiptRunMessage(row)) {
+        backgroundTaskSeen = true;
+        continue;
+      }
+      if (backgroundTaskSeen && isPlainLeadAiRunMessage(row)) {
+        result.add(row);
+      }
+    }
+  }
+  return result;
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
   appendedMessages: Message[],
   runs?: Run[],
 ) {
-  const visibleRowsByRunId = new Map<string, VisibleRunMessage[]>();
+  const legacyStepRows = legacyCommandRoomStepRows(messageRows);
+  const visibleRowsByRunId = new Map<
+    string,
+    Array<{ message: VisibleRunMessage; isCommandRoomStep: boolean }>
+  >();
   for (const message of messageRows) {
+    if (!isMessageContent(message.content)) {
+      continue;
+    }
+    const displayableMessage = message as VisibleRunMessage;
+    const isCommandRoomStep =
+      isCommandRoomStepHistoryRunMessage(displayableMessage) ||
+      legacyStepRows.has(message);
     if (
       supersededRunIds.has(message.run_id) ||
-      !isVisibleHistoryRunMessage(message)
+      (!isVisibleHistoryRunMessage(displayableMessage) && !isCommandRoomStep)
     ) {
       continue;
     }
     const rows = visibleRowsByRunId.get(message.run_id) ?? [];
-    rows.push(message);
+    rows.push({ message: displayableMessage, isCommandRoomStep });
     visibleRowsByRunId.set(message.run_id, rows);
   }
   const runIds = new Set(
@@ -456,15 +537,20 @@ export function buildVisibleHistoryMessages(
   const visibleRows = [...runIds].flatMap((runId) => {
     const rows = visibleRowsByRunId.get(runId) ?? [];
     // seq is run-local; never use it to order rows across different runs.
-    return [...rows].sort((a, b) => {
-      if (typeof a.seq !== "number" || typeof b.seq !== "number") {
+    return [...rows].sort((left, right) => {
+      if (
+        typeof left.message.seq !== "number" ||
+        typeof right.message.seq !== "number"
+      ) {
         return 0;
       }
-      return a.seq - b.seq;
+      return left.message.seq - right.message.seq;
     });
   });
   return dedupeMessagesByIdentity([
-    ...visibleRows.map(historyMessageFromRunMessage),
+    ...visibleRows.map(({ message, isCommandRoomStep }) =>
+      historyMessageFromRunMessage(message, isCommandRoomStep),
+    ),
     ...appendedMessages,
   ]);
 }

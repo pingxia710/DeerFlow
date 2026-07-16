@@ -283,7 +283,7 @@ def _command_room_runtime_facts(
 
     direct_groups = _resolve_agent_tool_groups("command-room", agent_config)
     direct_tools = [tool.name for tool in app_config.tools if direct_groups is None or tool.group in direct_groups]
-    direct_tools.extend(["present_files", "ask_clarification", "task"])
+    direct_tools.extend(["present_files", "ask_clarification", "task", "accept_handoff", "close_task", "project_status"])
     configured_child_model = app_config.subagents.get_model_for("general-purpose")
     configured_child_model_config = app_config.get_model_config(configured_child_model) if configured_child_model else None
     resolved_child_model = configured_child_model_config.model if configured_child_model_config is not None else configured_child_model

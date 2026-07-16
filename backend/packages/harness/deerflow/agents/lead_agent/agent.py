@@ -53,8 +53,9 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
 _COMMAND_ROOM_DIRECT_TOOL_GROUPS: list[str] = []
-_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"ask_clarification", "present_files", "task"})
+_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"accept_handoff", "ask_clarification", "close_task", "present_files", "project_status", "task"})
 _COMMAND_ROOM_CHAIR_SKILL = "command-room-chair"
+_COMMAND_ROOM_MAX_REASONING_EFFORT = "medium"
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -83,6 +84,12 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
 
 def _is_coordinator_only_agent(agent_name: str | None) -> bool:
     return agent_name in _COORDINATOR_ONLY_AGENT_NAMES
+
+
+def _cap_coordinator_reasoning_effort(agent_name: str | None, reasoning_effort: str | None) -> str | None:
+    if agent_name == "command-room" and reasoning_effort in {"high", "xhigh", "max"}:
+        return _COMMAND_ROOM_MAX_REASONING_EFFORT
+    return reasoning_effort
 
 
 def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
@@ -517,6 +524,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         reasoning_effort,
         thinking_enabled=thinking_enabled,
     )
+    reasoning_effort = _cap_coordinator_reasoning_effort(agent_name, reasoning_effort)
 
     logger.info(
         "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, reasoning_summary: %s, text_verbosity: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",

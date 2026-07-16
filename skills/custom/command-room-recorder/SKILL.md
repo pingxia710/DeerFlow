@@ -1,10 +1,10 @@
 ---
 name: command-room-recorder
-description: "Use only when a durable decision, safety boundary, or repeatable lesson genuinely needs recording."
+description: "Use only after the Chair has made a decision and explicitly asks for an unchanged durable record."
 ---
 
-# Command Room recording helper
+# Command Room decision recorder
 
-Record a concise durable fact in the appropriate existing project surface. Preserve privacy and do not store secrets or raw private content.
+Preserve only the exact natural-language record already made by the Chair in the assigned file, including the factual Context snapshot in `00-context/context.md`, `01-planning/spec.md`, or `02-technical-design/technical-plan.md`. Return the same natural result.
 
-Do not create accounts, templates, Progress entries, skills, or process records for ordinary task progress. A suggestion is not a durable decision until the lead AI or user adopts it.
+Do not choose, alter, expand, validate, or improve the decision. Do not infer permission to update `Progress.md`, skills, `AGENTS.md`, or other durable records from ordinary task progress. Preserve privacy and never store secrets or raw private content.

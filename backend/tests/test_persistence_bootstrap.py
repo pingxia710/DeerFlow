@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0009_task_lane_display_metadata"
+HEAD = "0010_task_lane_wake_claim"
 BASELINE = "0001_baseline"
 
 
@@ -513,6 +513,27 @@ async def test_0009_adds_task_lane_display_metadata(tmp_path: Path) -> None:
             after = await conn.run_sync(lambda c: {column["name"] for column in sa.inspect(c).get_columns("task_lanes")})
 
         expected = {"description", "result", "started_at", "finished_at", "duration_ms"}
+        assert expected.isdisjoint(before)
+        assert expected <= after
+        assert await _alembic_version(engine) == HEAD
+    finally:
+        await engine.dispose()
+
+
+@asyncio_test
+async def test_0010_adds_task_lane_wake_claim_columns(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "task-lane-wake-claim.db"))
+    try:
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(_upgrade, cfg, "0009_task_lane_display_metadata")
+        async with engine.connect() as conn:
+            before = await conn.run_sync(lambda c: {column["name"] for column in sa.inspect(c).get_columns("task_lanes")})
+
+        await asyncio.to_thread(_upgrade, cfg, HEAD)
+        async with engine.connect() as conn:
+            after = await conn.run_sync(lambda c: {column["name"] for column in sa.inspect(c).get_columns("task_lanes")})
+
+        expected = {"wake_claim_id", "wake_claim_expires_at"}
         assert expected.isdisjoint(before)
         assert expected <= after
         assert await _alembic_version(engine) == HEAD

@@ -338,6 +338,18 @@ _kill_repo_nginx() {
     fi
 }
 
+_wait_for_port_release() {
+    local port=$1 name=$2 elapsed=0
+
+    while _is_port_listening "$port" && [ "$elapsed" -lt 10 ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    if _is_port_listening "$port"; then
+        echo "  ! $name still holds port $port after shutdown"
+    fi
+}
+
 stop_all() {
     echo "Stopping all services..."
     _report_reclaimed_ports
@@ -358,6 +370,9 @@ stop_all() {
     _kill_repo_port "$GATEWAY_PORT"
     _kill_repo_port "$FRONTEND_PORT"
     _kill_repo_port "$NGINX_PORT"
+    _wait_for_port_release "$GATEWAY_PORT" "Gateway"
+    _wait_for_port_release "$FRONTEND_PORT" "Frontend"
+    _wait_for_port_release "$NGINX_PORT" "Nginx"
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -648,6 +663,8 @@ _wait_for_any_service_exit() {
 # ── Start services ───────────────────────────────────────────────────────────
 
 mkdir -p logs
+: > logs/gateway.log
+chmod 600 logs/gateway.log
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 render_nginx_config
 

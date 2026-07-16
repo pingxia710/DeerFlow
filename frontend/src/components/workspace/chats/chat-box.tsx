@@ -1,6 +1,13 @@
 import { FilesIcon, XIcon } from "lucide-react";
 import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { GroupImperativeHandle } from "react-resizable-panels";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -29,22 +36,64 @@ import {
   shouldDeselectArtifactForThreadChange,
   shouldShowArtifactPanel,
 } from "./chat-box-state";
+import {
+  ThreadWorkActivityTrigger,
+  ThreadWorkRecordPanel,
+  ThreadWorkRecordTrigger,
+} from "./thread-work-record";
 
-const CLOSE_MODE = { chat: 100, artifacts: 0 };
-const OPEN_MODE = { chat: 60, artifacts: 40 };
-const MOBILE_OPEN_MODE = { chat: 0, artifacts: 100 };
+const CLOSE_MODE = { artifacts: 0, chat: 100, workRecord: 0 };
+const ARTIFACT_OPEN_MODE = { artifacts: 40, chat: 60, workRecord: 0 };
+const WORK_RECORD_OPEN_MODE = { artifacts: 0, chat: 68, workRecord: 32 };
+const BOTH_PANELS_OPEN_MODE = { artifacts: 26, chat: 48, workRecord: 26 };
+const MOBILE_ARTIFACT_OPEN_MODE = { artifacts: 100, chat: 0, workRecord: 0 };
+
+const WorkRecordContext = createContext<{
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  threadId: string;
+  enabled: boolean;
+} | null>(null);
+
+export function WorkRecordTrigger() {
+  const controls = useContext(WorkRecordContext);
+  if (!controls) {
+    return null;
+  }
+  return (
+    <ThreadWorkRecordTrigger
+      open={controls.open}
+      onOpenChange={controls.setOpen}
+    />
+  );
+}
+
+export function WorkRecordActivityTrigger() {
+  const controls = useContext(WorkRecordContext);
+  if (!controls) {
+    return null;
+  }
+  return (
+    <ThreadWorkActivityTrigger
+      enabled={controls.enabled}
+      threadId={controls.threadId}
+      onOpen={() => controls.setOpen(true)}
+    />
+  );
+}
 
 const ChatBoxContent: React.FC<{
   children: React.ReactNode;
+  isNewThread: boolean;
   threadId: string;
-}> = ({ children, threadId }) => {
+}> = ({ children, isNewThread, threadId }) => {
   const { thread } = useThread();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
+  const workRecordThreadIdRef = useRef(threadId);
   const layoutRef = useRef<GroupImperativeHandle>(null);
   const isMobileViewport = useIsMobile();
-  const useMobileArtifactLayout =
-    typeof window !== "undefined" ? window.innerWidth < 768 : isMobileViewport;
+  const useMobileArtifactLayout = isMobileViewport;
 
   const {
     open: artifactsOpen,
@@ -56,6 +105,7 @@ const ChatBoxContent: React.FC<{
   } = useArtifacts();
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
+  const [workRecordOpen, setWorkRecordOpen] = useState(false);
   const currentArtifacts = useMemo(
     () => getCurrentThreadArtifacts(thread.values.artifacts, thread.messages),
     [thread.messages, thread.values.artifacts],
@@ -100,6 +150,14 @@ const ChatBoxContent: React.FC<{
     useMobileArtifactLayout,
   ]);
 
+  useEffect(() => {
+    if (workRecordThreadIdRef.current === threadId) {
+      return;
+    }
+    workRecordThreadIdRef.current = threadId;
+    setWorkRecordOpen(false);
+  }, [threadId]);
+
   const artifactPanelOpen = useMemo(
     () =>
       shouldShowArtifactPanel(
@@ -117,96 +175,146 @@ const ChatBoxContent: React.FC<{
 
   useEffect(() => {
     if (layoutRef.current) {
-      if (artifactPanelOpen) {
-        layoutRef.current.setLayout(
-          useMobileArtifactLayout ? MOBILE_OPEN_MODE : OPEN_MODE,
-        );
-      } else {
-        layoutRef.current.setLayout(CLOSE_MODE);
-      }
+      const layout = useMobileArtifactLayout
+        ? artifactPanelOpen
+          ? MOBILE_ARTIFACT_OPEN_MODE
+          : CLOSE_MODE
+        : artifactPanelOpen && workRecordOpen
+          ? BOTH_PANELS_OPEN_MODE
+          : artifactPanelOpen
+            ? ARTIFACT_OPEN_MODE
+            : workRecordOpen
+              ? WORK_RECORD_OPEN_MODE
+              : CLOSE_MODE;
+      layoutRef.current.setLayout(layout);
     }
-  }, [artifactPanelOpen, useMobileArtifactLayout]);
+  }, [artifactPanelOpen, useMobileArtifactLayout, workRecordOpen]);
 
   return (
-    <ResizablePanelGroup
-      id={`${resizableIdBase}-panels`}
-      orientation="horizontal"
-      defaultLayout={{ chat: 100, artifacts: 0 }}
-      groupRef={layoutRef}
+    <WorkRecordContext.Provider
+      value={{
+        open: workRecordOpen,
+        setOpen: setWorkRecordOpen,
+        threadId,
+        enabled: !isNewThread,
+      }}
     >
-      <ResizablePanel className="relative" defaultSize={100} id="chat">
-        {children}
-      </ResizablePanel>
-      <ResizableHandle
-        id={`${resizableIdBase}-separator`}
-        className={cn(
-          "opacity-33 hover:opacity-100",
-          !artifactPanelOpen && "pointer-events-none opacity-0",
-        )}
-      />
-      <ResizablePanel
-        className={cn(
-          "transition-all duration-300 ease-in-out",
-          !artifactsOpen && "opacity-0",
-        )}
-        id="artifacts"
+      <ResizablePanelGroup
+        id={`${resizableIdBase}-panels`}
+        orientation="horizontal"
+        defaultLayout={CLOSE_MODE}
+        groupRef={layoutRef}
       >
-        <div
+        <ResizablePanel className="relative" defaultSize={100} id="chat">
+          {children}
+        </ResizablePanel>
+        <ResizableHandle
+          id={`${resizableIdBase}-artifact-separator`}
           className={cn(
-            "h-full p-4 transition-transform duration-300 ease-in-out",
-            artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+            "opacity-33 hover:opacity-100",
+            !artifactPanelOpen && "pointer-events-none opacity-0",
           )}
+        />
+        <ResizablePanel
+          className={cn(
+            "transition-all duration-300 ease-in-out",
+            !artifactsOpen && "opacity-0",
+          )}
+          id="artifacts"
         >
-          {effectiveSelectedArtifact ? (
-            <ArtifactFileDetail
-              className="size-full"
-              filepath={effectiveSelectedArtifact}
-              threadId={threadId}
-            />
-          ) : (
-            <div className="relative flex size-full justify-center">
-              <div className="absolute top-1 right-1 z-30">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setArtifactsOpen(false);
-                  }}
-                >
-                  <XIcon />
-                </Button>
-              </div>
-              {currentArtifacts.length === 0 ? (
-                <ConversationEmptyState
-                  icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
-                />
-              ) : (
-                <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                  <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
-                  </header>
-                  <main className="min-h-0 grow">
-                    <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
-                      files={currentArtifacts}
-                      threadId={threadId}
-                    />
-                  </main>
+          <div
+            className={cn(
+              "h-full p-4 transition-transform duration-300 ease-in-out",
+              artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+            )}
+          >
+            {effectiveSelectedArtifact ? (
+              <ArtifactFileDetail
+                className="size-full"
+                filepath={effectiveSelectedArtifact}
+                threadId={threadId}
+              />
+            ) : (
+              <div className="relative flex size-full justify-center">
+                <div className="absolute top-1 right-1 z-30">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setArtifactsOpen(false);
+                    }}
+                  >
+                    <XIcon />
+                  </Button>
                 </div>
-              )}
-            </div>
+                {currentArtifacts.length === 0 ? (
+                  <ConversationEmptyState
+                    icon={<FilesIcon />}
+                    title="No artifact selected"
+                    description="Select an artifact to view its details"
+                  />
+                ) : (
+                  <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
+                    <header className="shrink-0">
+                      <h2 className="text-lg font-medium">Artifacts</h2>
+                    </header>
+                    <main className="min-h-0 grow">
+                      <ArtifactFileList
+                        className="max-w-(--container-width-sm) p-4 pt-12"
+                        files={currentArtifacts}
+                        threadId={threadId}
+                      />
+                    </main>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </ResizablePanel>
+        <ResizableHandle
+          id={`${resizableIdBase}-work-record-separator`}
+          className={cn(
+            "opacity-33 hover:opacity-100",
+            (!workRecordOpen || useMobileArtifactLayout) &&
+              "pointer-events-none opacity-0",
           )}
-        </div>
-      </ResizablePanel>
-    </ResizablePanelGroup>
+        />
+        <ResizablePanel
+          className={cn(
+            "overflow-hidden transition-opacity duration-300",
+            (!workRecordOpen || useMobileArtifactLayout) && "opacity-0",
+          )}
+          id="workRecord"
+        >
+          {!useMobileArtifactLayout && (
+            <ThreadWorkRecordPanel
+              enabled={workRecordOpen && !isNewThread}
+              mobile={false}
+              open={workRecordOpen}
+              threadId={threadId}
+              onOpenChange={setWorkRecordOpen}
+            />
+          )}
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      {useMobileArtifactLayout && (
+        <ThreadWorkRecordPanel
+          enabled={workRecordOpen && !isNewThread}
+          mobile
+          open={workRecordOpen}
+          threadId={threadId}
+          onOpenChange={setWorkRecordOpen}
+        />
+      )}
+    </WorkRecordContext.Provider>
   );
 };
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = (
-  props,
-) => (
+const ChatBox: React.FC<{
+  children: React.ReactNode;
+  isNewThread: boolean;
+  threadId: string;
+}> = (props) => (
   <ArtifactsProvider>
     <ChatBoxContent {...props} />
   </ArtifactsProvider>

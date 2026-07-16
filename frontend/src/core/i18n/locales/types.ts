@@ -276,6 +276,9 @@ export interface Translations {
       review: string;
       evaluation: string;
       cycle: (label: string, index: number) => string;
+      deliveryCycle: (index: number) => string;
+      cycles: (count: number) => string;
+      plans: (count: number) => string;
       tasks: (count: number) => string;
       running: string;
       completed: string;
@@ -285,6 +288,10 @@ export interface Translations {
       executionResult: string;
       reviewResult: string;
       subtasks: string;
+      activeTasks: string;
+      recentTasks: string;
+      unnamedTask: string;
+      informationDeposit: string;
       plan: string;
       planResearch: string;
       planProposal: string;
@@ -319,6 +326,7 @@ export interface Translations {
       artifactRecorded: string;
       runRunning: string;
       tasksRunning: (count: number) => string;
+      eventHistory: string;
     };
   };
 

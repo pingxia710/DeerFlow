@@ -58,11 +58,11 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
       <Tooltip content={t.common.export}>
         <DropdownMenuTrigger asChild>
           <Button
-            className="text-muted-foreground hover:text-foreground"
+            className="text-muted-foreground hover:text-foreground h-8 px-2 sm:px-3"
             variant="ghost"
           >
             <Download />
-            {t.common.export}
+            <span className="hidden sm:inline">{t.common.export}</span>
           </Button>
         </DropdownMenuTrigger>
       </Tooltip>

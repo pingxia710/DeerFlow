@@ -84,6 +84,26 @@ export type CommandRoomWorkPackageTrajectory = {
   steps: CommandRoomTrajectoryStep[];
 };
 
+export type CommandRoomDeliveryCycle = {
+  id: string;
+  index: number;
+  workPackageId?: string;
+  status: CommandRoomTrajectoryStep["status"];
+  tasks: Subtask[];
+};
+
+function deliveryCycleStatus(
+  tasks: Subtask[],
+): CommandRoomDeliveryCycle["status"] {
+  if (tasks.some((task) => task.status === "in_progress")) {
+    return "in_progress";
+  }
+  if (tasks.some((task) => task.status === "failed")) {
+    return "failed";
+  }
+  return "completed";
+}
+
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -210,6 +230,45 @@ export function groupCommandRoomTrajectoryByWorkPackage(
       ),
     );
     return leftStartedAt - rightStartedAt;
+  });
+}
+
+export function groupCommandRoomDeliveryCycles(tasks: Subtask[]) {
+  const grouped = new Map<string, CommandRoomDeliveryCycle>();
+  for (const task of tasks) {
+    if (
+      task.deliveryCycleIndex === undefined ||
+      (task.commandRoomContainer !== "execution" &&
+        task.commandRoomContainer !== "review")
+    ) {
+      continue;
+    }
+    const key = JSON.stringify([
+      task.workPackageId ?? "",
+      task.deliveryCycleIndex,
+    ]);
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.tasks.push(task);
+      existing.status = deliveryCycleStatus(existing.tasks);
+      continue;
+    }
+    grouped.set(key, {
+      id: key,
+      index: task.deliveryCycleIndex,
+      ...(task.workPackageId ? { workPackageId: task.workPackageId } : {}),
+      status: deliveryCycleStatus([task]),
+      tasks: [task],
+    });
+  }
+  return [...grouped.values()].sort((left, right) => {
+    const leftStartedAt = Math.min(
+      ...left.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+    );
+    const rightStartedAt = Math.min(
+      ...right.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
+    );
+    return leftStartedAt - rightStartedAt || left.index - right.index;
   });
 }
 

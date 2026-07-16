@@ -3,6 +3,7 @@ import { useEffect } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";
 import type { AgentThreadState } from "@/core/threads";
+import { cn } from "@/lib/utils";
 
 import { FlipDisplay } from "./flip-display";
 
@@ -10,6 +11,7 @@ export function ThreadTitle({
   threadId,
   thread,
   isNewThread,
+  className,
 }: {
   className?: string;
   threadId: string;
@@ -43,7 +45,10 @@ export function ThreadTitle({
     return null;
   }
   return (
-    <FlipDisplay uniqueKey={threadId}>
+    <FlipDisplay
+      className={cn("max-w-full min-w-0 [&>div]:truncate", className)}
+      uniqueKey={threadId}
+    >
       {thread.values.title ?? "Untitled"}
     </FlipDisplay>
   );

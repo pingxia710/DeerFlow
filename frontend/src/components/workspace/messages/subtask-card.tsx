@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import {
   CheckCircleIcon,
   ChevronUp,
@@ -14,6 +15,11 @@ import {
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
 import { Button } from "@/components/ui/button";
+import {
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  fetch as fetchWithAuth,
+} from "@/core/api/fetcher";
+import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
@@ -22,6 +28,12 @@ import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
 import { formatElapsedMinutesSeconds } from "@/core/tasks/elapsed";
 import type { Subtask } from "@/core/tasks/types";
+import {
+  buildRunMessagesUrl,
+  readRunMessagesPageResponse,
+} from "@/core/threads/hooks";
+import { queryKeys } from "@/core/threads/query-keys";
+import { terminalTaskToolResult } from "@/core/threads/task-events";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +43,64 @@ import { FlipDisplay } from "../flip-display";
 import { MarkdownContent } from "./markdown-content";
 
 const MS_IN_SECOND = 1000;
+
+export function getSubtaskAnchorId({
+  id,
+  roundId,
+  runId,
+}: Pick<Subtask, "id" | "roundId" | "runId">) {
+  return `command-room-task:${JSON.stringify([
+    runId ?? "",
+    roundId ?? "",
+    id,
+  ])}`;
+}
+
+function taskDisplayName(task: Subtask, unnamedTask: string) {
+  const description = task.description?.trim();
+  if (description && description !== task.id) {
+    return description;
+  }
+  if (task.subagent_type && task.subagent_type !== "task") {
+    return task.subagent_type;
+  }
+  return unnamedTask;
+}
+
+function taskScopeLabel(task: Subtask, t: ReturnType<typeof useI18n>["t"]) {
+  const container = task.commandRoomContainer;
+  if (!container) {
+    return null;
+  }
+  if (container === "context") {
+    return t.chats.trajectory.context;
+  }
+  if (container === "planning") {
+    return t.chats.trajectory.planResearch;
+  }
+  if (container === "technical-design") {
+    return t.chats.trajectory.technicalDesign;
+  }
+  if (container === "execution" || container === "review") {
+    const label =
+      container === "execution"
+        ? t.chats.trajectory.execution
+        : t.chats.trajectory.review;
+    return task.deliveryCycleIndex === undefined
+      ? label
+      : t.chats.trajectory.cycle(label, task.deliveryCycleIndex);
+  }
+  if (
+    container === "project-steward" ||
+    container === "debt-curation" ||
+    container === "learning-curation"
+  ) {
+    return t.chats.trajectory.informationDeposit;
+  }
+  return container === "evaluation"
+    ? t.chats.trajectory.evaluation
+    : t.chats.trajectory.otherProcess;
+}
 
 function restoreAnchorTop(
   anchor: HTMLElement,
@@ -114,13 +184,40 @@ function SubtaskCardBody({
 }) {
   const { t } = useI18n();
   const { scrollRef, stopScroll } = useStickToBottomContext();
+  const [collapsed, setCollapsed] = useState(true);
+  const isOpen = !collapsed;
+  const canLoadFullResult = Boolean(task.threadId && task.runId);
+  const fullResult = useQuery({
+    queryKey: queryKeys.thread.taskResult(
+      task.threadId ?? "",
+      task.runId ?? "",
+      task.id,
+    ),
+    queryFn: async () => {
+      if (!task.threadId || !task.runId) {
+        return null;
+      }
+      const response = await fetchWithAuth(
+        buildRunMessagesUrl(getBackendBaseURL(), task.threadId, task.runId),
+        {
+          method: "GET",
+          timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+        },
+      );
+      const page = await readRunMessagesPageResponse(response);
+      return terminalTaskToolResult(page.data, task.id) ?? null;
+    },
+    enabled: isOpen && canLoadFullResult && task.status !== "in_progress",
+    retry: false,
+    staleTime: Infinity,
+  });
+  const completedResult = fullResult.data ?? task.result;
   const resultPreview = useMemo(
-    () => task.result?.replace(/\s+/g, " ").trim() ?? "",
-    [task.result],
+    () => completedResult?.replace(/\s+/g, " ").trim() ?? "",
+    [completedResult],
   );
   const hasCompletedResult =
     task.status === "completed" && resultPreview.length > 0;
-  const [collapsed, setCollapsed] = useState(true);
   const startedAtRef = useRef<number | null>(task.startedAt ?? null);
   const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(() => {
     if (task.durationMs !== undefined) {
@@ -137,12 +234,17 @@ function SubtaskCardBody({
     }
     return null;
   });
-  const isOpen = !collapsed;
   const elapsedText =
     elapsedSeconds === null
       ? null
       : formatElapsedMinutesSeconds(elapsedSeconds);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const name = taskDisplayName(task, t.chats.trajectory.unnamedTask);
+  const scope = taskScopeLabel(task, t);
+  const role =
+    task.subagent_type && task.subagent_type !== "task"
+      ? task.subagent_type
+      : null;
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -213,9 +315,11 @@ function SubtaskCardBody({
   return (
     <ChainOfThought
       className={cn(
-        "bg-background w-full gap-2 rounded-md border py-0",
+        "bg-background w-full scroll-mt-20 gap-2 rounded-md border py-0 transition-shadow",
         className,
       )}
+      data-command-room-task
+      id={getSubtaskAnchorId(task)}
       open={isOpen}
     >
       <div className="flex w-full flex-col">
@@ -225,20 +329,25 @@ function SubtaskCardBody({
             variant="ghost"
             onClick={handleHeaderToggle}
           >
-            <div className="flex w-full items-center justify-between">
+            <div className="flex w-full flex-col items-stretch gap-1 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 flex-1">
                 <ChainOfThoughtStep
                   className="font-normal"
-                  label={task.description}
+                  label={name}
                   icon={<ClipboardListIcon />}
                 ></ChainOfThoughtStep>
+                {(role ?? scope) && (
+                  <p className="text-muted-foreground truncate px-6 pb-1 text-xs">
+                    {[role, scope].filter(Boolean).join(" · ")}
+                  </p>
+                )}
                 {!isOpen && hasCompletedResult && (
                   <p className="text-muted-foreground line-clamp-2 px-6 pb-1 text-xs leading-5 whitespace-normal">
                     {resultPreview}
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center justify-end gap-1 sm:justify-start">
                 {elapsedText && (
                   <span className="text-muted-foreground/80 min-w-[4ch] text-right font-mono text-xs leading-none tabular-nums">
                     {elapsedText}
@@ -305,9 +414,14 @@ function SubtaskCardBody({
               ></ChainOfThoughtStep>
               <ChainOfThoughtStep
                 label={
-                  task.result ? (
+                  fullResult.isFetching ? (
+                    <span className="text-muted-foreground flex items-center gap-2">
+                      <Loader2Icon className="size-4 animate-spin" />
+                      {t.common.loading}
+                    </span>
+                  ) : completedResult ? (
                     <MarkdownContent
-                      content={task.result}
+                      content={completedResult}
                       isLoading={false}
                       rehypePlugins={rehypePlugins}
                     />

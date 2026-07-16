@@ -1,16 +1,15 @@
 import { expect, test } from "@rstest/core";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { CommandRoomTrajectory } from "@/components/workspace/messages/command-room-trajectory";
 import { I18nProvider } from "@/core/i18n/context";
+import type { Subtask } from "@/core/tasks";
 import {
   buildCommandRoomTrajectory,
   groupCommandRoomTrajectoryByWorkPackage,
   splitCommandRoomTrajectory,
 } from "@/core/threads/command-room-read-model";
-import { queryKeys } from "@/core/threads/query-keys";
 
 const I18nProviderForCreateElement = I18nProvider as ComponentType<
   Omit<Parameters<typeof I18nProvider>[0], "children">
@@ -35,54 +34,37 @@ function planTask(workPackageId: string, containerArtifactWritten?: boolean) {
   };
 }
 
-function renderPlans(
-  tasks: ReturnType<typeof planTask>[],
-  artifactByTaskId: Record<string, string> = {},
-) {
-  const queryClient = new QueryClient();
-  for (const task of tasks) {
-    const artifact = artifactByTaskId[task.id];
-    if (artifact !== undefined) {
-      queryClient.setQueryData(
-        queryKeys.thread.commandRoomPlanArtifact(
-          task.threadId,
-          task.runId,
-          task.id,
-        ),
-        artifact,
-      );
-    }
-  }
+function renderPlans(tasks: Subtask[]) {
   return renderToStaticMarkup(
     createElement(
-      QueryClientProvider,
-      { client: queryClient },
-      createElement(
-        I18nProviderForCreateElement,
-        { initialLocale: "en-US" },
-        createElement(CommandRoomTrajectory, {
-          chairMessages: [],
-          steps: buildCommandRoomTrajectory(tasks),
-          unstagedTasks: [],
-        }),
-      ),
+      I18nProviderForCreateElement,
+      { initialLocale: "en-US" },
+      createElement(CommandRoomTrajectory, {
+        chairMessages: [],
+        onNavigate: () => undefined,
+        tasks,
+      }),
     ),
   );
 }
 
-test("renders a readable plan without adding an approval control", () => {
+test("renders a plan navigation entry without adding an approval control", () => {
   const task = planTask("package-a", true);
-  const markup = renderPlans([task], { [task.id]: "# Recorded plan" });
+  const markup = renderPlans([task]);
 
-  expect(markup).toContain("Recorded plan");
+  expect(markup).toContain("Plan proposal");
+  expect(markup).toContain("1 plan");
   expect(markup).not.toContain("Confirm execution");
 });
 
-test("shows a factual unavailable reason without approval language", () => {
-  const task = planTask("package-a", false);
-  const markup = renderPlans([task], { [task.id]: "" });
+test("does not invent a plan section for ordinary tasks", () => {
+  const task = {
+    ...planTask("package-a", false),
+    containerArtifactKind: "planning-forward" as const,
+  };
+  const markup = renderPlans([task]);
 
-  expect(markup).toContain("The plan has not been recorded.");
+  expect(markup).not.toContain("1 plan");
   expect(markup).not.toContain("Confirm execution");
 });
 

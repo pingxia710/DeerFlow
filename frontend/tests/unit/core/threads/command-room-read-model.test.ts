@@ -3,6 +3,7 @@ import { expect, test } from "@rstest/core";
 import {
   buildCommandRoomReadModel,
   buildCommandRoomTrajectory,
+  groupCommandRoomDeliveryCycles,
   groupCommandRoomTrajectoryByWorkPackage,
   splitCommandRoomTrajectory,
 } from "@/core/threads/command-room-read-model";
@@ -248,4 +249,51 @@ test("trajectory keeps context and delivery steps in separate work packages", ()
   expect(splitCommandRoomTrajectory(packages[1]!.steps).context).toHaveLength(
     1,
   );
+});
+
+test("delivery navigation groups only explicit execution and review cycles", () => {
+  const cycles = groupCommandRoomDeliveryCycles([
+    {
+      id: "execute-a",
+      status: "completed",
+      subagent_type: "executor",
+      description: "Execute A",
+      prompt: "",
+      commandRoomContainer: "execution",
+      deliveryCycleIndex: 1,
+      workPackageId: "package-a",
+      startedAt: 10,
+    },
+    {
+      id: "review-a",
+      status: "in_progress",
+      subagent_type: "reviewer",
+      description: "Review A",
+      prompt: "",
+      commandRoomContainer: "review",
+      deliveryCycleIndex: 1,
+      workPackageId: "package-a",
+      startedAt: 20,
+    },
+    {
+      id: "free-task",
+      status: "completed",
+      subagent_type: "general",
+      description: "Free task",
+      prompt: "",
+      commandRoomContainer: "execution",
+      startedAt: 30,
+    },
+  ]);
+
+  expect(cycles).toHaveLength(1);
+  expect(cycles[0]).toMatchObject({
+    index: 1,
+    workPackageId: "package-a",
+    status: "in_progress",
+  });
+  expect(cycles[0]?.tasks.map((task) => task.id)).toEqual([
+    "execute-a",
+    "review-a",
+  ]);
 });

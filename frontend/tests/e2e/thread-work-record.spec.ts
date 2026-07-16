@@ -94,9 +94,10 @@ test("work record renders a factual desktop side panel", async ({
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
   await expect(page.getByText("Existing assistant message")).toBeVisible();
 
-  await page.getByLabel("Open work record").click();
-  const panel = page.getByRole("complementary", { name: "Work record" });
+  await page.getByLabel("Open activity").click();
+  const panel = page.getByRole("complementary", { name: "Activity" });
   await expect(panel).toBeVisible();
+  await panel.getByText("Event history").click();
   await expect(panel.getByText("Task started")).toBeVisible();
   await expect(panel.getByText("Task completed")).toBeVisible();
   await expect(panel.getByText("Artifact recorded")).toBeVisible();
@@ -144,15 +145,16 @@ test("work record uses a bottom sheet at 360px and returns to the chat", async (
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
   await expect(page.getByText("Existing assistant message")).toBeVisible();
 
-  await page.getByLabel("Open work record").click();
+  await page.getByLabel("Open activity").click();
   const sheet = page.locator('[data-slot="sheet-content"]');
   await expect(sheet).toBeVisible();
+  await sheet.getByText("Event history").click();
   await expect(sheet.getByText("Task completed")).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("work-record-mobile.png"),
   });
 
-  await page.getByLabel("Close work record").click();
+  await page.getByLabel("Close activity").click();
   await expect(sheet).toBeHidden();
   await expect(page.getByText("Existing assistant message")).toBeVisible();
 });
@@ -174,10 +176,10 @@ test("work record stays empty for an unpersisted chat", async ({ page }) => {
   });
 
   await page.goto("/workspace/chats/new");
-  await page.getByLabel("Open work record").click();
+  await page.getByLabel("Open activity").click();
 
   await expect(page.getByText("No work facts recorded yet.")).toBeVisible();
-  await expect(page.getByLabel("Refresh work record")).toBeDisabled();
+  await expect(page.getByLabel("Refresh activity")).toBeDisabled();
   expect(timelineRequests).toHaveLength(0);
   expect(consoleErrors).toEqual([]);
 });

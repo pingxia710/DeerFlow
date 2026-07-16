@@ -145,16 +145,18 @@ export function TokenUsageIndicator({
             {contextSnapshot ? (
               <>
                 <BrainCircuitIcon size={14} />
-                <span>{t.contextUsage.label}</span>
+                <span className="hidden sm:inline">{t.contextUsage.label}</span>
                 <span className="font-mono">
                   {formatContextCount(contextSnapshot.char_count)}
                 </span>
-                <span>{t.contextUsage.charUnit}</span>
+                <span className="hidden sm:inline">
+                  {t.contextUsage.charUnit}
+                </span>
               </>
             ) : (
               <>
                 <CoinsIcon size={14} />
-                <span>{t.tokenUsage.label}</span>
+                <span className="hidden sm:inline">{t.tokenUsage.label}</span>
               </>
             )}
             {!contextSnapshot &&

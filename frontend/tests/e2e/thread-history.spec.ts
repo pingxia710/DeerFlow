@@ -95,21 +95,28 @@ test.describe("Thread history", () => {
     await expect(page.getByRole("button", { name: /loading/i })).toHaveCount(0);
   });
 
-  test("Command Room stage updates stay in the collapsed run trace", async ({
+  test("Command Room updates stay as collapsed cards in chat", async ({
     page,
   }) => {
     const stepUpdate = "STEPS-PANEL-ONLY-UPDATE";
     mockLangGraphAPI(page, {
+      agents: [{ name: "command-room", description: "Command Room" }],
       threads: [
         {
           thread_id: MOCK_THREAD_ID,
           title: "Command Room conversation",
+          agent_name: "command-room",
           updated_at: "2025-06-01T12:00:00Z",
           messages: [
             {
               type: "human",
               id: "command-room-human",
               content: "Run the audit",
+            },
+            {
+              type: "ai",
+              id: "command-room-answer",
+              content: "Audit is running",
             },
             {
               type: "ai",
@@ -124,21 +131,29 @@ test.describe("Thread history", () => {
       ],
     });
 
-    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await page.goto(`/workspace/agents/command-room/chats/${MOCK_THREAD_ID}`);
 
-    await expect(
-      page.getByRole("button", { name: "Chair output" }),
-    ).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByLabel("Run trace")).toBeVisible();
-    await expect(page.getByText(stepUpdate)).toHaveCount(0);
-
-    await page.getByRole("button", { name: "Chair output" }).click();
+    await expect(page.getByText("Run the audit")).toBeVisible({
+      timeout: 15_000,
+    });
+    const update = page.getByRole("button", { name: "Command Room update" });
+    await expect(update).toBeVisible({ timeout: 15_000 });
+    await expect(update).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByText(stepUpdate)).toBeVisible();
+
+    await update.click();
+    await expect(update).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      page
+        .locator("[data-command-room-update]")
+        .getByRole("paragraph")
+        .filter({ hasText: stepUpdate }),
+    ).toBeVisible();
   });
 
   test("Command Room shows unstaged subtasks with factual timing", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const fullResult = "COMPLETE-RESULT-FROM-RUN";
     mockLangGraphAPI(page, {
       agents: [{ name: "command-room", description: "Command Room" }],
@@ -169,6 +184,7 @@ test.describe("Thread history", () => {
                 thread_id: MOCK_THREAD_ID,
                 assistant_id: "command-room",
                 status: "success",
+                round_id: "round-1",
                 metadata: {},
                 kwargs: {},
                 created_at: "2025-06-01T12:00:00Z",
@@ -185,6 +201,10 @@ test.describe("Thread history", () => {
                 description: "Legacy execution task",
                 status: "completed",
                 result: "preview",
+                metadata: {
+                  command_room_container: "execution",
+                  delivery_cycle_index: 1,
+                },
                 started_at: "2025-06-01T12:00:00Z",
                 finished_at: "2025-06-01T12:01:05Z",
                 duration_ms: 65_000,
@@ -194,6 +214,30 @@ test.describe("Thread history", () => {
         },
       ],
     });
+    await page.route(
+      `**/api/threads/${MOCK_THREAD_ID}/runs/run-task-1/messages**`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: [
+              {
+                run_id: "run-task-1",
+                seq: 1,
+                content: {
+                  type: "tool",
+                  name: "task",
+                  tool_call_id: "task-1",
+                  content: fullResult,
+                  additional_kwargs: { subagent_status: "completed" },
+                },
+              },
+            ],
+            has_more: false,
+          }),
+        }),
+    );
 
     const runtimeSnapshotResponse = page.waitForResponse((response) =>
       response
@@ -209,19 +253,140 @@ test.describe("Thread history", () => {
     expect((await runtimeSnapshot.json()).task_lanes).toHaveLength(1);
     await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
     await expect(page.getByText("command-room", { exact: true })).toBeVisible();
+    const taskCard = page
+      .locator("[data-command-room-task]")
+      .filter({ hasText: "Legacy execution task" });
+    await expect(taskCard).toBeVisible({ timeout: 15_000 });
+    await expect(taskCard).toContainText("Execution · Cycle 1");
+    await expect(taskCard).toContainText("1:05");
 
+    await page.getByRole("button", { name: "Open activity" }).click();
     const trajectory = page.locator("[data-command-room-trajectory]");
     await expect(trajectory).toBeVisible({ timeout: 15_000 });
-    await expect(trajectory.getByText("Subtasks")).toBeVisible();
-    await expect(trajectory.getByText("Started:")).toBeVisible();
-    await expect(trajectory.getByText("Finished:")).toBeVisible();
-    await expect(trajectory.getByText("Elapsed: 00:01:05")).toBeVisible();
+    await trajectory
+      .getByRole("button", { name: "Delivery cycle 1: Completed" })
+      .click();
+    await expect(taskCard).toBeVisible();
+    await trajectory.getByRole("button", { name: "Recent tasks" }).click();
+    await expect(trajectory.getByText("00:01:05")).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("command-room-navigation-desktop.png"),
+    });
     await expect(page.getByText(fullResult)).toHaveCount(0);
 
-    await trajectory
-      .getByRole("button", { name: "Legacy execution task: Completed" })
+    await taskCard.getByRole("button").first().click();
+    await expect(taskCard.getByText(fullResult)).toBeVisible();
+  });
+
+  test("Activity links information and plans back to mobile chat", async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const planAnswer = "PLAN-ANSWER-IN-COMMAND-ROOM";
+    mockLangGraphAPI(page, {
+      agents: [{ name: "command-room", description: "Command Room" }],
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Command Room navigation",
+          agent_name: "command-room",
+          messages: [
+            {
+              type: "human",
+              id: "command-room-navigation-human",
+              content: "Prepare the plan",
+            },
+            {
+              type: "ai",
+              id: "command-room-plan-answer",
+              content: planAnswer,
+              additional_kwargs: {
+                deerflow_display_message_type: "round_summary",
+                deerflow_round_id: "round-plan",
+              },
+            },
+          ],
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: "run-plan",
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "command-room",
+                status: "success",
+                round_id: "round-plan",
+                metadata: {},
+                kwargs: {},
+                created_at: "2025-06-01T12:00:00Z",
+                updated_at: "2025-06-01T12:01:00Z",
+              },
+            ],
+            task_lanes: [
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: "run-plan",
+                round_id: "round-plan",
+                task_id: "context-task",
+                role: "fact-finder",
+                description: "Inspect current evidence",
+                status: "completed",
+                metadata: { command_room_container: "context" },
+                started_at: "2025-06-01T12:00:00Z",
+                finished_at: "2025-06-01T12:00:10Z",
+              },
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: "run-plan",
+                round_id: "round-plan",
+                task_id: "plan-task",
+                role: "recorder",
+                description: "Record the chosen plan",
+                status: "completed",
+                metadata: {
+                  command_room_container: "planning",
+                  container_artifact_kind: "spec",
+                },
+                started_at: "2025-06-01T12:00:10Z",
+                finished_at: "2025-06-01T12:01:00Z",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/agents/command-room/chats/${MOCK_THREAD_ID}`);
+    const planUpdate = page.locator("[data-command-room-update]");
+    await expect(planUpdate).toBeVisible({ timeout: 15_000 });
+    await expect(
+      planUpdate.getByRole("button", { name: "Plan" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      planUpdate.getByRole("paragraph").filter({ hasText: planAnswer }),
+    ).toBeVisible();
+    await expect(page.getByTestId("run-terminal-notice")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Open activity" }).click();
+    const sheet = page.locator('[data-slot="sheet-content"]');
+    await expect(sheet).toBeVisible();
+    await expect(
+      sheet.getByRole("button", { name: "Information layer" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(sheet.getByText("1 plan")).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("command-room-navigation-mobile.png"),
+    });
+    await sheet
+      .getByRole("button", { name: "Plan proposal: Completed" })
       .click();
-    await expect(page.getByText(fullResult)).toBeVisible();
+
+    await expect(sheet).toBeHidden();
+    await expect(planUpdate).toBeVisible();
+    await expect(
+      planUpdate.getByRole("paragraph").filter({ hasText: planAnswer }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("command-room-plan-mobile.png"),
+    });
   });
 
   test("switching existing chats and reloading keeps histories isolated", async ({

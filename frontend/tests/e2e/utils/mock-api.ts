@@ -403,6 +403,28 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     },
   );
 
+  void page.route(/\/api\/threads\/([^/]+)\/timeline(?:\?.*)?$/, (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          records: [],
+          after_seq: 0,
+          watermark_seq: 0,
+          cursor: "mock-timeline-0",
+          has_more: false,
+          truncated: false,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();

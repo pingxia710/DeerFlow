@@ -1184,7 +1184,7 @@ test("task event run messages update subtask state without entering visible hist
   ).toEqual(["ai-1"]);
 });
 
-test("Command Room stage updates stay out of the main conversation and task projection", () => {
+test("Command Room stage updates use a dedicated conversation group", () => {
   const rows = [
     {
       run_id: "run-1",
@@ -1252,7 +1252,11 @@ test("Command Room stage updates stay out of the main conversation and task proj
     getMessageGroups(messages)
       .flatMap((group) => group.messages)
       .map((message) => message.id),
-  ).toEqual(["human-1"]);
+  ).toEqual(["human-1", "step-1"]);
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "human",
+    "assistant:command-room-update",
+  ]);
 });
 
 test("legacy background receipts keep their following Chair update in steps", () => {
@@ -1270,12 +1274,24 @@ test("legacy background receipts keep their following Chair update in steps", ()
       type: "ai",
       content: "Planning is in progress.",
     },
+    {
+      id: "orphan-tool",
+      type: "tool",
+      name: "task",
+      tool_call_id: "call-2",
+      content: "accepted",
+    },
   ] as Message[];
 
   expect(
     getCommandRoomStepMessages(messages).map((message) => message.id),
   ).toEqual(["step-1"]);
-  expect(getMessageGroups(messages)).toEqual([]);
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "assistant:command-room-update",
+  ]);
+  expect(
+    getMessageGroups(messages)[0]?.messages.map((message) => message.id),
+  ).toEqual(["step-1"]);
 });
 
 test("legacy persisted background receipts project Chair stage text into steps", () => {
@@ -1324,7 +1340,9 @@ test("legacy persisted background receipts project Chair stage text into steps",
   expect(messages[0]?.additional_kwargs?.deerflow_display_message_type).toBe(
     "round_summary",
   );
-  expect(getMessageGroups(messages)).toEqual([]);
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "assistant:command-room-update",
+  ]);
   expect(
     getCommandRoomStepMessages(messages).map((message) => message.id),
   ).toEqual(["step-1"]);

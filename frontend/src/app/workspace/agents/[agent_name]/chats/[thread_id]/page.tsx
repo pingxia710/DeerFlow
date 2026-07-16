@@ -326,7 +326,7 @@ export default function AgentChatPage() {
           >
             <SidebarTrigger className="md:hidden" />
             {/* Agent badge */}
-            <div className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
+            <div className="hidden min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 sm:flex">
               <BotIcon className="text-primary h-3.5 w-3.5" />
               <span className="hidden max-w-24 truncate text-xs font-medium sm:inline sm:max-w-none">
                 {agent?.name ?? agent_name}
@@ -340,7 +340,7 @@ export default function AgentChatPage() {
                 isNewThread={isNewThread}
               />
             </div>
-            <div className="flex shrink-0 items-center sm:mr-4">
+            <div className="flex min-w-0 shrink-0 items-center gap-0.5 sm:mr-4">
               {isCommandRoom && (
                 <CommandRoomCapabilities
                   threadId={isNewThread ? undefined : threadId}

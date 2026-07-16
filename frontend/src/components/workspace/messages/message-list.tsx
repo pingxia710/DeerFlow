@@ -41,9 +41,10 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getConversationTurnTiming,
-  getCommandRoomStepMessages,
   getConversationTurns,
   getMessageGroups,
+  getMessageRoundId,
+  getMessageRunId,
   getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
@@ -63,15 +64,12 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
-import { buildCommandRoomTrajectory } from "@/core/threads/command-room-read-model";
 import {
   HISTORY_CREATED_AT_KEY,
   isActiveRunStatus,
-  useThreadRuntimeSnapshot,
   type ThreadRunTerminalNotice,
   type useThreadStream,
 } from "@/core/threads/hooks";
-import { mergeTaskLaneSubtasks } from "@/core/threads/task-events";
 import type { ThreadContextUsageSnapshot } from "@/core/threads/types";
 import { cn } from "@/lib/utils";
 
@@ -79,7 +77,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { Tooltip } from "../tooltip";
 
-import { CommandRoomTrajectory } from "./command-room-trajectory";
+import { CommandRoomUpdateCard } from "./command-room-trajectory";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -128,6 +126,18 @@ export function getSubtaskCardKey(
   ])}`;
 }
 
+function getRunScopedSubtaskKey(
+  taskId: string,
+  runId?: string | null,
+  roundId?: string | null,
+) {
+  return JSON.stringify([
+    runId ?? "",
+    normalizeSubtaskRoundId(roundId),
+    taskId,
+  ]);
+}
+
 type ThreadRecoveryStatus = ReturnType<
   typeof useThreadStream
 >["recoveryStatus"];
@@ -145,13 +155,6 @@ function getMessageHistoryTime(message: Message) {
   return Number.isFinite(time) ? time : undefined;
 }
 
-function getMessageRunId(message: Message) {
-  const value =
-    message.additional_kwargs?.deerflow_run_id ??
-    message.additional_kwargs?.run_id;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
 function isMessageActivelyStreaming(
   message: Message,
   groupIsLoading: boolean,
@@ -167,25 +170,15 @@ function isMessageActivelyStreaming(
   return runId !== undefined && activeRunIds.has(runId);
 }
 
-function getMessageRoundId(message: Message) {
-  const value =
-    message.additional_kwargs?.deerflow_round_id ??
-    message.additional_kwargs?.round_id ??
-    message.additional_kwargs?.roundId;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function isCommandRoomBackgroundSubtaskGroup(messages: Message[]) {
-  return messages.some(
-    (message) =>
-      message.type === "tool" &&
-      message.name === "task" &&
-      message.additional_kwargs?.background_task === true,
-  );
-}
-
 function isTerminalSubtask(task: Subtask) {
   return task.status === "completed" || task.status === "failed";
+}
+
+function isCommandRoomPlanTask(task: Subtask) {
+  return (
+    task.containerArtifactKind === "spec" ||
+    task.containerArtifactKind === "technical-plan"
+  );
 }
 
 type SubtaskTaskLookup = {
@@ -668,10 +661,6 @@ export function MessageList({
   const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
   const prevIsLoading = useRef(thread.isLoading);
   const messages = thread.messages;
-  const commandRoomStepMessages = useMemo(
-    () => getCommandRoomStepMessages(messages),
-    [messages],
-  );
   const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const conversationTurns = useMemo(
     () => getConversationTurns(groupedMessages),
@@ -780,7 +769,11 @@ export function MessageList({
     if (lastHumanIndex === -1) return false;
     return groupedMessages
       .slice(lastHumanIndex)
-      .some((g) => g.type === "assistant");
+      .some(
+        (group) =>
+          group.type === "assistant" ||
+          group.type === "assistant:command-room-update",
+      );
   }, [groupedMessages]);
   const hasTerminalRunMessages = Boolean(
     terminalNotice &&
@@ -796,30 +789,6 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const contextSubtasks = useSubtasksForThread(threadId);
-  const runtimeSnapshot = useThreadRuntimeSnapshot(threadId, {
-    enabled: isCommandRoom,
-  });
-  const trajectoryTasks = useMemo(
-    () =>
-      isCommandRoom
-        ? mergeTaskLaneSubtasks(
-            runtimeSnapshot.data?.task_lanes ?? [],
-            contextSubtasks,
-          )
-        : contextSubtasks,
-    [contextSubtasks, isCommandRoom, runtimeSnapshot.data?.task_lanes],
-  );
-  const commandRoomTrajectory = useMemo(
-    () => buildCommandRoomTrajectory(trajectoryTasks),
-    [trajectoryTasks],
-  );
-  const unstagedCommandRoomTasks = useMemo(
-    () =>
-      isCommandRoom
-        ? trajectoryTasks.filter((task) => !task.commandRoomContainer)
-        : [],
-    [isCommandRoom, trajectoryTasks],
-  );
   const lastGroupIndex = groupedMessages.length - 1;
   const activeHistoryRunIds = useMemo(() => {
     return new Set(
@@ -977,14 +946,77 @@ export function MessageList({
       subtaskUpdates
         .filter((task) => task.runId)
         .map((task) =>
-          JSON.stringify([
-            task.runId,
-            normalizeSubtaskRoundId(task.roundId),
-            task.id,
-          ]),
+          getRunScopedSubtaskKey(task.id, task.runId, task.roundId),
         ),
     );
   }, [subtaskUpdates]);
+
+  const unanchoredCommandRoomTasks = useMemo(() => {
+    if (!isCommandRoom) {
+      return {
+        byTurn: new Map<string, Subtask[]>(),
+        orphaned: [] as Subtask[],
+      };
+    }
+
+    const tasks = contextSubtasks
+      .filter(
+        (task) =>
+          Boolean(task.runId) &&
+          !anchoredSubtaskKeys.has(
+            getRunScopedSubtaskKey(task.id, task.runId, task.roundId),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          (left.startedAt ?? left.finishedAt ?? 0) -
+          (right.startedAt ?? right.finishedAt ?? 0),
+      );
+    const scopes = conversationTurns.map((turn) => {
+      const turnMessages = turn.groups.flatMap((group) => group.messages);
+      return {
+        turnId: turn.id,
+        roundIds: new Set(
+          turnMessages
+            .map(getMessageRoundId)
+            .filter((value): value is string => Boolean(value)),
+        ),
+        runIds: new Set(
+          turnMessages
+            .map(getMessageRunId)
+            .filter((value): value is string => Boolean(value)),
+        ),
+      };
+    });
+    const byTurn = new Map<string, Subtask[]>();
+    const orphaned: Subtask[] = [];
+
+    for (const task of tasks) {
+      let targetTurnId: string | undefined;
+      for (let index = scopes.length - 1; index >= 0; index -= 1) {
+        const scope = scopes[index];
+        if (
+          scope &&
+          ((task.roundId && scope.roundIds.has(task.roundId)) ||
+            (task.runId && scope.runIds.has(task.runId)))
+        ) {
+          targetTurnId = scope.turnId;
+          break;
+        }
+      }
+      targetTurnId ??= scopes.at(-1)?.turnId;
+      if (!targetTurnId) {
+        orphaned.push(task);
+        continue;
+      }
+      const turnTasks = byTurn.get(targetTurnId) ?? [];
+      turnTasks.push(task);
+      byTurn.set(targetTurnId, turnTasks);
+    }
+
+    return { byTurn, orphaned };
+  }, [anchoredSubtaskKeys, contextSubtasks, conversationTurns, isCommandRoom]);
+
   const runtimeOnlySubtasks = useMemo(() => {
     if (!thread.isLoading) {
       return [];
@@ -994,6 +1026,7 @@ export function MessageList({
       (task) =>
         task.status === "in_progress" &&
         !task.commandRoomContainer &&
+        !task.backgroundTask &&
         Boolean(task.runId) &&
         isRuntimeOnlySubtaskForActiveTurn(
           task,
@@ -1008,11 +1041,7 @@ export function MessageList({
           roundId: task.roundId,
         }) &&
         !anchoredSubtaskKeys.has(
-          JSON.stringify([
-            task.runId,
-            normalizeSubtaskRoundId(task.roundId),
-            task.id,
-          ]),
+          getRunScopedSubtaskKey(task.id, task.runId, task.roundId),
         ),
     );
   }, [
@@ -1083,49 +1112,57 @@ export function MessageList({
         enableRegenerateForTurn &&
         !!regenerateTarget?.id &&
         !!onRegenerateMessage;
-      const hasHoverActions = !!clipboardData || hasRegenerateAction;
 
       return (
         <div className="mt-2 flex items-center justify-end gap-1">
-          {hasHoverActions && (
-            <div className="flex gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
-              {clipboardData && <CopyButton clipboardData={clipboardData} />}
-              {hasRegenerateAction && (
-                <Tooltip content={t.common.regenerate}>
-                  <Button
-                    aria-label={t.common.regenerate}
-                    size="icon-sm"
-                    type="button"
-                    variant="ghost"
-                    disabled={
-                      !canRegenerate ||
-                      regeneratingMessageId === regenerateTarget.id
+          <div className="flex gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+            {clipboardData && <CopyButton clipboardData={clipboardData} />}
+            {hasRegenerateAction && (
+              <Tooltip content={t.common.regenerate}>
+                <Button
+                  aria-label={t.common.regenerate}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={
+                    !canRegenerate ||
+                    regeneratingMessageId === regenerateTarget.id
+                  }
+                  onClick={() => {
+                    const targetId = regenerateTarget.id;
+                    if (!targetId) {
+                      return;
                     }
-                    onClick={() => {
-                      const targetId = regenerateTarget.id;
-                      if (!targetId) {
-                        return;
-                      }
-                      setRegeneratingMessageId(targetId);
-                      void Promise.resolve(
-                        onRegenerateMessage?.(targetId, supersededMessageIds),
-                      ).finally(() => {
-                        setRegeneratingMessageId(null);
-                      });
-                    }}
-                  >
-                    <RefreshCcwIcon
-                      className={cn(
-                        "size-3",
-                        regeneratingMessageId === regenerateTarget.id &&
-                          "animate-spin",
-                      )}
-                    />
-                  </Button>
-                </Tooltip>
-              )}
-            </div>
-          )}
+                    setRegeneratingMessageId(targetId);
+                    void Promise.resolve(
+                      onRegenerateMessage?.(targetId, supersededMessageIds),
+                    ).finally(() => {
+                      setRegeneratingMessageId(null);
+                    });
+                  }}
+                >
+                  <RefreshCcwIcon
+                    className={cn(
+                      "size-3",
+                      regeneratingMessageId === regenerateTarget.id &&
+                        "animate-spin",
+                    )}
+                  />
+                </Button>
+              </Tooltip>
+            )}
+            <Tooltip content={t.chats.reviewTurn}>
+              <Button
+                aria-label={t.chats.reviewTurn}
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+                onClick={handleReviewTurnClick}
+              >
+                <ChevronUpIcon className="size-3.5" />
+              </Button>
+            </Tooltip>
+          </div>
           {contextSnapshotForTurn && (
             <div
               className="text-muted-foreground bg-background/70 flex h-8 items-center gap-1.5 rounded-full border px-2 text-xs"
@@ -1141,16 +1178,6 @@ export function MessageList({
               <span>{t.contextUsage.charUnit}</span>
             </div>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground hover:text-foreground rounded-full px-3"
-            onClick={handleReviewTurnClick}
-          >
-            <ChevronUpIcon className="mr-1 size-3.5" />
-            {t.chats.reviewTurn}
-          </Button>
         </div>
       );
     },
@@ -1251,6 +1278,8 @@ export function MessageList({
         {conversationTurns.map((turn) => {
           const turnTiming = getConversationTurnTiming(turn);
           const isActiveTurn = turn.id === activeConversationTurn?.id;
+          const restoredCommandRoomTasks =
+            unanchoredCommandRoomTasks.byTurn.get(turn.id) ?? [];
           const localTurnTiming = localTurnTimings[turn.id];
           const displayTurnStartTime =
             turnTiming.startedAt ?? localTurnTiming?.startedAt;
@@ -1271,6 +1300,7 @@ export function MessageList({
           const hasTerminalAssistantOutput = turn.groups.some(
             (group) =>
               group.type === "assistant" ||
+              group.type === "assistant:command-room-update" ||
               group.type === "assistant:clarification" ||
               group.type === "assistant:present-files",
           );
@@ -1384,6 +1414,32 @@ export function MessageList({
                         )}
                     </div>
                   );
+                } else if (group.type === "assistant:command-room-update") {
+                  const message = group.messages[0];
+                  if (!message) {
+                    return null;
+                  }
+                  const messageRoundId = getMessageRoundId(message);
+                  const messageRunId = getMessageRunId(message);
+                  const isPlanUpdate = contextSubtasks.some(
+                    (task) =>
+                      isCommandRoomPlanTask(task) &&
+                      (messageRoundId
+                        ? task.roundId === messageRoundId
+                        : Boolean(messageRunId && task.runId === messageRunId)),
+                  );
+                  return (
+                    <CommandRoomUpdateCard
+                      defaultOpen={Boolean(isPlanUpdate)}
+                      key={groupKey}
+                      message={message}
+                      title={
+                        isPlanUpdate
+                          ? t.chats.trajectory.plan
+                          : t.chats.trajectory.chairOutput
+                      }
+                    />
+                  );
                 } else if (group.type === "assistant:clarification") {
                   const message = group.messages[0];
                   if (message && hasContent(message)) {
@@ -1437,9 +1493,6 @@ export function MessageList({
                     </div>
                   );
                 } else if (group.type === "assistant:subagent") {
-                  if (isCommandRoomBackgroundSubtaskGroup(group.messages)) {
-                    return null;
-                  }
                   const tasks = new Set<Subtask>();
                   for (const message of group.messages) {
                     if (message.type === "ai") {
@@ -1709,6 +1762,20 @@ export function MessageList({
                   </div>
                 );
               })}
+              {restoredCommandRoomTasks.length > 0 && (
+                <div className="relative z-1 flex flex-col gap-2">
+                  {restoredCommandRoomTasks.map((task) => (
+                    <SubtaskCard
+                      isLoading={task.status === "in_progress"}
+                      key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                      roundId={task.roundId}
+                      runId={task.runId!}
+                      taskId={task.id}
+                      threadId={threadId}
+                    />
+                  ))}
+                </div>
+              )}
               {isActiveTurn && runtimeOnlySubtasks.length > 0 && (
                 <div className="relative z-1 flex flex-col gap-2">
                   {!hideProtocolUi && (
@@ -1736,6 +1803,20 @@ export function MessageList({
             </section>
           );
         })}
+        {unanchoredCommandRoomTasks.orphaned.length > 0 && (
+          <div className="relative z-1 flex flex-col gap-2">
+            {unanchoredCommandRoomTasks.orphaned.map((task) => (
+              <SubtaskCard
+                isLoading={task.status === "in_progress"}
+                key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                roundId={task.roundId}
+                runId={task.runId!}
+                taskId={task.id}
+                threadId={threadId}
+              />
+            ))}
+          </div>
+        )}
         {thread.isLoading &&
           !hideProtocolUi &&
           !hideThinkingUi &&
@@ -1746,11 +1827,6 @@ export function MessageList({
               </Reasoning>
             </div>
           )}
-        <CommandRoomTrajectory
-          chairMessages={commandRoomStepMessages}
-          steps={commandRoomTrajectory}
-          unstagedTasks={unstagedCommandRoomTasks}
-        />
         {recoveryStatus &&
           (recoveryStatus.state !== "terminal" || shouldShowTerminalNotice) && (
             <RunRecoveryNotice

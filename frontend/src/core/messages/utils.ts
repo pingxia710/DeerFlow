@@ -18,13 +18,16 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+interface AssistantCommandRoomUpdateGroup extends GenericMessageGroup<"assistant:command-room-update"> {}
+
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup;
+  | AssistantSubagentGroup
+  | AssistantCommandRoomUpdateGroup;
 
 export const HISTORY_CREATED_AT_KEY = "history_created_at";
 
@@ -64,7 +67,8 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       last &&
       last.type !== "human" &&
       last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
+      last.type !== "assistant:clarification" &&
+      last.type !== "assistant:command-room-update"
     ) {
       return last;
     }
@@ -72,10 +76,15 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   for (const message of messages) {
-    if (
-      isHiddenFromUIMessage(message) ||
-      commandRoomStepMessages.has(message)
-    ) {
+    if (commandRoomStepMessages.has(message)) {
+      groups.push({
+        id: message.id,
+        type: "assistant:command-room-update",
+        messages: [message],
+      });
+      continue;
+    }
+    if (isHiddenFromUIMessage(message)) {
       continue;
     }
 
@@ -141,11 +150,21 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   return groups;
 }
 
-function messageRunId(message: Message) {
+export function getMessageRunId(message: Message) {
   const runId =
     message.additional_kwargs?.deerflow_run_id ??
     message.additional_kwargs?.run_id;
   return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+export function getMessageRoundId(message: Message) {
+  const roundId =
+    message.additional_kwargs?.deerflow_round_id ??
+    message.additional_kwargs?.round_id ??
+    message.additional_kwargs?.roundId;
+  return typeof roundId === "string" && roundId.length > 0
+    ? roundId
+    : undefined;
 }
 
 function isBackgroundTaskReceipt(message: Message) {
@@ -178,7 +197,7 @@ export function getCommandRoomStepMessages(messages: Message[]): Message[] {
       unscopedBackgroundTaskSeen = false;
     }
     if (isBackgroundTaskReceipt(message)) {
-      const runId = messageRunId(message);
+      const runId = getMessageRunId(message);
       if (runId) {
         backgroundTaskRunIds.add(runId);
       } else {
@@ -193,7 +212,7 @@ export function getCommandRoomStepMessages(messages: Message[]): Message[] {
     ) {
       continue;
     }
-    const runId = messageRunId(message);
+    const runId = getMessageRunId(message);
     if (
       isCommandRoomStepMessage(message) ||
       (runId ? backgroundTaskRunIds.has(runId) : unscopedBackgroundTaskSeen)
@@ -206,7 +225,7 @@ export function getCommandRoomStepMessages(messages: Message[]): Message[] {
 }
 
 function groupRunId(group: MessageGroup) {
-  return group.messages.map(messageRunId).find(Boolean);
+  return group.messages.map(getMessageRunId).find(Boolean);
 }
 
 function groupStableId(

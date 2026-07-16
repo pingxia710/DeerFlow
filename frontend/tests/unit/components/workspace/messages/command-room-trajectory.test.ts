@@ -68,6 +68,82 @@ test("does not invent a plan section for ordinary tasks", () => {
   expect(markup).not.toContain("Confirm execution");
 });
 
+test("shows elapsed duration for a running task", () => {
+  const markup = renderPlans([
+    {
+      id: "running-task",
+      description: "Long-running implementation",
+      durationMs: 3_723_000,
+      prompt: "",
+      runId: "run-running",
+      startedAt: 1,
+      status: "in_progress",
+      subagent_type: "executor",
+      threadId: "thread-1",
+    },
+  ]);
+
+  expect(markup).toContain("Running");
+  expect(markup).toContain("01:02:03");
+});
+
+test("orders navigation newest first and exposes execution and review tasks", () => {
+  const markup = renderPlans([
+    { ...planTask("old-plan"), startedAt: 1, subagent_type: "old-recorder" },
+    { ...planTask("new-plan"), startedAt: 2, subagent_type: "new-recorder" },
+    {
+      id: "execution-1",
+      commandRoomContainer: "execution",
+      deliveryCycleIndex: 1,
+      description: "Implement change",
+      prompt: "",
+      runId: "run-execution",
+      startedAt: 3,
+      status: "completed",
+      subagent_type: "executor",
+      threadId: "thread-1",
+      workPackageId: "delivery",
+    },
+    {
+      id: "review-1",
+      commandRoomContainer: "review",
+      deliveryCycleIndex: 1,
+      description: "Inspect change",
+      prompt: "",
+      runId: "run-review",
+      startedAt: 4,
+      status: "completed",
+      subagent_type: "reviewer",
+      threadId: "thread-1",
+      workPackageId: "delivery",
+    },
+    {
+      id: "review-without-cycle",
+      commandRoomContainer: "review",
+      description: "Review without cycle",
+      prompt: "",
+      runId: "run-review-without-cycle",
+      startedAt: 5,
+      status: "completed",
+      subagent_type: "reviewer",
+      threadId: "thread-1",
+      workPackageId: "delivery",
+    },
+  ]);
+
+  expect(markup.indexOf("new-recorder")).toBeLessThan(
+    markup.indexOf("old-recorder"),
+  );
+  const ungroupedReview = markup.indexOf("Review · Review without cycle");
+  const cycle = markup.indexOf("Delivery cycle 1");
+  const cycleReview = markup.indexOf("Review · Inspect change");
+  const cycleExecution = markup.indexOf("Execution · Implement change");
+  expect(ungroupedReview).toBeGreaterThan(-1);
+  expect(ungroupedReview).toBeLessThan(cycle);
+  expect(cycle).toBeLessThan(cycleReview);
+  expect(cycleReview).toBeLessThan(cycleExecution);
+});
+
 test("keeps plan projections separated by work package", () => {
   const packages = groupCommandRoomTrajectoryByWorkPackage(
     buildCommandRoomTrajectory([

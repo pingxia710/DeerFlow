@@ -3,7 +3,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   CheckCircleIcon,
-  ChevronsUpDownIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   CircleDashedIcon,
   LoaderCircleIcon,
@@ -91,6 +91,10 @@ function StatusIcon({
   return <CircleDashedIcon aria-hidden className="size-4" />;
 }
 
+function taskActivityTime(task: Subtask) {
+  return task.finishedAt ?? task.startedAt ?? 0;
+}
+
 function taskDuration(task: Subtask) {
   if (task.durationMs !== undefined) {
     return task.durationMs;
@@ -98,7 +102,20 @@ function taskDuration(task: Subtask) {
   if (task.startedAt === undefined) {
     return undefined;
   }
-  return Math.max(0, (task.finishedAt ?? Date.now()) - task.startedAt);
+  return Math.max(0, Date.now() - task.startedAt);
+}
+
+function taskCompletionTime(task: Subtask, locale: string) {
+  if (task.finishedAt === undefined || !Number.isFinite(task.finishedAt)) {
+    return null;
+  }
+  return new Intl.DateTimeFormat(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(task.finishedAt);
 }
 
 function isInformationTask(task: Subtask) {
@@ -143,7 +160,10 @@ function NavigationSection({
             <span className="font-medium">{title}</span>
             <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
               {count}
-              <ChevronsUpDownIcon aria-hidden className="size-4" />
+              <ChevronRightIcon
+                aria-hidden
+                className={`size-4 transition-transform ${open ? "rotate-90" : ""}`}
+              />
             </span>
           </Button>
         </CollapsibleTrigger>
@@ -166,9 +186,11 @@ function TaskNavigationRow({
   onNavigate: (anchorId: string) => void;
   task: Subtask;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const name = label ?? taskDisplayName(task, t.chats.trajectory.unnamedTask);
-  const duration = taskDuration(task);
+  const duration =
+    task.status === "in_progress" ? taskDuration(task) : undefined;
+  const completedAt = taskCompletionTime(task, locale);
   const target = anchorId ?? getSubtaskAnchorId(task);
   const role =
     task.subagent_type && task.subagent_type !== "task"
@@ -197,6 +219,11 @@ function TaskNavigationRow({
       <span className="text-muted-foreground flex shrink-0 flex-col items-end text-xs font-normal">
         <span>{statusLabel(task.status, t)}</span>
         {duration !== undefined && <span>{formatDuration(duration)}</span>}
+        {completedAt && task.finishedAt !== undefined && (
+          <time dateTime={new Date(task.finishedAt).toISOString()}>
+            {completedAt}
+          </time>
+        )}
       </span>
     </Button>
   );
@@ -214,7 +241,15 @@ function planTarget(task: Subtask, chairMessages: Message[]) {
     : getSubtaskAnchorId(task);
 }
 
-function CycleNavigationRow({
+function deliveryTaskLabel(task: Subtask, t: ReturnType<typeof useI18n>["t"]) {
+  const phase =
+    task.commandRoomContainer === "review"
+      ? t.chats.trajectory.review
+      : t.chats.trajectory.execution;
+  return `${phase} · ${taskDisplayName(task, t.chats.trajectory.unnamedTask)}`;
+}
+
+function DeliveryCycleNavigationGroup({
   cycle,
   onNavigate,
 }: {
@@ -222,37 +257,64 @@ function CycleNavigationRow({
   onNavigate: (anchorId: string) => void;
 }) {
   const { t } = useI18n();
-  const firstTask = cycle.tasks[0];
-  if (!firstTask) {
-    return null;
-  }
   const title = t.chats.trajectory.deliveryCycle(cycle.index);
   return (
-    <Button
-      aria-label={`${title}: ${statusLabel(cycle.status, t)}`}
-      className="h-auto min-h-11 w-full justify-between gap-3 px-3 py-2 text-left"
-      size="sm"
-      type="button"
-      variant="ghost"
-      onClick={() => onNavigate(getSubtaskAnchorId(firstTask))}
-    >
-      <span className="flex min-w-0 items-center gap-2">
-        <StatusIcon status={cycle.status} />
-        <span className="min-w-0">
-          <span className="block truncate">{title}</span>
-          {cycle.workPackageId && (
-            <span className="text-muted-foreground block truncate text-xs font-normal">
-              {t.chats.trajectory.workPackage(cycle.workPackageId)}
-            </span>
-          )}
+    <div className="divide-border/60 divide-y">
+      <div className="bg-muted/30 flex min-h-10 items-center justify-between gap-3 px-3 py-2">
+        <span className="flex min-w-0 items-center gap-2">
+          <StatusIcon status={cycle.status} />
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium">{title}</span>
+            {cycle.workPackageId && (
+              <span className="text-muted-foreground block truncate text-xs">
+                {t.chats.trajectory.workPackage(cycle.workPackageId)}
+              </span>
+            )}
+          </span>
         </span>
-      </span>
-      <span className="text-muted-foreground flex shrink-0 flex-col items-end text-xs font-normal">
-        <span>{t.chats.trajectory.tasks(cycle.tasks.length)}</span>
-        <span>{statusLabel(cycle.status, t)}</span>
-      </span>
-    </Button>
+        <span className="text-muted-foreground shrink-0 text-xs">
+          {t.chats.trajectory.tasks(cycle.tasks.length)}
+        </span>
+      </div>
+      {cycle.tasks.map((task) => (
+        <TaskNavigationRow
+          key={getSubtaskAnchorId(task)}
+          label={deliveryTaskLabel(task, t)}
+          onNavigate={onNavigate}
+          task={task}
+        />
+      ))}
+    </div>
   );
+}
+
+function isDeliveryTask(task: Subtask) {
+  return (
+    task.commandRoomContainer === "execution" ||
+    task.commandRoomContainer === "review"
+  );
+}
+
+function deliveryNavigationItems(tasks: Subtask[]) {
+  const cycles = groupCommandRoomDeliveryCycles(tasks);
+  return [
+    ...cycles.map((cycle) => ({
+      type: "cycle" as const,
+      id: cycle.id,
+      timestamp: Math.max(...cycle.tasks.map(taskActivityTime)),
+      cycle,
+    })),
+    ...tasks
+      .filter(
+        (task) => isDeliveryTask(task) && task.deliveryCycleIndex === undefined,
+      )
+      .map((task) => ({
+        type: "task" as const,
+        id: getSubtaskAnchorId(task),
+        timestamp: taskActivityTime(task),
+        task,
+      })),
+  ].sort((left, right) => right.timestamp - left.timestamp);
 }
 
 export function CommandRoomUpdateCard({
@@ -308,7 +370,10 @@ export function CommandRoomUpdateCard({
                   {formatDateTime(timestamp, locale)}
                 </time>
               )}
-              <ChevronsUpDownIcon aria-hidden className="size-4" />
+              <ChevronRightIcon
+                aria-hidden
+                className={`size-4 transition-transform ${open ? "rotate-90" : ""}`}
+              />
             </span>
           </Button>
         </CollapsibleTrigger>
@@ -330,21 +395,21 @@ export function CommandRoomTrajectory({
   tasks: Subtask[];
 }) {
   const { t } = useI18n();
-  const informationTasks = tasks.filter(isInformationTask);
-  const planTasks = tasks.filter(isPlanTask);
-  const cycles = groupCommandRoomDeliveryCycles(tasks);
-  const activeTasks = tasks.filter((task) => task.status === "in_progress");
-  const recentTasks = useMemo(
+  const orderedTasks = useMemo(
     () =>
-      [...tasks]
-        .sort(
-          (left, right) =>
-            (right.finishedAt ?? right.startedAt ?? 0) -
-            (left.finishedAt ?? left.startedAt ?? 0),
-        )
-        .slice(0, 12),
+      [...tasks].sort(
+        (left, right) => taskActivityTime(right) - taskActivityTime(left),
+      ),
     [tasks],
   );
+  const informationTasks = orderedTasks.filter(isInformationTask);
+  const planTasks = orderedTasks.filter(isPlanTask);
+  const deliveryTasks = orderedTasks.filter(isDeliveryTask);
+  const deliveryItems = deliveryNavigationItems(orderedTasks);
+  const activeTasks = orderedTasks.filter(
+    (task) => task.status === "in_progress",
+  );
+  const recentTasks = orderedTasks.slice(0, 12);
   const completedCount = tasks.filter(
     (task) => task.status === "completed",
   ).length;
@@ -435,19 +500,28 @@ export function CommandRoomTrajectory({
         </NavigationSection>
       )}
 
-      {cycles.length > 0 && (
+      {deliveryItems.length > 0 && (
         <NavigationSection
-          count={t.chats.trajectory.cycles(cycles.length)}
+          count={t.chats.trajectory.tasks(deliveryTasks.length)}
           defaultOpen
           title={t.chats.trajectory.delivery}
         >
-          {cycles.map((cycle) => (
-            <CycleNavigationRow
-              cycle={cycle}
-              key={cycle.id}
-              onNavigate={onNavigate}
-            />
-          ))}
+          {deliveryItems.map((item) =>
+            item.type === "cycle" ? (
+              <DeliveryCycleNavigationGroup
+                cycle={item.cycle}
+                key={item.id}
+                onNavigate={onNavigate}
+              />
+            ) : (
+              <TaskNavigationRow
+                key={item.id}
+                label={deliveryTaskLabel(item.task, t)}
+                onNavigate={onNavigate}
+                task={item.task}
+              />
+            ),
+          )}
         </NavigationSection>
       )}
 

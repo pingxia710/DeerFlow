@@ -103,6 +103,11 @@ test("work record renders a factual desktop side panel", async ({
   await expect(panel.getByText("Artifact recorded")).toBeVisible();
   await expect(panel.getByText("Run lifecycle")).toBeVisible();
   await expect(panel.getByText("This must stay in chat only.")).toHaveCount(0);
+  const eventRows = panel.locator("ol > li");
+  await expect(eventRows.nth(0)).toContainText("Run lifecycle");
+  await expect(eventRows.nth(1)).toContainText("Task completed");
+  await expect(eventRows.nth(2)).toContainText("Artifact recorded");
+  await expect(eventRows.nth(3)).toContainText("Task started");
 
   await page.screenshot({
     path: testInfo.outputPath("work-record-desktop.png"),

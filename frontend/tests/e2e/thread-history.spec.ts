@@ -168,6 +168,10 @@ test.describe("Thread history", () => {
               type: "human",
               id: "command-room-task-request",
               content: "Run the bounded task",
+              additional_kwargs: {
+                deerflow_run_id: "run-task-1",
+                deerflow_round_id: "round-1",
+              },
             },
             {
               type: "tool",
@@ -208,6 +212,18 @@ test.describe("Thread history", () => {
                 started_at: "2025-06-01T12:00:00Z",
                 finished_at: "2025-06-01T12:01:05Z",
                 duration_ms: 65_000,
+              },
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: "run-outside-loaded-history",
+                round_id: "round-outside-loaded-history",
+                task_id: "old-task",
+                role: "reviewer",
+                description: "Old task outside loaded history",
+                status: "completed",
+                started_at: "2025-05-01T12:00:00Z",
+                finished_at: "2025-05-01T12:01:00Z",
+                duration_ms: 60_000,
               },
             ],
           },
@@ -250,7 +266,7 @@ test.describe("Thread history", () => {
     await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
     const runtimeSnapshot = await runtimeSnapshotResponse;
     expect(runtimeSnapshot.ok()).toBe(true);
-    expect((await runtimeSnapshot.json()).task_lanes).toHaveLength(1);
+    expect((await runtimeSnapshot.json()).task_lanes).toHaveLength(2);
     await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
     await expect(page.getByText("command-room", { exact: true })).toBeVisible();
     const taskCard = page
@@ -259,16 +275,30 @@ test.describe("Thread history", () => {
     await expect(taskCard).toBeVisible({ timeout: 15_000 });
     await expect(taskCard).toContainText("Execution · Cycle 1");
     await expect(taskCard).toContainText("1:05");
+    await expect(
+      page
+        .locator("[data-command-room-task]")
+        .filter({ hasText: "Old task outside loaded history" }),
+    ).toHaveCount(0);
 
     await page.getByRole("button", { name: "Open activity" }).click();
     const trajectory = page.locator("[data-command-room-trajectory]");
     await expect(trajectory).toBeVisible({ timeout: 15_000 });
-    await trajectory
-      .getByRole("button", { name: "Delivery cycle 1: Completed" })
-      .click();
+    await expect(trajectory.getByText("Delivery cycle 1")).toBeVisible();
+    const executionTask = trajectory.getByRole("button", {
+      name: "Execution · Legacy execution task: Completed",
+    });
+    const completionTime = executionTask.locator("time");
+    await expect(completionTime).toHaveAttribute(
+      "datetime",
+      "2025-06-01T12:01:05.000Z",
+    );
+    await expect(completionTime).not.toContainText("2025");
+    await expect(executionTask).not.toContainText("00:01:05");
+    await executionTask.click();
     await expect(taskCard).toBeVisible();
     await trajectory.getByRole("button", { name: "Recent tasks" }).click();
-    await expect(trajectory.getByText("00:01:05")).toBeVisible();
+    await expect(trajectory.getByText("00:01:05")).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath("command-room-navigation-desktop.png"),
     });

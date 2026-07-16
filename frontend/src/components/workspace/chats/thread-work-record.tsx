@@ -137,9 +137,9 @@ function WorkRecordBody({
     [thread.messages],
   );
   const hasTaskOverview = tasks.length > 0;
-  const records = (
-    timeline.data?.records.filter(isWorkRecordFact) ?? []
-  ).filter((record) => !hasTaskOverview || !isTaskTimelineRecord(record));
+  const records = (timeline.data?.records.filter(isWorkRecordFact) ?? [])
+    .filter((record) => !hasTaskOverview || !isTaskTimelineRecord(record))
+    .sort((left, right) => right.seq - left.seq);
   const navigateToChat = (anchorId: string) => {
     if (mobile) {
       onClose();

@@ -951,12 +951,9 @@ export function MessageList({
     );
   }, [subtaskUpdates]);
 
-  const unanchoredCommandRoomTasks = useMemo(() => {
+  const restoredCommandRoomTasksByTurn = useMemo(() => {
     if (!isCommandRoom) {
-      return {
-        byTurn: new Map<string, Subtask[]>(),
-        orphaned: [] as Subtask[],
-      };
+      return new Map<string, Subtask[]>();
     }
 
     const tasks = contextSubtasks
@@ -989,7 +986,6 @@ export function MessageList({
       };
     });
     const byTurn = new Map<string, Subtask[]>();
-    const orphaned: Subtask[] = [];
 
     for (const task of tasks) {
       let targetTurnId: string | undefined;
@@ -1004,9 +1000,7 @@ export function MessageList({
           break;
         }
       }
-      targetTurnId ??= scopes.at(-1)?.turnId;
       if (!targetTurnId) {
-        orphaned.push(task);
         continue;
       }
       const turnTasks = byTurn.get(targetTurnId) ?? [];
@@ -1014,7 +1008,7 @@ export function MessageList({
       byTurn.set(targetTurnId, turnTasks);
     }
 
-    return { byTurn, orphaned };
+    return byTurn;
   }, [anchoredSubtaskKeys, contextSubtasks, conversationTurns, isCommandRoom]);
 
   const runtimeOnlySubtasks = useMemo(() => {
@@ -1279,7 +1273,7 @@ export function MessageList({
           const turnTiming = getConversationTurnTiming(turn);
           const isActiveTurn = turn.id === activeConversationTurn?.id;
           const restoredCommandRoomTasks =
-            unanchoredCommandRoomTasks.byTurn.get(turn.id) ?? [];
+            restoredCommandRoomTasksByTurn.get(turn.id) ?? [];
           const localTurnTiming = localTurnTimings[turn.id];
           const displayTurnStartTime =
             turnTiming.startedAt ?? localTurnTiming?.startedAt;
@@ -1803,20 +1797,6 @@ export function MessageList({
             </section>
           );
         })}
-        {unanchoredCommandRoomTasks.orphaned.length > 0 && (
-          <div className="relative z-1 flex flex-col gap-2">
-            {unanchoredCommandRoomTasks.orphaned.map((task) => (
-              <SubtaskCard
-                isLoading={task.status === "in_progress"}
-                key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
-                roundId={task.roundId}
-                runId={task.runId!}
-                taskId={task.id}
-                threadId={threadId}
-              />
-            ))}
-          </div>
-        )}
         {thread.isLoading &&
           !hideProtocolUi &&
           !hideThinkingUi &&

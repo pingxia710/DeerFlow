@@ -10,7 +10,21 @@ import {
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
 const FOLLOW_RELEASE_DISTANCE_PX = 96;
-const NEW_TURN_VIEWPORT_OFFSET_PX = 24;
+
+export function getFollowingState({
+  current,
+  distanceFromBottom,
+  isProgrammatic,
+}: {
+  current: boolean;
+  distanceFromBottom: number;
+  isProgrammatic: boolean;
+}) {
+  if (isProgrammatic) {
+    return current;
+  }
+  return distanceFromBottom <= FOLLOW_RELEASE_DISTANCE_PX;
+}
 
 type ConversationTurnScrollOptions = {
   threadId: string;
@@ -37,22 +51,32 @@ export function useConversationTurnScroll({
   activeTurnId,
   isStreaming,
 }: ConversationTurnScrollOptions) {
-  const { contentRef, scrollRef, scrollToBottom } = useStickToBottomContext();
+  const { contentRef, scrollRef, scrollToBottom, stopScroll } =
+    useStickToBottomContext();
   const [isFollowing, setIsFollowing] = useState(true);
-  const [currentTurnId, setCurrentTurnId] = useState<string | null>(null);
   const followingRef = useRef(true);
-  const isStreamingRef = useRef(isStreaming);
   const previousActiveTurnIdRef = useRef<string | undefined>(undefined);
   const previousIsStreamingRef = useRef(isStreaming);
   const readerAnchorRef = useRef<ReaderAnchor | null>(null);
-  const programmaticScrollRef = useRef(false);
-
-  isStreamingRef.current = isStreaming;
+  const programmaticScrollTopRef = useRef<number | null>(null);
 
   const setFollowingState = useCallback((next: boolean) => {
     followingRef.current = next;
     setIsFollowing(next);
   }, []);
+
+  const setScrollTop = useCallback(
+    (scrollRoot: HTMLElement, nextScrollTop: number) => {
+      const maxScrollTop = Math.max(
+        0,
+        scrollRoot.scrollHeight - scrollRoot.clientHeight,
+      );
+      const target = Math.min(Math.max(nextScrollTop, 0), maxScrollTop);
+      programmaticScrollTopRef.current = target;
+      scrollRoot.scrollTop = target;
+    },
+    [],
+  );
 
   const captureReaderAnchor = useCallback(() => {
     const content = contentRef.current;
@@ -87,53 +111,25 @@ export function useConversationTurnScroll({
 
     const delta = anchor.element.getBoundingClientRect().top - anchor.top;
     if (Math.abs(delta) >= 1) {
-      scrollRoot.scrollTop += delta;
+      setScrollTop(scrollRoot, scrollRoot.scrollTop + delta);
     }
-  }, [scrollRef]);
+  }, [scrollRef, setScrollTop]);
 
   const runWithHistoryAnchor = useCallback(
     async (loadMore: LoadMoreHistory) => {
       captureReaderAnchor();
-      await Promise.resolve(loadMore());
-      requestAnimationFrame(restoreReaderAnchor);
+      try {
+        await Promise.resolve(loadMore());
+      } finally {
+        requestAnimationFrame(() => {
+          restoreReaderAnchor();
+          requestAnimationFrame(() => {
+            restoreReaderAnchor();
+          });
+        });
+      }
     },
     [captureReaderAnchor, restoreReaderAnchor],
-  );
-
-  const anchorActiveTurn = useCallback(
-    (turnId: string) => {
-      const content = contentRef.current;
-      const scrollRoot = scrollRef.current;
-      if (!content || !scrollRoot) {
-        return;
-      }
-
-      const turnElement = Array.from(
-        content.querySelectorAll<HTMLElement>("[data-conversation-turn]"),
-      ).find((element) => element.dataset.conversationTurnId === turnId);
-      if (!turnElement) {
-        return;
-      }
-
-      const rootRect = scrollRoot.getBoundingClientRect();
-      const target =
-        scrollRoot.scrollTop +
-        turnElement.getBoundingClientRect().top -
-        rootRect.top -
-        NEW_TURN_VIEWPORT_OFFSET_PX;
-      const maxScrollTop = Math.max(
-        0,
-        scrollRoot.scrollHeight - scrollRoot.clientHeight,
-      );
-
-      programmaticScrollRef.current = true;
-      scrollRoot.scrollTop = Math.min(Math.max(target, 0), maxScrollTop);
-      captureReaderAnchor();
-      requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
-      });
-    },
-    [captureReaderAnchor, contentRef, scrollRef],
   );
 
   useEffect(() => {
@@ -144,71 +140,53 @@ export function useConversationTurnScroll({
 
     const handleScroll = () => {
       captureReaderAnchor();
-      if (programmaticScrollRef.current) {
-        return;
+      const isProgrammatic =
+        programmaticScrollTopRef.current !== null &&
+        Math.abs(scrollRoot.scrollTop - programmaticScrollTopRef.current) < 1;
+      programmaticScrollTopRef.current = null;
+      const distanceFromBottom = distanceFromLiveEdge(scrollRoot);
+      if (!isProgrammatic && distanceFromBottom > FOLLOW_RELEASE_DISTANCE_PX) {
+        stopScroll();
       }
       setFollowingState(
-        distanceFromLiveEdge(scrollRoot) <= FOLLOW_RELEASE_DISTANCE_PX,
+        getFollowingState({
+          current: followingRef.current,
+          distanceFromBottom,
+          isProgrammatic,
+        }),
       );
     };
 
     scrollRoot.addEventListener("scroll", handleScroll, { passive: true });
     return () => scrollRoot.removeEventListener("scroll", handleScroll);
-  }, [captureReaderAnchor, scrollRef, setFollowingState]);
+  }, [captureReaderAnchor, scrollRef, setFollowingState, stopScroll]);
 
-  useEffect(() => {
-    const content = contentRef.current;
-    const scrollRoot = scrollRef.current;
-    if (!content || !scrollRoot) {
-      return;
-    }
-
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        if (followingRef.current && isStreamingRef.current) {
-          scrollRoot.scrollTop = scrollRoot.scrollHeight;
-          return;
-        }
-        restoreReaderAnchor();
-      });
-    });
-    observer.observe(content);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, [contentRef, restoreReaderAnchor, scrollRef]);
+  useLayoutEffect(() => {
+    previousActiveTurnIdRef.current = undefined;
+    previousIsStreamingRef.current = false;
+    readerAnchorRef.current = null;
+    setFollowingState(true);
+  }, [setFollowingState, threadId]);
 
   useLayoutEffect(() => {
     const startedStreaming = isStreaming && !previousIsStreamingRef.current;
     const changedTurn = activeTurnId !== previousActiveTurnIdRef.current;
     if (activeTurnId && (startedStreaming || (changedTurn && isStreaming))) {
-      setCurrentTurnId(activeTurnId);
-      requestAnimationFrame(() => anchorActiveTurn(activeTurnId));
+      setFollowingState(true);
+      void scrollToBottom({ animation: "instant" });
     }
     previousActiveTurnIdRef.current = activeTurnId;
     previousIsStreamingRef.current = isStreaming;
-  }, [activeTurnId, anchorActiveTurn, isStreaming]);
-
-  useEffect(() => {
-    previousActiveTurnIdRef.current = undefined;
-    previousIsStreamingRef.current = false;
-    readerAnchorRef.current = null;
-    setCurrentTurnId(null);
-    setFollowingState(true);
-  }, [setFollowingState, threadId]);
+  }, [activeTurnId, isStreaming, scrollToBottom, setFollowingState]);
 
   const returnToCurrentReply = useCallback(() => {
     setFollowingState(true);
-    void scrollToBottom({ animation: "smooth" });
+    void scrollToBottom({ animation: "instant" });
   }, [scrollToBottom, setFollowingState]);
 
   return {
     runWithHistoryAnchor,
-    shouldShowReturnToCurrentReply: currentTurnId !== null && !isFollowing,
+    shouldShowReturnToCurrentReply: !isFollowing,
     returnToCurrentReply,
   };
 }

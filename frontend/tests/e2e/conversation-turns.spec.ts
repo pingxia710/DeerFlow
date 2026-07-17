@@ -161,6 +161,15 @@ test.describe("Conversation turns", () => {
       /in progress.*0m [1-9]\d*s/i,
       { timeout: 3_000 },
     );
+    await expect
+      .poll(() =>
+        scrollRoot.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop <=
+            1,
+        ),
+      )
+      .toBeTruthy();
 
     await scrollRoot.evaluate((element) => {
       element.scrollTop = 0;

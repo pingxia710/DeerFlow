@@ -1259,10 +1259,7 @@ export function MessageList({
   }
 
   return (
-    <Conversation
-      className={cn("flex size-full flex-col", className)}
-      resize={thread.isLoading ? "smooth" : undefined}
-    >
+    <Conversation className={cn("flex size-full flex-col", className)}>
       <ConversationContent
         data-conversation-content
         className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8"

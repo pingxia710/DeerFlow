@@ -297,8 +297,9 @@ test.describe("Thread history", () => {
     await expect(executionTask).not.toContainText("00:01:05");
     await executionTask.click();
     await expect(taskCard).toBeVisible();
-    await trajectory.getByRole("button", { name: "Recent tasks" }).click();
-    await expect(trajectory.getByText("00:01:05")).toHaveCount(0);
+    await expect(
+      trajectory.getByRole("button", { name: "Recent tasks" }),
+    ).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath("command-room-navigation-desktop.png"),
     });
@@ -373,7 +374,7 @@ test.describe("Thread history", () => {
                 status: "completed",
                 metadata: {
                   command_room_container: "planning",
-                  container_artifact_kind: "spec",
+                  container_artifact_kind: "planning-forward",
                 },
                 started_at: "2025-06-01T12:00:10Z",
                 finished_at: "2025-06-01T12:01:00Z",
@@ -406,7 +407,7 @@ test.describe("Thread history", () => {
       path: testInfo.outputPath("command-room-navigation-mobile.png"),
     });
     await sheet
-      .getByRole("button", { name: "Plan proposal: Completed" })
+      .getByRole("button", { name: "Planning analysis: Completed" })
       .click();
 
     await expect(sheet).toBeHidden();

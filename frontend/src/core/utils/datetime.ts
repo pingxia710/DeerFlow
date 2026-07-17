@@ -45,11 +45,10 @@ export function formatDuration(durationMs: number) {
   if (!Number.isFinite(durationMs) || durationMs < 0) {
     return null;
   }
-  const totalSeconds = Math.floor(durationMs / 1_000);
-  const hours = Math.floor(totalSeconds / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const totalSeconds = Math.min(60 * 60, Math.floor(durationMs / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return [hours, minutes, seconds]
+  return [minutes, seconds]
     .map((part) => String(part).padStart(2, "0"))
     .join(":");
 }

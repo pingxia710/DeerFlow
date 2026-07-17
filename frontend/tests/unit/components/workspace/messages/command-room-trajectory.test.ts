@@ -57,14 +57,15 @@ test("renders a plan navigation entry without adding an approval control", () =>
   expect(markup).not.toContain("Confirm execution");
 });
 
-test("does not invent a plan section for ordinary tasks", () => {
+test("shows an explicit planning task as planning analysis", () => {
   const task = {
     ...planTask("package-a", false),
     containerArtifactKind: "planning-forward" as const,
   };
   const markup = renderPlans([task]);
 
-  expect(markup).not.toContain("1 plan");
+  expect(markup).toContain("Planning analysis");
+  expect(markup).toContain("1 plan");
   expect(markup).not.toContain("Confirm execution");
 });
 
@@ -84,7 +85,7 @@ test("shows elapsed duration for a running task", () => {
   ]);
 
   expect(markup).toContain("Running");
-  expect(markup).toContain("01:02:03");
+  expect(markup).toContain("60:00");
 });
 
 test("orders navigation newest first and exposes execution and review tasks", () => {
@@ -142,6 +143,7 @@ test("orders navigation newest first and exposes execution and review tasks", ()
   expect(ungroupedReview).toBeLessThan(cycle);
   expect(cycle).toBeLessThan(cycleReview);
   expect(cycleReview).toBeLessThan(cycleExecution);
+  expect(markup).not.toContain("Recent tasks");
 });
 
 test("keeps plan projections separated by work package", () => {

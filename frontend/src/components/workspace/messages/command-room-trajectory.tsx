@@ -129,6 +129,8 @@ function isInformationTask(task: Subtask) {
 
 function isPlanTask(task: Subtask) {
   return (
+    task.commandRoomContainer === "planning" ||
+    task.commandRoomContainer === "technical-design" ||
     task.containerArtifactKind === "spec" ||
     task.containerArtifactKind === "technical-plan"
   );
@@ -409,7 +411,6 @@ export function CommandRoomTrajectory({
   const activeTasks = orderedTasks.filter(
     (task) => task.status === "in_progress",
   );
-  const recentTasks = orderedTasks.slice(0, 12);
   const completedCount = tasks.filter(
     (task) => task.status === "completed",
   ).length;
@@ -491,7 +492,9 @@ export function CommandRoomTrajectory({
               label={
                 task.containerArtifactKind === "technical-plan"
                   ? t.chats.trajectory.technicalPlan
-                  : t.chats.trajectory.planProposal
+                  : task.containerArtifactKind === "spec"
+                    ? t.chats.trajectory.planProposal
+                    : t.chats.trajectory.planResearch
               }
               onNavigate={onNavigate}
               task={task}
@@ -522,21 +525,6 @@ export function CommandRoomTrajectory({
               />
             ),
           )}
-        </NavigationSection>
-      )}
-
-      {recentTasks.length > 0 && (
-        <NavigationSection
-          count={t.chats.trajectory.tasks(recentTasks.length)}
-          title={t.chats.trajectory.recentTasks}
-        >
-          {recentTasks.map((task) => (
-            <TaskNavigationRow
-              key={getSubtaskAnchorId(task)}
-              onNavigate={onNavigate}
-              task={task}
-            />
-          ))}
         </NavigationSection>
       )}
     </section>

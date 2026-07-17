@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0010_task_lane_wake_claim"
+HEAD = "0012_fenced_artifact_reservations"
 BASELINE = "0001_baseline"
 
 

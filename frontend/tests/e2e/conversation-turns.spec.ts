@@ -209,6 +209,245 @@ test.describe("Conversation turns", () => {
       .toBeTruthy();
   });
 
+  test("follows a content observer resize callback and disconnects it on unmount", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const state = {
+        contentObservers: [] as Array<{
+          active: boolean;
+          callbackTriggers: number;
+          disconnects: number;
+          installs: number;
+        }>,
+        maxActiveContentObservers: 0,
+        triggerContentResize: () => undefined,
+      };
+      Object.defineProperty(window, "__conversationResizeObserverState", {
+        value: state,
+      });
+
+      const recordActiveContentObservers = () => {
+        state.maxActiveContentObservers = Math.max(
+          state.maxActiveContentObservers,
+          state.contentObservers.filter((observer) => observer.active).length,
+        );
+      };
+
+      class TrackingResizeObserver implements ResizeObserver {
+        private readonly callback: ResizeObserverCallback;
+        private readonly contentObserver = {
+          active: false,
+          callbackTriggers: 0,
+          disconnects: 0,
+          installs: 0,
+        };
+        private contentTarget: Element | null = null;
+        private observesConversationContent = false;
+
+        constructor(callback: ResizeObserverCallback) {
+          this.callback = callback;
+        }
+
+        disconnect() {
+          if (this.observesConversationContent) {
+            this.contentObserver.active = false;
+            this.contentObserver.disconnects += 1;
+            recordActiveContentObservers();
+          }
+          this.contentTarget = null;
+        }
+
+        observe(target: Element) {
+          if (target.matches("[data-conversation-content]")) {
+            if (!this.observesConversationContent) {
+              this.observesConversationContent = true;
+              state.contentObservers.push(this.contentObserver);
+            }
+            this.contentObserver.active = true;
+            this.contentObserver.installs += 1;
+            this.contentTarget = target;
+            recordActiveContentObservers();
+            state.triggerContentResize = () => {
+              if (!this.contentTarget || !this.contentObserver.active) {
+                return;
+              }
+              this.contentObserver.callbackTriggers += 1;
+              this.callback(
+                [
+                  {
+                    target: this.contentTarget,
+                    contentRect: this.contentTarget.getBoundingClientRect(),
+                  } as ResizeObserverEntry,
+                ],
+                this,
+              );
+            };
+          }
+        }
+
+        takeRecords() {
+          return [];
+        }
+
+        unobserve(target: Element) {
+          if (target === this.contentTarget) {
+            this.contentTarget = null;
+          }
+        }
+      }
+
+      window.ResizeObserver = TrackingResizeObserver;
+    });
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Observed conversation",
+          messages: TURN_MESSAGES,
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Second turn answer")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const state = Reflect.get(
+            window,
+            "__conversationResizeObserverState",
+          ) as {
+            contentObservers: Array<{ active: boolean; installs: number }>;
+            maxActiveContentObservers: number;
+          };
+          return {
+            activeContentObservers: state.contentObservers.filter(
+              (observer) => observer.active,
+            ).length,
+            everyObserverInstalledOnce: state.contentObservers.every(
+              (observer) => observer.installs === 1,
+            ),
+            maxActiveContentObservers: state.maxActiveContentObservers,
+          };
+        }),
+      )
+      .toEqual({
+        activeContentObservers: 1,
+        everyObserverInstalledOnce: true,
+        maxActiveContentObservers: 1,
+      });
+
+    const conversationContent = page.locator("[data-conversation-content]");
+    const scrollRoot = conversationContent.locator("..");
+    await page.evaluate(() => {
+      const content = document.querySelector<HTMLElement>(
+        "[data-conversation-content]",
+      );
+      const state = Reflect.get(
+        window,
+        "__conversationResizeObserverState",
+      ) as {
+        triggerContentResize: () => void;
+      };
+      if (!content) {
+        throw new Error("Conversation content did not mount");
+      }
+
+      state.triggerContentResize();
+      content.style.minHeight = `${content.getBoundingClientRect().height + 2_000}px`;
+      state.triggerContentResize();
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const state = Reflect.get(
+            window,
+            "__conversationResizeObserverState",
+          ) as {
+            contentObservers: Array<{
+              active: boolean;
+              callbackTriggers: number;
+            }>;
+          };
+          return {
+            activeContentObservers: state.contentObservers.filter(
+              (observer) => observer.active,
+            ).length,
+            callbackTriggers: state.contentObservers.reduce(
+              (total, observer) => total + observer.callbackTriggers,
+              0,
+            ),
+          };
+        }),
+      )
+      .toEqual({ activeContentObservers: 1, callbackTriggers: 2 });
+    await expect
+      .poll(() =>
+        scrollRoot.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop <=
+            1,
+        ),
+      )
+      .toBeTruthy();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const state = Reflect.get(
+            window,
+            "__conversationResizeObserverState",
+          ) as {
+            contentObservers: Array<{ active: boolean }>;
+          };
+          return state.contentObservers.filter((observer) => observer.active)
+            .length;
+        }),
+      )
+      .toBe(1);
+
+    await page
+      .locator("[data-sidebar='sidebar'] a[href='/workspace/agents']")
+      .click();
+    await expect(page).toHaveURL(/\/workspace\/agents/);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const state = Reflect.get(
+            window,
+            "__conversationResizeObserverState",
+          ) as {
+            contentObservers: Array<{
+              active: boolean;
+              disconnects: number;
+              installs: number;
+            }>;
+            maxActiveContentObservers: number;
+          };
+          return {
+            activeContentObservers: state.contentObservers.filter(
+              (observer) => observer.active,
+            ).length,
+            everyObserverDisconnectedOnce: state.contentObservers.every(
+              (observer) => observer.disconnects === 1,
+            ),
+            everyObserverInstalledOnce: state.contentObservers.every(
+              (observer) => observer.installs === 1,
+            ),
+            maxActiveContentObservers: state.maxActiveContentObservers,
+          };
+        }),
+      )
+      .toEqual({
+        activeContentObservers: 0,
+        everyObserverDisconnectedOnce: true,
+        everyObserverInstalledOnce: true,
+        maxActiveContentObservers: 1,
+      });
+  });
+
   test("keeps the visible turn anchored when older run history is prepended", async ({
     page,
   }) => {

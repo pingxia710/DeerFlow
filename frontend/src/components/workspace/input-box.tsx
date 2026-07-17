@@ -17,6 +17,7 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -276,6 +277,7 @@ export function InputBox({
   onStop?: () => void;
 }) {
   const { t } = useI18n();
+  const skillSuggestionListId = useId();
   const searchParams = useSearchParams();
   const { models } = useModels();
   const { thread, isMock } = useThread();
@@ -1043,12 +1045,14 @@ export function InputBox({
           <div
             aria-label="Skill suggestions"
             className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
+            id={skillSuggestionListId}
             role="listbox"
           >
             {skillSuggestions.map((skill, index) => {
               const selected = index === skillSuggestionIndex;
               return (
                 <button
+                  id={`${skillSuggestionListId}-option-${index}`}
                   aria-selected={selected}
                   className={cn(
                     "flex min-h-12 w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
@@ -1103,6 +1107,15 @@ export function InputBox({
         </PromptInputAttachments>
         <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
           <PromptInputTextarea
+            aria-activedescendant={
+              showSkillSuggestions
+                ? `${skillSuggestionListId}-option-${skillSuggestionIndex}`
+                : undefined
+            }
+            aria-autocomplete="list"
+            aria-controls={skillSuggestionListId}
+            aria-expanded={showSkillSuggestions}
+            aria-label={t.inputBox.placeholder}
             className={cn("size-full")}
             disabled={disabled}
             placeholder={t.inputBox.placeholder}

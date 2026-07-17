@@ -406,6 +406,8 @@ export const enUS: Translations = {
       runRunning: "Run in progress",
       tasksRunning: (count) => `${count} task${count === 1 ? "" : "s"} running`,
       eventHistory: "Event history",
+      backgroundWakeFailed: (taskId, sourceRunId, roundId, attempts) =>
+        `Task ${taskId} · source run ${sourceRunId} · round ${roundId}: Child task completed; the Chair wake did not complete after ${attempts} attempts. This fact does not mean the project is complete, accepted, or needs automatic retry.`,
     },
   },
 
@@ -486,6 +488,8 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    backgroundWakeFailed: (attempts) =>
+      `Child task completed; the Chair wake did not complete after ${attempts} attempts. This fact does not mean the project is complete, accepted, or needs automatic retry.`,
   },
 
   // Token Usage

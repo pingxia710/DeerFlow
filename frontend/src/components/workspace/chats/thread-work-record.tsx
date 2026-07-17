@@ -21,6 +21,7 @@ import { useSubtasksForThread } from "@/core/tasks/context";
 import {
   useThreadRuntimeSnapshot,
   useThreadTimeline,
+  useThreadWakeFacts,
 } from "@/core/threads/hooks";
 import { isActiveRunStatus } from "@/core/threads/run-status";
 import { mergeTaskLaneSubtasks } from "@/core/threads/task-events";
@@ -132,11 +133,24 @@ function WorkRecordBody({
       mergeTaskLaneSubtasks(snapshot.data?.task_lanes ?? [], contextSubtasks),
     [contextSubtasks, snapshot.data?.task_lanes],
   );
+  const wakeScope = useMemo(() => {
+    const runId = snapshot.data?.runs?.[0]?.run_id;
+    const roundId = snapshot.data?.rounds?.find(
+      (round) => round.current_run_id === runId,
+    )?.round_id;
+    return { runId, roundId };
+  }, [snapshot.data?.rounds, snapshot.data?.runs]);
+  const wakeFacts = useThreadWakeFacts(threadId, {
+    ...wakeScope,
+    enabled,
+    poll: true,
+  });
   const chairMessages = useMemo(
     () => getCommandRoomStepMessages(thread.messages),
     [thread.messages],
   );
   const hasTaskOverview = tasks.length > 0;
+  const backgroundWakeFailures = wakeFacts.data?.items ?? [];
   const records = (timeline.data?.records.filter(isWorkRecordFact) ?? [])
     .filter((record) => !hasTaskOverview || !isTaskTimelineRecord(record))
     .sort((left, right) => right.seq - left.seq);
@@ -208,6 +222,24 @@ function WorkRecordBody({
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+        {backgroundWakeFailures.length > 0 && (
+          <div className="space-y-2 border-b px-4 py-3">
+            {backgroundWakeFailures.map((task) => (
+              <p
+                className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100"
+                key={`${task.task_id}:${task.source_run_id}:${wakeFacts.data?.round_id}`}
+                role="alert"
+              >
+                {t.chats.workRecord.backgroundWakeFailed(
+                  task.task_id,
+                  task.source_run_id,
+                  wakeFacts.data?.round_id ?? "",
+                  task.wake_attempts,
+                )}
+              </p>
+            ))}
+          </div>
+        )}
         {hasTaskOverview && (
           <CommandRoomTrajectory
             chairMessages={chairMessages}

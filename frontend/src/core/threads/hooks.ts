@@ -58,10 +58,12 @@ import {
   buildCommandRoomReadModel,
   latestRoundIdFromSnapshot,
   mergeRunsWithTerminalPrecedence,
+  parseWakeFactsProjection,
   resolveThreadHistoryReset,
   roundIdOfRun,
   type RuntimeRoundSnapshot,
   type TaskLaneSnapshot,
+  type WakeFactsProjectionResponse,
 } from "./command-room-read-model";
 import {
   clearDeletedThreadTombstones,
@@ -1040,6 +1042,14 @@ export function threadRuntimeSnapshotQueryKey(threadId?: string | null) {
   return queryKeys.thread.runtimeSnapshot(threadId);
 }
 
+export function threadWakeFactsQueryKey(
+  threadId?: string | null,
+  runId?: string | null,
+  roundId?: string | null,
+) {
+  return queryKeys.thread.wakeFacts(threadId, runId, roundId);
+}
+
 export function buildThreadRuntimeSnapshotUrl(
   baseUrl: string,
   threadId: string,
@@ -1051,6 +1061,23 @@ export function buildThreadRuntimeSnapshotUrl(
     typeof window !== "undefined" ? window.location.origin : "http://localhost",
   );
   url.searchParams.set("run_limit", String(THREAD_RUNTIME_SNAPSHOT_RUN_LIMIT));
+  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
+}
+
+export function buildThreadWakeFactsUrl(
+  baseUrl: string,
+  threadId: string,
+  runId: string,
+  roundId: string,
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const path = `/api/threads/${encodeURIComponent(threadId)}/command-room/wake-facts`;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
+  url.searchParams.set("run_id", runId);
+  url.searchParams.set("round_id", roundId);
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -1123,6 +1150,26 @@ export async function readThreadRuntimeSnapshotResponse(
     return (await response.json()) as ThreadRuntimeSnapshotResponse;
   } catch {
     throw new Error(fallback);
+  }
+}
+
+async function readThreadWakeFactsProjectionResponse(
+  response: Response,
+  scope: { threadId: string; runId: string; roundId: string },
+): Promise<WakeFactsProjectionResponse> {
+  const fallback = "Failed to load Chair wake facts.";
+  if (!response.ok) {
+    const error = new Error(await readResponseErrorMessage(response, fallback));
+    Object.defineProperty(error, "status", {
+      value: response.status,
+      enumerable: true,
+    });
+    throw error;
+  }
+  try {
+    return parseWakeFactsProjection(await response.json(), scope);
+  } catch {
+    return parseWakeFactsProjection(null, scope);
   }
 }
 
@@ -3931,6 +3978,7 @@ export function hasPersistedThreadId(
 export const THREAD_RUNTIME_BACKGROUND_POLL_INTERVAL_MS = 1500;
 export const THREAD_RUNTIME_BACKGROUND_WAKE_GRACE_MS = 15_000;
 export const THREAD_RUNTIME_ERROR_POLL_INTERVAL_MS = 15_000;
+export const THREAD_WAKE_FACTS_MAX_POLL_INTERVAL_MS = 12_000;
 const THREAD_RUNTIME_ACTIVITY_OWNER_ID = "command-room-background";
 const ACTIVE_TASK_LANE_STATUSES = new Set([
   "in_progress",
@@ -3940,7 +3988,7 @@ const ACTIVE_TASK_LANE_STATUSES = new Set([
 ]);
 
 type RuntimeSnapshotPollingState = {
-  runs?: Array<{ status?: unknown }>;
+  runs?: Array<{ run_id?: unknown; status?: unknown }>;
   task_lanes?: Array<{
     status?: unknown;
     completed_at?: unknown;
@@ -3948,6 +3996,48 @@ type RuntimeSnapshotPollingState = {
     updated_at?: unknown;
   }>;
 };
+
+type WakeFactsScope = {
+  runId?: string | null;
+  roundId?: string | null;
+};
+
+export function shouldPollThreadWakeFacts(
+  snapshot: RuntimeSnapshotPollingState | undefined,
+  { runId, roundId }: WakeFactsScope,
+) {
+  return (
+    hasPersistedThreadId(runId) &&
+    hasPersistedThreadId(roundId) &&
+    Boolean(
+      snapshot?.runs?.some(
+        (run) => run.run_id === runId && isActiveRunStatus(run.status),
+      ),
+    )
+  );
+}
+
+export function getThreadWakeFactsRefetchInterval(
+  snapshot: RuntimeSnapshotPollingState | undefined,
+  scope: WakeFactsScope,
+  unchangedPolls: number,
+  isVisible: boolean,
+) {
+  if (!isVisible || !shouldPollThreadWakeFacts(snapshot, scope)) {
+    return false;
+  }
+  const multiplier = 2 ** Math.min(Math.max(unchangedPolls, 0), 3);
+  return Math.min(
+    THREAD_RUNTIME_BACKGROUND_POLL_INTERVAL_MS * multiplier,
+    THREAD_WAKE_FACTS_MAX_POLL_INTERVAL_MS,
+  );
+}
+
+function isDocumentVisible() {
+  return (
+    typeof document === "undefined" || document.visibilityState !== "hidden"
+  );
+}
 
 export function shouldPollThreadRuntimeSnapshot(
   snapshot: RuntimeSnapshotPollingState | undefined,
@@ -4039,12 +4129,104 @@ export function useThreadRuntimeSnapshot(
     }),
     retry: false,
     refetchOnMount: "always",
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: "always",
+    refetchIntervalInBackground: false,
     refetchInterval: (query) =>
       getThreadRuntimeSnapshotRefetchInterval(
         query.state.data,
         query.state.error !== null,
       ),
+  });
+}
+
+export function useThreadWakeFacts(
+  threadId: string | undefined,
+  {
+    runId,
+    roundId,
+    enabled = true,
+    poll = false,
+  }: WakeFactsScope & { enabled?: boolean; poll?: boolean } = {},
+) {
+  const staticMode = isStaticWebsiteOnly();
+  const runtimeSnapshot = useThreadRuntimeSnapshot(threadId, {
+    enabled: enabled && poll,
+  });
+  const pollStateRef = useRef({
+    fingerprint: "",
+    scope: "",
+    unchangedPolls: 0,
+  });
+  const canRead =
+    shouldEnableThreadRuntimeSnapshotQuery({
+      enabled,
+      threadId,
+      staticMode,
+      deleted: isDeletedThreadTombstoned(threadId),
+    }) &&
+    hasPersistedThreadId(runId) &&
+    hasPersistedThreadId(roundId);
+  const scope =
+    threadId && runId && roundId ? { threadId, runId, roundId } : undefined;
+  const scopeKey = scope
+    ? `${scope.threadId}:${scope.runId}:${scope.roundId}`
+    : "";
+
+  return useQuery<WakeFactsProjectionResponse>({
+    queryKey: threadWakeFactsQueryKey(threadId, runId, roundId),
+    queryFn: async () => {
+      if (!threadId || !runId || !roundId) {
+        throw new Error("Missing wake-facts scope.");
+      }
+      const requestScope = { threadId, runId, roundId };
+      const url = buildThreadWakeFactsUrl(
+        getBackendBaseURL(),
+        threadId,
+        runId,
+        roundId,
+      );
+      const projection = await fetch(url, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+      }).then((response) =>
+        readThreadWakeFactsProjectionResponse(response, requestScope),
+      );
+      if (poll) {
+        const fingerprint = JSON.stringify(projection.items);
+        const previous = pollStateRef.current;
+        pollStateRef.current =
+          previous.scope === scopeKey && previous.fingerprint === fingerprint
+            ? { ...previous, unchangedPolls: previous.unchangedPolls + 1 }
+            : { fingerprint, scope: scopeKey, unchangedPolls: 0 };
+      }
+      return projection;
+    },
+    enabled: canRead,
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: poll ? "always" : false,
+    refetchIntervalInBackground: false,
+    refetchInterval: (query) => {
+      if (!poll || !scope) {
+        return false;
+      }
+      if (query.state.error !== null) {
+        return shouldPollThreadWakeFacts(runtimeSnapshot.data, scope) &&
+          isDocumentVisible()
+          ? THREAD_RUNTIME_ERROR_POLL_INTERVAL_MS
+          : false;
+      }
+      return getThreadWakeFactsRefetchInterval(
+        runtimeSnapshot.data,
+        scope,
+        pollStateRef.current.unchangedPolls,
+        isDocumentVisible(),
+      );
+    },
   });
 }
 

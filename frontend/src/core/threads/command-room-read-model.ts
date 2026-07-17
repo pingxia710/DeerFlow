@@ -5,6 +5,24 @@ import type { CommandRoomContainer, Subtask } from "../tasks/types";
 import { hasStrongCommandRoomIdentity } from "./owner-scope";
 import { isActiveRunStatus, isTerminalRunStatus } from "./run-status";
 
+export type WakeFactsProjectionItem = {
+  task_id: string;
+  source_run_id: string;
+  child_status: "completed";
+  child_completed_at: string | null;
+  wake_state: "failed";
+  wake_attempts: number;
+  wake_failure_reason?: "retry_exhausted" | "wake_unavailable";
+  updated_at: string;
+};
+
+export type WakeFactsProjectionResponse = {
+  thread_id: string;
+  run_id: string;
+  round_id: string;
+  items: WakeFactsProjectionItem[];
+};
+
 export type TaskLaneSnapshot = {
   thread_id: string;
   run_id: string;
@@ -106,6 +124,82 @@ function deliveryCycleStatus(
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function nonEmptyString(value: unknown) {
+  const candidate = stringValue(value);
+  return candidate?.trim() ? candidate : undefined;
+}
+
+export function parseWakeFactsProjection(
+  value: unknown,
+  scope: { threadId: string; runId: string; roundId: string },
+): WakeFactsProjectionResponse {
+  const empty: WakeFactsProjectionResponse = {
+    thread_id: scope.threadId,
+    run_id: scope.runId,
+    round_id: scope.roundId,
+    items: [],
+  };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return empty;
+  }
+  const response = value as Record<string, unknown>;
+  if (
+    response.thread_id !== scope.threadId ||
+    response.run_id !== scope.runId ||
+    response.round_id !== scope.roundId ||
+    !Array.isArray(response.items)
+  ) {
+    return empty;
+  }
+
+  const items: WakeFactsProjectionItem[] = [];
+  for (const value of response.items) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const item = value as Record<string, unknown>;
+    const taskId = nonEmptyString(item.task_id);
+    const sourceRunId = nonEmptyString(item.source_run_id);
+    const childCompletedAt = item.child_completed_at;
+    const updatedAt = nonEmptyString(item.updated_at);
+    const reason = item.wake_failure_reason;
+    if (
+      !taskId ||
+      sourceRunId !== scope.runId ||
+      item.child_status !== "completed" ||
+      (childCompletedAt !== null && !nonEmptyString(childCompletedAt)) ||
+      item.wake_state !== "failed" ||
+      typeof item.wake_attempts !== "number" ||
+      !Number.isInteger(item.wake_attempts) ||
+      item.wake_attempts < 0 ||
+      !updatedAt ||
+      (reason !== undefined &&
+        reason !== "retry_exhausted" &&
+        reason !== "wake_unavailable")
+    ) {
+      continue;
+    }
+    items.push({
+      task_id: taskId,
+      source_run_id: sourceRunId,
+      child_status: "completed",
+      child_completed_at: childCompletedAt as string | null,
+      wake_state: "failed",
+      wake_attempts: item.wake_attempts,
+      ...(reason ? { wake_failure_reason: reason } : {}),
+      updated_at: updatedAt,
+    });
+  }
+  return { ...empty, items };
+}
+
+export function wakeFactForTask(
+  projection: WakeFactsProjectionResponse | undefined,
+  taskId: string,
+) {
+  return projection?.items.find((item) => item.task_id === taskId);
 }
 
 function trajectoryStatus(

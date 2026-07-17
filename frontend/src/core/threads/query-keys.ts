@@ -13,6 +13,11 @@ export const queryKeys = {
     runs: (threadId?: string | null) => ["thread", threadId, "runs"] as const,
     runtimeSnapshot: (threadId?: string | null) =>
       ["thread", threadId, "runtime-snapshot"] as const,
+    wakeFacts: (
+      threadId?: string | null,
+      runId?: string | null,
+      roundId?: string | null,
+    ) => ["thread", threadId, "wake-facts", runId, roundId] as const,
     timeline: (threadId?: string | null) =>
       ["thread", threadId, "timeline"] as const,
     capabilitySnapshot: (threadId?: string | null) =>
@@ -66,6 +71,7 @@ export function isThreadScopedQueryKey(
     queryKey[1] === threadId &&
     (queryKey[2] === "runs" ||
       queryKey[2] === "runtime-snapshot" ||
+      queryKey[2] === "wake-facts" ||
       queryKey[2] === "timeline" ||
       queryKey[2] === "run" ||
       queryKey[2] === "task-result" ||

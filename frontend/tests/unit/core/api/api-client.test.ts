@@ -102,6 +102,7 @@ test("adds credentials and an abort signal to non-streaming SDK requests", async
 });
 
 test("includes credentials on SDK stream requests", async () => {
+  const timeout = rs.spyOn(AbortSignal, "timeout");
   rs.stubGlobal("window", {
     location: { origin: "http://localhost:2026" },
     sessionStorage: makeSessionStorage(),
@@ -119,6 +120,7 @@ test("includes credentials on SDK stream requests", async () => {
   const init = fetchMock.mock.calls[0]?.[1];
   expect(init?.method).toBe("POST");
   expect(init?.credentials).toBe("include");
+  expect(timeout).not.toHaveBeenCalled();
 });
 
 test("SDK 401 notifies AuthProvider exactly once", async () => {

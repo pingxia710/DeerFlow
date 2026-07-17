@@ -14,6 +14,8 @@ type FetchInit = RequestInit & {
    * ``null`` to opt out when a call is intentionally long-lived.
    */
   timeoutMs?: number | null;
+  /** Keep a login form's 401 response available for its own field feedback. */
+  handleUnauthorized?: boolean;
 };
 
 /** Mirror of the gateway's ``should_check_csrf`` decision. */
@@ -32,6 +34,28 @@ export class UnauthorizedError extends Error {
     super(message);
     this.name = "UnauthorizedError";
   }
+}
+
+export class RequestTimeoutError extends Error {
+  readonly timeout = true;
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, cause?: unknown) {
+    super(`Request timed out after ${timeoutMs}ms.`, { cause });
+    this.name = "RequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function isRequestTimeoutError(
+  error: unknown,
+): error is RequestTimeoutError {
+  return (
+    error instanceof RequestTimeoutError ||
+    (typeof error === "object" &&
+      error !== null &&
+      Reflect.get(error, "timeout") === true)
+  );
 }
 
 export function isUnauthorizedError(
@@ -109,7 +133,11 @@ export async function fetch(
   init?: FetchInit,
 ): Promise<Response> {
   const url = typeof input === "string" ? input : input.url;
-  const { timeoutMs, ...requestInit } = init ?? {};
+  const {
+    timeoutMs = DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    handleUnauthorized = true,
+    ...requestInit
+  } = init ?? {};
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
@@ -133,14 +161,26 @@ export async function fetch(
       ? requestInit.signal
       : mergeAbortSignals(timeoutSignal, requestInit.signal);
 
-  const res = await globalThis.fetch(url, {
-    ...requestInit,
-    headers,
-    signal,
-    credentials: "include",
-  });
+  let res: Response;
+  try {
+    res = await globalThis.fetch(url, {
+      ...requestInit,
+      headers,
+      signal,
+      credentials: "include",
+    });
+  } catch (error) {
+    if (
+      typeof timeoutMs === "number" &&
+      timeoutSignal?.aborted &&
+      !requestInit.signal?.aborted
+    ) {
+      throw new RequestTimeoutError(timeoutMs, error);
+    }
+    throw error;
+  }
 
-  if (res.status === 401) {
+  if (handleUnauthorized && res.status === 401) {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }

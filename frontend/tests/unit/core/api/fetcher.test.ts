@@ -4,12 +4,16 @@ import { resolve } from "node:path";
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
+  DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  RequestTimeoutError,
   UnauthorizedError,
   fetch,
+  isRequestTimeoutError,
   isUnauthorizedError,
 } from "@/core/api/fetcher";
 
 afterEach(() => {
+  rs.restoreAllMocks();
   rs.unstubAllGlobals();
 });
 
@@ -59,6 +63,78 @@ test("auth fetch does not add csrf header for read-only requests", async () => {
   const init = fetchMock.mock.calls[0]?.[1];
   expect(init?.credentials).toBe("include");
   expect(new Headers(init?.headers).has("X-CSRF-Token")).toBe(false);
+});
+
+test("ordinary requests receive the shared default timeout", async () => {
+  const timeout = rs.spyOn(AbortSignal, "timeout");
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 }),
+  );
+  rs.stubGlobal("fetch", fetchMock);
+
+  await fetch("/api/test");
+
+  expect(timeout).toHaveBeenCalledWith(
+    DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+  );
+  expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("explicit null keeps an intentionally long-lived request unbounded", async () => {
+  const timeout = rs.spyOn(AbortSignal, "timeout");
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 }),
+  );
+  rs.stubGlobal("fetch", fetchMock);
+
+  await fetch("/api/stream", { timeoutMs: null });
+
+  expect(timeout).not.toHaveBeenCalled();
+  expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeUndefined();
+});
+
+test("caller cancellation survives the default timeout signal merge", async () => {
+  const timeoutController = new AbortController();
+  rs.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+  const requestController = new AbortController();
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 }),
+  );
+  rs.stubGlobal("fetch", fetchMock);
+
+  await fetch("/api/test", { signal: requestController.signal });
+
+  const signal = fetchMock.mock.calls[0]?.[1]?.signal;
+  requestController.abort("cancelled by caller");
+  expect(signal).not.toBe(requestController.signal);
+  expect(signal?.aborted).toBe(true);
+});
+
+test("default timeout has a recognizable error shape", async () => {
+  const timeoutController = new AbortController();
+  const timeoutReason = new DOMException("Timed out", "TimeoutError");
+  rs.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(timeoutReason), {
+            once: true,
+          });
+        }),
+    ),
+  );
+
+  const pending = fetch("/api/test");
+  timeoutController.abort(timeoutReason);
+  const error = await pending.catch((reason: unknown) => reason);
+
+  expect(error).toBeInstanceOf(RequestTimeoutError);
+  expect(isRequestTimeoutError(error)).toBe(true);
 });
 
 test("isUnauthorizedError recognizes typed and status-shaped 401 errors", () => {

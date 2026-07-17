@@ -161,6 +161,38 @@ test("runtime snapshot polling stays active for background tasks and their wakeu
   ).toBe(15_000);
 });
 
+test("wake-facts polling only follows the active scope, pauses hidden, and backs off", async () => {
+  const { getThreadWakeFactsRefetchInterval, shouldPollThreadWakeFacts } =
+    await import("@/core/threads/hooks");
+  const snapshot = {
+    runs: [
+      { run_id: "run-active", status: "running" },
+      { run_id: "run-terminal", status: "success" },
+    ],
+  };
+  const activeScope = { runId: "run-active", roundId: "round-active" };
+
+  expect(shouldPollThreadWakeFacts(snapshot, activeScope)).toBe(true);
+  expect(
+    shouldPollThreadWakeFacts(snapshot, {
+      runId: "run-terminal",
+      roundId: "round-terminal",
+    }),
+  ).toBe(false);
+  expect(
+    getThreadWakeFactsRefetchInterval(snapshot, activeScope, 0, true),
+  ).toBe(1_500);
+  expect(
+    getThreadWakeFactsRefetchInterval(snapshot, activeScope, 1, true),
+  ).toBe(3_000);
+  expect(
+    getThreadWakeFactsRefetchInterval(snapshot, activeScope, 9, true),
+  ).toBe(12_000);
+  expect(
+    getThreadWakeFactsRefetchInterval(snapshot, activeScope, 0, false),
+  ).toBe(false);
+});
+
 function stubBrowserWindow(storage = makeLocalStorage()) {
   rs.stubGlobal("localStorage", storage);
   rs.stubGlobal("window", {

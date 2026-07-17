@@ -42,7 +42,11 @@ describe("uploads api", () => {
     expect(mockedFetch).toHaveBeenNthCalledWith(
       1,
       "/backend/api/threads/thread%2Fwith%20space/uploads",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.any(FormData),
+        timeoutMs: null,
+      }),
     );
     expect(mockedFetch).toHaveBeenNthCalledWith(
       2,

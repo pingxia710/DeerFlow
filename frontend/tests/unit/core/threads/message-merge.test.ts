@@ -19,6 +19,7 @@ import {
   applyBackgroundRunProbeResult,
   buildRunMessagesUrl,
   buildThreadRuntimeSnapshotUrl,
+  buildThreadWakeFactsUrl,
   clearDeletedThreadClientState,
   buildVisibleHistoryMessages,
   completeOptimisticUploadMessages,
@@ -68,6 +69,7 @@ import {
   taskEventRunMessageKey,
   threadRuntimeSnapshotQueryKey,
   threadRunsQueryKey,
+  threadWakeFactsQueryKey,
   upsertThreadInSearchCache,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -115,6 +117,26 @@ test("threadRuntimeSnapshotQueryKey keeps snapshot cache separate from run lists
     "thread-a",
     "runtime-snapshot",
   ]);
+});
+
+test("wake-facts query is independently scoped to its thread, run, and round", () => {
+  expect(threadWakeFactsQueryKey("thread-1", "run-1", "round-1")).toEqual([
+    "thread",
+    "thread-1",
+    "wake-facts",
+    "run-1",
+    "round-1",
+  ]);
+  expect(
+    buildThreadWakeFactsUrl(
+      "https://api.example.test",
+      "thread/with space",
+      "run/with space",
+      "round/with space",
+    ),
+  ).toBe(
+    "https://api.example.test/api/threads/thread%2Fwith%20space/command-room/wake-facts?run_id=run%2Fwith+space&round_id=round%2Fwith+space",
+  );
 });
 
 test("native runtime snapshot closed round does not imply run success", () => {
@@ -1020,6 +1042,32 @@ test("taskLaneSubtaskUpdate restores completed task lane state", () => {
     actionResultStatus: "completed",
     notify: true,
   });
+});
+
+test("taskLaneSubtaskUpdate never derives wake facts from a legacy task lane", () => {
+  const lane = {
+    thread_id: "thread-1",
+    run_id: "run-1",
+    round_id: "round-1",
+    task_id: "task-1",
+    status: "completed",
+    result: "complete child result",
+    background_recovery: {
+      version: 1 as const,
+      outcome_status: "completed" as const,
+      wake: {
+        state: "failed" as const,
+        attempts: 3,
+        last_status: "http_503",
+      },
+    },
+  };
+
+  expect(taskLaneSubtaskUpdate(lane)).toMatchObject({
+    status: "completed",
+    result: "complete child result",
+  });
+  expect(taskLaneSubtaskUpdate(lane)).not.toHaveProperty("backgroundWake");
 });
 
 test("taskLaneSubtaskUpdate restores explicit Command Room trajectory facts", () => {

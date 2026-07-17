@@ -386,6 +386,8 @@ export const zhCN: Translations = {
       runRunning: "任务运行中",
       tasksRunning: (count) => `正在执行 ${count} 个子任务`,
       eventHistory: "事件记录",
+      backgroundWakeFailed: (taskId, sourceRunId, roundId, attempts) =>
+        `任务 ${taskId} · 来源运行 ${sourceRunId} · 轮次 ${roundId}：子任务已完成；Chair 唤醒在 ${attempts} 次尝试后仍未完成。该事实不表示项目已完成、已接受，或需要自动重试。`,
     },
   },
 
@@ -464,6 +466,8 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    backgroundWakeFailed: (attempts) =>
+      `子任务已完成；Chair 唤醒在 ${attempts} 次尝试后仍未完成。该事实不表示项目已完成、已接受，或需要自动重试。`,
   },
 
   // Token Usage

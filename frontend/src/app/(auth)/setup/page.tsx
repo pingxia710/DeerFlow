@@ -176,7 +176,11 @@ export default function SetupPage() {
               Set up the administrator account to get started.
             </p>
           </div>
-          <form onSubmit={handleInitAdmin} className="space-y-2">
+          <form
+            aria-busy={loading}
+            className="space-y-2"
+            onSubmit={handleInitAdmin}
+          >
             <div className="flex flex-col space-y-1">
               <label htmlFor="email" className="text-sm font-medium">
                 Email
@@ -188,6 +192,9 @@ export default function SetupPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                aria-describedby={error ? "init-admin-error" : undefined}
+                aria-invalid={Boolean(error)}
+                className="min-h-11"
               />
             </div>
             <div className="flex flex-col space-y-1">
@@ -202,6 +209,9 @@ export default function SetupPage() {
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
                 minLength={8}
+                aria-describedby={error ? "init-admin-error" : undefined}
+                aria-invalid={Boolean(error)}
+                className="min-h-11"
               />
             </div>
             <div className="flex flex-col space-y-1">
@@ -216,10 +226,28 @@ export default function SetupPage() {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
                 minLength={8}
+                aria-describedby={error ? "init-admin-error" : undefined}
+                aria-invalid={Boolean(error)}
+                className="min-h-11"
               />
             </div>
-            {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
-            <Button type="submit" className="w-full" disabled={loading}>
+            {error && (
+              <p
+                className="ms-1 text-sm text-red-700 dark:text-red-300"
+                id="init-admin-error"
+                role="alert"
+              >
+                {error}
+              </p>
+            )}
+            <p aria-live="polite" className="sr-only">
+              {loading ? "Creating account…" : ""}
+            </p>
+            <Button
+              type="submit"
+              className="min-h-11 w-full"
+              disabled={loading}
+            >
               {loading ? "Creating account…" : "Create Admin Account"}
             </Button>
           </form>
@@ -249,39 +277,93 @@ export default function SetupPage() {
             Set your real email and a new password.
           </p>
         </div>
-        <form onSubmit={handleChangePassword} className="space-y-4">
-          <Input
-            type="email"
-            placeholder="Your email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
-          <Input
-            type="password"
-            placeholder="Current password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-          />
-          <Input
-            type="password"
-            placeholder="New password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          <Input
-            type="password"
-            placeholder="Confirm new password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          {error && <p className="text-sm text-red-500">{error}</p>}
-          <Button type="submit" className="w-full" disabled={loading}>
+        <form
+          aria-busy={loading}
+          className="space-y-4"
+          onSubmit={handleChangePassword}
+        >
+          <div className="flex flex-col space-y-1">
+            <label htmlFor="change-email" className="text-sm font-medium">
+              Email
+            </label>
+            <Input
+              id="change-email"
+              type="email"
+              placeholder="Your email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              aria-describedby={error ? "change-password-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
+            />
+          </div>
+          <div className="flex flex-col space-y-1">
+            <label htmlFor="current-password" className="text-sm font-medium">
+              Current password
+            </label>
+            <Input
+              id="current-password"
+              type="password"
+              placeholder="Current password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              required
+              aria-describedby={error ? "change-password-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
+            />
+          </div>
+          <div className="flex flex-col space-y-1">
+            <label htmlFor="new-password" className="text-sm font-medium">
+              New password
+            </label>
+            <Input
+              id="new-password"
+              type="password"
+              placeholder="New password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              minLength={8}
+              aria-describedby={error ? "change-password-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
+            />
+          </div>
+          <div className="flex flex-col space-y-1">
+            <label
+              htmlFor="confirm-new-password"
+              className="text-sm font-medium"
+            >
+              Confirm new password
+            </label>
+            <Input
+              id="confirm-new-password"
+              type="password"
+              placeholder="Confirm new password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              minLength={8}
+              aria-describedby={error ? "change-password-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
+            />
+          </div>
+          {error && (
+            <p
+              className="text-sm text-red-700 dark:text-red-300"
+              id="change-password-error"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
+          <p aria-live="polite" className="sr-only">
+            {loading ? "Setting up…" : ""}
+          </p>
+          <Button type="submit" className="min-h-11 w-full" disabled={loading}>
             {loading ? "Setting up…" : "Complete Setup"}
           </Button>
         </form>

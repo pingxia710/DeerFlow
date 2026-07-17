@@ -90,6 +90,8 @@ If a response contains more calls than the configured limit, the middleware omit
 
 Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps factual dispatch identity, status, hashes, and character counts while omitting raw prompts, worker output, and error text. It does not parse worker prose or infer a verdict, evidence strength, or next action.
 
+When a child completes but the Chair wake fails, the UI can show that transport fact without treating it as Chair consumption, project completion, approval, or a retry request.
+
 ## ACP agents (external agents)
 
 In addition to the built-in subagents, DeerFlow supports delegating to external agents through the **Agent Connect Protocol (ACP)**. ACP allows DeerFlow to invoke agents running as separate processes (including third-party CLI tools wrapped with an ACP adapter).

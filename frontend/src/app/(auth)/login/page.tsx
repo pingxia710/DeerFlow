@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
+import { fetch as fetcher } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { getBackendBaseURL } from "@/core/config";
@@ -90,7 +91,7 @@ export default function LoginPage() {
   useEffect(() => {
     let cancelled = false;
 
-    void fetch(`${getBackendBaseURL()}/api/v1/auth/setup-status`)
+    void fetcher(`${getBackendBaseURL()}/api/v1/auth/setup-status`)
       .then((r) => r.json())
       .then((data: { needs_setup?: boolean }) => {
         if (!cancelled && data.needs_setup) {
@@ -102,7 +103,7 @@ export default function LoginPage() {
       });
 
     // Fetch SSO providers
-    void fetch(`${getBackendBaseURL()}/api/v1/auth/providers`)
+    void fetcher(`${getBackendBaseURL()}/api/v1/auth/providers`)
       .then((r) => r.json())
       .then(
         (data: {
@@ -140,11 +141,11 @@ export default function LoginPage() {
         ? { "Content-Type": "application/x-www-form-urlencoded" }
         : { "Content-Type": "application/json" };
 
-      const res = await fetch(endpoint, {
+      const res = await fetcher(endpoint, {
         method: "POST",
         headers,
         body,
-        credentials: "include", // Important: include HttpOnly cookie
+        handleUnauthorized: false,
       });
 
       if (!res.ok) {
@@ -188,7 +189,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-2">
+        <form aria-busy={loading} className="space-y-2" onSubmit={handleSubmit}>
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
               {t.login.email}
@@ -200,6 +201,9 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder={t.login.emailPlaceholder}
               required
+              aria-describedby={error ? "login-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
             />
           </div>
           <div className="flex flex-col space-y-1">
@@ -214,12 +218,26 @@ export default function LoginPage() {
               placeholder={t.login.passwordPlaceholder}
               required
               minLength={isLogin ? 6 : 8}
+              aria-describedby={error ? "login-error" : undefined}
+              aria-invalid={Boolean(error)}
+              className="min-h-11"
             />
           </div>
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && (
+            <p
+              className="text-sm text-red-700 dark:text-red-300"
+              id="login-error"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
+          <p aria-live="polite" className="sr-only">
+            {loading ? t.login.pleaseWait : ""}
+          </p>
 
-          <Button type="submit" className="w-full" disabled={loading}>
+          <Button type="submit" className="min-h-11 w-full" disabled={loading}>
             {loading
               ? t.login.pleaseWait
               : isLogin
@@ -252,7 +270,7 @@ export default function LoginPage() {
                 key={provider.id}
                 type="button"
                 variant="outline"
-                className="w-full"
+                className="min-h-11 w-full"
                 disabled={loading}
                 onClick={() => {
                   window.location.href = `${getBackendBaseURL()}/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
@@ -272,7 +290,7 @@ export default function LoginPage() {
               setError("");
               setShowSsoHint(false);
             }}
-            className="text-blue-500 hover:underline"
+            className="inline-flex min-h-11 items-center text-blue-600 hover:underline dark:text-blue-300"
           >
             {isLogin ? t.login.noAccountSignUp : t.login.haveAccountSignIn}
           </button>

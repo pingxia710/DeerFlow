@@ -29,8 +29,13 @@ import { useSubtask } from "@/core/tasks/context";
 import { formatElapsedMinutesSeconds } from "@/core/tasks/elapsed";
 import type { Subtask } from "@/core/tasks/types";
 import {
+  wakeFactForTask,
+  type WakeFactsProjectionItem,
+} from "@/core/threads/command-room-read-model";
+import {
   buildRunMessagesUrl,
   readRunMessagesPageResponse,
+  useThreadWakeFacts,
 } from "@/core/threads/hooks";
 import { queryKeys } from "@/core/threads/query-keys";
 import { terminalTaskToolResult } from "@/core/threads/task-events";
@@ -149,6 +154,11 @@ export function SubtaskCard({
 }) {
   const { t } = useI18n();
   const storedTask = useSubtask({ id: taskId, threadId, runId, roundId });
+  const wakeFacts = useThreadWakeFacts(threadId, {
+    runId,
+    roundId,
+    enabled: Boolean(roundId),
+  });
   const task =
     storedTask ??
     (isLoading
@@ -169,15 +179,22 @@ export function SubtaskCard({
   }
 
   return (
-    <SubtaskCardBody className={className} isLoading={isLoading} task={task} />
+    <SubtaskCardBody
+      backgroundWake={wakeFactForTask(wakeFacts.data, taskId)}
+      className={className}
+      isLoading={isLoading}
+      task={task}
+    />
   );
 }
 
 function SubtaskCardBody({
+  backgroundWake,
   className,
   isLoading,
   task,
 }: {
+  backgroundWake?: WakeFactsProjectionItem;
   className?: string;
   isLoading: boolean;
   task: Subtask;
@@ -383,6 +400,14 @@ function SubtaskCardBody({
             </div>
           </Button>
         </div>
+        {backgroundWake && (
+          <p
+            className="mx-3 mb-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100"
+            role="alert"
+          >
+            {t.subtasks.backgroundWakeFailed(backgroundWake.wake_attempts)}
+          </p>
+        )}
         <ChainOfThoughtContent className="px-4 pb-4">
           {task.prompt && (
             <ChainOfThoughtStep

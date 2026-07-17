@@ -84,6 +84,7 @@ export async function uploadFiles(
   const response = await fetch(uploadsURL(threadId), {
     method: "POST",
     body: formData,
+    timeoutMs: null,
   });
 
   if (!response.ok) {

@@ -327,6 +327,12 @@ export interface Translations {
       runRunning: string;
       tasksRunning: (count: number) => string;
       eventHistory: string;
+      backgroundWakeFailed: (
+        taskId: string,
+        sourceRunId: string,
+        roundId: string,
+        attempts: number,
+      ) => string;
     };
   };
 
@@ -397,6 +403,7 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    backgroundWakeFailed: (attempts: number) => string;
   };
 
   // Token Usage

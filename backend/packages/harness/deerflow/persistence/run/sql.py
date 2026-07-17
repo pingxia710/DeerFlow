@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, exists, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
@@ -207,6 +208,16 @@ class RunRepository(RunStore):
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
             else:
+                if row.command_room_wake_id is not None:
+                    for key in (
+                        "thread_id",
+                        "assistant_id",
+                        "user_id",
+                        "multitask_strategy",
+                        "metadata_json",
+                        "kwargs_json",
+                    ):
+                        values[key] = getattr(row, key)
                 for key, value in values.items():
                     setattr(row, key, value)
             await session.commit()
@@ -225,6 +236,52 @@ class RunRepository(RunStore):
             if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
+
+    async def get_by_command_room_wake_id(self, wake_id: str) -> dict[str, Any] | None:
+        async with self._sf() as session:
+            row = await session.scalar(select(RunRow).where(RunRow.command_room_wake_id == wake_id))
+            return self._row_to_dict(row) if row is not None else None
+
+    async def reserve_command_room_wake(
+        self,
+        *,
+        wake_id: str,
+        thread_id: str,
+        assistant_id: str,
+        user_id: str | None,
+        metadata: dict[str, Any],
+        kwargs: dict[str, Any],
+        multitask_strategy: str,
+        model_name: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create a canonical wake row or read the single global winner."""
+        run_id = str(uuid4())
+        now = datetime.now(UTC)
+        row = RunRow(
+            run_id=run_id,
+            thread_id=thread_id,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            model_name=self._normalize_model_name(model_name),
+            status="pending",
+            multitask_strategy=multitask_strategy,
+            metadata_json=self._safe_json(metadata) or {},
+            kwargs_json=self._safe_json(kwargs) or {},
+            command_room_wake_id=wake_id,
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._sf() as session:
+            session.add(row)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                canonical = await session.scalar(select(RunRow).where(RunRow.command_room_wake_id == wake_id))
+                if canonical is None:
+                    raise
+                return self._row_to_dict(canonical), False
+            return self._row_to_dict(row), True
 
     async def list_by_thread(
         self,

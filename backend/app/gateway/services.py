@@ -39,7 +39,14 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
+from deerflow.runtime.runs.schemas import (
+    CommandRoomWakeAdmission,
+    CommandRoomWakeAdmissionUnavailable,
+    WakeAdmissionOutcome,
+    WakeAdmissionResult,
+    is_inflight_status,
+    run_status_value,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID, reset_current_user, set_current_user
 from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
@@ -49,6 +56,14 @@ _STREAM_RECOVERY_REQUIRED_EVENT = "stream_recovery_required"
 _STATUS_COMMIT_FAILED_REASON = "run_status_commit_failed"
 _TASK_EVENT_REPLAY_PAGE_SIZE = 500
 _RUN_TERMINAL_EVENT_TYPE = "run.terminal"
+_RESERVED_COMMAND_ROOM_WAKE_METADATA = frozenset(
+    {
+        "command_room_wakeup",
+        "command_room_wake_id",
+        "source_run_id",
+        "source_task_id",
+    }
+)
 _TASK_EVENT_REPLAY_TYPES = [
     "task_started",
     "task_running",
@@ -652,7 +667,10 @@ async def start_run(
     body: Any,
     thread_id: str,
     request: Request,
-) -> RunRecord:
+    *,
+    command_room_wake_admission: CommandRoomWakeAdmission | None = None,
+    return_command_room_wake_admission: bool = False,
+) -> RunRecord | WakeAdmissionResult:
     """Create a RunRecord and launch the background agent task.
 
     Parameters
@@ -669,27 +687,21 @@ async def start_run(
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
 
-    disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
-
-    body_context = getattr(body, "context", None) or {}
-    model_name = body_context.get("model_name")
-
-    # Coerce non-string model_name values to str before truncation.
-    if model_name is not None and not isinstance(model_name, str):
-        model_name = str(model_name)
-
-    # Validate model against the allowlist when a model_name is provided.
-    if model_name:
-        app_config = get_app_config()
-        resolved = app_config.get_model_config(model_name)
-        if resolved is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model {model_name!r} is not in the configured model allowlist",
-            )
+    metadata = getattr(body, "metadata", None) or {}
+    if _RESERVED_COMMAND_ROOM_WAKE_METADATA.intersection(metadata) and command_room_wake_admission is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Command Room wake metadata is reserved for internal use",
+        )
+    if command_room_wake_admission is not None and (command_room_wake_admission.thread_id != thread_id or command_room_wake_admission.assistant_id != getattr(body, "assistant_id", None)):
+        raise ValueError("command room wake admission does not match the requested run")
+    if return_command_room_wake_admission and command_room_wake_admission is None:
+        raise ValueError("command room wake admission result requires an internal admission")
 
     trusted_owner_user_id = get_trusted_internal_owner_user_id(request)
     owner_user_id = trusted_owner_user_id or _request_user_id(request)
+    if command_room_wake_admission is not None and command_room_wake_admission.user_id != owner_user_id:
+        raise ValueError("command room wake admission does not match the request owner")
     # Stateless routes strictly validate explicit body thread selectors before
     # calling here. Keep this shared check permissive for server-generated thread
     # IDs, while still rejecting a thread already owned by another user before
@@ -740,31 +752,49 @@ async def start_run(
                 request,
             )
 
-    # Finish all request/checkpoint parsing before creating the persistent run
-    # and acquiring its active-slot lease.  Any exception below this point is
-    # therefore an infrastructure/task-start failure, not a client validation
-    # error that can leave an ownerless pending run behind.
-    agent_factory = resolve_agent_factory(body.assistant_id)
-    command = getattr(body, "command", None)
-    if command and command.get("resume") is not None:
-        graph_input = Command(resume=command["resume"])
-    else:
-        graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
-    # LangGraph's saver receives an owner-qualified physical key while the
-    # external thread id remains available to tools and runtime events.
-    config.setdefault("context", {}).setdefault("thread_id", thread_id)
-    config["configurable"] = {
-        **(config.get("configurable") if isinstance(config.get("configurable"), dict) else {}),
-        **owner_checkpoint_config(thread_id, owner_user_id)["configurable"],
-    }
-    await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
-    merge_run_context_overrides(config, getattr(body, "context", None))
-    inject_authenticated_user_context(config, request)
-    stream_modes = normalize_stream_modes(body.stream_mode)
+    async def prepare_execution(execution_body: Any) -> tuple[Any, Any, dict[str, Any], list[str], str | None]:
+        body_context = getattr(execution_body, "context", None) or {}
+        model_name = body_context.get("model_name")
+        if model_name is not None and not isinstance(model_name, str):
+            model_name = str(model_name)
+        if model_name and get_app_config().get_model_config(model_name) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
+
+        command = getattr(execution_body, "command", None)
+        graph_input = Command(resume=command["resume"]) if command and command.get("resume") is not None else normalize_input(execution_body.input)
+        config = build_run_config(
+            thread_id,
+            execution_body.config,
+            execution_body.metadata,
+            assistant_id=execution_body.assistant_id,
+        )
+        # LangGraph's saver receives an owner-qualified physical key while the
+        # external thread id remains available to tools and runtime events.
+        config.setdefault("context", {}).setdefault("thread_id", thread_id)
+        config["configurable"] = {
+            **(config.get("configurable") if isinstance(config.get("configurable"), dict) else {}),
+            **owner_checkpoint_config(thread_id, owner_user_id)["configurable"],
+        }
+        await apply_checkpoint_to_run_config(config, body=execution_body, thread_id=thread_id, request=request)
+        merge_run_context_overrides(config, getattr(execution_body, "context", None))
+        inject_authenticated_user_context(config, request)
+        return (
+            resolve_agent_factory(execution_body.assistant_id),
+            graph_input,
+            config,
+            normalize_stream_modes(execution_body.stream_mode),
+            model_name,
+        )
+
+    prepared_execution = None if command_room_wake_admission is not None else await prepare_execution(body)
+    model_name = prepared_execution[-1] if prepared_execution is not None else None
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     record: RunRecord | None = None
+    wake_admission_result: WakeAdmissionResult | None = None
     run_start_gate_held = False
 
     async def release_run_start_gate() -> None:
@@ -776,24 +806,69 @@ async def start_run(
 
     try:
         try:
-            record = await run_mgr.create_or_reject(
-                thread_id,
-                body.assistant_id,
-                on_disconnect=disconnect,
-                metadata=body.metadata or {},
-                kwargs={"input": body.input, "config": body.config},
-                multitask_strategy=body.multitask_strategy,
-                model_name=model_name,
-                user_id=owner_user_id,
-                defer_start_gate_release=True,
-            )
-            run_start_gate_held = True
+            if command_room_wake_admission is not None:
+                wake_admission_result = await run_mgr.create_or_reuse_command_room_wake(command_room_wake_admission)
+                if not wake_admission_result.should_start_worker:
+                    if wake_admission_result.outcome is WakeAdmissionOutcome.ACTIVE_SLOT_BLOCKED:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Command Room wake is blocked by an active run",
+                        )
+                    if wake_admission_result.outcome is WakeAdmissionOutcome.ADMISSION_UNAVAILABLE:
+                        raise CommandRoomWakeAdmissionUnavailable("command room wake admission unavailable")
+                    if wake_admission_result.record is None:
+                        raise RuntimeError("command room wake admission returned no canonical run")
+                    return wake_admission_result if return_command_room_wake_admission else wake_admission_result.record
+                if wake_admission_result.record is None:
+                    raise RuntimeError("command room wake admission returned no canonical run")
+                record = wake_admission_result.record
+            else:
+                disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=body.metadata or {},
+                    kwargs={"input": body.input, "config": body.config},
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                    defer_start_gate_release=True,
+                )
+                run_start_gate_held = True
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
         try:
+            if command_room_wake_admission is not None:
+                payload = record.kwargs if isinstance(record.kwargs, dict) else {}
+                context = payload.get("context")
+                canonical_context = dict(context) if isinstance(context, dict) else {}
+                if record.model_name is None:
+                    canonical_context.pop("model_name", None)
+                else:
+                    canonical_context["model_name"] = record.model_name
+                body = SimpleNamespace(
+                    assistant_id=record.assistant_id,
+                    input=payload.get("input"),
+                    command=payload.get("command"),
+                    metadata=dict(record.metadata),
+                    config=payload.get("config"),
+                    context=canonical_context,
+                    checkpoint_id=payload.get("checkpoint_id"),
+                    checkpoint=payload.get("checkpoint"),
+                    interrupt_before=payload.get("interrupt_before"),
+                    interrupt_after=payload.get("interrupt_after"),
+                    stream_mode=payload.get("stream_mode"),
+                    stream_subgraphs=bool(payload.get("stream_subgraphs", False)),
+                )
+                prepared_execution = await prepare_execution(body)
+            if prepared_execution is None:
+                raise RuntimeError("run execution was not prepared")
+            agent_factory, graph_input, config, stream_modes, _ = prepared_execution
+
             # Upsert thread metadata so the thread appears in /threads/search,
             # even for threads that were never explicitly created via POST /threads
             # (e.g. stateless runs).
@@ -828,7 +903,7 @@ async def start_run(
                     terminal_reason=terminal_reason,
                     error=error,
                 )
-                return record
+                return wake_admission_result if return_command_room_wake_admission else record
 
             worker_started = False
             worker = run_agent(
@@ -898,7 +973,7 @@ async def start_run(
                 record,
                 run_ctx,
                 status=RunStatus.error,
-                terminal_reason="failed",
+                terminal_reason=("launcher_failed" if command_room_wake_admission is not None else "failed"),
                 error=f"Run task failed to start: {type(exc).__name__}",
             )
             raise
@@ -948,6 +1023,10 @@ async def start_run(
         # title from the checkpoint and calls thread_store.update_display_name
         # after the run completes.
 
+        if return_command_room_wake_admission:
+            if wake_admission_result is None:
+                raise RuntimeError("command room wake admission result was not created")
+            return wake_admission_result
         return record
     finally:
         await release_run_start_gate()

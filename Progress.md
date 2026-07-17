@@ -1,5 +1,16 @@
 # Progress
 
+## 2026-07-17 — Command Room wake-admission governance closeout
+
+- Recorded the persisted wake-admission contract: only `LEASE_WON` starts a
+  worker; repeated or old wake keys cannot start another worker; lease token and
+  generation fence stale writes; this does not promise end-to-end exactly-once.
+- Accepted local evidence: isolated PostgreSQL 16 directed suite `10 passed`;
+  related wake-admission/background regression suite `32 passed`.
+- Out of scope: production validation, Command Room child-execution recovery,
+  external-side-effect business idempotency/exactly-once, and complete
+  browser/SSE/CI end-to-end validation.
+
 ## 2026-07-16 — Unified SQLite Store and restart handover reliability
 
 - Fixed the Store providers so an absent legacy `checkpointer` section falls

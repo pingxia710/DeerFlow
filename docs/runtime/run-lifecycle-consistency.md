@@ -158,6 +158,19 @@ Alternative generation sources:
   lifecycle writes and should be used only if that metadata row is already
   transactionally available.
 
+## Command Room Wake Admission Contract
+
+Command Room background wakes use a persisted internal wake key to find one
+canonical run. Only an admission result of `LEASE_WON` may launch a worker;
+every other result returns before thread upsert, start-gate work, or task
+creation. Repeated or old wake keys reuse or observe the canonical run and must
+not launch another worker. Lease token and generation fence heartbeat, recovery,
+and terminal writes, so a failed compare-and-set makes a stale owner stop.
+
+This is not an end-to-end exactly-once guarantee. Database admission, worker
+scheduling, model/tool execution, SSE, and external side effects are not one
+transaction and require their own idempotency where needed.
+
 ## Active-Slot Transaction Contract
 
 All active-slot operations are store-level contracts. `rowcount = 0` is a normal

@@ -99,6 +99,19 @@ class MemoryRunStore(RunStore):
             "created_at": created_at or now,
             "updated_at": now,
         }
+        previous = self._runs.get(run_id)
+        if previous is not None:
+            if previous.get("command_room_wake_id") is not None:
+                for key in (
+                    "thread_id",
+                    "assistant_id",
+                    "user_id",
+                    "multitask_strategy",
+                    "metadata",
+                    "kwargs",
+                    "command_room_wake_id",
+                ):
+                    row[key] = previous.get(key)
         for key in ("owner_worker_id", "lease_token", "generation", "lease_expires_at", "lease_heartbeat_at"):
             if key in metadata:
                 row[key] = metadata[key]
@@ -108,6 +121,42 @@ class MemoryRunStore(RunStore):
     async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:
         await self.put(run_id, thread_id=thread_id, status="pending", **kwargs)
         return self._runs[run_id]
+
+    async def reserve_command_room_wake(
+        self,
+        *,
+        wake_id: str,
+        thread_id: str,
+        assistant_id: str,
+        user_id: str | None,
+        metadata: dict[str, Any],
+        kwargs: dict[str, Any],
+        multitask_strategy: str,
+        model_name: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        existing = await self.get_by_command_room_wake_id(wake_id)
+        if existing is not None:
+            return existing, False
+        run_id = str(uuid4())
+        await self.put(
+            run_id,
+            thread_id=thread_id,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            model_name=model_name,
+            status="pending",
+            multitask_strategy=multitask_strategy,
+            metadata=metadata,
+            kwargs=kwargs,
+        )
+        self._runs[run_id]["command_room_wake_id"] = wake_id
+        return self._runs[run_id], True
+
+    async def get_by_command_room_wake_id(self, wake_id: str) -> dict[str, Any] | None:
+        return next(
+            (run for run in self._runs.values() if run.get("command_room_wake_id") == wake_id),
+            None,
+        )
 
     async def get(self, run_id, *, user_id=None):
         run = self._runs.get(run_id)

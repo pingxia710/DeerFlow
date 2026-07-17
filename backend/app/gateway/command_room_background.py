@@ -14,7 +14,15 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
-from deerflow.runtime.runs.schemas import is_terminal_status, run_status_value
+from deerflow.runtime.runs.schemas import (
+    CommandRoomWakeAdmission,
+    CommandRoomWakeAdmissionUnavailable,
+    CommandRoomWakeIdentityConflict,
+    WakeAdmissionOutcome,
+    WakeAdmissionResult,
+    is_terminal_status,
+    run_status_value,
+)
 
 logger = logging.getLogger(__name__)
 _WAKE_RETRY_SECONDS = 0.25
@@ -31,6 +39,7 @@ _OUTCOME_EVENT_TYPES = {
     "cancelled": "task_cancelled",
 }
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "timed_out", "cancelled"})
+_AMBIGUOUS_LEGACY_WAKE_ID = "ambiguous_legacy_wake_id"
 
 
 @dataclass(frozen=True)
@@ -167,6 +176,9 @@ async def _create_wake_run(
     from app.gateway.routers.thread_runs import RunCreateRequest
     from app.gateway.services import start_run
 
+    if wake_id is None:
+        raise ValueError("command room wake creation requires a persisted wake_id")
+
     body = RunCreateRequest(
         assistant_id="command-room",
         input={
@@ -190,7 +202,36 @@ async def _create_wake_run(
         on_disconnect="continue",
         multitask_strategy="reject",
     )
-    return await start_run(body, job.thread_id, snapshot.build_request(job.thread_id))
+    admission = CommandRoomWakeAdmission(
+        wake_id=wake_id,
+        thread_id=job.thread_id,
+        user_id=CommandRoomBackgroundService._snapshot_user_id(snapshot),
+        assistant_id="command-room",
+        source_run_id=job.source_run_id,
+        source_task_id=job.task_id,
+        metadata=dict(body.metadata or {}),
+        kwargs={
+            "input": body.input,
+            "config": body.config,
+            "context": body.context,
+            "command": body.command,
+            "checkpoint_id": body.checkpoint_id,
+            "checkpoint": body.checkpoint,
+            "interrupt_before": body.interrupt_before,
+            "interrupt_after": body.interrupt_after,
+            "stream_mode": body.stream_mode,
+            "stream_subgraphs": body.stream_subgraphs,
+        },
+        multitask_strategy=body.multitask_strategy,
+        model_name=body.context.get("model_name") if isinstance(body.context, dict) else None,
+    )
+    return await start_run(
+        body,
+        job.thread_id,
+        snapshot.build_request(job.thread_id),
+        command_room_wake_admission=admission,
+        return_command_room_wake_admission=True,
+    )
 
 
 async def _renew_background_wake_claim(
@@ -222,7 +263,7 @@ async def _wait_for_wake_run_terminal(snapshot: _RequestSnapshot, record: Any) -
         return "success"
     user_id = getattr(record, "user_id", None)
     while True:
-        current = await run_manager.get(run_id, user_id=user_id)
+        current = await run_manager.get(run_id, user_id=user_id, recover_stale=False)
         status = run_status_value(getattr(current, "status", None))
         if is_terminal_status(status):
             return status or "error"
@@ -526,17 +567,50 @@ class CommandRoomBackgroundService:
                 lease_lost.set()
                 return
             try:
-                wake_record = await _start_wake_run(snapshot, job, outcome, wake_id=wake_id, claim_id=claim_id)
+                wake_start = await _start_wake_run(snapshot, job, outcome, wake_id=wake_id, claim_id=claim_id)
             except _WakeClaimLost:
                 lease_lost.set()
                 return
+            except CommandRoomWakeIdentityConflict:
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={
+                        "state": "failed",
+                        "attempts": attempts,
+                        "wake_id": wake_id,
+                        "last_status": "identity_conflict",
+                        "claim_id": claim_id,
+                    },
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
+                return
+            except CommandRoomWakeAdmissionUnavailable:
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={
+                        "state": "failed",
+                        "attempts": attempts,
+                        "wake_id": wake_id,
+                        "last_status": "admission_unavailable",
+                        "claim_id": claim_id,
+                    },
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
+                return
             except HTTPException as exc:
                 if exc.status_code == 409:
+                    wake = {"state": "pending", "attempts": attempts, "wake_id": wake_id, "claim_id": claim_id}
                     if not await self._persist_state(
                         job,
                         snapshot,
                         outcome=outcome,
-                        wake={"state": "pending", "attempts": attempts, "wake_id": wake_id, "claim_id": claim_id},
+                        wake=wake,
                         claim_id=claim_id,
                     ):
                         lease_lost.set()
@@ -560,7 +634,7 @@ class CommandRoomBackgroundService:
                     lease_lost.set()
                     return
                 continue
-            if wake_record is None:
+            if wake_start is None:
                 if not await self._persist_state(
                     job,
                     snapshot,
@@ -570,17 +644,68 @@ class CommandRoomBackgroundService:
                 ):
                     lease_lost.set()
                 return
-            attempts += 1
-            wake_run_id = getattr(wake_record, "run_id", None)
-            if not await self._persist_state(
-                job,
-                snapshot,
-                outcome=outcome,
-                wake={"state": "running", "attempts": attempts, "wake_id": wake_id, "run_id": wake_run_id, "claim_id": claim_id},
-                claim_id=claim_id,
-            ):
-                lease_lost.set()
+            wake_record = wake_start.record if isinstance(wake_start, WakeAdmissionResult) else wake_start
+            wake_outcome = wake_start.outcome if isinstance(wake_start, WakeAdmissionResult) else WakeAdmissionOutcome.LEASE_WON
+            if wake_outcome is WakeAdmissionOutcome.SUCCEEDED:
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={"state": "completed", "attempts": attempts, "wake_id": wake_id, "run_id": getattr(wake_record, "run_id", None), "claim_id": claim_id},
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
                 return
+            if wake_outcome is WakeAdmissionOutcome.TERMINAL_FAILURE:
+                attempts += 1
+                wake = {"state": "pending", "attempts": attempts, "last_status": "terminal_failure", "claim_id": claim_id}
+                if not await self._persist_state(job, snapshot, outcome=outcome, wake=wake, claim_id=claim_id):
+                    lease_lost.set()
+                    return
+                await asyncio.sleep(_WAKE_RETRY_SECONDS)
+                continue
+            if wake_outcome is WakeAdmissionOutcome.ACTIVE_SLOT_BLOCKED:
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={"state": "pending", "attempts": attempts, "wake_id": wake_id, "claim_id": claim_id},
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
+                    return
+                await asyncio.sleep(_WAKE_RETRY_SECONDS)
+                continue
+            if wake_outcome is WakeAdmissionOutcome.ADMISSION_UNAVAILABLE:
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={
+                        "state": "failed",
+                        "attempts": attempts,
+                        "wake_id": wake_id,
+                        "last_status": "admission_unavailable",
+                        "claim_id": claim_id,
+                    },
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
+                return
+            if wake_record is None:
+                raise RuntimeError("command room wake admission returned no canonical run")
+            wake_run_id = getattr(wake_record, "run_id", None)
+            if wake_outcome is WakeAdmissionOutcome.LEASE_WON:
+                attempts += 1
+                if not await self._persist_state(
+                    job,
+                    snapshot,
+                    outcome=outcome,
+                    wake={"state": "running", "attempts": attempts, "wake_id": wake_id, "run_id": wake_run_id, "claim_id": claim_id},
+                    claim_id=claim_id,
+                ):
+                    lease_lost.set()
+                    return
             try:
                 wake_status = await _wait_for_wake_run_terminal(snapshot, wake_record)
             except asyncio.CancelledError:
@@ -601,6 +726,7 @@ class CommandRoomBackgroundService:
                     lease_lost.set()
                 return
             logger.warning("Retrying Command Room wake for task %s after wake run ended with %s", job.task_id, wake_status)
+            attempts += 1 if wake_outcome is WakeAdmissionOutcome.ACTIVE else 0
             wake = {"state": "pending", "attempts": attempts, "last_status": wake_status, "claim_id": claim_id}
             if not await self._persist_state(job, snapshot, outcome=outcome, wake=wake, claim_id=claim_id):
                 lease_lost.set()
@@ -649,30 +775,28 @@ class CommandRoomBackgroundService:
         run_manager = getattr(state, "run_manager", None)
         if run_manager is None:
             return None
-        user_id = self._snapshot_user_id(snapshot)
         run_id = wake.get("run_id")
-        if isinstance(run_id, str) and run_id:
-            record = await run_manager.get(run_id, user_id=user_id)
-        else:
-            wake_id = wake.get("wake_id")
-            list_by_thread = getattr(run_manager, "list_by_thread", None)
-            if not isinstance(wake_id, str) or not wake_id or not callable(list_by_thread):
-                return None
-            records = await list_by_thread(job.thread_id, user_id=user_id, limit=200)
-            record = next(
-                (
-                    item
-                    for item in records
-                    if isinstance(getattr(item, "metadata", None), dict)
-                    and item.metadata.get("command_room_wakeup") is True
-                    and item.metadata.get("source_run_id") == job.source_run_id
-                    and item.metadata.get("source_task_id") == job.task_id
-                    and item.metadata.get("command_room_wake_id") == wake_id
-                ),
-                None,
-            )
-        if record is None:
+        wake_id = wake.get("wake_id")
+        if not isinstance(wake_id, str) or not wake_id:
+            return _AMBIGUOUS_LEGACY_WAKE_ID if isinstance(run_id, str) and run_id else None
+        find_wake = getattr(run_manager, "find_command_room_wake", None)
+        if not callable(find_wake):
             return None
+        record = await find_wake(
+            CommandRoomWakeAdmission(
+                wake_id=wake_id,
+                thread_id=job.thread_id,
+                user_id=self._snapshot_user_id(snapshot),
+                assistant_id="command-room",
+                source_run_id=job.source_run_id,
+                source_task_id=job.task_id,
+                metadata={},
+                kwargs={},
+            ),
+            probe_stale=True,
+        )
+        if record is None:
+            return _AMBIGUOUS_LEGACY_WAKE_ID if isinstance(run_id, str) and run_id else None
         return run_status_value(getattr(record, "status", None))
 
     async def recover(self, app: Any) -> None:
@@ -741,7 +865,27 @@ class CommandRoomBackgroundService:
                 wake = background.get("wake") if isinstance(background.get("wake"), dict) else {}
                 if wake.get("state") == "completed" or wake.get("state") == "failed":
                     continue
-                wake_status = await self._existing_wake_status(snapshot, job, wake)
+                try:
+                    wake_status = await self._existing_wake_status(snapshot, job, wake)
+                except CommandRoomWakeIdentityConflict:
+                    wake_status = "identity_conflict"
+                except CommandRoomWakeAdmissionUnavailable:
+                    wake_status = "admission_unavailable"
+                if wake_status in {_AMBIGUOUS_LEGACY_WAKE_ID, "identity_conflict", "admission_unavailable"}:
+                    if not await self._persist_state(
+                        job,
+                        snapshot,
+                        outcome=outcome,
+                        wake={
+                            **wake,
+                            "state": "failed",
+                            "last_status": wake_status,
+                            "claim_id": claim_id,
+                        },
+                        claim_id=claim_id,
+                    ):
+                        continue
+                    continue
                 if wake_status == "success":
                     if not await self._persist_state(
                         job,

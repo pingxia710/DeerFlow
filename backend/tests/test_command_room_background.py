@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -8,7 +9,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.gateway import command_room_background as background_module
 from deerflow.persistence.base import Base
 from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
+from deerflow.persistence.run import RunRepository
 from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import (
+    CommandRoomWakeAdmissionUnavailable,
+    CommandRoomWakeIdentityConflict,
+    WakeAdmissionOutcome,
+    WakeAdmissionResult,
+)
 
 
 async def _background_snapshot(*, user_id: str | None = None):
@@ -17,6 +26,28 @@ async def _background_snapshot(*, user_id: str | None = None):
     app = SimpleNamespace(state=SimpleNamespace(round_state_store=round_store))
     state = {"user": SimpleNamespace(id=user_id)} if user_id else {}
     return background_module._RequestSnapshot(app=app, headers=[], state=state), round_store
+
+
+def test_wake_status_wait_does_not_trigger_stale_recovery():
+    async def scenario():
+        calls: list[bool] = []
+
+        class RunManager:
+            async def get(self, _run_id, *, user_id=None, recover_stale=True):
+                assert user_id == "user-1"
+                calls.append(recover_stale)
+                return SimpleNamespace(status="success")
+
+        snapshot = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RunManager())))
+        status = await background_module._wait_for_wake_run_terminal(
+            snapshot,
+            SimpleNamespace(run_id="wake-run", user_id="user-1"),
+        )
+
+        assert status == "success"
+        assert calls == [False]
+
+    asyncio.run(scenario())
 
 
 def test_background_service_returns_immediately_and_retries_chair_wakeup(monkeypatch):
@@ -195,27 +226,10 @@ def test_terminal_outcome_is_idempotent_and_recovery_does_not_execute_again(monk
     asyncio.run(scenario())
 
 
-def test_recovery_finds_a_wake_created_before_its_run_id_was_persisted(monkeypatch):
+def test_recovery_retries_the_persisted_wake_id_before_lane_run_id_is_written(monkeypatch):
     async def scenario():
         snapshot, round_store = await _background_snapshot()
-        wake_id = "wake-created-before-crash"
-
-        class RunManager:
-            async def list_by_thread(self, thread_id, *, user_id=None, limit=200):
-                assert (thread_id, user_id, limit) == ("thread-1", None, 200)
-                return [
-                    SimpleNamespace(
-                        status="success",
-                        metadata={
-                            "command_room_wakeup": True,
-                            "source_run_id": "run-1",
-                            "source_task_id": "task-wake-created",
-                            "command_room_wake_id": wake_id,
-                        },
-                    )
-                ]
-
-        snapshot.app.state.run_manager = RunManager()
+        wake_id = str(uuid4())
 
         async def execute():
             raise AssertionError("recovery must not execute persisted work")
@@ -237,17 +251,126 @@ def test_recovery_finds_a_wake_created_before_its_run_id_was_persisted(monkeypat
             wake={"state": "starting", "attempts": 1, "wake_id": wake_id},
         )
 
-        async def start_wake(*_args, **_kwargs):
-            raise AssertionError("existing wake must be reused")
+        wake_calls = []
+
+        async def start_wake(*_args, **kwargs):
+            wake_calls.append(kwargs["wake_id"])
+            return WakeAdmissionResult(
+                record=SimpleNamespace(run_id="wake-run", status="success"),
+                outcome=WakeAdmissionOutcome.SUCCEEDED,
+                created=False,
+            )
 
         monkeypatch.setattr(background_module, "_start_wake_run", start_wake)
         recovered_service = background_module.CommandRoomBackgroundService()
         await recovered_service.recover(snapshot.app)
+        await asyncio.gather(*tuple(recovered_service._tasks.values()))
 
         lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-wake-created")
+        assert wake_calls == [wake_id]
         assert lane["handoff"]["background_recovery"]["wake"]["state"] == "completed"
         assert recovered_service._tasks == {}
         await recovered_service.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_uses_exact_wake_lookup_and_fails_closed_for_legacy_cache(monkeypatch, tmp_path):
+    async def scenario():
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'wake-exact-recovery.db'}"
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        repository = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        manager = RunManager(repository)
+        round_store = MemoryRoundStateStore()
+        app = SimpleNamespace(state=SimpleNamespace(round_state_store=round_store, run_manager=manager))
+        service = background_module.CommandRoomBackgroundService()
+        outcome = CommandRoomBackgroundOutcome(status="completed", result="durable result")
+        wake_id = str(uuid4())
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-exact-recovery",
+            description="Execution",
+            subagent_type="executor",
+            execute=service._unavailable_execute,
+        )
+        calls: list[str] = []
+
+        async def start_wake(*_args, **kwargs):
+            calls.append(kwargs["wake_id"])
+            return WakeAdmissionResult(
+                record=SimpleNamespace(run_id="unexpected", status="success"),
+                outcome=WakeAdmissionOutcome.SUCCEEDED,
+                created=False,
+            )
+
+        monkeypatch.setattr(background_module, "_start_wake_run", start_wake)
+        try:
+            await round_store.bind_run(thread_id="thread-1", run_id="run-1")
+            admission = background_module.CommandRoomWakeAdmission(
+                wake_id=wake_id,
+                thread_id="thread-1",
+                user_id=None,
+                assistant_id="command-room",
+                source_run_id="run-1",
+                source_task_id="task-exact-recovery",
+                metadata={},
+                kwargs={},
+            )
+            canonical = await manager.create_or_reuse_command_room_wake(admission)
+            assert canonical.record is not None
+            await repository.update_status(canonical.record.run_id, "success")
+            await service._persist_state(
+                job,
+                background_module._RequestSnapshot.for_recovery(app, None),
+                outcome=outcome,
+                wake={"state": "starting", "attempts": 1, "wake_id": wake_id},
+            )
+
+            await service.recover(app)
+            lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-exact-recovery")
+            assert calls == []
+            assert lane["handoff"]["background_recovery"]["wake"]["state"] == "completed"
+
+            legacy_wake_id = str(uuid4())
+            await repository.put(
+                "legacy-wake-run",
+                thread_id="thread-1",
+                assistant_id="command-room",
+                status="success",
+                metadata={
+                    "command_room_wakeup": True,
+                    "command_room_wake_id": legacy_wake_id,
+                    "source_run_id": "run-1",
+                    "source_task_id": "task-legacy-cache",
+                },
+            )
+            legacy_job = CommandRoomBackgroundJob(
+                thread_id="thread-1",
+                source_run_id="run-1",
+                task_id="task-legacy-cache",
+                description="Execution",
+                subagent_type="executor",
+                execute=service._unavailable_execute,
+            )
+            await service._persist_state(
+                legacy_job,
+                background_module._RequestSnapshot.for_recovery(app, None),
+                outcome=outcome,
+                wake={"state": "starting", "attempts": 1, "wake_id": legacy_wake_id, "run_id": "legacy-wake-run"},
+            )
+
+            await service.recover(app)
+            legacy_lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-legacy-cache")
+            legacy_wake = legacy_lane["handoff"]["background_recovery"]["wake"]
+            assert calls == []
+            assert legacy_wake["state"] == "failed"
+            assert legacy_wake["last_status"] == "ambiguous_legacy_wake_id"
+        finally:
+            await service.shutdown()
+            await engine.dispose()
 
     asyncio.run(scenario())
 
@@ -394,10 +517,12 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
 
         captured = {}
 
-        async def start_run(body, thread_id, request):
-            captured.update(body=body, thread_id=thread_id, request=request)
+        async def start_run(body, thread_id, request, **kwargs):
+            captured.update(body=body, thread_id=thread_id, request=request, **kwargs)
 
         class Snapshot:
+            state = {}
+
             def build_request(self, thread_id):
                 return {"thread_id": thread_id}
 
@@ -419,6 +544,7 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
             Snapshot(),
             job,
             CommandRoomBackgroundOutcome(status="completed", result="complete result"),
+            wake_id=str(uuid4()),
         )
 
         body = captured["body"]
@@ -427,9 +553,198 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
         assert body.assistant_id == "command-room"
         assert body.context["model_name"] == "configured-model"
         assert body.metadata["source_work_package_id"] == "package-a"
+        assert captured["command_room_wake_admission"].wake_id == body.metadata["command_room_wake_id"]
         assert message["name"] == "command_room_background_result"
         assert message["additional_kwargs"]["hide_from_ui"] is True
         assert "complete result" in message["content"]
+
+    asyncio.run(scenario())
+
+
+def test_two_sqlite_gateways_reach_start_run_but_only_the_lease_winner_starts_a_worker(monkeypatch, tmp_path):
+    async def scenario():
+        from app.gateway import services
+
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'two-gateway-real-start.db'}"
+        first_engine = create_async_engine(database_url, connect_args={"timeout": 30})
+        second_engine = create_async_engine(database_url, connect_args={"timeout": 30})
+        async with first_engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        first_manager = RunManager(RunRepository(async_sessionmaker(first_engine, expire_on_commit=False)), worker_id="first-gateway")
+        second_manager = RunManager(RunRepository(async_sessionmaker(second_engine, expire_on_commit=False)), worker_id="second-gateway")
+        thread_store = SimpleNamespace()
+
+        async def get_thread(*_args, **_kwargs):
+            return {"thread_id": "thread-1"}
+
+        async def update_thread_status(*_args, **_kwargs):
+            return None
+
+        thread_store.get = get_thread
+        thread_store.update_status = update_thread_status
+        bridge = SimpleNamespace()
+        worker_runs = []
+
+        async def run_agent(_bridge, _manager, record, **_kwargs):
+            worker_runs.append(record.run_id)
+            record.status = "success"
+
+        async def no_checkpoint(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(services, "get_stream_bridge", lambda _request: bridge)
+        monkeypatch.setattr(services, "get_run_manager", lambda request: request.app.state.run_manager)
+        monkeypatch.setattr(services, "get_run_context", lambda _request: SimpleNamespace(thread_store=thread_store, event_store=None))
+        monkeypatch.setattr(services, "build_run_config", lambda *_args, **_kwargs: {"configurable": {}})
+        monkeypatch.setattr(services, "owner_checkpoint_config", lambda *_args, **_kwargs: {"configurable": {}})
+        monkeypatch.setattr(services, "apply_checkpoint_to_run_config", no_checkpoint)
+        monkeypatch.setattr(services, "merge_run_context_overrides", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(services, "inject_authenticated_user_context", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(services, "normalize_input", lambda value: value)
+        monkeypatch.setattr(services, "normalize_stream_modes", lambda _value: [])
+        monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
+        monkeypatch.setattr(services, "run_agent", run_agent)
+
+        first_snapshot = background_module._RequestSnapshot(app=SimpleNamespace(state=SimpleNamespace(run_manager=first_manager)), headers=[], state={})
+        second_snapshot = background_module._RequestSnapshot(app=SimpleNamespace(state=SimpleNamespace(run_manager=second_manager)), headers=[], state={})
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-real-admission",
+            description="Execution",
+            subagent_type="executor",
+            execute=lambda: None,
+        )
+        outcome = CommandRoomBackgroundOutcome(status="completed", result="durable result")
+        wake_id = str(uuid4())
+        try:
+            first, second = await asyncio.gather(
+                background_module._create_wake_run(first_snapshot, job, outcome, wake_id=wake_id, task_lane_facts="first"),
+                background_module._create_wake_run(second_snapshot, job, outcome, wake_id=wake_id, task_lane_facts="second"),
+            )
+            assert isinstance(first, WakeAdmissionResult)
+            assert isinstance(second, WakeAdmissionResult)
+            assert first.record is not None and second.record is not None
+            assert first.record.run_id == second.record.run_id
+            assert sum(result.should_start_worker for result in (first, second)) == 1
+            await asyncio.sleep(0)
+            assert worker_runs == [first.record.run_id]
+        finally:
+            await first_engine.dispose()
+            await second_engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_wake_outcomes_keep_lane_writes_fenced_and_reuse_or_rotate_keys(monkeypatch):
+    async def scenario():
+        async def run_case(name, starts, *, expected_state, expected_status, expected_calls):
+            snapshot, round_store = await _background_snapshot()
+            service = background_module.CommandRoomBackgroundService()
+            job = CommandRoomBackgroundJob(
+                thread_id="thread-1",
+                source_run_id="run-1",
+                task_id=f"task-{name}",
+                description="Execution",
+                subagent_type="executor",
+                execute=lambda: None,
+            )
+            outcome = CommandRoomBackgroundOutcome(status="completed", result="durable result")
+            await service._persist_state(job, snapshot, outcome=outcome, wake={"state": "pending", "attempts": 0})
+            calls = []
+            persisted_states = []
+            persist_state = service._persist_state
+
+            async def record_persisted_state(*args, **kwargs):
+                persisted_states.append(kwargs["wake"]["state"])
+                return await persist_state(*args, **kwargs)
+
+            async def start_wake(*_args, **kwargs):
+                calls.append(kwargs["wake_id"])
+                result = starts.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            monkeypatch.setattr(background_module, "_start_wake_run", start_wake)
+            monkeypatch.setattr(background_module, "_WAKE_RETRY_SECONDS", 0)
+            monkeypatch.setattr(background_module, "_wait_for_wake_run_terminal", lambda *_args: asyncio.sleep(0, result="success"))
+            monkeypatch.setattr(service, "_persist_state", record_persisted_state)
+            claim_id = await service._claim_wake(job, snapshot)
+            assert claim_id is not None
+            await service._wake_with_claim(job, snapshot, outcome, claim_id)
+            lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id=job.task_id)
+            wake = lane["handoff"]["background_recovery"]["wake"]
+            assert wake["state"] == expected_state
+            assert wake.get("last_status") == expected_status
+            assert len(calls) == expected_calls
+            await service.shutdown()
+            return calls, persisted_states
+
+        active_calls, active_states = await run_case(
+            "active",
+            [
+                WakeAdmissionResult(
+                    record=SimpleNamespace(run_id="active-run", status="running"),
+                    outcome=WakeAdmissionOutcome.ACTIVE,
+                    created=False,
+                )
+            ],
+            expected_state="completed",
+            expected_status=None,
+            expected_calls=1,
+        )
+        assert len(active_calls) == 1
+        assert "running" not in active_states
+
+        blocked_calls, _blocked_states = await run_case(
+            "blocked",
+            [
+                HTTPException(status_code=409, detail="source active"),
+                WakeAdmissionResult(
+                    record=SimpleNamespace(run_id="blocked-run", status="running"),
+                    outcome=WakeAdmissionOutcome.LEASE_WON,
+                    created=False,
+                ),
+            ],
+            expected_state="completed",
+            expected_status=None,
+            expected_calls=2,
+        )
+        assert blocked_calls[0] == blocked_calls[1]
+
+        terminal_calls, _terminal_states = await run_case(
+            "terminal",
+            [
+                WakeAdmissionResult(
+                    record=SimpleNamespace(run_id="failed-run", status="error"),
+                    outcome=WakeAdmissionOutcome.TERMINAL_FAILURE,
+                    created=False,
+                ),
+                WakeAdmissionResult(
+                    record=SimpleNamespace(run_id="replacement-run", status="running"),
+                    outcome=WakeAdmissionOutcome.LEASE_WON,
+                    created=True,
+                ),
+            ],
+            expected_state="completed",
+            expected_status=None,
+            expected_calls=2,
+        )
+        assert terminal_calls[0] != terminal_calls[1]
+
+        for name, error, status in (
+            ("identity", CommandRoomWakeIdentityConflict("conflict"), "identity_conflict"),
+            ("unavailable", CommandRoomWakeAdmissionUnavailable("unavailable"), "admission_unavailable"),
+        ):
+            calls, _states = await run_case(
+                name,
+                [error],
+                expected_state="failed",
+                expected_status=status,
+                expected_calls=1,
+            )
+            assert len(calls) == 1
 
     asyncio.run(scenario())
 
@@ -635,7 +950,7 @@ def test_takeover_during_real_task_lane_facts_fences_old_gateway_before_start_ru
         async def execute():
             raise AssertionError("the durable child outcome must not run again")
 
-        async def start_run(body, thread_id, request):
+        async def start_run(body, thread_id, request, **_kwargs):
             assert thread_id == "thread-1"
             assert request.scope["path"] == "/api/threads/thread-1/runs"
             start_calls.append(body.metadata["command_room_wake_id"])
@@ -650,6 +965,7 @@ def test_takeover_during_real_task_lane_facts_fences_old_gateway_before_start_ru
             execute=execute,
         )
         outcome = CommandRoomBackgroundOutcome(status="completed", result="durable result")
+        wake_id = str(uuid4())
         first_claim_id = "first-gateway"
         second_claim_id = "second-gateway"
         claimed_at = datetime.now(UTC)
@@ -660,7 +976,7 @@ def test_takeover_during_real_task_lane_facts_fences_old_gateway_before_start_ru
                 job,
                 first_snapshot,
                 outcome=outcome,
-                wake={"state": "starting", "attempts": 0, "wake_id": "wake-1"},
+                wake={"state": "starting", "attempts": 0, "wake_id": wake_id},
             )
             assert await first_store.claim_background_wake(
                 thread_id="thread-1",
@@ -672,7 +988,7 @@ def test_takeover_during_real_task_lane_facts_fences_old_gateway_before_start_ru
                 lease_expires_at=expires_at,
             )
 
-            old_start = asyncio.create_task(background_module._start_wake_run(first_snapshot, job, outcome, wake_id="wake-1", claim_id=first_claim_id))
+            old_start = asyncio.create_task(background_module._start_wake_run(first_snapshot, job, outcome, wake_id=wake_id, claim_id=first_claim_id))
             await asyncio.wait_for(facts_started.wait(), timeout=2)
             takeover_at = expires_at + timedelta(seconds=1)
             assert await second_store.claim_background_wake(
@@ -693,9 +1009,9 @@ def test_takeover_during_real_task_lane_facts_fences_old_gateway_before_start_ru
             else:
                 raise AssertionError("the old owner reached start_run after its claim was taken over")
 
-            await background_module._start_wake_run(second_snapshot, job, outcome, wake_id="wake-1", claim_id=second_claim_id)
+            await background_module._start_wake_run(second_snapshot, job, outcome, wake_id=wake_id, claim_id=second_claim_id)
 
-            assert start_calls == ["wake-1"]
+            assert start_calls == [wake_id]
         finally:
             release_facts.set()
             await first_engine.dispose()

@@ -188,6 +188,25 @@ class RunStore(abc.ABC):
             raise RuntimeError(f"pending run {run_id!r} was not persisted")
         return row
 
+    async def reserve_command_room_wake(
+        self,
+        *,
+        wake_id: str,
+        thread_id: str,
+        assistant_id: str,
+        user_id: str | None,
+        metadata: dict[str, Any],
+        kwargs: dict[str, Any],
+        multitask_strategy: str,
+        model_name: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically insert or read the canonical Command Room wake run."""
+        raise NotImplementedError
+
+    async def get_by_command_room_wake_id(self, wake_id: str) -> dict[str, Any] | None:
+        """Return the globally canonical wake run without owner filtering."""
+        raise NotImplementedError
+
     async def try_acquire_active_slot(
         self,
         thread_id: str,

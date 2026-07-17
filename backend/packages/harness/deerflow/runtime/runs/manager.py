@@ -13,7 +13,19 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import ACTIVE_RUN_STATUS_VALUES, DisconnectMode, RunStatus, is_inflight_status, is_terminal_status, run_status_value
+from .schemas import (
+    ACTIVE_RUN_STATUS_VALUES,
+    CommandRoomWakeAdmission,
+    CommandRoomWakeAdmissionUnavailable,
+    CommandRoomWakeIdentityConflict,
+    DisconnectMode,
+    RunStatus,
+    WakeAdmissionOutcome,
+    WakeAdmissionResult,
+    is_inflight_status,
+    is_terminal_status,
+    run_status_value,
+)
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.store.base import RunStore
@@ -126,6 +138,7 @@ class RunRecord:
     lead_agent_tokens: int = 0
     subagent_tokens: int = 0
     middleware_tokens: int = 0
+    command_room_wake_id: str | None = None
     # Per-model token breakdown
     token_usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
     message_count: int = 0
@@ -373,7 +386,8 @@ class RunManager:
                     record.thread_id,
                     record.run_id,
                     owner_worker_id=self._worker_id,
-                    lease_expires_at=datetime.now(UTC) + _ACTIVE_SLOT_LEASE_TTL,
+                    lease_expires_at=(now := datetime.now(UTC)) + _ACTIVE_SLOT_LEASE_TTL,
+                    now=now,
                 ),
             )
         except NotImplementedError:
@@ -714,6 +728,7 @@ class RunManager:
             lease_token=metadata.get("lease_token") or row.get("lease_token"),
             lease_generation=lease_generation,
             lease_owner_worker_id=metadata.get("owner_worker_id") or row.get("owner_worker_id"),
+            command_room_wake_id=row.get("command_room_wake_id"),
         )
 
     @staticmethod
@@ -1050,14 +1065,310 @@ class RunManager:
         finally:
             await self._end_run_start(thread_id)
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    @staticmethod
+    def _verify_command_room_wake_identity(
+        record: RunRecord,
+        admission: CommandRoomWakeAdmission,
+    ) -> None:
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        if (
+            record.command_room_wake_id != admission.wake_id
+            or record.thread_id != admission.thread_id
+            or record.user_id != admission.user_id
+            or record.assistant_id != "command-room"
+            or metadata.get("command_room_wakeup") is not True
+            or metadata.get("source_run_id") != admission.source_run_id
+            or metadata.get("source_task_id") != admission.source_task_id
+        ):
+            raise CommandRoomWakeIdentityConflict("command room wake identity conflict")
+
+    @staticmethod
+    def _wake_outcome_for_terminal_status(status: str) -> WakeAdmissionOutcome:
+        return WakeAdmissionOutcome.SUCCEEDED if status == RunStatus.success.value else WakeAdmissionOutcome.TERMINAL_FAILURE
+
+    async def _probe_stale_command_room_wake(
+        self,
+        record: RunRecord,
+        admission: CommandRoomWakeAdmission,
+    ) -> RunRecord:
+        """Fence one expired lease for an explicitly resolved wake run."""
+        if self._store is None or run_status_value(record.status) not in ACTIVE_RUN_STATUS_VALUES:
+            return record
+        generation = record.lease_generation
+        if generation is None:
+            return record
+        now = datetime.now(UTC)
+        try:
+            recovered = await self._call_store_with_retry(
+                "recover_expired_lease",
+                record.run_id,
+                lambda: self._store.recover_expired_lease(
+                    record.run_id,
+                    generation=generation,
+                    terminal_status=RunStatus.error.value,
+                    terminal_reason="worker_lost",
+                    recovery_worker_id=self._worker_id,
+                    now=now,
+                    error=_STALE_INFLIGHT_ERROR,
+                ),
+            )
+        except Exception as exc:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake stale probe failed") from exc
+        if not recovered:
+            return record
+        try:
+            row = await self._call_store_with_retry(
+                "get_by_command_room_wake_id",
+                admission.wake_id,
+                lambda: self._store.get_by_command_room_wake_id(admission.wake_id),
+            )
+        except Exception as exc:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake stale probe reread failed") from exc
+        if row is None:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake disappeared after stale probe")
+        record = self._record_from_store(row)
+        self._verify_command_room_wake_identity(record, admission)
+        async with self._lock:
+            live_record = self._runs.get(record.run_id)
+            if live_record is not None:
+                live_record.abort_action = "interrupt"
+                live_record.abort_event.set()
+                if live_record.task is not None and not live_record.task.done():
+                    live_record.task.cancel()
+                live_record.status = record.status
+                live_record.error = record.error
+                live_record.terminal_reason = record.terminal_reason
+                live_record.updated_at = record.updated_at
+                live_record.lease_terminal_committing = False
+                live_record.lease_terminal_committed = True
+                record = live_record
+        if not await self._persist_round_state_for_status(
+            record,
+            RunStatus.error,
+            error=record.error,
+            terminal_reason=record.terminal_reason,
+        ):
+            await self._queue_terminal_round_projection_retry(
+                record,
+                RunStatus.error,
+                error=record.error,
+                terminal_reason=record.terminal_reason,
+            )
+        return record
+
+    async def find_command_room_wake(
+        self,
+        admission: CommandRoomWakeAdmission,
+        *,
+        probe_stale: bool = False,
+    ) -> RunRecord | None:
+        """Resolve a wake only through its dedicated globally unique column."""
+        if self._store is None:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake storage is unavailable")
+        try:
+            row = await self._call_store_with_retry(
+                "get_by_command_room_wake_id",
+                admission.wake_id,
+                lambda: self._store.get_by_command_room_wake_id(admission.wake_id),
+            )
+        except Exception as exc:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake lookup failed") from exc
+        if row is None:
+            return None
+        try:
+            record = self._record_from_store(row)
+            self._verify_command_room_wake_identity(record, admission)
+            return await self._probe_stale_command_room_wake(record, admission) if probe_stale else record
+        except (CommandRoomWakeIdentityConflict, CommandRoomWakeAdmissionUnavailable):
+            raise
+        except Exception as exc:
+            raise CommandRoomWakeAdmissionUnavailable("command room wake lookup could not be verified") from exc
+
+    async def create_or_reuse_command_room_wake(
+        self,
+        admission: CommandRoomWakeAdmission,
+    ) -> WakeAdmissionResult:
+        """Reserve one canonical wake run and grant its sole worker lease.
+
+        This is intentionally separate from ``create_or_reject``: a failed or
+        blocked wake reservation must remain durable rather than being deleted
+        like an ordinary rejected run.
+        """
+        if self._store is None:
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=False,
+            )
+        try:
+            record = await self.find_command_room_wake(admission, probe_stale=True)
+            created = False
+            if record is None:
+                row, created = await self._call_store_with_retry(
+                    "reserve_command_room_wake",
+                    admission.wake_id,
+                    lambda: self._store.reserve_command_room_wake(
+                        wake_id=admission.wake_id,
+                        thread_id=admission.thread_id,
+                        assistant_id=admission.assistant_id,
+                        user_id=admission.user_id,
+                        metadata=admission.persisted_metadata(),
+                        kwargs=dict(admission.kwargs),
+                        multitask_strategy=admission.multitask_strategy,
+                        model_name=admission.model_name,
+                    ),
+                )
+                record = self._record_from_store(row)
+                self._verify_command_room_wake_identity(record, admission)
+                if not created:
+                    record = await self._probe_stale_command_room_wake(record, admission)
+        except CommandRoomWakeIdentityConflict:
+            raise
+        except CommandRoomWakeAdmissionUnavailable:
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=False,
+            )
+        except Exception:
+            logger.warning("Command Room wake admission is unavailable", exc_info=True)
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=False,
+            )
+
+        status = run_status_value(record.status)
+        if is_terminal_status(status):
+            return WakeAdmissionResult(
+                record=record,
+                outcome=self._wake_outcome_for_terminal_status(status or ""),
+                created=created,
+            )
+        if status in ACTIVE_RUN_STATUS_VALUES:
+            return WakeAdmissionResult(record=record, outcome=WakeAdmissionOutcome.ACTIVE, created=created)
+        if status != RunStatus.pending.value:
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=created,
+            )
+
+        try:
+            lease = await self._call_store_with_retry(
+                "try_acquire_active_slot",
+                record.run_id,
+                lambda: self._store.try_acquire_active_slot(
+                    record.thread_id,
+                    record.run_id,
+                    owner_worker_id=self._worker_id,
+                    lease_expires_at=(now := datetime.now(UTC)) + _ACTIVE_SLOT_LEASE_TTL,
+                    now=now,
+                ),
+            )
+        except Exception:
+            logger.warning("Command Room wake lease admission is unavailable", exc_info=True)
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=created,
+            )
+        if lease is None:
+            try:
+                record = await self.find_command_room_wake(admission)
+            except CommandRoomWakeIdentityConflict:
+                raise
+            except CommandRoomWakeAdmissionUnavailable:
+                logger.warning("Command Room wake admission reread is unavailable", exc_info=True)
+                return WakeAdmissionResult(
+                    record=None,
+                    outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                    created=created,
+                )
+            if record is None:
+                return WakeAdmissionResult(
+                    record=None,
+                    outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                    created=created,
+                )
+            status = run_status_value(record.status)
+            if is_terminal_status(status):
+                return WakeAdmissionResult(
+                    record=record,
+                    outcome=self._wake_outcome_for_terminal_status(status or ""),
+                    created=created,
+                )
+            if status in ACTIVE_RUN_STATUS_VALUES:
+                return WakeAdmissionResult(record=record, outcome=WakeAdmissionOutcome.ACTIVE, created=created)
+            if status == RunStatus.pending.value:
+                return WakeAdmissionResult(
+                    record=record,
+                    outcome=WakeAdmissionOutcome.ACTIVE_SLOT_BLOCKED,
+                    created=created,
+                )
+            return WakeAdmissionResult(
+                record=None,
+                outcome=WakeAdmissionOutcome.ADMISSION_UNAVAILABLE,
+                created=created,
+            )
+
+        self._apply_lease_to_record(record, lease)
+        async with self._lock:
+            existing = self._runs.get(record.run_id)
+            if existing is None:
+                self._runs[record.run_id] = record
+                self._index_run_locked(record)
+            else:
+                record = existing
+        try:
+            await self._bind_round_to_run(record)
+            binding_metadata = {key: record.metadata[key] for key in ("round_id", "round_context") if key in record.metadata}
+            if not await self.heartbeat_active_lease(record, metadata_updates=binding_metadata):
+                raise RuntimeError("command room wake lost its active lease while binding round state")
+        except Exception:
+            logger.warning("Command Room wake launcher setup failed", exc_info=True)
+            try:
+                await self._call_store_with_retry(
+                    "complete_run",
+                    record.run_id,
+                    lambda: self._store.complete_run(
+                        record.run_id,
+                        from_statuses=ACTIVE_RUN_STATUS_VALUES,
+                        terminal_status=RunStatus.error.value,
+                        lease_token=record.lease_token or "",
+                        generation=record.lease_generation or 0,
+                        terminal_reason="launcher_failed",
+                        error="Command Room wake launcher setup failed",
+                    ),
+                )
+            except Exception:
+                logger.warning("Failed to settle Command Room wake launcher failure", exc_info=True)
+            async with self._lock:
+                self._evict_run_locked(record)
+            raise
+        return WakeAdmissionResult(
+            record=record,
+            outcome=WakeAdmissionOutcome.LEASE_WON,
+            created=created,
+            lease_token=lease.lease_token,
+            generation=lease.generation,
+        )
+
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        recover_stale: bool = True,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
         """
-        await self.recover_stale_inflight_runs(run_id=run_id, user_id=user_id)
+        if recover_stale:
+            await self.recover_stale_inflight_runs(run_id=run_id, user_id=user_id)
         await self._retry_terminal_round_projections(run_id=run_id)
         async with self._lock:
             record = self._runs.get(run_id)
@@ -1458,7 +1769,8 @@ class RunManager:
                         record.run_id,
                         lease_token=record.lease_token or "",
                         generation=record.lease_generation or 0,
-                        lease_expires_at=datetime.now(UTC) + _ACTIVE_SLOT_LEASE_TTL,
+                        lease_expires_at=(now := datetime.now(UTC)) + _ACTIVE_SLOT_LEASE_TTL,
+                        now=now,
                         metadata_updates=metadata_updates,
                     ),
                 )

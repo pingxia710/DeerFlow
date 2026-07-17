@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, text
+from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -24,6 +24,7 @@ class RunRow(Base):
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    command_room_wake_id: Mapped[str | None] = mapped_column(String(64))
     error: Mapped[str | None] = mapped_column(Text)
 
     # Convenience fields (for listing pages without querying RunEventStore)
@@ -47,4 +48,11 @@ class RunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
-    __table_args__ = (Index("ix_runs_thread_status", "thread_id", "status"),)
+    __table_args__ = (
+        CheckConstraint(
+            "command_room_wake_id IS NULL OR (length(command_room_wake_id) BETWEEN 1 AND 64 AND command_room_wake_id = trim(command_room_wake_id))",
+            name="ck_runs_command_room_wake_id_nonblank",
+        ),
+        Index("ix_runs_thread_status", "thread_id", "status"),
+        Index("uq_runs_command_room_wake_id", "command_room_wake_id", unique=True),
+    )

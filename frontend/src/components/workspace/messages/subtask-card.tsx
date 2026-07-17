@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  AlertCircleIcon,
   CheckCircleIcon,
   ChevronUp,
   ClipboardListIcon,
   Loader2Icon,
+  RefreshCcwIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
@@ -144,6 +146,7 @@ export function SubtaskCard({
   taskId,
   threadId,
   isLoading,
+  onRetryRecovery,
 }: {
   className?: string;
   runId: string;
@@ -151,6 +154,7 @@ export function SubtaskCard({
   taskId: string;
   threadId: string;
   isLoading: boolean;
+  onRetryRecovery?: (threadId?: string, runId?: string) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const storedTask = useSubtask({ id: taskId, threadId, runId, roundId });
@@ -183,7 +187,10 @@ export function SubtaskCard({
       backgroundWake={wakeFactForTask(wakeFacts.data, taskId)}
       className={className}
       isLoading={isLoading}
+      onRetryRecovery={onRetryRecovery}
+      runId={runId}
       task={task}
+      threadId={threadId}
     />
   );
 }
@@ -192,17 +199,34 @@ function SubtaskCardBody({
   backgroundWake,
   className,
   isLoading,
+  onRetryRecovery,
+  runId,
   task,
+  threadId,
 }: {
   backgroundWake?: WakeFactsProjectionItem;
   className?: string;
   isLoading: boolean;
+  onRetryRecovery?: (threadId?: string, runId?: string) => Promise<void> | void;
+  runId: string;
   task: Subtask;
+  threadId: string;
 }) {
   const { t } = useI18n();
   const { scrollRef, stopScroll } = useStickToBottomContext();
   const [collapsed, setCollapsed] = useState(true);
+  const [isRetryingRecovery, setIsRetryingRecovery] = useState(false);
   const isOpen = !collapsed;
+  const retryRecovery = () => {
+    if (!onRetryRecovery || isRetryingRecovery) {
+      return;
+    }
+    setIsRetryingRecovery(true);
+    void Promise.resolve()
+      .then(() => onRetryRecovery(threadId, runId))
+      .catch(() => undefined)
+      .finally(() => setIsRetryingRecovery(false));
+  };
   const canLoadFullResult = Boolean(task.threadId && task.runId);
   const fullResult = useQuery({
     queryKey: queryKeys.thread.taskResult(
@@ -269,6 +293,8 @@ function SubtaskCardBody({
       return <XCircleIcon className="size-3 text-red-500" />;
     } else if (task.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
+    } else if (task.status === "unknown") {
+      return <AlertCircleIcon className="size-3" />;
     }
   }, [task.status]);
 
@@ -408,6 +434,26 @@ function SubtaskCardBody({
             {t.subtasks.backgroundWakeFailed(backgroundWake.wake_attempts)}
           </p>
         )}
+        {task.status === "unknown" && onRetryRecovery && (
+          <div className="px-3 pb-2">
+            <Button
+              aria-busy={isRetryingRecovery}
+              className="h-8 gap-1 text-xs"
+              disabled={isRetryingRecovery}
+              onClick={retryRecovery}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {isRetryingRecovery ? (
+                <Loader2Icon className="size-3 animate-spin" />
+              ) : (
+                <RefreshCcwIcon className="size-3" />
+              )}
+              {t.chats.retryRecovery}
+            </Button>
+          </div>
+        )}
         <ChainOfThoughtContent className="px-4 pb-4">
           {task.prompt && (
             <ChainOfThoughtStep
@@ -459,6 +505,12 @@ function SubtaskCardBody({
             <ChainOfThoughtStep
               label={<div className="text-red-500">{task.error}</div>}
               icon={<XCircleIcon className="size-4 text-red-500" />}
+            ></ChainOfThoughtStep>
+          )}
+          {task.status === "unknown" && (
+            <ChainOfThoughtStep
+              label={t.subtasks.recoveryFailedUnknown}
+              icon={<AlertCircleIcon className="size-4" />}
             ></ChainOfThoughtStep>
           )}
           <div className="flex justify-end pt-1">

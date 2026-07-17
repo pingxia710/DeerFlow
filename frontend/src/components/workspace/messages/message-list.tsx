@@ -171,7 +171,11 @@ function isMessageActivelyStreaming(
 }
 
 function isTerminalSubtask(task: Subtask) {
-  return task.status === "completed" || task.status === "failed";
+  return (
+    task.status === "completed" ||
+    task.status === "failed" ||
+    task.status === "unknown"
+  );
 }
 
 function isCommandRoomPlanTask(task: Subtask) {
@@ -650,7 +654,7 @@ export function MessageList({
   historyRuns?: ReadonlyArray<MessageListRun>;
   terminalNotice?: ThreadRunTerminalNotice | null;
   recoveryStatus?: ThreadRecoveryStatus;
-  onRetryRecovery?: () => void;
+  onRetryRecovery?: (threadId?: string, runId?: string) => Promise<void> | void;
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
@@ -1679,6 +1683,7 @@ export function MessageList({
                               runId,
                               effectiveRoundId,
                             )}
+                            onRetryRecovery={onRetryRecovery}
                             runId={runId}
                             roundId={effectiveRoundId}
                             taskId={taskId}
@@ -1762,6 +1767,7 @@ export function MessageList({
                     <SubtaskCard
                       isLoading={task.status === "in_progress"}
                       key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                      onRetryRecovery={onRetryRecovery}
                       roundId={task.roundId}
                       runId={task.runId!}
                       taskId={task.id}
@@ -1780,6 +1786,7 @@ export function MessageList({
                   {runtimeOnlySubtasks.map((task) => (
                     <SubtaskCard
                       key={getSubtaskCardKey(task.id, task.runId, task.roundId)}
+                      onRetryRecovery={onRetryRecovery}
                       runId={task.runId!}
                       roundId={task.roundId}
                       taskId={task.id}

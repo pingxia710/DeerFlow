@@ -284,6 +284,7 @@ const INACTIVE_THREAD_STATUSES = new Set([
 ]);
 const backgroundRunProbeTimers = new Map<string, number>();
 const backgroundRunProbeAttempts = new Map<string, number>();
+const backgroundRunRecoveryRetries = new Map<string, Promise<void>>();
 
 type QueuedMessageReleaseState = {
   streamFinished: boolean;
@@ -1941,6 +1942,12 @@ export function startBackgroundRunProbe({
   const attempt = (backgroundRunProbeAttempts.get(key) ?? 0) + 1;
   if (shouldStopBackgroundRunProbe(attempt)) {
     backgroundRunProbeAttempts.delete(key);
+    settleRunSubtasks?.({
+      threadId,
+      runId,
+      status: "recovery_failed",
+      terminalReason: "recovery_exhausted",
+    });
     stopBackgroundRunProbeRecovery(queryClient, threadId, runId);
     return;
   }
@@ -1978,6 +1985,12 @@ export function startBackgroundRunProbe({
         backgroundRunProbeTimers.delete(key);
         if (shouldStopBackgroundRunProbe(attempt, error)) {
           backgroundRunProbeAttempts.delete(key);
+          settleRunSubtasks?.({
+            threadId,
+            runId,
+            status: "recovery_failed",
+            terminalReason: "recovery_exhausted",
+          });
           stopBackgroundRunProbeRecovery(queryClient, threadId, runId);
           return;
         }
@@ -1993,6 +2006,71 @@ export function startBackgroundRunProbe({
   }, getBackgroundRunProbeDelay(attempt));
 
   backgroundRunProbeTimers.set(key, timer);
+}
+
+export function retryBackgroundRunRecovery({
+  queryClient,
+  threadId,
+  runId,
+  isMock,
+  settleRunSubtasks,
+  refreshRuns,
+}: {
+  queryClient: QueryClient;
+  threadId: string;
+  runId: string;
+  isMock?: boolean;
+  settleRunSubtasks?: SettleRunSubtasks;
+  refreshRuns: RefreshRuns;
+}) {
+  const key = backgroundRunProbeKey(threadId, runId);
+  const existing = backgroundRunRecoveryRetries.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const retry = (async () => {
+    refreshRuns({ threadId, runIds: [runId] });
+    if (typeof window === "undefined" || isMock) {
+      return;
+    }
+    try {
+      const run = await getAPIClient().runs.get(threadId, runId);
+      if (
+        applyBackgroundRunProbeResult(
+          queryClient,
+          threadId,
+          runId,
+          run.status,
+          {
+            terminalReason: stringValue(
+              (run as { terminal_reason?: unknown }).terminal_reason,
+            ),
+            settleRunSubtasks,
+          },
+        )
+      ) {
+        refreshRuns({ threadId, runIds: [runId] });
+        return;
+      }
+    } catch {
+      // The background probe continues transient recovery failures.
+    }
+    startBackgroundRunProbe({
+      queryClient,
+      threadId,
+      runId,
+      isMock,
+      settleRunSubtasks,
+    });
+  })();
+
+  backgroundRunRecoveryRetries.set(key, retry);
+  void retry.then(
+    () => backgroundRunRecoveryRetries.delete(key),
+    () => backgroundRunRecoveryRetries.delete(key),
+  );
+  return retry;
 }
 
 async function readResponseErrorMessage(
@@ -3916,6 +3994,33 @@ export function useThreadStream({
           ? null
           : null;
 
+  const retryRecovery = useCallback(
+    (retryThreadId?: string, retryRunId?: string) => {
+      if (!retryThreadId || !retryRunId) {
+        return loadMoreHistory();
+      }
+      if (retryThreadId !== onStreamThreadId) {
+        return Promise.resolve();
+      }
+      return retryBackgroundRunRecovery({
+        queryClient,
+        threadId: retryThreadId,
+        runId: retryRunId,
+        isMock,
+        settleRunSubtasks,
+        refreshRuns: refreshHistoryRuns,
+      });
+    },
+    [
+      isMock,
+      loadMoreHistory,
+      onStreamThreadId,
+      queryClient,
+      refreshHistoryRuns,
+      settleRunSubtasks,
+    ],
+  );
+
   return {
     thread: mergedThread,
     historyRuns,
@@ -3927,7 +4032,7 @@ export function useThreadStream({
     historyError,
     terminalNotice: visibleTerminalNotice,
     recoveryStatus,
-    retryRecovery: loadMoreHistory,
+    retryRecovery,
     hasMoreHistory,
     loadMoreHistory,
   } as const;

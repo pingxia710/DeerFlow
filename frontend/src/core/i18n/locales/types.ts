@@ -403,6 +403,8 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    unknown: string;
+    recoveryFailedUnknown: string;
     backgroundWakeFailed: (attempts: number) => string;
   };
 

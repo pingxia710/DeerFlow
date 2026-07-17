@@ -35,7 +35,7 @@ export interface Subtask {
   threadId?: string;
   runId?: string;
   roundId?: string;
-  status: "in_progress" | "completed" | "failed";
+  status: "in_progress" | "completed" | "failed" | "unknown";
   startedAt?: number;
   finishedAt?: number;
   durationMs?: number;

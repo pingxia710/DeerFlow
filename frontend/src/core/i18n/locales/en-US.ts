@@ -488,6 +488,9 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    unknown: "Recovery failed; status unknown",
+    recoveryFailedUnknown:
+      "Recovery failed, so the final subtask status is unknown. Retry recovery to synchronize it again.",
     backgroundWakeFailed: (attempts) =>
       `Child task completed; the Chair wake did not complete after ${attempts} attempts. This fact does not mean the project is complete, accepted, or needs automatic retry.`,
   },

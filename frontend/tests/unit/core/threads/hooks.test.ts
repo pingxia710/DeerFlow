@@ -6,7 +6,12 @@ import { afterEach, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
 import type { Subtask } from "@/core/tasks";
-import type { SubtaskUpdate } from "@/core/tasks/context";
+import {
+  applySubtaskUpdateInState,
+  settleRunningSubtasksForRun,
+  type SubtaskUpdate,
+} from "@/core/tasks/context";
+import { applyTaskEventToSubtask } from "@/core/threads/task-events";
 import type { RunMessage } from "@/core/threads/types";
 
 interface TaskEventContractCase {
@@ -3081,6 +3086,136 @@ test("stopBackgroundRunProbesForThread clears same-thread probes only", async ()
 
   expect(getRun).toHaveBeenCalledTimes(1);
   expect(getRun).toHaveBeenCalledWith("thread-b", "run-1");
+});
+
+test("retry recovery reloads the exhausted run and lets its terminal task event replace unknown", async () => {
+  rs.useFakeTimers();
+  stubBrowserWindow();
+  const threadId = "recovery-thread";
+  const runId = "recovery-run";
+  const taskId = "recovery-task";
+  let attempts = 0;
+  let terminalAvailable = false;
+  const getRun = rs.fn(async () => {
+    attempts += 1;
+    if (attempts <= 11) {
+      throw new Error("stream disconnected");
+    }
+    terminalAvailable = true;
+    return { run_id: runId, status: "success" };
+  });
+  const { retryBackgroundRunRecovery, startBackgroundRunProbe } =
+    await loadThreadHooksWithRunProbe(getRun);
+  let tasks: Record<string, Subtask> = {};
+  const updateSubtask = (update: SubtaskUpdate) => {
+    tasks = applySubtaskUpdateInState(tasks, update);
+  };
+
+  expect(
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_started",
+        task_id: taskId,
+        thread_id: threadId,
+        run_id: runId,
+        description: "recover this task",
+        subagent_type: "executor",
+        prompt: "recover",
+      },
+      updateSubtask,
+    ),
+  ).toBe(true);
+
+  startBackgroundRunProbe({
+    queryClient: new QueryClient(),
+    threadId,
+    runId,
+    settleRunSubtasks: (terminal) => {
+      tasks = settleRunningSubtasksForRun(tasks, terminal);
+    },
+  });
+  await rs.advanceTimersByTimeAsync(310_000);
+
+  expect(getRun).toHaveBeenCalledTimes(11);
+  expect(Object.values(tasks)).toContainEqual(
+    expect.objectContaining({
+      id: taskId,
+      status: "unknown",
+      actionResultStatus: "recovery_failed",
+      terminalReason: "recovery_exhausted",
+    }),
+  );
+
+  const refreshRuns = rs.fn(() => {
+    if (!terminalAvailable) {
+      return;
+    }
+    applyTaskEventToSubtask(
+      {
+        event_type: "task_completed",
+        task_id: taskId,
+        thread_id: threadId,
+        run_id: runId,
+        result: "completed after retry",
+      },
+      updateSubtask,
+    );
+  });
+  await retryBackgroundRunRecovery({
+    queryClient: new QueryClient(),
+    threadId,
+    runId,
+    refreshRuns,
+    settleRunSubtasks: (terminal) => {
+      tasks = settleRunningSubtasksForRun(tasks, terminal);
+    },
+  });
+
+  expect(getRun).toHaveBeenCalledTimes(12);
+  expect(getRun).toHaveBeenLastCalledWith(threadId, runId);
+  expect(refreshRuns).toHaveBeenLastCalledWith({
+    threadId,
+    runIds: [runId],
+  });
+  expect(Object.values(tasks)).toContainEqual(
+    expect.objectContaining({
+      id: taskId,
+      status: "completed",
+      result: "completed after retry",
+    }),
+  );
+});
+
+test("retry recovery deduplicates concurrent target-run syncs", async () => {
+  stubBrowserWindow();
+  const threadId = "dedupe-thread";
+  const runId = "dedupe-run";
+  let resolveRun!: (run: { run_id: string; status: string }) => void;
+  const run = new Promise<{ run_id: string; status: string }>((resolve) => {
+    resolveRun = resolve;
+  });
+  const getRun = rs.fn(async () => run);
+  const { retryBackgroundRunRecovery } =
+    await loadThreadHooksWithRunProbe(getRun);
+  const refreshRuns = rs.fn();
+  const first = retryBackgroundRunRecovery({
+    queryClient: new QueryClient(),
+    threadId,
+    runId,
+    refreshRuns,
+  });
+  const second = retryBackgroundRunRecovery({
+    queryClient: new QueryClient(),
+    threadId,
+    runId,
+    refreshRuns,
+  });
+
+  expect(second).toBe(first);
+  expect(getRun).toHaveBeenCalledTimes(1);
+  resolveRun({ run_id: runId, status: "success" });
+  await first;
+  expect(getRun).toHaveBeenLastCalledWith(threadId, runId);
 });
 
 test("deleted thread background probe does not write cache after fetch returns", async () => {

@@ -138,6 +138,29 @@ test("matching terminal lane keeps its historical task card renderable", () => {
   ).toBe(false);
 });
 
+test("unknown recovery state suppresses a stale running task card", () => {
+  expect(
+    hasTerminalSubtaskForTask(
+      [
+        {
+          id: "task-1",
+          threadId: "thread-1",
+          runId: "run-recovery",
+          status: "unknown",
+          subagent_type: "test",
+          description: "recovering",
+          prompt: "recover",
+        },
+      ],
+      {
+        threadId: "thread-1",
+        runId: "run-replay",
+        taskId: "task-1",
+      },
+    ),
+  ).toBe(true);
+});
+
 test("missing historical roundId resolves one matching terminal lane without guessing", () => {
   const terminal = {
     id: "task-1",

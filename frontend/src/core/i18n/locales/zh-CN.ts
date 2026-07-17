@@ -466,6 +466,9 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    unknown: "恢复失败，状态未知",
+    recoveryFailedUnknown:
+      "恢复失败，尚未取得子任务最终状态。可重试恢复以重新同步状态。",
     backgroundWakeFailed: (attempts) =>
       `子任务已完成；Chair 唤醒在 ${attempts} 次尝试后仍未完成。该事实不表示项目已完成、已接受，或需要自动重试。`,
   },

@@ -292,7 +292,9 @@ export function mergeSubtaskUpdate(
 ) {
   const previousStatus = previous?.status;
   const isTerminalStatus =
-    task.status === "completed" || task.status === "failed";
+    task.status === "completed" ||
+    task.status === "failed" ||
+    task.status === "unknown";
   const { roundId, runId, threadId } = task;
   const hasStrongerTiming =
     task.startedAt !== undefined ||
@@ -323,8 +325,12 @@ export function mergeSubtaskUpdate(
     (previous?.actionResultStatus !== undefined ||
       previous?.terminalReason !== undefined);
   const isTerminalCompleted = previousStatus === "completed";
+  const isRecoveryStatusUnknown =
+    previousStatus === "unknown" &&
+    previous?.terminalReason === "recovery_exhausted";
   const shouldKeepTerminalStatus =
-    task.status === "in_progress" && (isTerminalCompleted || isTerminalFailure);
+    task.status === "in_progress" &&
+    (isTerminalCompleted || isTerminalFailure || isRecoveryStatusUnknown);
   const shouldKeepExistingMetadata =
     previous !== undefined &&
     (task.description === undefined ||
@@ -497,13 +503,21 @@ export function settleRunningSubtasksForRun(
       continue;
     }
 
+    const recoveryExhausted = terminal.status === "recovery_failed";
     const next = mergeSubtaskUpdate(task, {
       id: task.id,
       threadId: terminal.threadId,
       runId: terminal.runId,
       ...(task.roundId ? { roundId: task.roundId } : {}),
-      status: "failed",
-      error: runTerminalSubtaskError(terminal.status, terminal.terminalReason),
+      status: recoveryExhausted ? "unknown" : "failed",
+      ...(recoveryExhausted
+        ? {}
+        : {
+            error: runTerminalSubtaskError(
+              terminal.status,
+              terminal.terminalReason,
+            ),
+          }),
       actionResultStatus: terminal.status,
       terminalReason: terminal.terminalReason ?? terminal.status,
       finishedAt: now,

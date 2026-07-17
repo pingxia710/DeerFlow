@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -57,6 +58,7 @@ import {
 } from "@/core/threads/export";
 import {
   clearThreadFinishedActivity,
+  getThreadDeleteFailureState,
   shouldShowThreadRunningStatus,
   useDeleteThread,
   useInfiniteThreads,
@@ -120,7 +122,8 @@ export function RecentChatList() {
     return () => observer.disconnect();
   }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
-  const { mutate: deleteThread } = useDeleteThread();
+  const { mutateAsync: deleteThread, isPending: isDeletingThread } =
+    useDeleteThread();
   const { mutateAsync: renameThread, isPending: isRenaming } =
     useRenameThread();
 
@@ -128,35 +131,76 @@ export function RecentChatList() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-
-  const handleDelete = useCallback(
-    (thread: AgentThread) => {
-      const currentPathname =
-        typeof window === "undefined" ? pathname : window.location.pathname;
-      const nextThreadPath = pathOfThread("new", {
-        agent_name: agentNameFromPath,
-      });
-      const isCurrentThread = isThreadAtCommittedPath(
-        thread.thread_id,
-        currentPathname,
-      );
-
-      deleteThread({
-        threadId: thread.thread_id,
-        onRemoteDeleted: isCurrentThread
-          ? () => {
-              resetThreadChatAfterDelete({
-                deletedThreadId: thread.thread_id,
-                nextPath: nextThreadPath,
-                force: true,
-              });
-              void router.replace(nextThreadPath);
-            }
-          : undefined,
-      });
-    },
-    [agentNameFromPath, deleteThread, pathname, router],
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AgentThread | null>(null);
+  const [deletePhase, setDeletePhase] = useState<"remote" | "local" | null>(
+    null,
   );
+  const [deleteError, setDeleteError] = useState<
+    "deleting" | "partial" | "failed" | null
+  >(null);
+  const cancelDeleteButtonRef = useRef<HTMLButtonElement>(null);
+
+  const handleDeleteClick = useCallback(
+    (thread: AgentThread) => {
+      if (isDeletingThread) {
+        return;
+      }
+      setDeleteTarget(thread);
+      setDeleteError(null);
+      setDeletePhase(null);
+      setDeleteDialogOpen(true);
+    },
+    [isDeletingThread],
+  );
+
+  const handleDelete = useCallback(async () => {
+    if (!deleteTarget || isDeletingThread) {
+      return;
+    }
+    const currentPathname =
+      typeof window === "undefined" ? pathname : window.location.pathname;
+    const nextThreadPath = pathOfThread("new", {
+      agent_name: agentNameFromPath,
+    });
+    const isCurrentThread = isThreadAtCommittedPath(
+      deleteTarget.thread_id,
+      currentPathname,
+    );
+
+    setDeleteError(null);
+    setDeletePhase("remote");
+    try {
+      await deleteThread({
+        threadId: deleteTarget.thread_id,
+        onRemoteDeleteStarted: () => setDeletePhase("local"),
+        onRemoteDeleted: () => {
+          if (isCurrentThread) {
+            resetThreadChatAfterDelete({
+              deletedThreadId: deleteTarget.thread_id,
+              nextPath: nextThreadPath,
+              force: true,
+            });
+            void router.replace(nextThreadPath);
+          }
+        },
+      });
+      setDeleteDialogOpen(false);
+      toast.success(t.conversation.deleteSuccess);
+    } catch (error) {
+      setDeletePhase(null);
+      setDeleteError(getThreadDeleteFailureState(error));
+      setDeleteDialogOpen(true);
+    }
+  }, [
+    agentNameFromPath,
+    deleteTarget,
+    deleteThread,
+    isDeletingThread,
+    pathname,
+    router,
+    t.conversation.deleteSuccess,
+  ]);
 
   const handleRenameClick = useCallback(
     (threadId: string, currentTitle: string) => {
@@ -232,7 +276,7 @@ export function RecentChatList() {
     [t],
   );
 
-  if (threads.length === 0) {
+  if (threads.length === 0 && !deleteDialogOpen) {
     return null;
   }
   return (
@@ -375,7 +419,8 @@ export function RecentChatList() {
                           </DropdownMenuSub>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            onSelect={() => handleDelete(thread)}
+                            disabled={isDeletingThread}
+                            onSelect={() => handleDeleteClick(thread)}
                           >
                             <Trash2 className="text-muted-foreground" />
                             <span>{t.common.delete}</span>
@@ -444,6 +489,107 @@ export function RecentChatList() {
               onClick={() => void handleRenameSubmit()}
             >
               {t.common.save}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => {
+          if (!isDeletingThread) {
+            setDeleteDialogOpen(open);
+            if (!open) {
+              setDeleteError(null);
+            }
+          }
+        }}
+      >
+        <DialogContent
+          aria-busy={isDeletingThread}
+          showCloseButton={!isDeletingThread}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            cancelDeleteButtonRef.current?.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            if (isDeletingThread) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t.conversation.deleteTitle}</DialogTitle>
+            <DialogDescription>
+              {t.conversation.deleteDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            {deleteTarget && (
+              <p className="break-words">
+                <span className="font-medium">
+                  {t.conversation.deleteTarget}
+                </span>{" "}
+                {titleOfThread(deleteTarget)}
+              </p>
+            )}
+            <div>
+              <p className="font-medium">{t.conversation.deleteWillRemove}</p>
+              <ul className="text-muted-foreground mt-2 list-disc space-y-1 pl-5">
+                <li>{t.conversation.deleteMessagesAndConversation}</li>
+                <li>{t.conversation.deleteLocalThreadData}</li>
+                <li>{t.conversation.deleteActiveRuns}</li>
+                <li>{t.conversation.deleteRunRecords}</li>
+              </ul>
+            </div>
+            <div>
+              <p className="font-medium">
+                {t.conversation.deleteWillNotRemove}
+              </p>
+              <ul className="text-muted-foreground mt-2 list-disc space-y-1 pl-5">
+                <li>{t.conversation.deleteSavedMemory}</li>
+                <li>{t.conversation.deleteExternalMessages}</li>
+              </ul>
+            </div>
+            {deletePhase && (
+              <p aria-live="polite" role="status">
+                {deletePhase === "remote"
+                  ? t.conversation.deleteDeletingConversation
+                  : t.conversation.deleteFinishingLocalCleanup}
+              </p>
+            )}
+            {deleteError && (
+              <p className="text-destructive" role="alert">
+                {deleteError === "deleting"
+                  ? t.conversation.deleteInProgress
+                  : deleteError === "partial"
+                    ? t.conversation.deletePartialFailure
+                    : t.conversation.deleteFailed}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              ref={cancelDeleteButtonRef}
+              variant="outline"
+              disabled={isDeletingThread}
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setDeleteError(null);
+              }}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={isDeletingThread || !deleteTarget}
+              onClick={() => void handleDelete()}
+            >
+              {isDeletingThread
+                ? t.common.loading
+                : deleteError
+                  ? t.conversation.retryDelete
+                  : t.common.delete}
             </Button>
           </DialogFooter>
         </DialogContent>

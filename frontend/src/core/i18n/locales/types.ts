@@ -238,6 +238,24 @@ export interface Translations {
     inProgress: string;
     failed: string;
     returnToCurrentReply: string;
+    deleteTitle: string;
+    deleteDescription: string;
+    deleteTarget: string;
+    deleteWillRemove: string;
+    deleteMessagesAndConversation: string;
+    deleteLocalThreadData: string;
+    deleteActiveRuns: string;
+    deleteRunRecords: string;
+    deleteWillNotRemove: string;
+    deleteSavedMemory: string;
+    deleteExternalMessages: string;
+    deleteDeletingConversation: string;
+    deleteFinishingLocalCleanup: string;
+    deleteInProgress: string;
+    deletePartialFailure: string;
+    deleteFailed: string;
+    deleteSuccess: string;
+    retryDelete: string;
   };
 
   // Chats

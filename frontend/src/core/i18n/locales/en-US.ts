@@ -312,6 +312,27 @@ export const enUS: Translations = {
     inProgress: "In progress",
     failed: "Failed",
     returnToCurrentReply: "Return to current reply",
+    deleteTitle: "Delete conversation?",
+    deleteDescription: "This cannot be undone.",
+    deleteTarget: "Conversation to delete:",
+    deleteWillRemove: "This will remove:",
+    deleteMessagesAndConversation: "This conversation and its messages.",
+    deleteLocalThreadData: "Local thread files and artifacts.",
+    deleteActiveRuns: "Active local runs are stopped before cleanup.",
+    deleteRunRecords: "Stored run and round records for this thread.",
+    deleteWillNotRemove: "This will not remove:",
+    deleteSavedMemory: "Saved memories.",
+    deleteExternalMessages:
+      "Messages already sent through external IM channels.",
+    deleteDeletingConversation: "Deleting conversation…",
+    deleteFinishingLocalCleanup: "Removing local thread data…",
+    deleteInProgress:
+      "This conversation is already being deleted. Retry shortly to check whether cleanup can finish.",
+    deletePartialFailure:
+      "The conversation was deleted, but local thread cleanup did not finish. Retry to finish cleanup.",
+    deleteFailed: "Could not confirm deletion. Retry to try again.",
+    deleteSuccess: "Conversation deleted",
+    retryDelete: "Retry deletion",
   },
 
   // Chats

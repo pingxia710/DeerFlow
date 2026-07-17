@@ -3054,6 +3054,102 @@ test("deleteThreadRemote treats direct 404 after SDK delete as idempotent", asyn
   expect(onRemoteDeleted).toHaveBeenCalledTimes(1);
 });
 
+test("deleteThreadRemote reports local cleanup failures after remote deletion", async () => {
+  const sdkDelete = rs.fn(async () => undefined);
+  const fetchDelete = rs.fn(
+    async () =>
+      new Response(JSON.stringify({ detail: "Failed to delete thread runs" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+  const onRemoteDeleted = rs.fn();
+  const { deleteThreadRemote, getThreadDeleteFailureState } =
+    await loadThreadHooksWithRunAndFetch(async () => ({}), fetchDelete);
+
+  let failure: unknown;
+  try {
+    await deleteThreadRemote({
+      threadId: "partially-deleted-thread",
+      apiClient: { threads: { delete: sdkDelete } } as never,
+      onRemoteDeleted,
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toMatchObject({
+    name: "ThreadDeleteError",
+    phase: "local",
+    message: "Failed to delete thread runs",
+  });
+  expect(getThreadDeleteFailureState(failure)).toBe("partial");
+  expect(onRemoteDeleted).toHaveBeenCalledTimes(1);
+});
+
+test("deleteThreadRemote identifies a deleting thread tombstone", async () => {
+  const sdkDelete = rs.fn(async () => undefined);
+  const fetchDelete = rs.fn(
+    async () =>
+      new Response(JSON.stringify({ detail: "Thread is being deleted" }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+  const onRemoteDeleted = rs.fn();
+  const { deleteThreadRemote, getThreadDeleteFailureState } =
+    await loadThreadHooksWithRunAndFetch(async () => ({}), fetchDelete);
+
+  let failure: unknown;
+  try {
+    await deleteThreadRemote({
+      threadId: "deleting-thread",
+      apiClient: { threads: { delete: sdkDelete } } as never,
+      onRemoteDeleted,
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toMatchObject({
+    name: "ThreadDeleteError",
+    phase: "local",
+    message: "Thread is being deleted",
+  });
+  expect(getThreadDeleteFailureState(failure)).toBe("deleting");
+  expect(onRemoteDeleted).toHaveBeenCalledTimes(1);
+});
+
+test("deleteThreadRemote leaves client state alone when conversation deletion fails", async () => {
+  const sdkDelete = rs.fn(async () => {
+    throw new Error("offline");
+  });
+  const fetchDelete = rs.fn(async () => new Response(null, { status: 204 }));
+  const onRemoteDeleted = rs.fn();
+  const { deleteThreadRemote, getThreadDeleteFailureState } =
+    await loadThreadHooksWithRunAndFetch(async () => ({}), fetchDelete);
+
+  let failure: unknown;
+  try {
+    await deleteThreadRemote({
+      threadId: "offline-thread",
+      apiClient: { threads: { delete: sdkDelete } } as never,
+      onRemoteDeleted,
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toMatchObject({
+    name: "ThreadDeleteError",
+    phase: "remote",
+    message: "offline",
+  });
+  expect(getThreadDeleteFailureState(failure)).toBe("failed");
+  expect(fetchDelete).not.toHaveBeenCalled();
+  expect(onRemoteDeleted).not.toHaveBeenCalled();
+});
+
 test("stopBackgroundRunProbesForThread clears same-thread probes only", async () => {
   rs.useFakeTimers();
   stubBrowserWindow();

@@ -2124,6 +2124,32 @@ export function isThreadDeleteNotFound(error: unknown): boolean {
   return getHttpStatus(error) === 404;
 }
 
+type ThreadDeleteFailurePhase = "remote" | "local";
+
+class ThreadDeleteError extends Error {
+  constructor(
+    readonly phase: ThreadDeleteFailurePhase,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ThreadDeleteError";
+  }
+}
+
+export function getThreadDeleteFailureState(
+  error: unknown,
+): "deleting" | "partial" | "failed" {
+  if (
+    error instanceof ThreadDeleteError &&
+    error.message === "Thread is being deleted"
+  ) {
+    return "deleting";
+  }
+  return error instanceof ThreadDeleteError && error.phase === "local"
+    ? "partial"
+    : "failed";
+}
+
 export async function deleteThreadRemote({
   threadId,
   apiClient,
@@ -2139,7 +2165,12 @@ export async function deleteThreadRemote({
     sdkDeleteConfirmed = true;
   } catch (error) {
     if (!isThreadDeleteNotFound(error)) {
-      throw error;
+      throw new ThreadDeleteError(
+        "remote",
+        error instanceof Error
+          ? error.message
+          : "Failed to delete conversation.",
+      );
     }
     sdkDeleteConfirmed = true;
   }
@@ -2156,10 +2187,13 @@ export async function deleteThreadRemote({
     return;
   }
 
-  const error = await response
-    .json()
-    .catch(() => ({ detail: "Failed to delete local thread data." }));
-  throw new Error(error.detail ?? "Failed to delete local thread data.");
+  throw new ThreadDeleteError(
+    "local",
+    await readResponseErrorMessage(
+      response,
+      "Failed to delete local thread data.",
+    ),
+  );
 }
 
 export function useThreadStream({
@@ -5505,9 +5539,11 @@ export function useDeleteThread() {
     mutationFn: async ({
       threadId,
       onRemoteDeleted,
+      onRemoteDeleteStarted,
     }: {
       threadId: string;
       onRemoteDeleted?: () => void;
+      onRemoteDeleteStarted?: () => void;
     }) => {
       await deleteThreadRemote({
         threadId,
@@ -5516,11 +5552,11 @@ export function useDeleteThread() {
           clearDeletedThreadClientState(queryClient, threadId, {
             clearSubtasksForThread,
           });
-          onRemoteDeleted?.();
+          onRemoteDeleteStarted?.();
         },
       });
     },
-    onSuccess(_, { threadId }) {
+    onSuccess(_, { threadId, onRemoteDeleted }) {
       queryClient.setQueriesData(
         {
           queryKey: queryKeys.threads.search(),
@@ -5541,6 +5577,7 @@ export function useDeleteThread() {
         (oldData: InfiniteData<AgentThread[]> | undefined) =>
           filterInfiniteThreadsCache(oldData, (t) => t.thread_id !== threadId),
       );
+      onRemoteDeleted?.();
     },
 
     onSettled() {

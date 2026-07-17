@@ -1,4 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 import {
   mockLangGraphAPI,
@@ -22,6 +22,19 @@ const DEMO_THREAD_ID = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
 const SVG_PROMPT_THREAD_ID = "00000000-0000-0000-0000-000000000777";
 const SVG_PROMPT_MARKER = "LEAK-STRICT-SVG-PROMPT-SHOULD-DISAPPEAR";
 const OPTIMISTIC_PROMPT_MARKER = "LEAK-OPTIMISTIC-SVG-PROMPT-SHOULD-DISAPPEAR";
+
+async function confirmThreadDeletion(page: Page) {
+  const dialog = page.getByRole("dialog", {
+    name: "Delete conversation?",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("This cannot be undone.");
+  await expect(dialog).toContainText("This conversation and its messages.");
+  await expect(dialog).toContainText("Local thread files and artifacts.");
+  await expect(dialog).toContainText("Saved memories.");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await dialog.getByRole("button", { name: "Delete" }).click();
+}
 
 test.describe("Thread history", () => {
   test("sidebar shows existing threads", async ({ page }) => {
@@ -563,6 +576,59 @@ test.describe("Thread history", () => {
     await expect(textarea).toHaveValue("");
   });
 
+  test("cancelling thread deletion keeps the thread and sends no DELETE requests", async ({
+    page,
+  }) => {
+    let remoteDeleteRequests = 0;
+    let localDeleteRequests = 0;
+
+    mockLangGraphAPI(page, { threads: THREADS });
+    await page.route("**/api/langgraph/threads/*", (route) => {
+      if (route.request().method() === "DELETE") {
+        remoteDeleteRequests += 1;
+      }
+      return route.fallback();
+    });
+    await page.route(/\/api\/threads\/[^/]+$/, (route) => {
+      if (route.request().method() === "DELETE") {
+        localDeleteRequests += 1;
+      }
+      return route.fallback();
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("Response in thread First conversation"),
+    ).toBeVisible({ timeout: 15_000 });
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const activeThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({
+        has: page.getByRole("button", { name: /more/i }),
+        hasText: "First conversation",
+      })
+      .first();
+    await activeThreadItem.hover();
+    await activeThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Delete conversation?" });
+    const cancel = dialog.getByRole("button", { name: "Cancel" });
+    await expect(dialog).toBeVisible();
+    await expect(cancel).toBeFocused();
+    await cancel.click();
+
+    await expect(dialog).toBeHidden();
+    expect(remoteDeleteRequests).toBe(0);
+    expect(localDeleteRequests).toBe(0);
+    await expect(page).toHaveURL(new RegExp(`${MOCK_THREAD_ID}$`));
+    await expect(sidebar.getByText("First conversation")).toBeVisible();
+    await expect(
+      page.getByText("Response in thread First conversation"),
+    ).toBeVisible();
+  });
+
   test("deleting an inactive chat keeps the current chat open", async ({
     page,
   }) => {
@@ -585,6 +651,7 @@ test.describe("Thread history", () => {
     await inactiveThreadItem.hover();
     await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await confirmThreadDeletion(page);
 
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
     await expect(
@@ -615,6 +682,7 @@ test.describe("Thread history", () => {
     await newestSavedThread.hover();
     await newestSavedThread.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await confirmThreadDeletion(page);
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
     await expect(textarea).toHaveValue(draft);
@@ -643,6 +711,7 @@ test.describe("Thread history", () => {
     await activeThreadItem.hover();
     await activeThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await confirmThreadDeletion(page);
 
     await page.waitForURL("**/workspace/chats/new");
     await expect(sidebar.getByText("First conversation")).toHaveCount(0);
@@ -782,6 +851,20 @@ test.describe("Thread history", () => {
     await streamingThreadItem.hover();
     await streamingThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    const deleteDialog = page.getByRole("dialog", {
+      name: "Delete conversation?",
+    });
+    await expect(deleteDialog).toContainText(
+      "This conversation and its messages.",
+    );
+    await expect(deleteDialog).toContainText(
+      "Local thread files and artifacts.",
+    );
+    await expect(deleteDialog).toContainText("Saved memories.");
+    await expect(
+      deleteDialog.getByRole("button", { name: "Cancel" }),
+    ).toBeFocused();
+    await deleteDialog.getByRole("button", { name: "Delete" }).click();
     await page.waitForURL("**/workspace/chats/new");
     await expect(page.getByText(lateMarker)).toHaveCount(0);
 
@@ -2140,20 +2223,11 @@ test.describe("Thread history", () => {
     await expect(textarea).toBeVisible();
   });
 
-  test("deleting the active newly created chat returns to the new chat screen", async ({
+  test("a local cleanup failure keeps the current route and allows retry", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
-    await page.route(/\/api\/threads\/[^/]+$/, (route) => {
-      if (route.request().method() === "DELETE") {
-        return route.fulfill({
-          status: 500,
-          contentType: "application/json",
-          body: JSON.stringify({ detail: "Local cleanup failed" }),
-        });
-      }
-      return route.fallback();
-    });
+    let localCleanupAttempts = 0;
 
     await page.goto("/workspace/chats/new");
     const textarea = page.getByPlaceholder(/how can i assist you/i);
@@ -2163,6 +2237,20 @@ test.describe("Thread history", () => {
 
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 15_000,
+    });
+    await page.unroute(/\/api\/threads\/[^/]+$/);
+    await page.route(/\/api\/threads\/[^/]+$/, (route) => {
+      if (route.request().method() !== "DELETE") {
+        return route.fallback();
+      }
+      if (localCleanupAttempts++ === 0) {
+        return route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Local cleanup failed" }),
+        });
+      }
+      return route.fulfill({ status: 204 });
     });
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
@@ -2177,8 +2265,24 @@ test.describe("Thread history", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await confirmThreadDeletion(page);
 
-    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect.poll(() => localCleanupAttempts).toBe(1);
+    const deleteDialog = page.getByRole("dialog", {
+      name: "Delete conversation?",
+    });
+    await expect(deleteDialog.getByRole("alert")).toHaveText(
+      "The conversation was deleted, but local thread cleanup did not finish. Retry to finish cleanup.",
+    );
+    await expect(
+      deleteDialog.getByRole("button", { name: "Retry deletion" }),
+    ).toBeEnabled();
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+    );
+    await deleteDialog.getByRole("button", { name: "Retry deletion" }).click();
+
+    await page.waitForURL("**/workspace/chats/new");
     await expect(page.getByText("Previous question")).toHaveCount(0);
     await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
@@ -2211,15 +2315,6 @@ test.describe("Thread history", () => {
       }
     });
 
-    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
-      if (route.request().method() !== "DELETE") {
-        return route.fallback();
-      }
-      localDeleteStarted = true;
-      await localDeletePending;
-      return route.fulfill({ status: 204 });
-    });
-
     await page.goto("/workspace/chats/new");
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
@@ -2227,6 +2322,15 @@ test.describe("Thread history", () => {
     await textarea.press("Enter");
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 15_000,
+    });
+    await page.unroute(/\/api\/threads\/[^/]+$/);
+    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
+      if (route.request().method() !== "DELETE") {
+        return route.fallback();
+      }
+      localDeleteStarted = true;
+      await localDeletePending;
+      return route.fulfill({ status: 204 });
     });
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
@@ -2240,12 +2344,28 @@ test.describe("Thread history", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await confirmThreadDeletion(page);
+
+    const deleteDialog = page.getByRole("dialog", {
+      name: "Delete conversation?",
+    });
 
     try {
       await expect.poll(() => localDeleteStarted).toBe(true);
-      await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+      await expect(deleteDialog).toHaveAttribute("aria-busy", "true");
+      await expect(deleteDialog.getByRole("status")).toHaveText(
+        "Removing local thread data…",
+      );
+      await expect(page).toHaveURL(
+        new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+      );
       await page.waitForTimeout(300);
       expect(staleRequests).toEqual([]);
+      releaseLocalDelete();
+      await page.waitForURL("**/workspace/chats/new");
+      await expect(
+        sidebar.locator(`a[href='/workspace/chats/${MOCK_THREAD_ID}']`),
+      ).toHaveCount(0);
     } finally {
       releaseLocalDelete();
     }

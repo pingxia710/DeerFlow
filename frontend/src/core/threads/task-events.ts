@@ -646,6 +646,9 @@ export function applyTaskEventToSubtask(
     notify: true,
     ...(durationMs !== undefined ? { durationMs } : {}),
   };
+  if (taskEvent.artifact_refs !== undefined) {
+    base.metadata = { refs: { artifact_refs: taskEvent.artifact_refs } };
+  }
 
   if (eventType === "task_started") {
     const update: SubtaskUpdate = { ...base, status: "in_progress" };

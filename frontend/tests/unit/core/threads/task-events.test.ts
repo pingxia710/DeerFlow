@@ -53,6 +53,26 @@ test("task events retain explicit delivery-loop facts without reading task prose
   ]);
 });
 
+test("task events retain explicit artifact references without treating prose as a file", () => {
+  const updates: SubtaskUpdate[] = [];
+
+  applyTaskEventToSubtask(
+    {
+      type: "task_completed",
+      task_id: "task-1",
+      thread_id: "thread-1",
+      run_id: "run-1",
+      artifact_refs: ["/mnt/user-data/outputs/report.md"],
+      result_preview: "Report completed at /mnt/user-data/outputs/report.md",
+    },
+    (update) => updates.push(update),
+  );
+
+  expect(updates[0]?.metadata).toEqual({
+    refs: { artifact_refs: ["/mnt/user-data/outputs/report.md"] },
+  });
+});
+
 test("task events leave old tasks neutral instead of inferring a container from text", () => {
   const updates: SubtaskUpdate[] = [];
 

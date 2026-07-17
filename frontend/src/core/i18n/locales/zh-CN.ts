@@ -471,6 +471,13 @@ export const zhCN: Translations = {
       "恢复失败，尚未取得子任务最终状态。可重试恢复以重新同步状态。",
     backgroundWakeFailed: (attempts) =>
       `子任务已完成；Chair 唤醒在 ${attempts} 次尝试后仍未完成。该事实不表示项目已完成、已接受，或需要自动重试。`,
+    artifactPending: "子任务结束后将检查交付文件。",
+    artifactLoading: "正在检查交付文件…",
+    artifactUnavailable: "交付文件不可用。",
+    artifactCheckFailed: "无法检查交付文件。",
+    artifactNotWritten: "交付文件尚未写入。",
+    viewArtifact: (name) => `查看 ${name}`,
+    downloadArtifact: (name) => `下载 ${name}`,
   },
 
   // Token Usage

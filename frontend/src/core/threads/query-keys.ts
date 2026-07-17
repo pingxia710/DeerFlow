@@ -28,6 +28,8 @@ export const queryKeys = {
       ["thread", threadId, "run", runId] as const,
     taskResult: (threadId: string, runId: string, taskId: string) =>
       ["thread", threadId, "task-result", runId, taskId] as const,
+    runArtifacts: (threadId: string, runId: string) =>
+      ["thread", threadId, "run-artifacts", runId] as const,
     commandRoomPlanArtifact: (
       threadId: string,
       runId: string,
@@ -75,6 +77,7 @@ export function isThreadScopedQueryKey(
       queryKey[2] === "timeline" ||
       queryKey[2] === "run" ||
       queryKey[2] === "task-result" ||
+      queryKey[2] === "run-artifacts" ||
       queryKey[2] === "command-room-plan-artifact")
   ) {
     return true;

@@ -493,6 +493,13 @@ export const enUS: Translations = {
       "Recovery failed, so the final subtask status is unknown. Retry recovery to synchronize it again.",
     backgroundWakeFailed: (attempts) =>
       `Child task completed; the Chair wake did not complete after ${attempts} attempts. This fact does not mean the project is complete, accepted, or needs automatic retry.`,
+    artifactPending: "The delivery file will be checked when the subtask ends.",
+    artifactLoading: "Checking delivery file…",
+    artifactUnavailable: "The delivery file is not available.",
+    artifactCheckFailed: "Could not check the delivery file.",
+    artifactNotWritten: "The delivery file has not been written yet.",
+    viewArtifact: (name) => `View ${name}`,
+    downloadArtifact: (name) => `Download ${name}`,
   },
 
   // Token Usage

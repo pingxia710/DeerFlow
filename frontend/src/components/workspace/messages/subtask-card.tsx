@@ -4,6 +4,8 @@ import {
   CheckCircleIcon,
   ChevronUp,
   ClipboardListIcon,
+  DownloadIcon,
+  EyeIcon,
   Loader2Icon,
   RefreshCcwIcon,
   XCircleIcon,
@@ -21,10 +23,12 @@ import {
   DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
   fetch as fetchWithAuth,
 } from "@/core/api/fetcher";
+import { urlOfArtifact } from "@/core/artifacts/utils";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
@@ -42,6 +46,7 @@ import {
 import { queryKeys } from "@/core/threads/query-keys";
 import { terminalTaskToolResult } from "@/core/threads/task-events";
 import { explainLastToolCall } from "@/core/tools/utils";
+import { getFileName } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -50,6 +55,263 @@ import { FlipDisplay } from "../flip-display";
 import { MarkdownContent } from "./markdown-content";
 
 const MS_IN_SECOND = 1000;
+
+type RunArtifact = {
+  available: boolean;
+  taskId?: string;
+  virtualPath: string;
+};
+
+type SubtaskArtifactSource = Pick<
+  Subtask,
+  "id" | "containerArtifactPath" | "metadata" | "details"
+>;
+
+function addArtifactReferences(value: unknown, references: Set<string>) {
+  if (typeof value === "string") {
+    const reference = value.trim();
+    if (reference) {
+      references.add(reference);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => addArtifactReferences(item, references));
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    for (const key of ["virtual_path", "path", "output_ref"] as const) {
+      addArtifactReferences(record[key], references);
+    }
+  }
+}
+
+export function subtaskArtifactReferences(task: SubtaskArtifactSource) {
+  const references = new Set<string>();
+  addArtifactReferences(task.containerArtifactPath, references);
+  for (const source of [task.metadata, task.details]) {
+    const refs = source?.refs;
+    if (typeof refs !== "object" || refs === null) {
+      continue;
+    }
+    const record = refs as Record<string, unknown>;
+    addArtifactReferences(record.artifact_refs, references);
+    addArtifactReferences(record.output_refs, references);
+  }
+  return [...references];
+}
+
+export function selectSubtaskArtifacts(
+  artifacts: RunArtifact[],
+  task: SubtaskArtifactSource,
+) {
+  const references = new Set(subtaskArtifactReferences(task));
+  const matched = artifacts.filter(
+    (artifact) =>
+      artifact.taskId === task.id || references.has(artifact.virtualPath),
+  );
+  const available = new Map<string, RunArtifact>();
+  for (const artifact of matched) {
+    if (artifact.available) {
+      available.set(artifact.virtualPath, artifact);
+    }
+  }
+  return {
+    available: [...available.values()],
+    hasUnavailable:
+      matched.some((artifact) => !artifact.available) ||
+      [...references].some(
+        (reference) =>
+          !matched.some((artifact) => artifact.virtualPath === reference),
+      ),
+  };
+}
+
+function buildRunArtifactsUrl(
+  baseUrl: string,
+  threadId: string,
+  runId: string,
+) {
+  const base = baseUrl.replace(/\/$/, "");
+  return `${base}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts`;
+}
+
+async function loadRunArtifacts(threadId: string, runId: string) {
+  const response = await fetchWithAuth(
+    buildRunArtifactsUrl(getBackendBaseURL(), threadId, runId),
+    { method: "GET", timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS },
+  );
+  if (!response.ok) {
+    throw new Error("Failed to load run artifacts.");
+  }
+  const payload: unknown = await response.json();
+  if (!Array.isArray(payload)) {
+    throw new Error("Invalid run artifacts response.");
+  }
+  return payload.flatMap((item): RunArtifact[] => {
+    if (typeof item !== "object" || item === null) {
+      return [];
+    }
+    const artifact = item as Record<string, unknown>;
+    return typeof artifact.virtual_path === "string" && artifact.virtual_path
+      ? [
+          {
+            available: artifact.available === true,
+            ...(typeof artifact.task_id === "string"
+              ? { taskId: artifact.task_id }
+              : {}),
+            virtualPath: artifact.virtual_path,
+          },
+        ]
+      : [];
+  });
+}
+
+function SubtaskArtifactLinks({
+  runId,
+  task,
+  threadId,
+}: {
+  runId: string;
+  task: Subtask;
+  threadId: string;
+}) {
+  const { t } = useI18n();
+  const references = useMemo(() => subtaskArtifactReferences(task), [task]);
+  const canLoad =
+    references.length > 0 &&
+    task.status !== "in_progress" &&
+    !isStaticWebsiteOnly();
+  const runArtifacts = useQuery({
+    queryKey: queryKeys.thread.runArtifacts(threadId, runId),
+    queryFn: () => loadRunArtifacts(threadId, runId),
+    enabled: canLoad,
+    retry: false,
+    staleTime: Infinity,
+  });
+
+  if (references.length === 0) {
+    return task.containerArtifactWritten !== undefined ? (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {task.containerArtifactWritten
+          ? t.subtasks.artifactUnavailable
+          : t.subtasks.artifactNotWritten}
+      </p>
+    ) : null;
+  }
+  if (task.status === "in_progress") {
+    return (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {task.containerArtifactWritten === false
+          ? t.subtasks.artifactNotWritten
+          : t.subtasks.artifactPending}
+      </p>
+    );
+  }
+  if (isStaticWebsiteOnly()) {
+    return (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {t.subtasks.artifactUnavailable}
+      </p>
+    );
+  }
+  if (runArtifacts.isFetching) {
+    return (
+      <p
+        aria-live="polite"
+        className="text-muted-foreground flex items-center gap-2 px-3 pb-2 text-xs"
+        role="status"
+      >
+        <Loader2Icon aria-hidden className="size-3 animate-spin" />
+        {t.subtasks.artifactLoading}
+      </p>
+    );
+  }
+  if (runArtifacts.isError) {
+    return (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {t.subtasks.artifactCheckFailed}
+      </p>
+    );
+  }
+
+  const artifacts = selectSubtaskArtifacts(runArtifacts.data ?? [], task);
+  if (artifacts.available.length === 0) {
+    return (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {task.containerArtifactWritten === false
+          ? t.subtasks.artifactNotWritten
+          : t.subtasks.artifactUnavailable}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 px-3 pb-2">
+      {artifacts.available.map((artifact) => {
+        const name = getFileName(artifact.virtualPath);
+        return (
+          <div
+            className="bg-muted/40 flex min-w-0 flex-wrap items-center gap-2 rounded-sm px-2 py-1.5"
+            key={artifact.virtualPath}
+          >
+            <span
+              className="min-w-0 flex-1 truncate text-xs"
+              title={artifact.virtualPath}
+            >
+              {name}
+            </span>
+            <Button
+              asChild
+              className="h-7 gap-1 text-xs"
+              size="sm"
+              variant="outline"
+            >
+              <a
+                aria-label={t.subtasks.viewArtifact(name)}
+                href={urlOfArtifact({
+                  filepath: artifact.virtualPath,
+                  threadId,
+                })}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <EyeIcon aria-hidden className="size-3" />
+                {t.subtasks.viewArtifact(name)}
+              </a>
+            </Button>
+            <Button
+              asChild
+              className="h-7 gap-1 text-xs"
+              size="sm"
+              variant="outline"
+            >
+              <a
+                aria-label={t.subtasks.downloadArtifact(name)}
+                href={urlOfArtifact({
+                  filepath: artifact.virtualPath,
+                  threadId,
+                  download: true,
+                })}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <DownloadIcon aria-hidden className="size-3" />
+                {t.subtasks.downloadArtifact(name)}
+              </a>
+            </Button>
+          </div>
+        );
+      })}
+      {artifacts.hasUnavailable && (
+        <p className="text-muted-foreground text-xs" role="status">
+          {t.subtasks.artifactUnavailable}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function getSubtaskAnchorId({
   id,
@@ -433,6 +695,10 @@ function SubtaskCardBody({
           >
             {t.subtasks.backgroundWakeFailed(backgroundWake.wake_attempts)}
           </p>
+        )}
+        {(task.containerArtifactWritten !== undefined ||
+          subtaskArtifactReferences(task).length > 0) && (
+          <SubtaskArtifactLinks runId={runId} task={task} threadId={threadId} />
         )}
         {task.status === "unknown" && onRetryRecovery && (
           <div className="px-3 pb-2">

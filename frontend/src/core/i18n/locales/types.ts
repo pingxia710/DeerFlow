@@ -406,6 +406,13 @@ export interface Translations {
     unknown: string;
     recoveryFailedUnknown: string;
     backgroundWakeFailed: (attempts: number) => string;
+    artifactPending: string;
+    artifactLoading: string;
+    artifactUnavailable: string;
+    artifactCheckFailed: string;
+    artifactNotWritten: string;
+    viewArtifact: (name: string) => string;
+    downloadArtifact: (name: string) => string;
   };
 
   // Token Usage

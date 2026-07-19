@@ -83,10 +83,6 @@ class _SlowRoundStore(MemoryRoundStateStore):
         await asyncio.sleep(_FAKE_IO_DELAY_SECONDS)
         return await super().bind_run(*args, **kwargs)
 
-    async def set_run_state(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
-        await asyncio.sleep(_FAKE_IO_DELAY_SECONDS)
-        return await super().set_run_state(*args, **kwargs)
-
     async def record_task_events(self, *args: Any, **kwargs: Any) -> None:
         await asyncio.sleep(_FAKE_IO_DELAY_SECONDS)
         await super().record_task_events(*args, **kwargs)
@@ -230,8 +226,6 @@ async def _room_isolation_counts(
         if len(matching_rounds) != 1:
             consistency_errors += 1
         else:
-            expected_round_state = "closed" if record.status == RunStatus.success else "blocked"
-            consistency_errors += matching_rounds[0].get("state") != expected_round_state
             crosswire_count += matching_rounds[0].get("thread_id") != record.thread_id
 
         stream = bridge._streams.get(record.run_id)
@@ -448,8 +442,7 @@ async def test_eight_command_rooms_fault_mix_five_interleaved_waves() -> None:
         consistency_errors += len(rounds) != wave_count
         expected_status = RunStatus.interrupted if room_index in cancelled_room_indexes else RunStatus.success
         consistency_errors += sum(record.status != expected_status for record in history)
-        expected_round_state = "blocked" if room_index in cancelled_room_indexes else "closed"
-        consistency_errors += sum(row.get("state") != expected_round_state for row in rounds)
+        consistency_errors += sum("state" in row for row in rounds)
 
     consistency_errors += len(round_store.task_lanes) != room_count * wave_count
     cancelled_runs = sum(record.status == RunStatus.interrupted for record in all_records)
@@ -689,7 +682,7 @@ async def test_single_conversation_keeps_three_sequential_rounds_consistent() ->
     )
     assert len(rounds) == 3
     assert {row["current_run_id"] for row in rounds} == {record.run_id for record in records}
-    assert all(row["state"] == "closed" for row in rounds)
+    assert all("state" not in row for row in rounds)
     assert {(lane["thread_id"], lane["run_id"], lane["task_id"]) for lane in round_store.task_lanes.values()} == {("sequential-thread", record.run_id, "shared-task") for record in records}
 
     for record in records:

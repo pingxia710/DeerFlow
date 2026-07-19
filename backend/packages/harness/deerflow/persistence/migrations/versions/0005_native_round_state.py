@@ -32,16 +32,12 @@ def upgrade() -> None:
             sa.Column("current_run_id", sa.String(length=64), nullable=True),
             sa.Column("source_goal_run_id", sa.String(length=64), nullable=True),
             sa.Column("current_intent", sa.Text(), nullable=True),
-            sa.Column("state", sa.String(length=24), nullable=False),
-            sa.Column("next_action", sa.Text(), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-            sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
             sa.PrimaryKeyConstraint("round_id"),
         )
         op.create_index("ix_rounds_current_run_id", "rounds", ["current_run_id"])
         op.create_index("ix_rounds_thread_id", "rounds", ["thread_id"])
-        op.create_index("ix_rounds_thread_state_updated", "rounds", ["thread_id", "state", "updated_at"])
         op.create_index("ix_rounds_thread_user_updated", "rounds", ["thread_id", "user_id", "updated_at"])
         op.create_index("ix_rounds_user_id", "rounds", ["user_id"])
 

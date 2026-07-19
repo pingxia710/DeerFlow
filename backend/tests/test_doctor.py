@@ -542,6 +542,24 @@ class TestCheckFrontendEnv:
 
 
 # ---------------------------------------------------------------------------
+# check_local_nginx_frontend_proxy
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLocalNginxFrontendProxy:
+    def test_accepts_loopback_host_in_listen_directive(self, tmp_path, monkeypatch):
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "nginx.local.generated.conf").write_text("listen 127.0.0.1:2026;\nupstream frontend { server 127.0.0.1:3000; }\n")
+        monkeypatch.setattr(doctor, "_is_tcp_listening", lambda _host, _port: True)
+
+        result = doctor.check_local_nginx_frontend_proxy(tmp_path)
+
+        assert result.status == "ok"
+        assert result.detail == "nginx:2026 -> frontend:3000"
+
+
+# ---------------------------------------------------------------------------
 # check_sandbox
 # ---------------------------------------------------------------------------
 

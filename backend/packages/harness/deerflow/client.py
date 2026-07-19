@@ -42,7 +42,6 @@ from deerflow.agents.lead_agent.agent import (
     build_middlewares,
 )
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
-from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, normalize_subagent_limit
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
@@ -222,6 +221,7 @@ class DeerFlowClient:
         configurable = {
             "thread_id": thread_id,
             "model_name": overrides.get("model_name", self._model_name),
+            "reasoning_effort": overrides.get("reasoning_effort"),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
@@ -251,16 +251,18 @@ class DeerFlowClient:
         lead_available_skills = _resolve_command_room_available_skills(self._agent_name, effective_available_skills)
         tool_groups = _resolve_agent_tool_groups(self._agent_name, agent_config)
         subagent_enabled = True if self._agent_name == "command-room" else cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = normalize_subagent_limit(cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS))
         model_name = cfg.get("model_name")
         if not model_name and agent_config and agent_config.model:
             model_name = agent_config.model
+        reasoning_effort = cfg.get("reasoning_effort")
+        if reasoning_effort is None and agent_config is not None:
+            reasoning_effort = agent_config.reasoning_effort
         key = (
             model_name,
+            reasoning_effort,
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             subagent_enabled,
-            max_concurrent_subagents,
             self._agent_name,
             frozenset(effective_available_skills) if effective_available_skills is not None else None,
             tuple(tool_groups) if tool_groups is not None else None,
@@ -288,7 +290,13 @@ class DeerFlowClient:
             # callbacks at the graph invocation root so a single embedded run
             # produces one trace with correct session_id / user_id propagation.
             # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=self._app_config, attach_tracing=False),
+            "model": create_chat_model(
+                name=model_name,
+                thinking_enabled=thinking_enabled,
+                reasoning_effort=reasoning_effort,
+                app_config=self._app_config,
+                attach_tracing=False,
+            ),
             "tools": final_tools,
             "middleware": build_middlewares(
                 config,
@@ -301,7 +309,6 @@ class DeerFlowClient:
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=lead_available_skills,
                 app_config=self._app_config,

@@ -39,7 +39,7 @@ _SOURCE_KINDS = set(SourceKind.__args__)
 
 @dataclass(frozen=True)
 class EvidenceRef:
-    """Structured, redacted provenance for judgment by an AI."""
+    """Structured, redacted provenance fact."""
 
     ref_id: str
     thread_id: str
@@ -47,7 +47,6 @@ class EvidenceRef:
     round_id: str | None
     task_id: str | None
     source_kind: SourceKind
-    strength: None
     claim: str
     ref: str
     excerpt: str | None
@@ -91,7 +90,6 @@ def normalize_evidence_ref(
         round_id=round_id if round_id is not None else _optional_mapping_text(ref, "round_id"),
         task_id=task_id if task_id is not None else _optional_mapping_text(ref, "task_id"),
         source_kind=cleaned_source_kind,
-        strength=None,
         claim=_public_text(raw_claim),
         ref=cleaned_ref,
         excerpt=cleaned_excerpt,
@@ -164,14 +162,12 @@ def _stable_ref_id(
 
 
 def summarize_evidence_refs(refs: Iterable[str | None]) -> dict[str, object]:
-    """Return counts only; an AI decides whether the references are adequate."""
+    """Return the references and their factual count."""
 
     values = [str(ref).strip() for ref in refs if ref is not None and str(ref).strip()]
     return {
         "total": len(values),
         "refs": values,
-        "quality_verdict": None,
-        "auto_rework": False,
     }
 
 

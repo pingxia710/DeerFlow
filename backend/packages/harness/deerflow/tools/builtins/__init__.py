@@ -1,5 +1,4 @@
 from .clarification_tool import ask_clarification_tool
-from .command_room_lifecycle import accept_handoff_tool, close_task_tool, project_status_tool
 from .present_file_tool import present_file_tool
 from .setup_agent_tool import setup_agent
 from .task_tool import task_tool
@@ -13,7 +12,4 @@ __all__ = [
     "ask_clarification_tool",
     "view_image_tool",
     "task_tool",
-    "accept_handoff_tool",
-    "close_task_tool",
-    "project_status_tool",
 ]

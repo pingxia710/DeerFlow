@@ -14,8 +14,8 @@ const healthyRuntime = {
     model_fallback: false,
   },
   skills: {
-    configured: ["nextos-commander"],
-    loaded: ["nextos-commander"],
+    configured: ["command-room-fact-finder"],
+    loaded: ["command-room-fact-finder"],
     missing: [],
     disabled: [],
   },

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "deerflow.enterprise.wake-facts/v1",
+  "title": "WakeFactsProjectionResponse",
+  "description": "Owner-scoped, read-only projection of one completed child task whose Chair wake failed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thread_id", "run_id", "round_id", "items"],
+  "properties": {
+    "thread_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "round_id": { "type": "string" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task_id",
+          "source_run_id",
+          "child_status",
+          "child_completed_at",
+          "wake_state",
+          "wake_attempts",
+          "updated_at"
+        ],
+        "properties": {
+          "task_id": { "type": "string" },
+          "source_run_id": { "type": "string" },
+          "child_status": { "const": "completed" },
+          "child_completed_at": { "type": ["string", "null"], "format": "date-time" },
+          "wake_state": { "const": "failed" },
+          "wake_attempts": { "type": "integer", "minimum": 0 },
+          "wake_failure_reason": { "enum": ["retry_exhausted", "wake_unavailable"] },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

@@ -16,14 +16,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
-from deerflow.command_room.ai_workspace import (
-    AI_WORKSPACE_CONTEXT_HEADER,
-    ensure_command_room_ai_workspace,
-    format_ai_workspace_for_model,
-)
 from deerflow.config.app_config import AppConfig
-from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import resolve_runtime_user_id
 
 _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
 _CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
@@ -127,17 +120,6 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
             return None
         ctx = getattr(runtime, "context", None) or {}
         sections: list[str] = []
-        if isinstance(ctx, Mapping):
-            thread_id = ctx.get("thread_id")
-            run_id = ctx.get("run_id")
-            if isinstance(thread_id, str) and thread_id and isinstance(run_id, str) and run_id:
-                try:
-                    workspace_path = get_paths().sandbox_work_dir(thread_id, user_id=resolve_runtime_user_id(runtime))
-                    ai_workspace = ensure_command_room_ai_workspace(workspace_path, thread_id)
-                    if ai_workspace_text := format_ai_workspace_for_model(ai_workspace):
-                        sections.append(ai_workspace_text)
-                except (OSError, ValueError):
-                    pass
         native_context = ctx.get("round_context") if isinstance(ctx, Mapping) else None
         if isinstance(native_context, Mapping):
             if native_text := format_native_round_context_for_model(native_context):
@@ -148,7 +130,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        headers = (_NATIVE_ROUND_CONTEXT_HEADER, AI_WORKSPACE_CONTEXT_HEADER)
+        headers = (_NATIVE_ROUND_CONTEXT_HEADER,)
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})

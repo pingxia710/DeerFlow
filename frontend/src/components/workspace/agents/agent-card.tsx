@@ -1,6 +1,11 @@
 "use client";
 
-import { BotIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
+import {
+  BotIcon,
+  MessageSquareIcon,
+  Settings2Icon,
+  Trash2Icon,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ComponentProps, type ReactElement, useState } from "react";
 import { toast } from "sonner";
@@ -29,13 +34,17 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { beginThreadNavigation } from "@/components/workspace/chats";
-import { useDeleteAgent } from "@/core/agents";
+import { useDeleteAgent, useUpdateAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import type { Model } from "@/core/models/types";
 import { cn } from "@/lib/utils";
+
+import { ModelConfigDialog } from "./model-config-dialog";
 
 interface AgentCardProps {
   agent: Agent;
+  models: Model[];
 }
 
 /**
@@ -101,11 +110,13 @@ function TruncatedBadge({
   );
 }
 
-export function AgentCard({ agent }: AgentCardProps) {
+export function AgentCard({ agent, models }: AgentCardProps) {
   const { t } = useI18n();
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
+  const updateAgent = useUpdateAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
 
   function handleChat() {
     beginThreadNavigation();
@@ -119,6 +130,22 @@ export function AgentCard({ agent }: AgentCardProps) {
       setDeleteOpen(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleConfigSave(
+    model: string,
+    reasoningEffort: Agent["reasoning_effort"],
+  ) {
+    try {
+      await updateAgent.mutateAsync({
+        name: agent.name,
+        request: { model, reasoning_effort: reasoningEffort },
+      });
+      toast.success(t.agents.configurationSaved);
+      setConfigOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -144,6 +171,13 @@ export function AgentCard({ agent }: AgentCardProps) {
                     className="mt-0.5 text-xs"
                   />
                 )}
+                {agent.reasoning_effort ? (
+                  <TruncatedBadge
+                    label={agent.reasoning_effort}
+                    variant="outline"
+                    className="mt-0.5 text-xs"
+                  />
+                ) : null}
               </div>
             </div>
           </div>
@@ -188,12 +222,26 @@ export function AgentCard({ agent }: AgentCardProps) {
             <Button
               size="icon"
               variant="ghost"
-              className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
-              onClick={() => setDeleteOpen(true)}
-              title={t.agents.delete}
+              className="h-8 w-8 shrink-0"
+              onClick={() => setConfigOpen(true)}
+              disabled={models.length === 0}
+              title={t.agents.configure}
+              aria-label={t.agents.configure}
             >
-              <Trash2Icon className="h-3.5 w-3.5" />
+              <Settings2Icon className="h-3.5 w-3.5" />
             </Button>
+            {!agent.system ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
+                onClick={() => setDeleteOpen(true)}
+                title={t.agents.delete}
+                aria-label={t.agents.delete}
+              >
+                <Trash2Icon className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
           </div>
         </CardFooter>
       </Card>
@@ -223,6 +271,19 @@ export function AgentCard({ agent }: AgentCardProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {configOpen ? (
+        <ModelConfigDialog
+          title={`${t.agents.configure}: ${agent.name}`}
+          description={t.agents.agentConfigurationDescription}
+          models={models}
+          currentModel={agent.model}
+          currentReasoningEffort={agent.reasoning_effort}
+          saving={updateAgent.isPending}
+          onOpenChange={setConfigOpen}
+          onSave={handleConfigSave}
+        />
+      ) : null}
     </>
   );
 }

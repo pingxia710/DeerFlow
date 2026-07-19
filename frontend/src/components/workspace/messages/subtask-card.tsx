@@ -34,10 +34,7 @@ import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
 import { formatElapsedMinutesSeconds } from "@/core/tasks/elapsed";
 import type { Subtask } from "@/core/tasks/types";
-import {
-  wakeFactForTask,
-  type WakeFactsProjectionItem,
-} from "@/core/threads/command-room-read-model";
+import { wakeFactForTask } from "@/core/threads/command-room-read-model";
 import {
   buildRunMessagesUrl,
   readRunMessagesPageResponse,
@@ -62,10 +59,7 @@ type RunArtifact = {
   virtualPath: string;
 };
 
-type SubtaskArtifactSource = Pick<
-  Subtask,
-  "id" | "containerArtifactPath" | "metadata" | "details"
->;
+type SubtaskArtifactSource = Pick<Subtask, "id" | "metadata" | "details">;
 
 function addArtifactReferences(value: unknown, references: Set<string>) {
   if (typeof value === "string") {
@@ -89,7 +83,6 @@ function addArtifactReferences(value: unknown, references: Set<string>) {
 
 export function subtaskArtifactReferences(task: SubtaskArtifactSource) {
   const references = new Set<string>();
-  addArtifactReferences(task.containerArtifactPath, references);
   for (const source of [task.metadata, task.details]) {
     const refs = source?.refs;
     if (typeof refs !== "object" || refs === null) {
@@ -192,20 +185,12 @@ function SubtaskArtifactLinks({
   });
 
   if (references.length === 0) {
-    return task.containerArtifactWritten !== undefined ? (
-      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
-        {task.containerArtifactWritten
-          ? t.subtasks.artifactUnavailable
-          : t.subtasks.artifactNotWritten}
-      </p>
-    ) : null;
+    return null;
   }
   if (task.status === "in_progress") {
     return (
       <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
-        {task.containerArtifactWritten === false
-          ? t.subtasks.artifactNotWritten
-          : t.subtasks.artifactPending}
+        {t.subtasks.artifactPending}
       </p>
     );
   }
@@ -240,9 +225,7 @@ function SubtaskArtifactLinks({
   if (artifacts.available.length === 0) {
     return (
       <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
-        {task.containerArtifactWritten === false
-          ? t.subtasks.artifactNotWritten
-          : t.subtasks.artifactUnavailable}
+        {t.subtasks.artifactUnavailable}
       </p>
     );
   }
@@ -336,41 +319,6 @@ function taskDisplayName(task: Subtask, unnamedTask: string) {
   return unnamedTask;
 }
 
-function taskScopeLabel(task: Subtask, t: ReturnType<typeof useI18n>["t"]) {
-  const container = task.commandRoomContainer;
-  if (!container) {
-    return null;
-  }
-  if (container === "context") {
-    return t.chats.trajectory.context;
-  }
-  if (container === "planning") {
-    return t.chats.trajectory.planResearch;
-  }
-  if (container === "technical-design") {
-    return t.chats.trajectory.technicalDesign;
-  }
-  if (container === "execution" || container === "review") {
-    const label =
-      container === "execution"
-        ? t.chats.trajectory.execution
-        : t.chats.trajectory.review;
-    return task.deliveryCycleIndex === undefined
-      ? label
-      : t.chats.trajectory.cycle(label, task.deliveryCycleIndex);
-  }
-  if (
-    container === "project-steward" ||
-    container === "debt-curation" ||
-    container === "learning-curation"
-  ) {
-    return t.chats.trajectory.informationDeposit;
-  }
-  return container === "evaluation"
-    ? t.chats.trajectory.evaluation
-    : t.chats.trajectory.otherProcess;
-}
-
 function restoreAnchorTop(
   anchor: HTMLElement,
   initialTop: number,
@@ -420,11 +368,6 @@ export function SubtaskCard({
 }) {
   const { t } = useI18n();
   const storedTask = useSubtask({ id: taskId, threadId, runId, roundId });
-  const wakeFacts = useThreadWakeFacts(threadId, {
-    runId,
-    roundId,
-    enabled: Boolean(roundId),
-  });
   const task =
     storedTask ??
     (isLoading
@@ -446,7 +389,6 @@ export function SubtaskCard({
 
   return (
     <SubtaskCardBody
-      backgroundWake={wakeFactForTask(wakeFacts.data, taskId)}
       className={className}
       isLoading={isLoading}
       onRetryRecovery={onRetryRecovery}
@@ -458,7 +400,6 @@ export function SubtaskCard({
 }
 
 function SubtaskCardBody({
-  backgroundWake,
   className,
   isLoading,
   onRetryRecovery,
@@ -466,7 +407,6 @@ function SubtaskCardBody({
   task,
   threadId,
 }: {
-  backgroundWake?: WakeFactsProjectionItem;
   className?: string;
   isLoading: boolean;
   onRetryRecovery?: (threadId?: string, runId?: string) => Promise<void> | void;
@@ -479,6 +419,12 @@ function SubtaskCardBody({
   const [collapsed, setCollapsed] = useState(true);
   const [isRetryingRecovery, setIsRetryingRecovery] = useState(false);
   const isOpen = !collapsed;
+  const wakeFacts = useThreadWakeFacts(threadId, {
+    runId,
+    roundId: task.roundId,
+    enabled: isOpen && Boolean(task.roundId),
+  });
+  const backgroundWake = wakeFactForTask(wakeFacts.data, task.id);
   const retryRecovery = () => {
     if (!onRetryRecovery || isRetryingRecovery) {
       return;
@@ -542,8 +488,7 @@ function SubtaskCardBody({
       ? null
       : formatElapsedMinutesSeconds(elapsedSeconds);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const name = taskDisplayName(task, t.chats.trajectory.unnamedTask);
-  const scope = taskScopeLabel(task, t);
+  const name = taskDisplayName(task, t.subtasks.subtask);
   const role =
     task.subagent_type && task.subagent_type !== "task"
       ? task.subagent_type
@@ -641,9 +586,9 @@ function SubtaskCardBody({
                   label={name}
                   icon={<ClipboardListIcon />}
                 ></ChainOfThoughtStep>
-                {(role ?? scope) && (
+                {role && (
                   <p className="text-muted-foreground truncate px-6 pb-1 text-xs">
-                    {[role, scope].filter(Boolean).join(" · ")}
+                    {role}
                   </p>
                 )}
                 {!isOpen && hasCompletedResult && (
@@ -696,8 +641,7 @@ function SubtaskCardBody({
             {t.subtasks.backgroundWakeFailed(backgroundWake.wake_attempts)}
           </p>
         )}
-        {(task.containerArtifactWritten !== undefined ||
-          subtaskArtifactReferences(task).length > 0) && (
+        {subtaskArtifactReferences(task).length > 0 && (
           <SubtaskArtifactLinks runId={runId} task={task} threadId={threadId} />
         )}
         {task.status === "unknown" && onRetryRecovery && (

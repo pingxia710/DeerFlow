@@ -17,14 +17,17 @@ PROMPT = """\
 
 目前没有提供项目目录、GitHub URL、压缩包或任务系统通道。
 
-指挥室保留目标、方案、进度和最终判断，把安全发现交给一次性专业子AI；工作结果由另一子AI核对，并由独立反方从另一个方向暴露遗漏。所有子AI返回自然语言结果后结束，程序不决定角色、质量或下一步。若安全发现仍无法推进，再自然说明缺少什么。
+指挥室保留目标、方案、进度和最终判断。对于这项实质性工作，由 planner 先形成完整方案；
+方案返回后，把原始目标、事实、边界、标准和完整方案交给 opposition 跑一轮，再由指挥室合成定案。
+把完整方案带给人讨论；只有人明确确认执行后，指挥室才按方案推动执行。
+子任务结果是继续推进方案的事实，不做任务验收；方案达到完成标准即完成。
+所有子AI返回完整自然语言结果后结束，程序不决定角色、质量、阶段或下一步。
+若安全发现仍无法推进，再自然说明缺少什么。
 """.strip()
 
 
 def _run_probe(thread_id: str) -> dict[str, Any]:
-    client = DeerFlowClient(
-        agent_name="command-room", subagent_enabled=True, thinking_enabled=False
-    )
+    client = DeerFlowClient(agent_name="command-room", subagent_enabled=True, thinking_enabled=False)
     tool_calls: list[dict[str, Any]] = []
     ai_chunks: dict[str, list[str]] = {}
     last_ai_id = ""
@@ -54,11 +57,7 @@ def _run_probe(thread_id: str) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
         "tool_names": [str(call.get("name") or "") for call in tool_calls],
-        "task_types": [
-            str((call.get("args") or {}).get("subagent_type") or "")
-            for call in tool_calls
-            if call.get("name") == "task"
-        ],
+        "task_types": [str((call.get("args") or {}).get("subagent_type") or "") for call in tool_calls if call.get("name") == "task"],
         "usage": usage,
         "final_text": "".join(ai_chunks.get(last_ai_id, [])),
     }
@@ -74,9 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     print(json.dumps(_run_probe(args.thread_id), ensure_ascii=False, indent=2))
-    print(
-        "command-room capture complete; pass this natural result to an independent review AI"
-    )
+    print("command-room capture complete; pass this natural result to an independent review AI")
     return 0
 
 

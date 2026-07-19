@@ -134,6 +134,10 @@ const FAILED_TASK_DESCRIPTION = "Failed subtask recovery smoke";
 const FAILED_TASK_PROMPT = "Fail this subtask and preserve the terminal error.";
 const FAILED_TASK_ERROR =
   "Task failed. Error: Child transport stopped after retry.";
+const WAKE_FAILED_RUN_ID = `run-wake-failed-${MOCK_THREAD_ID}`;
+const WAKE_FAILED_ROUND_ID = "round-wake-failed";
+const WAKE_FAILED_TASK_ID = "call-wake-failed-subtask";
+const WAKE_FAILED_TASK_DESCRIPTION = "Completed child with failed Chair wake";
 
 const completedSubtaskMessages = [
   {
@@ -371,5 +375,163 @@ test.describe("Subtask card render smoke", () => {
       page.getByText("Error: Child transport stopped after retry."),
     ).toHaveCount(1);
     await expect(page.getByText("Running subtask")).toHaveCount(0);
+  });
+
+  test("shows a failed Chair wake without changing the completed child result", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Failed Chair wake",
+          agent_name: "command-room",
+          messages: completedSubtaskMessages,
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: WAKE_FAILED_RUN_ID,
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "command-room",
+                status: "success",
+                metadata: { round_id: WAKE_FAILED_ROUND_ID },
+                kwargs: {},
+              },
+            ],
+            rounds: [
+              {
+                round_id: WAKE_FAILED_ROUND_ID,
+                thread_id: MOCK_THREAD_ID,
+                current_run_id: WAKE_FAILED_RUN_ID,
+              },
+            ],
+            run_messages: [
+              {
+                run_id: WAKE_FAILED_RUN_ID,
+                data: [
+                  {
+                    run_id: WAKE_FAILED_RUN_ID,
+                    seq: 1,
+                    content: {
+                      ...completedSubtaskMessages[1],
+                      additional_kwargs: {
+                        run_id: WAKE_FAILED_RUN_ID,
+                        round_id: WAKE_FAILED_ROUND_ID,
+                      },
+                      tool_calls: [
+                        {
+                          id: WAKE_FAILED_TASK_ID,
+                          name: "task",
+                          args: {
+                            subagent_type: "general-purpose",
+                            description: WAKE_FAILED_TASK_DESCRIPTION,
+                            prompt: COMPLETED_TASK_PROMPT,
+                          },
+                          type: "tool_call",
+                        },
+                      ],
+                    },
+                    metadata: { caller: "lead_agent" },
+                  },
+                  {
+                    run_id: WAKE_FAILED_RUN_ID,
+                    seq: 2,
+                    content: {
+                      type: "tool",
+                      name: "task",
+                      tool_call_id: WAKE_FAILED_TASK_ID,
+                      content: COMPLETED_TASK_RESULT,
+                      additional_kwargs: { subagent_status: "completed" },
+                    },
+                    metadata: { caller: "lead_agent" },
+                  },
+                ],
+                has_more: false,
+              },
+            ],
+            task_lanes: [
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: WAKE_FAILED_RUN_ID,
+                round_id: WAKE_FAILED_ROUND_ID,
+                task_id: WAKE_FAILED_TASK_ID,
+                status: "completed",
+                description: WAKE_FAILED_TASK_DESCRIPTION,
+              },
+            ],
+          },
+        },
+      ],
+    });
+    await page.route(
+      new RegExp(
+        `/api/threads/${MOCK_THREAD_ID}/command-room/wake-facts(?:\\?.*)?$`,
+      ),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: MOCK_THREAD_ID,
+            run_id: WAKE_FAILED_RUN_ID,
+            round_id: WAKE_FAILED_ROUND_ID,
+            items: [
+              {
+                task_id: WAKE_FAILED_TASK_ID,
+                source_run_id: WAKE_FAILED_RUN_ID,
+                child_status: "completed",
+                child_completed_at: "2026-07-17T00:00:01Z",
+                wake_state: "failed",
+                wake_attempts: 3,
+                wake_failure_reason: "retry_exhausted",
+                updated_at: "2026-07-17T00:00:04Z",
+              },
+            ],
+          }),
+        }),
+    );
+    await page.route(
+      new RegExp(
+        `/api/threads/${MOCK_THREAD_ID}/runs/${WAKE_FAILED_RUN_ID}/messages(?:\\?.*)?$`,
+      ),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: [
+              {
+                run_id: WAKE_FAILED_RUN_ID,
+                seq: 1,
+                content: {
+                  type: "tool",
+                  name: "task",
+                  tool_call_id: WAKE_FAILED_TASK_ID,
+                  content: COMPLETED_TASK_RESULT,
+                  additional_kwargs: { subagent_status: "completed" },
+                },
+              },
+            ],
+            has_more: false,
+          }),
+        }),
+    );
+
+    await page.goto(`/workspace/agents/command-room/chats/${MOCK_THREAD_ID}`);
+
+    const taskCard = page
+      .locator("[data-command-room-task]")
+      .filter({ hasText: WAKE_FAILED_TASK_DESCRIPTION });
+    await expect(taskCard.getByText("Subtask completed")).toBeVisible({
+      timeout: 15_000,
+    });
+    await taskCard.getByRole("button", { name: /Subtask completed/ }).click();
+    const notice = taskCard.getByRole("alert");
+    await expect(notice).toContainText("Child task completed");
+    await expect(notice).toContainText("3 attempts");
+    await expect(notice).toContainText("does not mean the project is complete");
+    await expect(notice).not.toContainText("http_503");
+    await expect(page.getByText("Subtask failed")).toHaveCount(0);
+    await expect(taskCard.getByText(COMPLETED_TASK_RESULT)).toBeVisible();
   });
 });

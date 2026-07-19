@@ -1,7 +1,13 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
+import type {
+  Agent,
+  CreateAgentRequest,
+  Role,
+  UpdateAgentRequest,
+  UpdateRoleRequest,
+} from "./types";
 
 const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
@@ -78,6 +84,32 @@ export async function updateAgent(
     throw new Error(err.detail ?? `Failed to update agent: ${res.statusText}`);
   }
   return res.json() as Promise<Agent>;
+}
+
+export async function listRoles(): Promise<Role[]> {
+  const res = await fetch(`${getBackendBaseURL()}/api/roles`);
+  if (!res.ok)
+    throw new Error(`Failed to load professional roles: ${res.statusText}`);
+  const data = (await res.json()) as { roles: Role[] };
+  return data.roles;
+}
+
+export async function updateRole(
+  name: string,
+  request: UpdateRoleRequest,
+): Promise<Role> {
+  const res = await fetch(`${getBackendBaseURL()}/api/roles/${name}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to update professional role: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<Role>;
 }
 
 export async function deleteAgent(name: string): Promise<void> {

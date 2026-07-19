@@ -17,7 +17,7 @@ def test_role_labels_do_not_try_to_control_codex_cli_tools() -> None:
 def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
 
-    section = prompt_module._build_subagent_section(3)
+    section = prompt_module._build_subagent_section()
 
     assert "**bash**" not in section
     assert "prompt is the complete AI-AI contract" in section
@@ -27,7 +27,8 @@ def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch
 def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> None:
     monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose", "bash"])
 
-    section = prompt_module._build_subagent_section(3)
+    section = prompt_module._build_subagent_section()
 
     assert "For command execution (git, build, test, deploy operations)" in section
-    assert "maximum 3 `task` calls" in section
+    assert "No program-defined task-call count" in section
+    assert "maximum" not in section

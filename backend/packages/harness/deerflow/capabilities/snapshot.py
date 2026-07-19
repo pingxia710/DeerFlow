@@ -283,7 +283,7 @@ def _command_room_runtime_facts(
 
     direct_groups = _resolve_agent_tool_groups("command-room", agent_config)
     direct_tools = [tool.name for tool in app_config.tools if direct_groups is None or tool.group in direct_groups]
-    direct_tools.extend(["present_files", "ask_clarification", "task", "accept_handoff", "close_task", "project_status"])
+    direct_tools.extend(["present_files", "ask_clarification", "task"])
     configured_child_model = app_config.subagents.get_model_for("general-purpose")
     configured_child_model_config = app_config.get_model_config(configured_child_model) if configured_child_model else None
     resolved_child_model = configured_child_model_config.model if configured_child_model_config is not None else configured_child_model
@@ -453,7 +453,6 @@ def _capability_center(
                 "unrestricted_host_access_available": sandbox.get("unrestricted_host_access_available"),
             },
             "middleware_source": "lead_agent.build_middlewares",
-            "program_decides_next_step": False,
         },
         "stop_before": list(approval_policy["stop_before"]),
         "permission_facts": {
@@ -467,7 +466,6 @@ def _capability_center(
                 "global_skill_management_admin_required": approval_policy["global_skill_management_admin_required"],
                 "thread_owner_check_required": approval_policy["thread_owner_check_required"],
             },
-            "program_makes_next_step_decisions": False,
         },
         "evidence_refs": [
             "deerflow.capabilities.snapshot",
@@ -476,15 +474,6 @@ def _capability_center(
             "skill_storage",
             "lead_agent.build_middlewares",
         ],
-        "advisory_only": True,
-        "non_decisions": {
-            "program_makes_next_step_decisions": False,
-            "auto_authorize": False,
-            "auto_reject": False,
-            "auto_pass_fail": False,
-            "auto_dispatch": False,
-            "auto_rework": False,
-        },
     }
 
 

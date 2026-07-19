@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
+from deerflow.config.model_config import ReasoningEffort
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -41,6 +42,7 @@ class AgentConfig(BaseModel):
     name: str
     description: str = ""
     model: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     tool_groups: list[str] | None = None
     # skills controls which skills are loaded into the agent's prompt:
     # - None (or omitted): load all enabled skills (default fallback behavior)
@@ -106,8 +108,15 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     config_file = agent_dir / "config.yaml"
 
     if name == "command-room" and not config_file.exists():
-        # Command Room is built in; a user config, when present, overrides this.
-        return AgentConfig(name=name, skills=[])
+        # NextOS keeps the stable command-room identifier for existing threads.
+        # A user config, when present, still overrides this built-in profile.
+        return AgentConfig(
+            name=name,
+            description="NextOS AI organization Command Room built on the DeerFlow runtime.",
+            model="gpt-5.6",
+            reasoning_effort="max",
+            skills=["nextos-commander"],
+        )
 
     if not agent_dir.exists():
         raise FileNotFoundError(f"Agent directory not found: {agent_dir}")

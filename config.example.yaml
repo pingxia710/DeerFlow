@@ -16,13 +16,21 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 18
+config_version: 19
 
 # ============================================================================
 # Logging
 # ============================================================================
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
+
+# ============================================================================
+# Enterprise read projections
+# ============================================================================
+# This only controls visibility of the completed-child / failed-Chair-wake
+# projection. It never authorizes waking, retrying, or dispatching work.
+enterprise:
+  wake_facts_projection: false
 
 # ============================================================================
 # Token Usage
@@ -1041,15 +1049,18 @@ sandbox:
 #   model: gpt-5.6-terra
 #   # Optional Codex CLI reasoning effort for every delegated task.
 #   # reasoning_effort: xhigh
-#   # Optional model override for a compatibility task label.
+#   # Optional model and reasoning-effort overrides for a task label.
 #   agents:
 #     general-purpose:
 #       model: gpt-5.6-terra
+#     planner:
+#       model: gpt-5.6
+#       reasoning_effort: max
 #   # Add role names for the lead AI to use when writing complete task prompts.
 #   custom_agents:
-#     contract-reviewer:
-#       description: Reviews API contracts and reports concrete mismatches.
-#       system_prompt: Act as an independent professional contract reviewer.
+#     contract-inspector:
+#       description: Inspects API contracts and reports concrete mismatches.
+#       system_prompt: Act as an independent professional contract inspector.
 #       # model: gpt-5.6-terra  # Optional role-specific override.
 
 # ============================================================================

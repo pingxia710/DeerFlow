@@ -45,7 +45,9 @@
     ".next-e2e-mock/types/**/*.ts",
     ".next-e2e-mock/dev/types/**/*.ts",
     ".next-e2e-record/types/**/*.ts",
-    ".next-e2e-record/dev/types/**/*.ts"
+    ".next-e2e-record/dev/types/**/*.ts",
+    ".next-e2e-bottom-anchor-review-6133/types/**/*.ts",
+    ".next-e2e-bottom-anchor-review-6133/dev/types/**/*.ts"
   ],
   "exclude": ["node_modules", "generated"]
 }

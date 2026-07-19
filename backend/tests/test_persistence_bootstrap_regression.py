@@ -27,11 +27,12 @@ import sqlalchemy as sa
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_head_revision
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.run import RunRepository
 
 pytestmark = pytest.mark.asyncio
-HEAD = "0010_task_lane_wake_claim"
+HEAD = _get_head_revision()
 
 
 def _seed_pre_3658_database(db_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import threading
@@ -108,7 +109,7 @@ class DiscordChannel(Channel):
 
         self._thread = threading.Thread(target=self._run_client, daemon=True)
         self._thread.start()
-        self._load_active_threads()
+        await asyncio.to_thread(self._load_active_threads)
         logger.info("Discord channel started")
 
     def _load_active_threads(self) -> None:
@@ -204,14 +205,14 @@ class DiscordChannel(Channel):
             return False
 
         try:
-            # Keep the file handle open only for the duration of the upload: discord.py
-            # reads ``fp`` while ``target.send`` runs on ``_discord_loop``; once that
-            # future resolves the bytes are consumed, so closing here is safe and avoids
-            # leaking the handle on both the success and failure paths.
-            with open(str(attachment.actual_path), "rb") as fp:
-                file = self._discord_module.File(fp, filename=attachment.filename)
+            content = await asyncio.to_thread(attachment.actual_path.read_bytes)
+            buffer = io.BytesIO(content)
+            try:
+                file = self._discord_module.File(buffer, filename=attachment.filename)
                 send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
                 await asyncio.wrap_future(send_future)
+            finally:
+                buffer.close()
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -358,7 +359,7 @@ class DiscordChannel(Channel):
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
                     self._active_threads[channel_id] = target_thread_id
-                    self._save_thread(channel_id, target_thread_id)
+                    await asyncio.to_thread(self._save_thread, channel_id, target_thread_id)
                     thread_id = target_thread_id
                     chat_id = channel_id
                     typing_target = thread_obj
@@ -385,7 +386,7 @@ class DiscordChannel(Channel):
             if thread_obj is not None:
                 target_thread_id = str(thread_obj.id)
                 self._active_threads[channel_id] = target_thread_id
-                self._save_thread(channel_id, target_thread_id)
+                await asyncio.to_thread(self._save_thread, channel_id, target_thread_id)
                 thread_id = target_thread_id
                 chat_id = channel_id
                 typing_target = thread_obj  # Type into the new thread
@@ -408,7 +409,7 @@ class DiscordChannel(Channel):
             else:
                 target_thread_id = str(thread_obj.id)
                 self._active_threads[channel_id] = target_thread_id
-                self._save_thread(channel_id, target_thread_id)
+                await asyncio.to_thread(self._save_thread, channel_id, target_thread_id)
                 thread_id = target_thread_id
                 chat_id = channel_id
                 typing_target = thread_obj  # Type into the new thread

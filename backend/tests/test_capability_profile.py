@@ -19,7 +19,7 @@ def test_agent_harness_profile_exposes_strict_command_room_facts():
         agent_name="command-room",
         role="chair",
         tools=[ToolCapability(name="read_file", source="config.tools", risk_level="low", read_only=True)],
-        skills=[SkillCapability(name="command-room-chair", source="public", enabled=True)],
+        skills=[SkillCapability(name="command-room-fact-finder", source="public", enabled=True)],
         memory_sources=["user", "agent", "thread"],
         middleware_stack=[MiddlewareCapability(name="CommandRoomRoundContextMiddleware", source="lead_agent.build_middlewares", protected=True)],
         filesystem_permissions=[

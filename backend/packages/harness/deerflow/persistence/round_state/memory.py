@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from deerflow.persistence.round_state.sql import (
-    ALLOWED_ROUND_TRANSITIONS,
     MAX_INTENT_CHARS,
-    MAX_NEXT_ACTION_CHARS,
-    ROUND_STATES,
-    TERMINAL_ROUND_STATES,
     _explicit_round_id,
     _validate_explicit_round,
 )
@@ -33,15 +28,6 @@ def _clip(value: Any, limit: int) -> str | None:
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _assert_allowed_transition(previous: str, state: str) -> None:
-    if state not in ROUND_STATES:
-        raise ValueError(f"Unknown round state: {state}")
-    if state == previous:
-        return
-    if state not in ALLOWED_ROUND_TRANSITIONS.get(previous, frozenset()):
-        raise ValueError(f"Invalid round state transition: {previous} -> {state}")
 
 
 def _ref_text(ref: Any) -> str | None:
@@ -109,49 +95,8 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
 
 
 def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
-    handoff = _safe_dict(event.get("handoff_envelope"))
-    container = event.get("command_room_container")
-    if isinstance(container, str) and container in {
-        "context",
-        "planning",
-        "technical-design",
-        "execution",
-        "review",
-        "project-steward",
-        "debt-curation",
-        "learning-curation",
-    }:
-        handoff["command_room_container"] = container
-    work_package_id = event.get("work_package_id")
-    if isinstance(work_package_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", work_package_id):
-        handoff["work_package_id"] = work_package_id
-    delivery_cycle_index = event.get("delivery_cycle_index")
-    if isinstance(delivery_cycle_index, int) and not isinstance(delivery_cycle_index, bool) and delivery_cycle_index >= 1:
-        handoff["delivery_cycle_index"] = delivery_cycle_index
-    artifact_path = event.get("container_artifact_path")
-    if isinstance(artifact_path, str) and artifact_path.strip():
-        handoff["container_artifact_path"] = artifact_path
-    artifact_written = event.get("container_artifact_written")
-    if isinstance(artifact_written, bool):
-        handoff["container_artifact_written"] = artifact_written
-    artifact_kind = event.get("container_artifact_kind")
-    if isinstance(artifact_kind, str) and artifact_kind in {
-        "context-discovery",
-        "context",
-        "planning-forward",
-        "planning-opposition",
-        "spec",
-        "technical-forward",
-        "technical-opposition",
-        "technical-plan",
-        "execution",
-        "findings",
-        "project-status",
-        "debt",
-        "learning",
-    }:
-        handoff["container_artifact_kind"] = artifact_kind
-    return handoff or None
+    handoff = event.get("handoff_envelope")
+    return dict(handoff) if isinstance(handoff, dict) and handoff else None
 
 
 def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
@@ -239,12 +184,9 @@ class MemoryRoundStateStore:
                 round_id=explicit_round_id,
                 row_thread_id=row.get("thread_id") if row is not None else None,
                 row_user_id=row.get("user_id") if row is not None else None,
-                row_state=row.get("state") if row is not None else None,
                 thread_id=thread_id,
                 user_id=user_id,
             )
-        if explicit_round_id is None and row is None and latest is not None and latest["state"] not in TERMINAL_ROUND_STATES:
-            row = latest
         previous_run_id = row.get("current_run_id") if row is not None else None
         previous_intent = row.get("current_intent") if row is not None else None
         previous_updated_at = row.get("updated_at") if row is not None else None
@@ -260,11 +202,8 @@ class MemoryRoundStateStore:
                 "current_run_id": run_id,
                 "source_goal_run_id": run_id,
                 "current_intent": _clip(current_intent, MAX_INTENT_CHARS),
-                "state": "open",
-                "next_action": None,
                 "created_at": now,
                 "updated_at": now,
-                "closed_at": None,
             }
             self.rounds[row["round_id"]] = row
             created = True
@@ -352,81 +291,6 @@ class MemoryRoundStateStore:
         owners.update(event.get("user_id") for events in self.events.values() for event in events if event.get("thread_id") == thread_id)
         owners.update(lane.get("user_id") for lane in self.task_lanes.values() if lane.get("thread_id") == thread_id)
         return owners
-
-    async def set_run_state(
-        self,
-        run_id: str,
-        *,
-        thread_id: str,
-        user_id: str | None,
-        round_id: str,
-        state: str,
-        event_type: str,
-        content: dict[str, Any] | None = None,
-        next_action: str | None = None,
-    ) -> dict[str, Any] | None:
-        row = self.rounds.get(round_id)
-        attached_rounds = self._attached_rounds_for_run(run_id)
-        if row is None or row["thread_id"] != thread_id or row.get("user_id") != user_id or set(attached_rounds) != {round_id} or attached_rounds.get(round_id) is not row:
-            return None
-
-        is_current_run = row.get("current_run_id") == run_id
-        previous = row["state"]
-        if is_current_run and previous == state:
-            return {**row, **self._round_refs(round_id)}
-        event_content = {
-            **(content or {}),
-            "from_state": previous,
-            "to_state": state,
-            "requested_state": state,
-            "state_applied": is_current_run,
-        }
-        if is_current_run:
-            _assert_allowed_transition(previous, state)
-            row["state"] = state
-            row["updated_at"] = _now_iso()
-            if state in TERMINAL_ROUND_STATES and row.get("closed_at") is None:
-                row["closed_at"] = row["updated_at"]
-            if state == "closed" and next_action is None:
-                row["next_action"] = None
-            elif next_action:
-                row["next_action"] = _clip(next_action, MAX_NEXT_ACTION_CHARS)
-        else:
-            event_content["superseded_by_run_id"] = row.get("current_run_id")
-        self._append_event(
-            round_id,
-            thread_id=thread_id,
-            run_id=run_id,
-            user_id=user_id,
-            event_type=event_type,
-            content=event_content,
-        )
-        return {**row, **self._round_refs(round_id)}
-
-    async def rollback_terminal_projection(
-        self,
-        run_id: str,
-        *,
-        expected_state: str,
-        restore_state: str,
-    ) -> dict[str, Any] | None:
-        row = next((item for item in self.rounds.values() if item.get("current_run_id") == run_id), None)
-        if row is None or row.get("state") != expected_state:
-            return None
-        if restore_state not in ROUND_STATES - TERMINAL_ROUND_STATES:
-            raise ValueError(f"Invalid round rollback state: {restore_state}")
-        row["state"] = restore_state
-        row["closed_at"] = None
-        row["updated_at"] = _now_iso()
-        self._append_event(
-            row["round_id"],
-            thread_id=row["thread_id"],
-            run_id=run_id,
-            user_id=row.get("user_id"),
-            event_type="run.status_commit_failed",
-            content={"from_state": expected_state, "to_state": restore_state},
-        )
-        return {**row, **self._round_refs(row["round_id"])}
 
     async def record_task_events(self, events: list[dict[str, Any]]) -> None:
         for event in events:

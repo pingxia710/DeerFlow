@@ -4,6 +4,16 @@ import { resolve } from "node:path";
 import { expect, test } from "@rstest/core";
 
 import { getAgentChatRuntimeKey } from "@/app/workspace/agents/[agent_name]/chats/[thread_id]/page";
+import { resolveAgentDisplayName } from "@/components/workspace/agent-welcome";
+
+test("the command-room compatibility id is displayed as NextOS", () => {
+  expect(resolveAgentDisplayName("command-room", "command-room")).toBe(
+    "NextOS",
+  );
+  expect(resolveAgentDisplayName("researcher", "Research Team")).toBe(
+    "Research Team",
+  );
+});
 
 test("new agent chat runtime key is isolated by draft thread id", () => {
   const firstDraftKey = getAgentChatRuntimeKey("researcher", "draft-a", true);

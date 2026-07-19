@@ -97,6 +97,11 @@ test.describe("Agent chat", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    const deleteDialog = page.getByRole("dialog", {
+      name: "Delete conversation?",
+    });
+    await expect(deleteDialog).toBeVisible();
+    await deleteDialog.getByRole("button", { name: "Delete" }).click();
 
     try {
       await expect.poll(() => localDeleteStarted).toBe(true);

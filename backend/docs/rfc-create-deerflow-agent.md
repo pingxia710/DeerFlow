@@ -220,7 +220,8 @@ def _assemble_from_features(feat: RuntimeFeatures, config: AppConfig) -> tuple[l
         chain.append(ViewImageMiddleware())
         extra_tools.append(view_image_tool)
     if feat.subagent:
-        chain.append(_resolve(feat.subagent, SubagentLimitMiddleware))
+        if isinstance(feat.subagent, AgentMiddleware):
+            chain.append(feat.subagent)
         extra_tools.append(task_tool)
     if feat.loop_detection:
         chain.append(_resolve(feat.loop_detection, LoopDetectionMiddleware))
@@ -493,7 +494,6 @@ graph TB
 | TitleMiddleware | ✓ | ✗ | |
 | MemoryMiddleware | ✓ | ✗ | |
 | ViewImageMiddleware | ✓ | ✗ | |
-| SubagentLimitMiddleware | ✓ | ✗ | |
 | LoopDetectionMiddleware | ✓ | ✗ | |
 | ClarificationMiddleware | ✓ | ✗ | |
 

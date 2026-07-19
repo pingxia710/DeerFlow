@@ -16,17 +16,13 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useI18n } from "@/core/i18n/hooks";
-import { getCommandRoomStepMessages } from "@/core/messages/utils";
-import { useSubtasksForThread } from "@/core/tasks/context";
 import {
   useThreadRuntimeSnapshot,
   useThreadTimeline,
   useThreadWakeFacts,
 } from "@/core/threads/hooks";
 import { isActiveRunStatus } from "@/core/threads/run-status";
-import { mergeTaskLaneSubtasks } from "@/core/threads/task-events";
 import {
-  isTaskTimelineRecord,
   isWorkRecordFact,
   type ThreadTimelineRecord,
 } from "@/core/threads/thread-timeline";
@@ -34,8 +30,6 @@ import { formatDateTime } from "@/core/utils/datetime";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { CommandRoomTrajectory } from "../messages/command-room-trajectory";
-import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
 type WorkRecordToggleProps = {
@@ -114,25 +108,16 @@ function detailForRecord(
 function WorkRecordBody({
   threadId,
   enabled,
-  mobile,
   onClose,
 }: {
   threadId: string;
   enabled: boolean;
-  mobile: boolean;
   onClose: () => void;
 }) {
   const { locale, t } = useI18n();
-  const { thread } = useThread();
   const activity = useWorkActivity(threadId, enabled);
   const snapshot = useThreadRuntimeSnapshot(threadId, { enabled });
   const timeline = useThreadTimeline(threadId, { enabled });
-  const contextSubtasks = useSubtasksForThread(threadId);
-  const tasks = useMemo(
-    () =>
-      mergeTaskLaneSubtasks(snapshot.data?.task_lanes ?? [], contextSubtasks),
-    [contextSubtasks, snapshot.data?.task_lanes],
-  );
   const wakeScope = useMemo(() => {
     const runId = snapshot.data?.runs?.[0]?.run_id;
     const roundId = snapshot.data?.rounds?.find(
@@ -145,37 +130,10 @@ function WorkRecordBody({
     enabled,
     poll: true,
   });
-  const chairMessages = useMemo(
-    () => getCommandRoomStepMessages(thread.messages),
-    [thread.messages],
-  );
-  const hasTaskOverview = tasks.length > 0;
   const backgroundWakeFailures = wakeFacts.data?.items ?? [];
-  const records = (timeline.data?.records.filter(isWorkRecordFact) ?? [])
-    .filter((record) => !hasTaskOverview || !isTaskTimelineRecord(record))
-    .sort((left, right) => right.seq - left.seq);
-  const navigateToChat = (anchorId: string) => {
-    if (mobile) {
-      onClose();
-    }
-    window.requestAnimationFrame(() => {
-      const target = document.getElementById(anchorId);
-      if (!target) {
-        return;
-      }
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
-      target.animate(
-        [
-          {
-            boxShadow:
-              "0 0 0 2px color-mix(in oklab, var(--primary) 45%, transparent)",
-          },
-          { boxShadow: "0 0 0 2px transparent" },
-        ],
-        { duration: 1200, easing: "ease-out" },
-      );
-    });
-  };
+  const records = (timeline.data?.records.filter(isWorkRecordFact) ?? []).sort(
+    (left, right) => right.seq - left.seq,
+  );
 
   return (
     <>
@@ -240,13 +198,6 @@ function WorkRecordBody({
             ))}
           </div>
         )}
-        {hasTaskOverview && (
-          <CommandRoomTrajectory
-            chairMessages={chairMessages}
-            tasks={tasks}
-            onNavigate={navigateToChat}
-          />
-        )}
         {timeline.isLoading ? (
           <p className="text-muted-foreground px-4 py-6 text-sm">
             {t.chats.workRecord.loading}
@@ -255,7 +206,7 @@ function WorkRecordBody({
           <p className="text-muted-foreground px-4 py-6 text-sm" role="alert">
             {t.chats.workRecord.unavailable}
           </p>
-        ) : records.length === 0 && !hasTaskOverview ? (
+        ) : records.length === 0 ? (
           <p className="text-muted-foreground px-4 py-6 text-sm">
             {t.chats.workRecord.empty}
           </p>
@@ -387,7 +338,6 @@ export function ThreadWorkRecordPanel({
           </SheetHeader>
           <WorkRecordBody
             enabled={enabled}
-            mobile
             threadId={threadId}
             onClose={close}
           />
@@ -401,12 +351,7 @@ export function ThreadWorkRecordPanel({
       aria-label={t.chats.workRecord.title}
       className={cn("flex size-full min-w-0 flex-col", !open && "invisible")}
     >
-      <WorkRecordBody
-        enabled={enabled}
-        mobile={false}
-        threadId={threadId}
-        onClose={close}
-      />
+      <WorkRecordBody enabled={enabled} threadId={threadId} onClose={close} />
     </aside>
   );
 }

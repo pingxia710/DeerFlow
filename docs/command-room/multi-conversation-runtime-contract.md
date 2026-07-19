@@ -2,21 +2,18 @@
 
 A multi-conversation runtime may associate actions, outputs, artifacts, and observed events with their parent execution context. It may support parallel work and preserve references needed for traceability.
 
-It records facts and enforces hard access or permission limits. For an explicit
-Command Room handoff, it may reject unfinished optional Planning/Technical
-Design, Review without same-cycle Execution, Execution N+1 without Review N, an
-invalid cycle, or an unwritten assigned artifact. It does not evaluate answer
-quality, automatically route work to a role, parse findings, initiate rework,
-or determine completion. The Command Room AI delegates every role and makes the
-final judgment from complete natural-language returns.
+It records facts and enforces only hard access or permission limits. It does not
+define work stages, evaluate answer quality, route work to a role, interpret
+findings, initiate follow-up work, or determine completion. The Command Room AI
+chooses every delegation and makes the final judgment from complete
+natural-language returns.
 
 ## Thread timeline
 
 `GET /api/threads/{thread_id}/timeline` is the bounded, owner-scoped factual
 work record. It returns only persisted `message`, `lifecycle`, and `artifact`
 events in immutable thread `seq` order. The record ID is `{thread_id}:{seq}`;
-the endpoint never interprets task results or derives acceptance, quality,
-rework, or the next action.
+the endpoint never interprets task results or makes decisions about AI work.
 
 An initial request returns the latest bounded window and its `watermark_seq`.
 `truncated: true` means older matching facts exist but are outside that window.

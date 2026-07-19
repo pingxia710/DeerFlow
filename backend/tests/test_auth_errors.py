@@ -39,6 +39,7 @@ def test_auth_error_response_from_dict():
 # ── decode_token typed failure tests ──────────────────────────────
 
 _TEST_SECRET = "test-secret-for-jwt-decode-token-tests"
+_WRONG_SECRET = "wrong-secret-for-jwt-decode-token-tests"
 
 
 def _setup_config():
@@ -56,7 +57,7 @@ def test_decode_token_returns_token_error_on_expired():
 def test_decode_token_returns_token_error_on_bad_signature():
     _setup_config()
     payload = {"sub": "user-1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(payload, "wrong-secret", algorithm="HS256")
+    token = pyjwt.encode(payload, _WRONG_SECRET, algorithm="HS256")
     result = decode_token(token)
     assert result == TokenError.INVALID_SIGNATURE
 

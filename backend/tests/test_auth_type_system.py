@@ -30,6 +30,7 @@ from app.gateway.csrf_middleware import (
 # ── Setup ────────────────────────────────────────────────────────────
 
 _TEST_SECRET = "test-secret-for-auth-type-system-tests-min32"
+_WRONG_SECRET = "wrong-secret-for-auth-type-system-tests-min32"
 
 
 @pytest.fixture(autouse=True)
@@ -174,7 +175,7 @@ def test_decode_token_invalid_sig_maps_to_token_invalid_code():
     import jwt as pyjwt
 
     payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
+    token = pyjwt.encode(payload, _WRONG_SECRET, algorithm="HS256")
     result = decode_token(token)
     assert result == TokenError.INVALID_SIGNATURE
 
@@ -303,7 +304,7 @@ def test_get_current_user_invalid_token_returns_token_invalid():
 
     _setup_config()
     payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(payload, "wrong-secret", algorithm="HS256")
+    token = pyjwt.encode(payload, _WRONG_SECRET, algorithm="HS256")
 
     mock_request = type("MockRequest", (), {"cookies": {"access_token": token}})()
     with pytest.raises(HTTPException) as exc_info:
@@ -563,7 +564,7 @@ def test_api_auth_me_invalid_sig_returns_structured_401():
     """/api/v1/auth/me with bad signature → 401 with {code: 'token_invalid'}."""
     _setup_config()
     payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
-    token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
+    token = pyjwt.encode(payload, _WRONG_SECRET, algorithm="HS256")
 
     client = _get_auth_client()
     client.cookies.set("access_token", token)

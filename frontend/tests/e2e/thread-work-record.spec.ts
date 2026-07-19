@@ -142,6 +142,85 @@ test("active background tasks are visible before work facts arrive", async ({
   ).toBeVisible();
 });
 
+test("work record keeps a failed Chair wake with its task, source run, and round", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: "Wake fact work record",
+        runtimeSnapshot: {
+          runs: [{ run_id: "run-wake", status: "success" }],
+          rounds: [
+            {
+              round_id: "round-wake",
+              thread_id: MOCK_THREAD_ID,
+              current_run_id: "run-wake",
+              state: "closed",
+            },
+          ],
+          task_lanes: [
+            {
+              thread_id: MOCK_THREAD_ID,
+              run_id: "run-wake",
+              round_id: "round-wake",
+              task_id: "task-wake",
+              status: "completed",
+            },
+          ],
+        },
+      },
+    ],
+  });
+  await page.route(
+    new RegExp(
+      `/api/threads/${MOCK_THREAD_ID}/command-room/wake-facts(?:\\?.*)?$`,
+    ),
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: MOCK_THREAD_ID,
+          run_id: "run-wake",
+          round_id: "round-wake",
+          items: [
+            {
+              task_id: "task-wake",
+              source_run_id: "run-wake",
+              child_status: "completed",
+              child_completed_at: "2026-07-17T00:00:01Z",
+              wake_state: "failed",
+              wake_attempts: 3,
+              wake_failure_reason: "retry_exhausted",
+              updated_at: "2026-07-17T00:00:04Z",
+            },
+          ],
+        }),
+      }),
+  );
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/timeline**`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(timelineResponse()),
+    }),
+  );
+
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  await page.getByLabel("Open activity").click();
+
+  const panel = page.getByRole("complementary", { name: "Activity" });
+  const notice = panel.getByRole("alert");
+  await expect(notice).toContainText("Task task-wake");
+  await expect(notice).toContainText("source run run-wake");
+  await expect(notice).toContainText("round round-wake");
+  await expect(notice).toContainText("does not mean the project is complete");
+  await expect(notice).not.toContainText("http_503");
+  await expect(notice).not.toContainText("Retry");
+});
+
 test("work record uses a bottom sheet at 360px and returns to the chat", async ({
   page,
 }, testInfo) => {

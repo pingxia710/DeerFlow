@@ -151,7 +151,6 @@ def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch)
             description="Execution",
             subagent_type="executor",
             execute=execute,
-            work_package_id="package-a",
         )
         await first_service.dispatch(job, snapshot)
         await asyncio.sleep(0)
@@ -163,7 +162,7 @@ def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch)
         wakes = []
 
         async def wake(_snapshot, recovered_job, outcome, **_kwargs):
-            wakes.append((recovered_job.work_package_id, outcome.status, outcome.error))
+            wakes.append((recovered_job.task_id, outcome.status, outcome.error))
 
         monkeypatch.setattr(background_module, "_start_wake_run", wake)
         recovered_service = background_module.CommandRoomBackgroundService()
@@ -173,7 +172,7 @@ def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch)
         recovered_lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-restart")
         background = recovered_lane["handoff"]["background_recovery"]
         assert calls == 1
-        assert wakes == [("package-a", "failed", "Gateway restarted before this background callable produced a durable outcome; it was not re-executed.")]
+        assert wakes == [("task-restart", "failed", "Gateway restarted before this background callable produced a durable outcome; it was not re-executed.")]
         assert recovered_lane["status"] == "failed"
         assert background["wake"]["state"] == "completed"
         await recovered_service.shutdown()
@@ -196,10 +195,9 @@ def test_terminal_outcome_is_idempotent_and_recovery_does_not_execute_again(monk
             thread_id="thread-1",
             source_run_id="run-1",
             task_id="task-terminal",
-            description="Review",
-            subagent_type="evidence",
+            description="Inspection",
+            subagent_type="general-purpose",
             execute=execute,
-            work_package_id="package-a",
         )
         outcome = CommandRoomBackgroundOutcome(status="completed", result="durable child result")
         await service._persist_state(job, snapshot, outcome=outcome, wake={"state": "pending", "attempts": 0})
@@ -208,7 +206,7 @@ def test_terminal_outcome_is_idempotent_and_recovery_does_not_execute_again(monk
         wakes = []
 
         async def wake(_snapshot, recovered_job, recovered_outcome, **_kwargs):
-            wakes.append((recovered_job.work_package_id, recovered_outcome.result))
+            wakes.append((recovered_job.task_id, recovered_outcome.result))
 
         monkeypatch.setattr(background_module, "_start_wake_run", wake)
         recovered_service = background_module.CommandRoomBackgroundService()
@@ -218,7 +216,7 @@ def test_terminal_outcome_is_idempotent_and_recovery_does_not_execute_again(monk
 
         lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-terminal")
         assert calls == 0
-        assert wakes == [("package-a", "durable child result")]
+        assert wakes == [("task-terminal", "durable child result")]
         assert lane["status"] == "completed"
         assert lane["handoff"]["background_recovery"]["wake"]["state"] == "completed"
         await recovered_service.shutdown()
@@ -375,7 +373,7 @@ def test_recovery_uses_exact_wake_lookup_and_fails_closed_for_legacy_cache(monke
     asyncio.run(scenario())
 
 
-def test_duplicate_receipt_for_a_different_work_package_is_rejected(monkeypatch):
+def test_duplicate_background_receipt_is_rejected(monkeypatch):
     async def scenario():
         snapshot, _round_store = await _background_snapshot()
         service = background_module.CommandRoomBackgroundService()
@@ -394,7 +392,6 @@ def test_duplicate_receipt_for_a_different_work_package_is_rejected(monkeypatch)
             description="Execution",
             subagent_type="executor",
             execute=execute,
-            work_package_id="package-a",
         )
         await service.dispatch(first, snapshot)
         await asyncio.gather(*tuple(service._tasks.values()))
@@ -406,14 +403,13 @@ def test_duplicate_receipt_for_a_different_work_package_is_rejected(monkeypatch)
             description="Execution",
             subagent_type="executor",
             execute=execute,
-            work_package_id="package-b",
         )
         try:
             await service.dispatch(duplicate, snapshot)
         except RuntimeError as exc:
-            assert "different work package" in str(exc)
+            assert "already has a durable admission" in str(exc)
         else:
-            raise AssertionError("different work package receipt was accepted")
+            raise AssertionError("duplicate background receipt was accepted")
         await service.shutdown()
 
     asyncio.run(scenario())
@@ -470,45 +466,17 @@ def test_wake_message_marks_child_output_as_internal_factual_handoff():
         thread_id="thread-1",
         source_run_id="run-1",
         task_id="task-1",
-        description="Review",
-        subagent_type="evidence",
+        description="Inspection",
+        subagent_type="general-purpose",
         execute=execute,
-        command_room_container="review",
-        delivery_cycle_index=1,
-        work_package_id="package-a",
     )
 
-    message = background_module._wake_message(job, CommandRoomBackgroundOutcome(status="completed", result="review facts"))
+    message = background_module._wake_message(job, CommandRoomBackgroundOutcome(status="completed", result="inspection facts"))
 
     assert "internal AI handoff, not a new human request" in message
-    assert "Compare it with the latest human conversation" in message
-    assert "review facts" in message
-    assert "work_package_id: package-a" in message
-    assert "Mandatory" not in message
-    assert "close_task" not in message
-    assert "project_status" not in message
-
-
-def test_wake_message_keeps_project_steward_result_factual():
-    async def execute():
-        return CommandRoomBackgroundOutcome(status="completed", result="continue")
-
-    job = CommandRoomBackgroundJob(
-        thread_id="thread-1",
-        source_run_id="run-1",
-        task_id="task-1",
-        description="Project Steward",
-        subagent_type="project-steward",
-        execute=execute,
-        command_room_container="project-steward",
-        delivery_cycle_index=1,
-    )
-
-    message = background_module._wake_message(job, CommandRoomBackgroundOutcome(status="completed", result="continue"))
-
-    assert "continue" in message
-    assert "Mandatory" not in message
-    assert "project_status" not in message
+    assert "Compare it with the latest human conversation" not in message
+    assert "Do not ask" not in message
+    assert "inspection facts" in message
 
 
 def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
@@ -538,7 +506,6 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
             subagent_type="executor",
             execute=execute,
             wake_context={"model_name": "configured-model", "agent_name": "command-room"},
-            work_package_id="package-a",
         )
         await background_module._start_wake_run(
             Snapshot(),
@@ -552,7 +519,6 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
         assert captured["thread_id"] == "thread-1"
         assert body.assistant_id == "command-room"
         assert body.context["model_name"] == "configured-model"
-        assert body.metadata["source_work_package_id"] == "package-a"
         assert captured["command_room_wake_admission"].wake_id == body.metadata["command_room_wake_id"]
         assert message["name"] == "command_room_background_result"
         assert message["additional_kwargs"]["hide_from_ui"] is True

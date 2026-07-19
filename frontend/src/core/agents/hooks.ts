@@ -5,9 +5,15 @@ import {
   deleteAgent,
   getAgent,
   listAgents,
+  listRoles,
   updateAgent,
+  updateRole,
 } from "./api";
-import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
+import type {
+  CreateAgentRequest,
+  UpdateAgentRequest,
+  UpdateRoleRequest,
+} from "./types";
 
 export function useAgents() {
   const { data, isLoading, error } = useQuery({
@@ -49,6 +55,30 @@ export function useUpdateAgent() {
     onSuccess: (_data, { name }) => {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
       void queryClient.invalidateQueries({ queryKey: ["agents", name] });
+    },
+  });
+}
+
+export function useRoles() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["roles"],
+    queryFn: () => listRoles(),
+  });
+  return { roles: data ?? [], isLoading, error };
+}
+
+export function useUpdateRole() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      name,
+      request,
+    }: {
+      name: string;
+      request: UpdateRoleRequest;
+    }) => updateRole(name, request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["roles"] });
     },
   });
 }

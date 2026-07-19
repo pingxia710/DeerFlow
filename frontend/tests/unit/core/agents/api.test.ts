@@ -26,7 +26,12 @@ rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
 
-import { AgentsApiDisabledError, checkAgentName } from "@/core/agents/api";
+import {
+  AgentsApiDisabledError,
+  checkAgentName,
+  listRoles,
+  updateRole,
+} from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 
 const mockedFetch = rs.mocked(fetcher);
@@ -145,5 +150,53 @@ describe("checkAgentName", () => {
     await expect(checkAgentName("deal.agent")).rejects.not.toBeInstanceOf(
       AgentsApiDisabledError,
     );
+  });
+});
+
+describe("professional roles", () => {
+  test("lists role configurations", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        roles: [
+          {
+            name: "planner",
+            description: "Plan",
+            skill: "command-room-planner",
+            model: "gpt-5.6",
+            reasoning_effort: "max",
+          },
+        ],
+      }),
+    );
+
+    await expect(listRoles()).resolves.toEqual([
+      expect.objectContaining({ name: "planner", model: "gpt-5.6" }),
+    ]);
+  });
+
+  test("updates one role configuration", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        name: "executor",
+        description: "Execute",
+        skill: "command-room-executor",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "xhigh",
+      }),
+    );
+
+    await updateRole("executor", {
+      model: "gpt-5.6-terra",
+      reasoning_effort: "xhigh",
+    });
+
+    expect(mockedFetch).toHaveBeenCalledWith("/api/roles/executor", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-terra",
+        reasoning_effort: "xhigh",
+      }),
+    });
   });
 });

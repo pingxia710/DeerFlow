@@ -215,7 +215,7 @@ def test_command_room_prompt_allows_live_discussion_without_implicit_interventio
         subagents=SubagentsAppConfig(),
     )
 
-    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+    section = prompt_module._build_subagent_section(app_config=explicit_config)
 
     assert "While sub-AIs are running, keep the user conversation responsive" in section
     assert "Do not silently change a running task's goal or permissions" in section
@@ -231,7 +231,7 @@ def test_command_room_prompt_keeps_lead_context_and_delegates_execution():
         subagents=SubagentsAppConfig(),
     )
 
-    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+    section = prompt_module._build_subagent_section(app_config=explicit_config)
 
     assert "You are the lead brain" in section
     assert "Keep the goal, plan, progress, context, and final judgment" in section
@@ -249,7 +249,7 @@ def test_command_room_prompt_requires_a_self_contained_one_shot_handoff():
         subagents=SubagentsAppConfig(),
     )
 
-    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+    section = prompt_module._build_subagent_section(app_config=explicit_config)
 
     assert "does not inherit this lead conversation" in section
     assert "self-contained one-shot handoff" in section
@@ -260,7 +260,7 @@ def test_command_room_prompt_requires_a_self_contained_one_shot_handoff():
     assert "Do not require a fixed handoff form" in section
 
 
-def test_command_room_prompt_leaves_review_and_opposition_to_ai_judgment():
+def test_command_room_prompt_leaves_additional_perspectives_to_ai_judgment():
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -269,13 +269,11 @@ def test_command_room_prompt_leaves_review_and_opposition_to_ai_judgment():
         subagents=SubagentsAppConfig(),
     )
 
-    section = prompt_module._build_command_room_subagent_section(3, app_config=explicit_config)
+    section = prompt_module._build_subagent_section(app_config=explicit_config)
 
     assert "professional role" in section
-    assert "decides whether another sub-AI should independently review" in section
-    assert "not a mandatory successor to every task" in section
-    assert "independent forward and opposition AIs" in section
-    assert "The lead reads those natural-language results and makes the final judgment" in section
+    assert "When another perspective is useful" in section
+    assert "The lead reads all natural-language results and makes the final judgment" in section
     assert "Program metadata must never choose" in section
 
 
@@ -528,22 +526,6 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     assert "append=True" in template
 
 
-def test_command_room_clarification_system_keeps_ai_ai_ai_boundary():
-    template = prompt_module.COMMAND_ROOM_CLARIFICATION_SYSTEM
-
-    assert "COMMAND ROOM AI-AI-AI" in template
-    assert "Keep the user's goal, plan, progress, and final judgment" in template
-    assert "Delegate execution to one-shot sub-AIs" in template
-    assert "Make normal technical choices within the stated scope yourself" in template
-    assert "Conversation and direct Chair answers need no label" in template
-    assert "independent forward and opposition" in template
-    assert "execution" in template
-    assert "review" in template
-    assert "2 minutes" not in template
-    assert "MANDATORY Clarification Scenarios" not in template
-    assert "Clarification ALWAYS comes BEFORE action" not in template
-
-
 def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
@@ -570,15 +552,13 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     )
 
     assert "AI-AI-AI" in prompt
-    assert "You are the lead brain" in prompt
-    assert "Delegate execution work to one-shot sub-AIs" in prompt
-    assert "goal, boundary, and observable result are clear" in prompt
-    assert "delegate the useful task directly" in prompt
-    assert "with only `description`, `prompt`, and `subagent_type`" in prompt
-    assert "optional factual labels" in prompt
-    assert "never authorize, block, sequence, or choose a task" in prompt
-    assert "Independent forward and opposition angles may run in parallel" in prompt
-    assert "freely request a review" in prompt
+    assert "Own the user's goal, accepted plan, decisions, progress, and final judgment" in prompt
+    assert "Delegate edits, shell commands, long-running work, and independent execution" in prompt
+    assert "read-only tools" in prompt
+    assert "Make that AI-AI contract self-contained" in prompt
+    assert "Read every complete natural result and choose every next action yourself" in prompt
+    assert "Programs may only transport text" in prompt
+    assert "records never authorize, block, sequence, judge, repair, advance, or close AI work" in prompt
     assert "Real work uses" not in prompt
     assert "2 minutes" not in prompt
     assert "Delegated Local Sandbox Paths" in prompt
@@ -590,7 +570,9 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "`bash cp`" not in prompt
     assert "Use web_search" not in prompt
     assert "The Command Room does not call ACP or file tools directly" in prompt
-    assert "maximum 2 `task` calls per response" in prompt
+    assert "maximum 2 `task` calls per response" not in prompt
+    assert "Choose the useful task count from the goal" in prompt
+    assert "returns a background receipt, not a result" in prompt
     assert "PRIORITY CHECK: If anything is unclear" not in prompt
     assert "A Round is the command-room execution cadence" not in prompt
     assert "Before execution, make the round's acceptance/evidence standard concrete" not in prompt
@@ -630,7 +612,7 @@ def test_command_room_prompt_stays_compact(monkeypatch):
     assert "Example - Deep Research Report" not in prompt
 
 
-def test_command_room_subagent_prompt_default_limit_is_six(monkeypatch):
+def test_command_room_subagent_prompt_has_no_programmatic_task_limit(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -654,11 +636,11 @@ def test_command_room_subagent_prompt_default_limit_is_six(monkeypatch):
         app_config=explicit_config,
     )
 
-    assert "maximum 6 `task` calls per response" in prompt
-    assert "maximum 6 `task` calls per response" in prompt
+    assert "maximum 6 `task` calls per response" not in prompt
+    assert "task calls per response" not in prompt
 
 
-def test_command_room_subagent_prompt_clamps_limit_to_runtime_range(monkeypatch):
+def test_command_room_subagent_prompt_ignores_legacy_task_limit(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -688,10 +670,8 @@ def test_command_room_subagent_prompt_clamps_limit_to_runtime_range(monkeypatch)
         app_config=explicit_config,
     )
 
-    assert "maximum 2 `task` calls per response" in below_minimum
-    assert "maximum 6 `task` calls per response" in above_maximum
-    assert "maximum 1 `task` calls per response" not in below_minimum
-    assert "maximum 7 `task` calls per response" not in above_maximum
+    assert below_minimum == above_maximum
+    assert "task calls per response" not in below_minimum
 
 
 def test_system_prompt_template_preserves_placeholders():

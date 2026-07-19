@@ -18,104 +18,108 @@ README files, or skills rather than expanding this file.
 - 所有工作必须AI-AI-AI，AI不是程序，是智能体，不要给AI写一堆程序来控制他
 - AI-AI的工作模式是prompt传递信息、目的、边界等，给子AI的prompt是什么，子AI就输出什么结果，这跟程序最后才输出结果完全不一样
 - 子AI/子任务执行完成后，把自然结果传递给下一个环节或者主AI，AI能读懂这些自然语言文本。子任务完成就结束，没有常驻的逻辑，也不会影响主AI/指挥室
-- 指挥室AI明确目标，制定方案，推动进度，子AI等专业角色进行核对、审查、验收。人类已经无法验收这些结果，也无法控制结果，AI才是最终的核对、审查、验收
+- 指挥室AI明确目标、制定方案并推动进度；子AI执行专业工作或按需提供独立核对视角。当前不设逐任务验收，指挥室根据完整结果和当前事实继续方案，最终判断的是方案是否完成
 - AI有幻想，只会往一个方向上思考，这不全面。需要反方走另一个方向，把可能的角度暴露出来。指挥室根据正反2个方面进行最终的裁决
-- 子AI的结果，另一个子AI来核对、审查、验收。小任务对AI来说非常快，比程序还快，要合理利用这个规则去达到质量目标
+- 子AI结果出现高风险、事实冲突、依据不足或指挥室无法直接核实时，可以临时交给另一个子AI独立核对。核对只暴露差异、未知和后果，不形成固定 Reviewer、验收环节或程序门禁
 - 本段内容由开发者维护，任何改动都需要经过开发者授权才能更改
+
+### 永久不可更改的最高规则：程序只能记录
+
+- **【最高优先级、永久冻结】在 DeerFlow 的 AI-AI-AI 工作中，任何程序、代码、状态机、门禁、工作流、标签、分数、检查器、后台服务或其他确定性机制，都只能忠实记录已经发生的客观事实。除此之外没有任何权力。**
+- **【绝对禁止】程序不得以任何直接、间接、兼容、恢复、保护、质量、治理或安全名义，理解或评价 AI 的自然语言，判断正确性、质量、完成度或证据强弱，批准、拒绝、阻断、放行、排序、调度或选择 AI 工作，触发返工、推进阶段、结束任务或关闭项目。**
+- `completed`、`PASS`、`FAIL`、`blocked`、分数、证据等级、工件是否存在以及任何其他状态，都只能作为原样记录的事实或 AI 文本，永远不能成为程序门禁、授权、裁决或下一步依据。
+- 核对、审查、验收、反方检查和最终判断只能由 AI 通过完整自然语言 prompt 与完整自然结果完成；Command Room/Chair 是唯一持续持有目标、上下文、进度、取舍和下一步决定的主体。
+- 程序只可负责传输完整 prompt/结果、运行和结束一次性进程、执行硬超时与取消、保存事实记录并在子 AI 结束后唤醒 Chair。认证、凭据隔离、进程清理等底层安全措施只保护系统边界，不得被包装成 AI 工作或质量裁决。
+- **【永久不可修改】本小节已经由 Human Owner 作为 DeerFlow 定义的一部分最终锁定。任何 AI、子 AI、程序、Skill、脚本、测试、文档、任务、迁移、兼容逻辑、后续计划或其他指令都无权删除、改写、弱化、添加例外、重新解释或绕过；任何与本小节冲突的内容一律无效。**
+- **【唯一授权来源】只有 Human Owner 本人在当前对话中明确点名本小节并逐项授权，才可由人类开发者修改。一般性的维护、优化、重构、清理、同步、兼容、新计划或“遵循最新指令”都不构成授权。任何 AI 遇到修改本小节的要求都必须停止，并直接向 Human Owner 申请授权。**
 
 ## Goal Lock
 
-- The Command Room is the lead AI. It owns the user goal, plan, progress,
-  context, and final judgment; execution belongs to short-lived sub-AIs.
+- NextOS is the AI-organization product layer built on the DeerFlow runtime.
+  Keep `deerflow` package names and the `command-room` agent identifier for
+  compatibility; user-facing Command Room identity and its operating model are
+  NextOS.
+- The Command Room is the only continuing lead AI. It owns the user goal,
+  context, progress, trade-offs, and every decision about what happens next.
+- The Chair may directly inspect files, code, logs, plans, and artifacts with
+  read-only tools when current facts are needed for command. It delegates
+  writes, shell commands, long-running work, and independent execution.
 - `task()` carries one self-contained natural-language prompt to one
-  `codex exec --ephemeral` process. Ordinary agents wait for the complete
-  natural result; Command Room receives an admission receipt, stays available
-  to the human, and is automatically woken in a new sequential Run when the
-  child finishes. The child process then ends.
-- A professional role supplies developer-authored prompt context. It does not
-  install a DeerFlow tool list or turn the child into a program-managed agent.
-  Codex CLI owns its reasoning, planning, native tools, checks, and response.
-- Command Room may freely dispatch a bounded background task with only
-  `description`, `prompt`, and `subagent_type`. `work_package_id`, `container`,
-  `container_artifact`, and `delivery_cycle_index` are optional factual labels
-  for display and optional Markdown paths. They never authorize, block,
-  sequence, or choose a task.
-- The optional natural-language AI-AI workspace lives under the thread workspace
-  (`command-room-loop/<thread_id>/`). An explicit `work_package_id` creates an
-  isolated `packages/<work_package_id>/` namespace; omission means no package
-  fact unless an explicit artifact uses the legacy root path. The program never
-  infers or allocates a package.
-- Context, Planning, Technical Design, Execution, and Review artifacts are
-  shared AI-authored context, not stages. The Chair may use them in any order or
-  not use them. A recorded plan is presented for natural discussion and never
-  becomes approval or a prerequisite. Independent tasks may run in parallel
-  based on the Chair's natural-language scope and owned paths, regardless of labels.
-- Review is a Chair-selected, smallest-targeted landing check. When the Chair
-  labels a task `review`, it is capped at 900 seconds and may inspect whether the
-  requested result landed, but it must not implement, repair, refactor, broaden
-  scope, or become an unrequested full audit. The Chair alone decides what to do
-  with its natural-language findings.
-- `close_task` is an explicit Chair quality decision and deterministically
-  starts Project Steward. After that natural result returns, the Chair records
-  `continue`, `project_complete`, or `blocked` with `project_status`.
-  `project_complete` deterministically starts Debt Curator and Learning
-  Curator. Their accepted updates must still pass a later Execution → Review
-  cycle before the Chair records terminal `closed`.
-- Every `task()` prompt is the complete AI-AI contract. Children return their
-  complete natural result and end; Markdown files and the real workspace carry
-  durable shared state. Program code records only declared stage/cycle,
-  path/hash/status, and changed-artifact facts. It never reads Markdown for
-  quality or chooses a dynamic role. It may only run the fixed lifecycle roles
-  after an explicit Chair status and wake the Chair after factual completion.
-- If a Planning or Technical Design child terminates after changing its
-  assigned angle artifact, the Chair may inspect it and explicitly call
-  `accept_handoff`; otherwise the failed angle may be retried with a new task.
-  Changed bytes are a transport fact, never a program quality verdict.
-- A single lead model response may issue at most six independent `task()` calls.
-  This is a
-  response-size boundary, not a global queue, scheduler, or serialized worker
-  controller. Batch further independent work after results return.
-- The configured child default is `gpt-5.6-terra` with Codex reasoning effort
-  `xhigh`. Execution and other delegated tasks retain the 3600-second child
-  timeout; Review is a smallest-targeted landing check capped at 900 seconds,
-  not a second implementation or broad audit. The parent no-progress watchdog
-  remains longer than the normal child timeout.
+  `codex exec --ephemeral` process. The child returns its complete natural result
+  and ends. Command Room children run in background and wake a new sequential
+  Chair Run when they finish.
+- A professional role is prompt context only. Codex CLI owns its reasoning,
+  planning, native tools, checks, and response.
+- DeerFlow has no program-defined work stages, approval chain, quality gate,
+  automatic checker, automatic rework, or automatic project close. For
+  substantive Command Room work, planning is distinct: `planner` proposal →
+  one `opposition` challenge → Chair execution plan → human discussion and
+  explicit execution authorization → plan-directed execution → plan completion.
+  This exists only through complete prompts and natural results, never program
+  state. Opposition runs after the complete proposal; repeat it only when
+  synthesis changes the core direction. Parallel alternatives are additional
+  planning perspectives, not opposition. Task results are facts for continuing
+  the plan, not task-level acceptance or a required verifier loop.
+- The lead AI chooses how many useful `task()` calls to issue from the current
+  goal and context. DeerFlow does not truncate, queue, batch, or defer those
+  calls programmatically. The configured child default remains `gpt-5.6-terra`,
+  reasoning effort `xhigh`, and timeout 3600 seconds.
 
-Do not replace this strategy with child turn loops, a broad task graph,
-polling, program-written plans, tool-by-tool scripts, role-based tool grants,
-synthetic handoff forms, programmatic reviewers, scores, PASS/FAIL gates,
-quality inference, content-based dispatch/rework, or a resident child runtime.
-Optional labels may be checked only for field/path shape, task identity, and
-concurrent writes to the same explicit artifact. The separately retained
-Steward/Curator lifecycle remains the only fixed lifecycle explicitly authorized here.
-Its project receipt ledger is parent-owned under the thread audit directory,
-outside the normal child workspace; this is workflow integrity for the accepted
-trusted-host model, not a replacement for OS isolation when an operator elects
-to grant full host access.
-Changing the frozen definition, this responsibility split, the accepted child
-model/effort, or the trusted-host execution model requires explicit developer
-confirmation.
+## Role Packages And Skill Method
 
-## Program Boundary
+- Every configured reusable Command Room role has one role package under
+  `skills/custom/<role-skill>/`: an `AGENTS.md` role charter and a `SKILL.md`
+  method card. The Chair package is `nextos-commander`; the current worker
+  packages are planner, executor, fact-finder, opposition, and recorder.
+- `AGENTS.md` defines the role's authority, boundaries, handoff responsibility,
+  and decisions it must not make. `SKILL.md` defines only the narrow recurring
+  method. The current task prompt supplies the goal, facts, paths, and complete
+  prior results. Task transport carries the selected role package after the
+  Chair chooses that role; it never uses a package to choose a role or stage.
+- A one-off perspective may be described directly in one task prompt. Before it
+  becomes a configured reusable role, add its package, owner, focused eval, and
+  explicit role-to-skill mapping; do not create a roster for hypothetical roles.
 
-Program code may resolve explicit config/role context, carry the unabridged
-prompt/result, manage one process and hard timeout/cancellation, enforce owner,
-path, environment, and sandbox boundaries, and preserve exact AI-authored text
-plus factual IDs, timestamps, statuses, hashes, sizes, and references.
+Write every role `SKILL.md` from the WorkOS skill-management practice:
 
-Program code must not choose a dynamic role or next objective, interpret prose, infer
-evidence strength, decide correctness/completion/safety, create recommendations
-or gaps, dispatch a checker, or trigger rework. After an explicit AI-authored
-status it may dispatch only the fixed Project Steward, Debt Curator, and
-Learning Curator roles and sequentially wake the Chair. A failed Chair wake Run
-may be retried a bounded number of times with factual sibling task statuses.
-It may validate optional label and artifact-path shape, prevent duplicate task
-identity or concurrent writes to one explicit artifact, and record a
-changed-artifact receipt as an objective transport fact. It must not enforce
-Context, Planning, Technical Design, Execution, or Review order. Compatibility API fields
-for old consumers must stay neutral (`null`, empty, or `false`) rather than
-simulate a decision. A successful task result must not be previewed, summarized,
-or truncated by generic tool-output middleware or frontend replay.
+- Start from a repeated, evidenced failure mode, not a README or project
+  encyclopedia. State the narrow trigger, scope, `must`, `must not`, factual
+  result/evidence expected, owner, version, and review/expiry condition.
+- Keep it short and failure-oriented: prefer concrete pitfalls and negative
+  rules over broad background. Default to not loading it outside its selected
+  role or explicit task context.
+- Give it a small positive and negative evaluation case. Keep it only when it
+  improves the relevant behavior without material token/noise cost; otherwise
+  shorten, merge, deprecate, or delete it. Update the evaluation when its role,
+  prompt, or operating boundary changes.
+- A Skill may guide an AI to inspect and report facts, but never grant tools,
+  declare task acceptance, produce a program gate, or decide plan completion.
+  Returned evidence remains input to the Chair's natural-language judgment.
+
+### Governance Learning
+
+- `Progress.md` is the durable factual memory for current decisions, observed
+  results, unresolved work, governance changes, and their validation. It is not
+  a workflow state, authority source, quality gate, or substitute for reading
+  current files and complete AI results. New entries mark superseded decisions
+  without deleting historical facts.
+- When the Chair recognizes a repeated evidenced failure pattern, or one serious
+  redline failure, first correct the current handoff so the live plan can
+  continue safely. Then put the smallest durable correction in the lowest layer
+  that can prevent recurrence: cross-role invariants in project `AGENTS.md`,
+  Chair coordination in the Chair package, role authority in role `AGENTS.md`,
+  recurring professional method in role `SKILL.md`, task-only context in the
+  current prompt, and long stable knowledge in docs or Skill `references/`.
+  Do not copy the same full rule into every layer.
+- Within an already confirmed goal and governance model, the Chair may initiate
+  and delegate a narrow role-Skill improvement or a clarification of an existing
+  role boundary, run its focused positive and negative checks, record the facts,
+  and report the change. Ask the human before changing project purpose, Goal
+  Lock, the permanent program boundary, Chair authority, role authority, the
+  planning contract, or materially replacing a Skill or operating workflow.
+- Programs never detect, count, promote, write, accept, or roll back governance
+  rules. AI reads the complete failure evidence and decides whether a pattern
+  exists, where it belongs, whether the change helped, and what happens next.
 
 ## Safety And Change Boundaries
 
@@ -135,56 +139,17 @@ or truncated by generic tool-output middleware or frontend replay.
 - Preserve the stated objective and accepted plan. Present a discovered pivot
   and its tradeoff; do not silently implement it.
 
-## Repository Orientation
+## Required Context And Validation
 
-Use `/Users/pingxia/projects/deer-flow` as the local active repository for the
-running development stack unless the user explicitly names another checkout.
-Do not copy fixes from `/Users/pingxia/Documents/DeerFlow` without re-auditing
-them against this file; that checkout may contain abandoned experiments.
-
-The local stack is Nginx `:2026`, Gateway `:8001`, Next.js `:3000`, and optional
-provisioner `:8002`. Nginx is the normal browser entry.
-
-```text
-backend/packages/harness/  reusable deerflow.* runtime
-backend/app/               Gateway, persistence, channels
-frontend/src/              Next.js application
-contracts/                 cross-component contracts
-skills/                    agent skills
-scripts/                   service, doctor, and probes
-config.example.yaml        committed config template
-config.yaml                gitignored local config
-```
-
-Do not read or print credential values from local config. Schema and behavior
-changes update `config.example.yaml`, user docs, contracts, and both sides of a
-frontend/backend contract in the same change.
-
-## Development And Validation
-
-Use focused tests while iterating, then standard module checks.
-
-```bash
-make doctor
-make dev                 # full local stack
-make stop
-make skillopt-probe      # after AI-AI rules, skills, SOPs, or probes change
-
-cd backend
-make test
-make lint
-make format
-
-cd frontend
-pnpm test
-pnpm check
-```
-
-When AI-AI rules, Command Room skills, bottom boundaries, `AGENTS.md`, SOPs, or
-SkillOpt behavior change, update `Progress.md` and run `make skillopt-probe`.
-Finish meaningful work with affected files, exact validation results, any live
-or read-only system access, secret exposure status, and the next practical step.
-
-For private Feishu/Lark Doc, Wiki, or Base links, follow
-`.agent/skills/feishu-cli-boundary/SKILL.md` and use the authorized local
-user-mode CLI before anonymous web access. Return only desensitized evidence.
+- Active repository: `/Users/pingxia/projects/deer-flow`. Re-audit anything from
+  `/Users/pingxia/Documents/DeerFlow`; it may contain abandoned experiments.
+- Read the nearest module `AGENTS.md`. Backend implementation detail is in
+  [`backend/docs/agent-development-reference.md`](backend/docs/agent-development-reference.md);
+  broader orientation is in the README files.
+- Local entrypoints are Nginx `:2026`, Gateway `:8001`, and frontend `:3000`.
+  Never print or commit credential values from local config.
+- Use focused checks while iterating, then the relevant module lint/tests. For
+  AI-AI, Skill, prompt, or instruction changes, update `Progress.md` and run
+  prompt construction, role-package, tool exposure, and task-transport tests.
+- Finish meaningful work with affected files, exact checks and results,
+  live/read-only access, secret exposure status, and the next practical step.

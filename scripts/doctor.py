@@ -632,7 +632,11 @@ def check_local_nginx_frontend_proxy(project_root: Path) -> CheckResult:
     except Exception as exc:
         return CheckResult("local nginx frontend upstream", "warn", str(exc))
 
-    listen_match = re.search(r"^\s*listen\s+(\d+)\s*;", text, re.MULTILINE)
+    listen_match = re.search(
+        r"^\s*listen\s+(?:127\.0\.0\.1:)?(\d+)\s*;",
+        text,
+        re.MULTILINE,
+    )
     frontend_match = re.search(
         r"upstream\s+frontend\s*\{[^}]*server\s+127\.0\.0\.1:(\d+)\s*;",
         text,

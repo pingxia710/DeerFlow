@@ -29,10 +29,9 @@ The middleware chain is built once per agent invocation, based on the current co
 6. `MemoryMiddleware` — cross-session memory injection and queuing
 7. `ViewImageMiddleware` — image details injection (if model supports vision)
 8. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-9. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-10. `LoopDetectionMiddleware` — breaks repetitive tool call loops for ordinary lead agents; excluded from the Command Room
-11. Custom middlewares (if any)
-12. `ClarificationMiddleware` — intercepts clarification requests (always last)
+9. `LoopDetectionMiddleware` — breaks repetitive tool call loops for ordinary lead agents; excluded from the Command Room
+10. Custom middlewares (if any)
+11. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
 The ordering is significant. Summarization runs early to reduce context before other processing. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
@@ -50,7 +49,8 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 
 Detects when the agent is making the same tool call repeatedly without making progress. When a loop is detected, the middleware intervenes to break the cycle and prevents the agent from burning turns indefinitely.
 
-The coordinator-only Command Room does not load this middleware. Its lead AI decides which worker, checker, or opposition AI runs next and when the work is complete.
+The coordinator-only Command Room does not load this middleware. Its lead AI
+decides whether another one-shot AI is useful and when the work is complete.
 
 Warning interventions are queued per thread and run, then drained on the next model call as a single hidden `HumanMessage(name="loop_warning")` appended after existing tool results. This keeps provider tool-call pairing valid. Run start/end hooks clear stale or undelivered warnings, and hard stops still strip tool calls before forcing a final text response.
 
@@ -71,14 +71,6 @@ memory:
   max_injection_tokens: 2000
   debounce_seconds: 30
 ```
-
----
-
-### SubagentLimitMiddleware
-
-Limits the number of subagent `task()` calls the agent can emit in one model response. This enforces the configured resource bound without creating a task queue or deciding what work the AI should issue next.
-
-**Configuration**: `subagent_enabled` and `max_concurrent_subagents` in the per-request config.
 
 ---
 

@@ -41,6 +41,13 @@ def _postgres_url() -> str:
     return url
 
 
+def _require_postgres_url() -> str:
+    """Return the optional local integration URL or skip integration checks."""
+    if not os.getenv("DEER_FLOW_TEST_RUN_LEASE_POSTGRES_URL"):
+        pytest.skip("set DEER_FLOW_TEST_RUN_LEASE_POSTGRES_URL to run the Postgres wake contract checks")
+    return _postgres_url()
+
+
 @pytest.mark.parametrize(
     "url",
     (
@@ -118,7 +125,7 @@ async def _assert_single_canonical_run(engine, wake_id: str, *, expected_run_id:
 
 @pytest.mark.anyio
 async def test_postgres_wake_contract_rejects_non_utc_session() -> None:
-    engine, *_ = await _gateway(_postgres_url(), "wake-gateway-non-utc")
+    engine, *_ = await _gateway(_require_postgres_url(), "wake-gateway-non-utc")
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SET TIME ZONE 'America/New_York'"))
@@ -130,7 +137,7 @@ async def test_postgres_wake_contract_rejects_non_utc_session() -> None:
 
 @pytest.mark.anyio
 async def test_postgres_gateway_wake_lease_fences_competition_expiry_and_restart(monkeypatch: pytest.MonkeyPatch) -> None:
-    url = _postgres_url()
+    url = _require_postgres_url()
     first_engine, first_repository, first_round_store, _first_manager, first_service, first_app, first_snapshot = await _gateway(url, "wake-gateway-one")
     second_engine, second_repository, second_round_store, _second_manager, second_service, second_app, second_snapshot = await _gateway(url, "wake-gateway-two")
     restarted_engine = None

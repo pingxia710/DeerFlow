@@ -12,7 +12,7 @@ import { Callout } from "nextra/components";
   委派子任务的专注执行者。它们以隔离的上下文运行，在处理并行或专业工作的同时保持主对话清晰。
 </Callout>
 
-Lead Agent 是指挥室的脑袋，保留目标、方案、进度、上下文和最终判断；一次性**子 AI**根据自包含的自然语言 prompt 执行工作。
+NextOS 是构建在 DeerFlow 运行时上的 AI 组织。它的 Lead Agent 是指挥室脑袋，保留目标、方案、进度、上下文和最终判断；一次性**子 AI**根据自包含的自然语言 prompt 执行工作。
 
 ## 为什么子 Agent 很重要
 
@@ -23,7 +23,7 @@ Lead Agent 是指挥室的脑袋，保留目标、方案、进度、上下文和
 
 ## 专业角色标签
 
-DeerFlow 提供 `general-purpose`、`bash`，以及 `planner`、`evidence`、`fact-finder`、`opposition` 等指挥室角色。角色标签会选择开发者写好的上下文，由 DeerFlow 放到任务 prompt 前面：优先使用配置的 `system_prompt`，否则使用角色 description。它不会授予 DeerFlow 工具、创建轮次循环或安装质量规则；一次性 Codex AI 自己拥有并选择原生工具。
+DeerFlow 提供 `general-purpose`、`bash`，以及 `planner`、`executor`、`fact-finder`、`opposition`、`recorder` 等指挥室角色。角色标签会选择开发者写好的上下文，由 DeerFlow 放到任务 prompt 前面：优先使用配置的 `system_prompt`，否则使用角色 description。它不会授予 DeerFlow 工具或创建轮次循环；一次性 Codex AI 自己拥有并选择原生工具。
 
 ### general-purpose
 
@@ -32,6 +32,16 @@ DeerFlow 提供 `general-purpose`、`bash`，以及 `planner`、`evidence`、`fa
 ### bash
 
 用于构建、测试、诊断和大量终端输出的命令执行角色。标签本身不授予 shell 权限；Codex CLI 使用自己的工具与权限配置。
+
+### planner
+
+独立规划角色，根据 Chair 的完整 brief 形成一个包含目标、边界、假设、路线和可观察完成标准的连贯方案。需要探索替代路线时，可以并行启动额外 Planner。
+
+### opposition
+
+在 Planner 完整方案之后运行的独立挑战角色。它同时获得原始 brief 和完整方案，报告隐藏假设、反证、失败路径、边界遗漏和实质性最强的替代方案；不强行反对、不批准或否决方案，也不替代 Chair 判断。
+
+对于实质性工作，Chair 通过这些临时角色执行由 AI 掌握的“`planner` 提案 → 一轮 `opposition` 挑战 → Chair 执行方案 → 人确认方案 → 执行 → 方案完成”。返回的任务结果是 Chair 继续已确认方案时使用的事实，不是逐任务验收事件。这个顺序存在于 AI prompt 和自然结果中，不进入运行时状态或前端门禁。
 
 ## 委派流程
 
@@ -51,7 +61,7 @@ task(
 1. 组合开发者写的角色上下文、Lead Agent 的任务 prompt、适用规则提示和真实任务路径，再把这个自包含 prompt 交给一个临时 Codex CLI 进程。
 2. 由这个 Codex AI 自主规划、调用工具并完成任务。
 3. 把完整自然语言结果原样返回给 Lead Agent。
-4. 结束子进程；Lead Agent 必须用新 prompt 把完整结果交给另一个核对 AI，并取得独立反方结果后再裁决。
+4. 结束子进程；Lead Agent 阅读完整结果，并自行判断是否还需要其他 AI 工作。
 
 ## 配置
 
@@ -66,27 +76,24 @@ subagents:
   reasoning_effort: xhigh
   # 可选：向 Lead Agent 展示的专业角色名称
   custom_agents:
-    contract-reviewer:
-      description: 核对 API 契约并报告具体不一致。
-      system_prompt: 作为独立的专业 API 契约审查者工作。
+    contract-inspector:
+      description: 检查 API 契约并报告具体不一致。
+      system_prompt: 作为独立的专业 API 契约检查者工作。
 ```
 
 DeerFlow 不再为子 AI 设置轮次循环、工具白名单、评分或程序化完成规则。组合后的自然语言 prompt 就是任务契约；超时只负责进程生命周期。
 
 委派还要求安装项目锁定版本的 `@openai/codex` CLI，并完成 `codex login` 或提供 Codex 支持的认证环境；即使 Lead Agent 使用其他模型 provider 也是如此。Docker 镜像会安装 CLI，但默认不包含个人凭证。
 
-## 并发限制
+## 派发数量
 
-`SubagentLimitMiddleware` 控制 Lead Agent 在一次模型响应中最多可以发出多少个 `task()` 调用，通过每次请求的配置控制：
+`subagent_enabled` 控制会话是否启用委派。启用后，由 Lead Agent 根据目标和当前上下文决定发出多少个有价值的 `task()` 调用。DeerFlow 不会用程序截断、排队、分批或延后这些调用；旧请求中的 `max_concurrent_subagents` 值会被忽略。
 
-- `subagent_enabled`：是否为此会话激活子 Agent 委派
-- `max_concurrent_subagents`：一次模型响应中的最大任务调用数（默认：6）
+独立 Codex 进程可以并发运行。主机/模型容量和每个子进程的生命周期超时仍是传输边界，但不会决定哪些 AI 工作应该执行。
 
-如果一条响应中的调用超过配置上限，中间件只省略超出的调用，并把这个客观事实告诉 Lead Agent。它不会建议下一步、把调用放入程序队列或静默调度；Lead Agent 根据已返回的 AI 结果自行判断。
+## 事实调度记录
 
-## Handoff audit
-
-每次 `task` 委派会在本地存储可用时向该线程的 audit 目录写入一条追加式审计记录。记录只保留客观的调度身份、状态、哈希和字符数，不写入原始 prompt、worker 输出和错误文本，也不会解析 worker 文字或推断 verdict、证据强度和下一步。
+每次 `task` 调用会在本地存储可用时向该线程的 audit 目录写入一条追加式记录。记录只保留客观的调度身份、状态、哈希和字符数，不写入原始 prompt、worker 输出和错误文本，也不会解释 worker 文字或决定 Lead Agent 的下一步。
 
 子任务完成而 Chair 唤醒失败时，UI 只会显示这一运输事实；它不表示 Chair 已消费、项目完成、批准或可以重试。
 

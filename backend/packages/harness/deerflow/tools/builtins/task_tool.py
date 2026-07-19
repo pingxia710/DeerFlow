@@ -18,26 +18,16 @@ from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 
-from deerflow.command_room.ai_workspace import (
-    CommandRoomContainer,
-    CommandRoomContainerTask,
-    ContainerArtifact,
-    container_artifact_is_ai_authored,
-    ensure_command_room_ai_workspace,
-    format_ai_workspace_for_model,
-    format_container_task_for_model,
-    prepare_command_room_container_task,
-    record_container_task_completion,
-    record_container_task_terminal,
-    validate_work_package_id,
-)
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
 from deerflow.config.paths import ensure_directory_no_symlinks
+from deerflow.config.role_assignments import RoleAssignment, load_role_assignments
 from deerflow.config.subagents_config import get_subagents_app_config
 from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import is_unrestricted_host_access_allowed
+from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.subagents.audit import record_subagent_handoff
+from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_SKILLS
 from deerflow.subagents.codex_cli import CodexSandboxMode, run_codex_cli_task
 from deerflow.subagents.registry import get_subagent_config
 from deerflow.subagents.status_contract import SubagentStatusValue, make_subagent_additional_kwargs
@@ -50,7 +40,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _TASK_EVENT_SCHEMA_VERSION = "deerflow.task-event/v1"
 _EVENT_PREVIEW_MAX_CHARS = 240
-_REVIEW_TASK_TIMEOUT_SECONDS = 900
 _BACKGROUND_DISPATCHER_CONTEXT_KEY = "__command_room_background_dispatcher"
 _BACKGROUND_WAKE_CONTEXT_KEYS = frozenset(
     {
@@ -62,7 +51,6 @@ _BACKGROUND_WAKE_CONTEXT_KEYS = frozenset(
         "text_verbosity",
         "is_plan_mode",
         "subagent_enabled",
-        "max_concurrent_subagents",
         "agent_name",
     }
 )
@@ -73,9 +61,6 @@ _SAFE_ACTION_RESULT_EVENT_KEYS = {
     "terminal_reason",
     "evidence_refs",
     "output_ref",
-    "risks",
-    "conflicts",
-    "open_questions",
 }
 _TASK_EVENT_IDENTITY_KEYS = {
     "type",
@@ -89,7 +74,6 @@ _TASK_EVENT_IDENTITY_KEYS = {
     "started_at",
     "completed_at",
     "duration_ms",
-    "work_package_id",
 }
 _SECRET_LIKE_RE = re.compile(
     r"(?i)(sk-[a-z0-9_-]{12,}|ak(?:ia|as)[a-z0-9]{12,}|"
@@ -288,22 +272,10 @@ def _terminal_task_message(
     tool_call_id: str,
     status: SubagentStatusValue,
     round_id: str | None,
-    container_task: CommandRoomContainerTask | None = None,
-    container_artifact_written: bool | None = None,
 ) -> ToolMessage:
     additional_kwargs = make_subagent_additional_kwargs(status)
     if round_id:
         additional_kwargs["round_id"] = round_id
-    if container_task is not None:
-        additional_kwargs["command_room_container"] = container_task.container
-        if container_task.work_package_id is not None:
-            additional_kwargs["work_package_id"] = container_task.work_package_id
-        additional_kwargs["container_artifact_path"] = str(container_task.output_path)
-        additional_kwargs["container_artifact_kind"] = container_task.artifact_kind
-        if container_task.delivery_cycle_index is not None:
-            additional_kwargs["delivery_cycle_index"] = container_task.delivery_cycle_index
-        if container_artifact_written is not None:
-            additional_kwargs["container_artifact_written"] = container_artifact_written
     return ToolMessage(
         content=content,
         name="task",
@@ -319,8 +291,6 @@ def _record_persisted_terminal_task_message(
     task_id: str,
     status: SubagentStatusValue,
     runtime: Any,
-    container_task: CommandRoomContainerTask | None,
-    container_artifact_written: bool | None,
 ) -> None:
     record_tool_message = getattr(recorder, "record_tool_message", None)
     if callable(record_tool_message):
@@ -330,8 +300,6 @@ def _record_persisted_terminal_task_message(
                 tool_call_id=task_id,
                 status=status,
                 round_id=_runtime_round_id(runtime),
-                container_task=container_task,
-                container_artifact_written=container_artifact_written,
             )
         )
 
@@ -350,7 +318,7 @@ def _background_task_message(
     if round_id:
         additional_kwargs["round_id"] = round_id
     return ToolMessage(
-        content=(f"Task {tool_call_id} was accepted for background execution. Do not claim or infer its result. End this turn after a short status update; the completed child result will automatically wake the Command Room."),
+        content=(f"Task {tool_call_id} was accepted for background execution. This receipt contains no child result. The completed child result will automatically wake the Command Room."),
         name="task",
         tool_call_id=tool_call_id,
         additional_kwargs=additional_kwargs,
@@ -384,36 +352,6 @@ def _fork_background_runtime(runtime: Any) -> tuple[Any, Any | None]:
     return SimpleNamespace(context=background_context, config=background_config), background_recorder
 
 
-def _container_task_event_fields(
-    container_task: CommandRoomContainerTask | None,
-    *,
-    container: CommandRoomContainer | None = None,
-    delivery_cycle_index: int | None = None,
-    work_package_id: str | None = None,
-    container_artifact_written: bool | None = None,
-) -> dict[str, Any]:
-    """Expose factual AI-AI handoff metadata without interpreting AI prose."""
-
-    fields: dict[str, Any] = {}
-    if container_task is not None:
-        fields.update(
-            command_room_container=container_task.container,
-            container_artifact_path=str(container_task.output_path),
-            container_artifact_kind=container_task.artifact_kind,
-        )
-    elif container is not None:
-        fields["command_room_container"] = container
-    package_id = container_task.work_package_id if container_task is not None else work_package_id
-    cycle_index = container_task.delivery_cycle_index if container_task is not None else delivery_cycle_index
-    if package_id is not None:
-        fields["work_package_id"] = package_id
-    if cycle_index is not None:
-        fields["delivery_cycle_index"] = cycle_index
-    if container_artifact_written is not None:
-        fields["container_artifact_written"] = container_artifact_written
-    return fields
-
-
 def _emit_task_event(writer: Any, runtime: Any, event: dict[str, Any]) -> None:
     if "round_id" not in event and (round_id := _runtime_round_id(runtime)):
         event = {**event, "round_id": round_id}
@@ -443,17 +381,26 @@ def _task_timeout_seconds(app_config: AppConfig | None) -> int:
     return get_subagents_app_config().timeout_seconds
 
 
-def _task_model_options(app_config: AppConfig | None, subagent_type: str) -> tuple[str | None, str | None]:
+def _task_model_options(
+    app_config: AppConfig | None,
+    subagent_type: str,
+    assignment: RoleAssignment | None = None,
+) -> tuple[str | None, str | None]:
     subagents = getattr(app_config, "subagents", None) if app_config is not None else get_subagents_app_config()
-    get_model_for = getattr(subagents, "get_model_for", None)
-    model = get_model_for(subagent_type) if callable(get_model_for) else None
+    if assignment is not None:
+        model = assignment.model
+        reasoning_effort = assignment.reasoning_effort
+    else:
+        get_model_for = getattr(subagents, "get_model_for", None)
+        model = get_model_for(subagent_type) if callable(get_model_for) else None
+        get_reasoning_effort_for = getattr(subagents, "get_reasoning_effort_for", None)
+        reasoning_effort = get_reasoning_effort_for(subagent_type) if callable(get_reasoning_effort_for) else getattr(subagents, "reasoning_effort", None)
     if app_config is not None and isinstance(model, str):
         get_model_config = getattr(app_config, "get_model_config", None)
         model_config = get_model_config(model) if callable(get_model_config) else None
         raw_model_id = getattr(model_config, "model", None)
         if isinstance(raw_model_id, str) and raw_model_id:
             model = raw_model_id
-    reasoning_effort = getattr(subagents, "reasoning_effort", None)
     return model, reasoning_effort if isinstance(reasoning_effort, str) else None
 
 
@@ -461,19 +408,38 @@ def _task_sandbox_mode(app_config: AppConfig | None) -> CodexSandboxMode:
     return "danger-full-access" if is_unrestricted_host_access_allowed(app_config) else "workspace-write"
 
 
+def _role_package_section(app_config: AppConfig | None, subagent_type: str) -> str:
+    """Return the selected reusable role's charter and compact method."""
+    skill_name = COMMAND_ROOM_ROLE_SKILLS.get(subagent_type)
+    if skill_name is None or app_config is None or getattr(app_config, "skills", None) is None:
+        return ""
+
+    try:
+        storage = get_or_new_skill_storage(app_config=app_config)
+        skill_file = storage.get_custom_skill_file(skill_name)
+        charter_file = storage.get_custom_skill_dir(skill_name) / "AGENTS.md"
+        if not skill_file.is_file() or not charter_file.is_file():
+            logger.warning("Configured Command Room role package is unavailable: %s", skill_name)
+            return ""
+        return f"# Role governance: {subagent_type}\n\n{charter_file.read_text(encoding='utf-8').strip()}\n\n# Role method\n\n{skill_file.read_text(encoding='utf-8').strip()}"
+    except OSError as exc:
+        logger.warning("Could not read configured Command Room role package %s: %s", skill_name, exc)
+        return ""
+
+
 def _task_worker_prompt(
     app_config: AppConfig | None,
     subagent_type: str,
     prompt: str,
     task_paths: dict[str, str],
-    container_task: CommandRoomContainerTask | None = None,
-    container: CommandRoomContainer | None = None,
 ) -> str:
     role = get_subagent_config(subagent_type, app_config=app_config)
     role_prompt = getattr(role, "system_prompt", None) or getattr(role, "description", None)
     if not isinstance(role_prompt, str) or not role_prompt.strip():
         role_prompt = f'Work as the professional role "{subagent_type}" selected by the lead AI.'
     sections = [f"# Professional role: {subagent_type}\n\n{role_prompt.strip()}"]
+    if role_package := _role_package_section(app_config, subagent_type):
+        sections.append(role_package)
     sections.append(f"# Command Room task\n\n{prompt}")
     sections.append(
         "# Applicable project instructions\n\n"
@@ -491,27 +457,6 @@ def _task_worker_prompt(
         path_lines.append(f"- Output artifacts (write): {outputs_path}")
     path_lines.append("- Any /mnt/user-data paths in the handoff refer to the matching host paths above.")
     sections.append("# DeerFlow task paths\n\n" + "\n".join(path_lines))
-    if ai_workspace := format_ai_workspace_for_model(task_paths.get("ai_workspace_path")):
-        sections.append("# AI-AI workspace\n\n" + ai_workspace)
-    if container_task is not None:
-        sections.append("# Required Command Room handoff\n\n" + format_container_task_for_model(container_task))
-        if container_task.container == "review":
-            sections.append(
-                "# Review boundary\n\n"
-                "Verify only whether the bounded execution landed as requested. Read the relevant execution note and "
-                "inspect the actual changed result. Use the smallest targeted check needed to support that judgment. "
-                "Do not implement, repair, refactor, or broaden the review, and do not run a full test suite unless the "
-                "Chair explicitly named it as an acceptance check. Record concrete landed facts and any exact gaps, then "
-                "stop. Stop as soon as the landing judgment is supported."
-            )
-    elif container == "review":
-        sections.append(
-            "# Review boundary\n\n"
-            "Verify only whether the bounded execution landed as requested. Inspect the actual changed result and "
-            "use the smallest targeted check needed to support that judgment. Do not implement, repair, refactor, or "
-            "broaden the review, and do not run a full test suite unless the Chair explicitly named it as an acceptance "
-            "check. Record concrete landed facts and any exact gaps, then stop. Stop as soon as the landing judgment is supported."
-        )
     return "\n\n".join(sections)
 
 
@@ -534,21 +479,6 @@ def _ensure_task_paths(task_paths: dict[str, str]) -> dict[str, str]:
         raise RuntimeError(f"Codex CLI task paths could not be prepared: {exc}") from exc
 
 
-def _add_command_room_ai_workspace(
-    task_paths: dict[str, str],
-    *,
-    agent_name: Any,
-    workspace_key: Any,
-) -> dict[str, str]:
-    if agent_name != "command-room" or not isinstance(workspace_key, str) or not workspace_key:
-        return task_paths
-    try:
-        ai_workspace_path = ensure_command_room_ai_workspace(task_paths["workspace_path"], workspace_key)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Command Room AI-AI workspace could not be prepared: {exc}") from exc
-    return {**task_paths, "ai_workspace_path": str(ai_workspace_path)}
-
-
 async def _record_terminal_task(
     *,
     writer: Any,
@@ -566,8 +496,6 @@ async def _record_terminal_task(
     started_monotonic: float,
     result: str | None = None,
     error: str | None = None,
-    container_task: CommandRoomContainerTask | None = None,
-    container_artifact_written: bool | None = None,
 ) -> None:
     terminal_reason = "user_cancelled" if status == "cancelled" else status
     action_result = task_action_result_from_terminal_event(
@@ -616,10 +544,6 @@ async def _record_terminal_task(
             "error_preview": _redacted_preview(error, fallback=f"Task {status.replace('_', ' ')}") if error is not None else None,
             "artifact_refs": _artifact_refs(action_result),
             "action_result": _compact_action_result_event(action_result),
-            **_container_task_event_fields(
-                container_task,
-                container_artifact_written=container_artifact_written,
-            ),
         },
     )
 
@@ -644,10 +568,9 @@ async def _execute_started_task(
     model: str | None,
     reasoning_effort: str | None,
     sandbox_mode: CodexSandboxMode,
-    container_task: CommandRoomContainerTask | None,
 ) -> CommandRoomBackgroundOutcome:
-    container_artifact_written: bool | None = None
     try:
+        writable_paths = [prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []
         result = await run_codex_cli_task(
             worker_prompt,
             workspace_path=prepared_paths["workspace_path"],
@@ -655,13 +578,10 @@ async def _execute_started_task(
             model=model,
             reasoning_effort=reasoning_effort,
             sandbox_mode=sandbox_mode,
-            additional_writable_paths=([prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []),
+            additional_writable_paths=writable_paths,
         )
     except TimeoutError as exc:
         error = str(exc)
-        if container_task is not None:
-            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
-            await asyncio.to_thread(record_container_task_terminal, container_task, status="timed_out")
         await _record_terminal_task(
             writer=writer,
             runtime=runtime,
@@ -677,8 +597,6 @@ async def _execute_started_task(
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
         _record_persisted_terminal_task_message(
             recorder_to_flush,
@@ -686,19 +604,10 @@ async def _execute_started_task(
             task_id=task_id,
             status="timed_out",
             runtime=runtime,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
-        return CommandRoomBackgroundOutcome(
-            status="timed_out",
-            error=error,
-            container_artifact_written=container_artifact_written,
-        )
+        return CommandRoomBackgroundOutcome(status="timed_out", error=error)
     except RuntimeError as exc:
         error = str(exc)
-        if container_task is not None:
-            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
-            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
         await _record_terminal_task(
             writer=writer,
             runtime=runtime,
@@ -714,8 +623,6 @@ async def _execute_started_task(
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
         _record_persisted_terminal_task_message(
             recorder_to_flush,
@@ -723,19 +630,10 @@ async def _execute_started_task(
             task_id=task_id,
             status="failed",
             runtime=runtime,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
-        return CommandRoomBackgroundOutcome(
-            status="failed",
-            error=error,
-            container_artifact_written=container_artifact_written,
-        )
+        return CommandRoomBackgroundOutcome(status="failed", error=error)
     except asyncio.CancelledError:
         error = "Background task cancelled"
-        if container_task is not None:
-            container_artifact_written = await asyncio.to_thread(container_artifact_is_ai_authored, container_task)
-            await asyncio.to_thread(record_container_task_terminal, container_task, status="cancelled")
         await _record_terminal_task(
             writer=writer,
             runtime=runtime,
@@ -751,8 +649,6 @@ async def _execute_started_task(
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
         _record_persisted_terminal_task_message(
             recorder_to_flush,
@@ -760,17 +656,12 @@ async def _execute_started_task(
             task_id=task_id,
             status="cancelled",
             runtime=runtime,
-            container_task=container_task,
-            container_artifact_written=container_artifact_written,
         )
         raise
     finally:
         flush = getattr(recorder_to_flush, "flush", None)
         if callable(flush):
             await flush()
-
-    if container_task is not None:
-        container_artifact_written = await asyncio.to_thread(record_container_task_completion, container_task)
 
     await _record_terminal_task(
         writer=writer,
@@ -787,8 +678,6 @@ async def _execute_started_task(
         started_at=started_at,
         started_monotonic=started_monotonic,
         result=result,
-        container_task=container_task,
-        container_artifact_written=container_artifact_written,
     )
     _record_persisted_terminal_task_message(
         recorder_to_flush,
@@ -796,17 +685,11 @@ async def _execute_started_task(
         task_id=task_id,
         status="completed",
         runtime=runtime,
-        container_task=container_task,
-        container_artifact_written=container_artifact_written,
     )
     flush = getattr(recorder_to_flush, "flush", None)
     if callable(flush):
         await flush()
-    return CommandRoomBackgroundOutcome(
-        status="completed",
-        result=result,
-        container_artifact_written=container_artifact_written,
-    )
+    return CommandRoomBackgroundOutcome(status="completed", result=result)
 
 
 @tool("task", parse_docstring=True)
@@ -816,34 +699,20 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
-    container: CommandRoomContainer | None = None,
-    container_artifact: ContainerArtifact | None = None,
-    delivery_cycle_index: int | None = None,
-    work_package_id: str | None = None,
 ) -> ToolMessage:
     """Delegate one natural-language task to the installed Codex CLI.
 
     DeerFlow combines the selected developer-authored professional role context
     with the lead AI's task prompt and records factual lifecycle events. Ordinary
     agents wait and receive the complete final answer unchanged. Command Room
-    receives an admission receipt immediately; the Gateway runs that child in
+    receives a dispatch receipt immediately; the Gateway runs that child in
     the background and starts a fresh sequential Chair run with the complete
     result. Codex CLI owns planning, tool use, and task completion.
-
-    Command Room may call this tool with only description, prompt, and role.
-    Container, cycle, package, and artifact fields are optional factual labels
-    for display and optional Markdown routing. The tool validates their local
-    shape and prevents concurrent writes to one requested artifact; it never
-    uses them to authorize, block, sequence, or choose a task.
 
     Args:
         description: A short task label for the user interface and audit log.
         prompt: Complete instructions for the Codex CLI worker.
         subagent_type: The professional role label selected by the lead AI.
-        container: Optional factual label for display and artifact routing.
-        container_artifact: Optional request for a fixed Command Room Markdown artifact.
-        delivery_cycle_index: Optional factual cycle label.
-        work_package_id: Optional namespace label and artifact path scope.
     """
     state = getattr(runtime, "state", None)
     state = state if isinstance(state, dict) else {}
@@ -867,58 +736,21 @@ async def task_tool(
     writer = get_stream_writer()
     runtime_app_config = _get_runtime_app_config(runtime)
     timeout_seconds = _task_timeout_seconds(runtime_app_config)
-    model, reasoning_effort = _task_model_options(runtime_app_config, subagent_type)
+    role_assignment = (await asyncio.to_thread(load_role_assignments, user_id)).roles.get(subagent_type)
+    model, reasoning_effort = _task_model_options(runtime_app_config, subagent_type, role_assignment)
     sandbox_mode = _task_sandbox_mode(runtime_app_config)
     worker_prompt = prompt
     is_command_room = context.get("agent_name") == "command-room"
-    if is_command_room and container == "review":
-        timeout_seconds = min(timeout_seconds, _REVIEW_TASK_TIMEOUT_SECONDS)
     background_dispatcher = _command_room_background_dispatcher(context) if is_command_room else None
-    container_task: CommandRoomContainerTask | None = None
-    task_fields: dict[str, Any] = {}
 
     try:
-        prepared_paths = _ensure_task_paths(_task_paths(thread_data))
-        prepared_paths = _add_command_room_ai_workspace(
-            prepared_paths,
-            agent_name=context.get("agent_name"),
-            workspace_key=thread_id,
-        )
-        if is_command_room:
-            ai_workspace_path = prepared_paths.get("ai_workspace_path")
-            if not ai_workspace_path:
-                raise RuntimeError("Command Room task requires an active run workspace.")
-            try:
-                package_id = validate_work_package_id(work_package_id)
-                if container_artifact is not None and container is None:
-                    raise ValueError("container_artifact requires a container label for artifact routing.")
-                if delivery_cycle_index is not None and (isinstance(delivery_cycle_index, bool) or not isinstance(delivery_cycle_index, int) or delivery_cycle_index < 1):
-                    raise ValueError("delivery_cycle_index must be a positive integer when provided.")
-                prepare_artifact = container_artifact is not None or (container in {"execution", "review", "project-steward"} and delivery_cycle_index is not None) or container in {"debt-curation", "learning-curation"}
-                if prepare_artifact:
-                    container_task = prepare_command_room_container_task(
-                        ai_workspace_path,
-                        container=container,
-                        task_id=task_id,
-                        container_artifact=container_artifact,
-                        delivery_cycle_index=delivery_cycle_index,
-                        work_package_id=package_id,
-                    )
-                task_fields = _container_task_event_fields(
-                    container_task,
-                    container=container,
-                    delivery_cycle_index=delivery_cycle_index,
-                    work_package_id=package_id,
-                )
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
-        worker_prompt = _task_worker_prompt(
+        prepared_paths = await asyncio.to_thread(_ensure_task_paths, _task_paths(thread_data))
+        worker_prompt = await asyncio.to_thread(
+            _task_worker_prompt,
             runtime_app_config,
             subagent_type,
             prompt,
             prepared_paths,
-            container_task=container_task,
-            container=container,
         )
         await _record_subagent_handoff_async(
             thread_id=thread_id,
@@ -947,13 +779,10 @@ async def task_tool(
                 "status": "in_progress",
                 "background_task": background_dispatcher is not None,
                 "summary": _redacted_preview(description, fallback="Task started"),
-                **task_fields,
             },
         )
     except RuntimeError as exc:
         error = str(exc)
-        if container_task is not None:
-            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
         await _record_terminal_task(
             writer=writer,
             runtime=runtime,
@@ -969,16 +798,12 @@ async def task_tool(
             started_at=started_at,
             started_monotonic=started_monotonic,
             error=error,
-            container_task=container_task,
-            container_artifact_written=None,
         )
         return _terminal_task_message(
             f"Task failed. Error: {_redacted_tool_text(error)}",
             tool_call_id=tool_call_id,
             status="failed",
             round_id=round_id,
-            container_task=container_task,
-            container_artifact_written=None,
         )
 
     if background_dispatcher is not None:
@@ -1006,7 +831,6 @@ async def task_tool(
                 model=model,
                 reasoning_effort=reasoning_effort,
                 sandbox_mode=sandbox_mode,
-                container_task=container_task,
             )
 
         job = CommandRoomBackgroundJob(
@@ -1016,17 +840,13 @@ async def task_tool(
             description=description,
             subagent_type=subagent_type,
             execute=execute_background,
+            round_id=round_id,
             wake_context=_background_wake_context(context),
-            command_room_container=task_fields.get("command_room_container"),
-            container_artifact_path=task_fields.get("container_artifact_path"),
-            delivery_cycle_index=task_fields.get("delivery_cycle_index"),
-            work_package_id=task_fields.get("work_package_id"),
         )
         try:
             await background_dispatcher.dispatch(job)
         except Exception as exc:
             error = f"Command Room background task could not be scheduled: {exc}"
-            await asyncio.to_thread(record_container_task_terminal, container_task, status="failed")
             await _record_terminal_task(
                 writer=writer,
                 runtime=runtime,
@@ -1042,18 +862,14 @@ async def task_tool(
                 started_at=started_at,
                 started_monotonic=started_monotonic,
                 error=error,
-                container_task=container_task,
-                container_artifact_written=None,
             )
             return _terminal_task_message(
                 f"Task failed. Error: {_redacted_tool_text(error)}",
                 tool_call_id=tool_call_id,
                 status="failed",
                 round_id=round_id,
-                container_task=container_task,
-                container_artifact_written=None,
             )
-        return _background_task_message(tool_call_id=tool_call_id, round_id=round_id, task_fields=task_fields)
+        return _background_task_message(tool_call_id=tool_call_id, round_id=round_id, task_fields={})
 
     outcome = await _execute_started_task(
         writer=writer,
@@ -1074,7 +890,6 @@ async def task_tool(
         model=model,
         reasoning_effort=reasoning_effort,
         sandbox_mode=sandbox_mode,
-        container_task=container_task,
     )
     if outcome.status == "completed":
         content = outcome.result or ""
@@ -1087,6 +902,4 @@ async def task_tool(
         tool_call_id=tool_call_id,
         status=outcome.status,
         round_id=round_id,
-        container_task=container_task,
-        container_artifact_written=outcome.container_artifact_written,
     )

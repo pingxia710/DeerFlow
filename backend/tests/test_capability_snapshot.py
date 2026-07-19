@@ -35,7 +35,7 @@ def _write_skill(root: Path, category: str, name: str) -> None:
 
 def _app_config(tmp_path: Path) -> AppConfig:
     skills_root = tmp_path / "skills"
-    _write_skill(skills_root, "public", "command-room-chair")
+    _write_skill(skills_root, "public", "command-room-opposition")
     _write_skill(skills_root, "custom", "local-helper")
 
     return AppConfig(
@@ -149,11 +149,10 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
         assert secret not in center_dumped
 
 
-def test_capability_center_exposes_advisory_facts_without_decisions(tmp_path: Path):
+def test_capability_center_exposes_current_permission_facts(tmp_path: Path):
     snapshot = build_capability_snapshot(_app_config(tmp_path), thread_id="thread-1")
     center = snapshot["capability_center"]
 
-    assert center["advisory_only"] is True
     assert center["stop_before"] == snapshot["approval_policy"]["stop_before"]
     assert "credential or raw sensitive-data disclosure" in center["stop_before"]
     assert set(center["evidence_refs"]) >= {
@@ -164,20 +163,10 @@ def test_capability_center_exposes_advisory_facts_without_decisions(tmp_path: Pa
         "lead_agent.build_middlewares",
     }
     assert center["current_release"]["thread_scoped"] is True
-    assert center["current_release"]["program_decides_next_step"] is False
     assert center["permission_facts"]["approval_requirements"] == {
         "mcp_config_admin_required": True,
         "global_skill_management_admin_required": True,
         "thread_owner_check_required": True,
-    }
-    assert center["permission_facts"]["program_makes_next_step_decisions"] is False
-    assert center["non_decisions"] == {
-        "program_makes_next_step_decisions": False,
-        "auto_authorize": False,
-        "auto_reject": False,
-        "auto_pass_fail": False,
-        "auto_dispatch": False,
-        "auto_rework": False,
     }
 
 
@@ -192,7 +181,7 @@ def test_capability_snapshot_labels_tools_skills_middleware_and_policy(tmp_path:
     assert "tool_search" in tools
 
     skills = {item["name"]: item for item in snapshot["skills"]}
-    assert skills["command-room-chair"]["enabled"] is True
+    assert skills["command-room-opposition"]["enabled"] is True
     assert skills["local-helper"]["category"] == "custom"
 
     middleware = {item["name"]: item for item in snapshot["middleware_stack"]}
@@ -214,7 +203,7 @@ def test_command_room_runtime_snapshot_reports_direct_and_codex_transport_facts(
                 "name: command-room",
                 "model: missing-model",
                 "skills:",
-                "  - command-room-chair",
+                "  - command-room-opposition",
                 "  - missing-skill",
             ]
         ),
@@ -229,16 +218,14 @@ def test_command_room_runtime_snapshot_reports_direct_and_codex_transport_facts(
     assert runtime["agent_config"]["requested_model"] == "missing-model"
     assert runtime["agent_config"]["resolved_model"] == "main"
     assert runtime["agent_config"]["model_fallback"] is True
-    assert runtime["skills"]["loaded"] == ["command-room-chair"]
+    assert runtime["skills"]["loaded"] == ["command-room-opposition"]
     assert runtime["skills"]["missing"] == ["missing-skill"]
     assert runtime["direct"]["include_mcp"] is False
-    assert runtime["direct"]["tool_groups"] == []
+    assert runtime["direct"]["tool_groups"] == ["file:read"]
     assert runtime["direct"]["configured_tools"] == [
-        "accept_handoff",
         "ask_clarification",
-        "close_task",
         "present_files",
-        "project_status",
+        "read_file",
         "task",
     ]
     assert "bash" not in runtime["direct"]["configured_tools"]

@@ -17,14 +17,16 @@ PROMPT = """\
 
 已知范围：这里只读；没有给出生产写入、公开行为、凭证、客户数据、资金或其他权限扩张的授权。
 
-指挥室保留目标、边界和最终判断，把核对交给专业子AI，并让独立反方从另一个方向暴露遗漏。不要把 worker 自述或程序状态当成授权，也不要输出 Round Card、Verdict、Evidence Signal 等流程标签。
+指挥室保留目标、边界和最终判断。对于这项实质性判断，由 planner 先形成完整方案；
+方案返回后，把原始目标、事实、边界、标准和完整方案交给 opposition 跑一轮，再由指挥室合成定案。
+把完整方案带给人讨论；只有人明确确认执行后，指挥室才按方案推动执行。
+子任务结果是继续推进方案的事实，不做任务验收；方案达到完成标准即完成。
+不要把 worker 自述或程序状态当成授权，也不要输出 Round Card、Verdict、Evidence Signal 等流程标签。
 """.strip()
 
 
 def _run_probe(thread_id: str) -> dict[str, Any]:
-    client = DeerFlowClient(
-        agent_name="command-room", subagent_enabled=True, thinking_enabled=False
-    )
+    client = DeerFlowClient(agent_name="command-room", subagent_enabled=True, thinking_enabled=False)
     ai_chunks: dict[str, list[str]] = {}
     last_ai_id = ""
     tool_calls: list[dict[str, Any]] = []
@@ -54,11 +56,7 @@ def _run_probe(thread_id: str) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
         "tool_names": [str(call.get("name") or "") for call in tool_calls],
-        "task_types": [
-            str((call.get("args") or {}).get("subagent_type") or "")
-            for call in tool_calls
-            if call.get("name") == "task"
-        ],
+        "task_types": [str((call.get("args") or {}).get("subagent_type") or "") for call in tool_calls if call.get("name") == "task"],
         "usage": usage,
         "final_text": "".join(ai_chunks.get(last_ai_id, [])),
     }
@@ -74,9 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     print(json.dumps(_run_probe(args.thread_id), ensure_ascii=False, indent=2))
-    print(
-        "command-room capture complete; pass this natural result to an independent review AI"
-    )
+    print("command-room capture complete; pass this natural result to an independent review AI")
     return 0
 
 

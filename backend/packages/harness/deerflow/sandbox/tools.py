@@ -1323,7 +1323,8 @@ async def _run_sync_tool_after_async_sandbox_init(
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        detail = await asyncio.to_thread(_sanitize_error, e, runtime)
+        return f"Error: Unexpected error initializing sandbox: {detail}"
 
     if func is None:
         return "Error: Tool implementation not available"

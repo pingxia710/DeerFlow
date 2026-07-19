@@ -180,6 +180,9 @@ def update_agent(
     if model is not None and model != existing_cfg.model:
         updated_fields.append("model")
 
+    if existing_cfg.reasoning_effort is not None:
+        config_data["reasoning_effort"] = existing_cfg.reasoning_effort
+
     new_tool_groups = tool_groups if tool_groups is not None else existing_cfg.tool_groups
     if new_tool_groups is not None:
         config_data["tool_groups"] = new_tool_groups

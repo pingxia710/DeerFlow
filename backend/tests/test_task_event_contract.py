@@ -48,39 +48,6 @@ def test_task_running_message_is_optional_reserved():
     assert contract["optional_task_running_fields"] == ["message"]
 
 
-def test_command_room_container_fields_remain_additive_facts():
-    contract = _contract()
-
-    assert contract["optional_command_room_container_fields"] == [
-        "command_room_container",
-        "work_package_id",
-        "delivery_cycle_index",
-        "collaboration_round_index",
-        "container_artifact_path",
-        "container_artifact_kind",
-        "container_artifact_written",
-    ]
-    assert contract["current_command_room_container_values"] == [
-        "context",
-        "planning",
-        "technical-design",
-        "execution",
-        "review",
-        "project-steward",
-        "debt-curation",
-        "learning-curation",
-    ]
-    assert contract["legacy_command_room_container_values"] == ["collaboration", "evaluation"]
-    assert {"context-discovery", "context", "planning-forward", "spec", "technical-plan", "execution", "findings", "project-status", "debt", "learning"}.issubset(contract["command_room_artifact_kind_values"])
-
-
-def test_boundary_blocked_is_reserved_for_future_task_terminal_reason():
-    contract = _contract()
-
-    assert "boundary_blocked" in contract["reserved_terminal_reasons"]
-    assert all(case["terminal_reason"] != "boundary_blocked" for case in contract["terminal_cases"])
-
-
 def test_terminal_action_result_contract_cases_are_preserved():
     contract = _contract()
 
@@ -117,7 +84,6 @@ def test_terminal_action_result_promotes_only_runtime_observed_evidence():
     )
 
     assert result.evidence_refs == [observed_ref]
-    assert result.risks == []
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "contracts" / "fixtures" / "task_events"

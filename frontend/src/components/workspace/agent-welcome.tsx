@@ -5,6 +5,16 @@ import { BotIcon } from "lucide-react";
 import { type Agent } from "@/core/agents";
 import { cn } from "@/lib/utils";
 
+export function resolveAgentDisplayName(
+  agentName: string,
+  configuredName?: string,
+) {
+  if (agentName === "command-room") {
+    return "NextOS";
+  }
+  return configuredName ?? agentName;
+}
+
 export function AgentWelcome({
   className,
   agent,
@@ -14,7 +24,7 @@ export function AgentWelcome({
   agent: Agent | null | undefined;
   agentName: string;
 }) {
-  const displayName = agent?.name ?? agentName;
+  const displayName = resolveAgentDisplayName(agentName, agent?.name);
   const description = agent?.description;
 
   return (

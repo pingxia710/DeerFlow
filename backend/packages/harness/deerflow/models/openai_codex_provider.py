@@ -95,7 +95,6 @@ def _build_usage_metadata(oai_usage: dict) -> dict:
 
 
 MAX_RETRIES = 3
-_REPLAYED_TASK_PROMPT_PLACEHOLDER = "[omitted from provider replay: this completed task prompt was {char_count} characters; use the following function_call_output as the task result.]"
 
 
 class CodexStreamIncompleteError(RuntimeError):
@@ -208,8 +207,6 @@ class CodexChatModel(BaseChatModel):
         """
         instructions_parts: list[str] = []
         input_items = []
-        completed_tool_call_ids = {msg.tool_call_id for msg in messages if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and msg.tool_call_id}
-
         for msg in messages:
             if isinstance(msg, SystemMessage):
                 content = self._normalize_content(msg.content)
@@ -228,7 +225,7 @@ class CodexChatModel(BaseChatModel):
                             {
                                 "type": "function_call",
                                 "name": tc["name"],
-                                "arguments": self._serialize_tool_call_arguments(tc, completed_tool_call_ids),
+                                "arguments": self._serialize_tool_call_arguments(tc),
                                 "call_id": tc["id"],
                             }
                         )
@@ -246,40 +243,11 @@ class CodexChatModel(BaseChatModel):
         return instructions, input_items
 
     @classmethod
-    def _serialize_tool_call_arguments(cls, tool_call: dict[str, Any], completed_tool_call_ids: set[str]) -> str:
+    def _serialize_tool_call_arguments(cls, tool_call: dict[str, Any]) -> str:
         args = tool_call["args"]
         if not isinstance(args, dict):
             return args
-
-        compacted_args = cls._compact_replayed_task_arguments(tool_call, args, completed_tool_call_ids)
-        return json.dumps(compacted_args)
-
-    @classmethod
-    def _compact_replayed_task_arguments(
-        cls,
-        tool_call: dict[str, Any],
-        args: dict[str, Any],
-        completed_tool_call_ids: set[str],
-    ) -> dict[str, Any]:
-        """Omit completed task prompts from provider replay payloads.
-
-        The Responses API requires replaying prior function_call items before
-        their function_call_output items. For completed DeerFlow ``task`` calls,
-        the long one-shot prompt is historical transport data; the model should
-        reason from the tool output plus the short description on later turns.
-        Keep pending tool calls untouched so execution still receives the exact
-        prompt the model authored.
-        """
-        if tool_call.get("name") != "task" or tool_call.get("id") not in completed_tool_call_ids:
-            return args
-
-        prompt = args.get("prompt")
-        if not isinstance(prompt, str):
-            return args
-
-        compacted = dict(args)
-        compacted["prompt"] = _REPLAYED_TASK_PROMPT_PLACEHOLDER.format(char_count=len(prompt))
-        return compacted
+        return json.dumps(args)
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
         """Convert LangChain tool format to Responses API format."""

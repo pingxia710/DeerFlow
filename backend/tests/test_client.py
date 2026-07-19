@@ -17,7 +17,6 @@ from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusRespons
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.uploads import UploadResponse
-from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS
 from deerflow.client import DeerFlowClient
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import Paths
@@ -948,7 +947,7 @@ class TestEnsureAgent:
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
-        assert mock_apply_prompt.call_args.kwargs.get("max_concurrent_subagents") == MAX_CONCURRENT_SUBAGENTS
+        assert "max_concurrent_subagents" not in mock_apply_prompt.call_args.kwargs
 
     def test_command_room_client_uses_agent_config_boundaries(self, client):
         mock_agent = MagicMock()
@@ -969,7 +968,7 @@ class TestEnsureAgent:
                     name="command-room",
                     model="safe-model",
                     tool_groups=["sandbox", "bash"],
-                    skills=["nextos-commander"],
+                    skills=["command-room-opposition"],
                 ),
             ),
             patch("deerflow.client.create_chat_model", side_effect=fake_create_chat_model),
@@ -984,13 +983,13 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
         assert captured_model["name"] == "safe-model"
-        assert mock_get_tools.call_args.kwargs["groups"] == []
+        assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
         assert mock_get_tools.call_args.kwargs["include_mcp"] is False
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
-        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
-        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"nextos-commander", "command-room-chair"}
+        assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"command-room-opposition"}
+        assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"command-room-opposition"}
 
-    def test_rebuilds_agent_when_normalized_subagent_limit_changes(self, client):
+    def test_legacy_subagent_limit_does_not_rebuild_or_limit_agent(self, client):
         mock_agent = MagicMock()
         config = client._get_runnable_config("t1")
         config["configurable"]["max_concurrent_subagents"] = 1
@@ -1007,8 +1006,9 @@ class TestEnsureAgent:
             config["configurable"]["max_concurrent_subagents"] = 7
             client._ensure_agent(config)
 
-        assert mock_create_agent.call_count == 2
-        assert [call.kwargs["max_concurrent_subagents"] for call in mock_apply_prompt.call_args_list] == [2, 6]
+        assert mock_create_agent.call_count == 1
+        assert mock_apply_prompt.call_count == 1
+        assert "max_concurrent_subagents" not in mock_apply_prompt.call_args.kwargs
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -1075,7 +1075,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, MAX_CONCURRENT_SUBAGENTS, None, None, None)
+        client._agent_config_key = (None, None, True, False, False, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)

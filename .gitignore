@@ -37,7 +37,20 @@ coverage.xml
 coverage/
 .deer-flow/
 .claude/
+# Custom user Skills stay local; built-in NextOS role packages are versioned.
 skills/custom/*
+!skills/custom/nextos-commander/
+!skills/custom/command-room-planner/
+!skills/custom/command-room-opposition/
+!skills/custom/command-room-executor/
+!skills/custom/command-room-fact-finder/
+!skills/custom/command-room-recorder/
+skills/custom/nextos-commander/*
+skills/custom/command-room-*/*
+!skills/custom/nextos-commander/AGENTS.md
+!skills/custom/nextos-commander/SKILL.md
+!skills/custom/command-room-*/AGENTS.md
+!skills/custom/command-room-*/SKILL.md
 logs/
 log/
 debug.log

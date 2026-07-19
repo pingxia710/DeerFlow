@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -28,6 +29,7 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 _TEST_USER_ID = UUID("55555555-5555-5555-5555-555555555555")
+_WAKE_FACTS_CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "enterprise" / "v1"
 
 
 def _make_user(user_id: UUID = _TEST_USER_ID) -> User:
@@ -60,7 +62,6 @@ class _RoundStoreForSnapshotTests:
                 "thread_id": thread_id,
                 "user_id": user_id,
                 "current_run_id": "run-2",
-                "state": "closed",
             }
         ][:limit]
 
@@ -84,7 +85,7 @@ class _RoundStoreForSnapshotTests:
         ][:limit]
 
 
-class _RepairableRoundStoreForSnapshotTests:
+class _StoredRoundStoreForSnapshotTests:
     def __init__(
         self,
         *,
@@ -98,7 +99,6 @@ class _RepairableRoundStoreForSnapshotTests:
                 "thread_id": "thread-1",
                 "user_id": user_id,
                 "current_run_id": "run-terminal",
-                "state": "executing",
             }
         ]
         self.task_lanes = task_lanes or [
@@ -112,8 +112,7 @@ class _RepairableRoundStoreForSnapshotTests:
                 "status": "executing",
             }
         ]
-        self.set_run_state_calls: list[dict] = []
-        self.record_task_events_calls: list[list[dict]] = []
+        self.record_task_events = AsyncMock()
 
     async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 50):
         return [dict(row) for row in self.rounds if row["thread_id"] == thread_id and row.get("user_id") == user_id][:limit]
@@ -121,45 +120,72 @@ class _RepairableRoundStoreForSnapshotTests:
     async def list_task_lanes_by_round(self, *, thread_id: str, round_id: str, user_id=None, limit: int = 100):
         return [dict(row) for row in self.task_lanes if row["thread_id"] == thread_id and row["round_id"] == round_id and row.get("user_id") == user_id][:limit]
 
-    async def set_run_state(
-        self,
-        run_id: str,
-        *,
-        thread_id: str,
-        user_id: str | None,
-        round_id: str,
-        state: str,
-        event_type: str,
-        content: dict | None = None,
-        next_action: str | None = None,
-    ):
-        self.set_run_state_calls.append(
-            {
-                "run_id": run_id,
-                "thread_id": thread_id,
-                "user_id": user_id,
-                "round_id": round_id,
-                "state": state,
-                "event_type": event_type,
-                "content": content,
-                "next_action": next_action,
-            }
-        )
-        for row in self.rounds:
-            if row["current_run_id"] != run_id:
-                continue
-            row["state"] = state
-            row["closed_at"] = "2026-01-01T00:00:02+00:00"
-            return dict(row)
-        return None
 
-    async def record_task_events(self, events: list[dict]) -> None:
-        self.record_task_events_calls.append(events)
-        for event in events:
-            for lane in self.task_lanes:
-                if lane["run_id"] == event.get("run_id") and lane["task_id"] == event.get("task_id"):
-                    lane["status"] = event.get("status") or lane["status"]
-                    lane["error"] = event.get("error_preview") or lane.get("error")
+class _BackgroundProjectionRoundStore:
+    def __init__(self, *, user_id: str, task_lane: dict) -> None:
+        self.user_id = user_id
+        self.task_lane = task_lane
+        self.seen_user_ids: list[str | None] = []
+        self.record_task_events = AsyncMock()
+        self.claim_background_wake = AsyncMock()
+        self.renew_background_wake = AsyncMock()
+        self.persist_claimed_background_wake = AsyncMock()
+
+    async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 50):
+        self.seen_user_ids.append(user_id)
+        return [
+            {
+                "round_id": "round-1",
+                "thread_id": thread_id,
+                "user_id": self.user_id,
+                "current_run_id": "run-1",
+            }
+        ][:limit]
+
+    async def list_task_lanes_by_round(self, *, thread_id: str, round_id: str, user_id=None, limit: int = 100):
+        self.seen_user_ids.append(user_id)
+        if user_id != self.user_id or round_id != "round-1":
+            return []
+        return [dict(self.task_lane)][:limit]
+
+
+def _background_recovery_handoff() -> dict:
+    return {
+        "background_recovery": {
+            "version": 1,
+            "thread_id": "thread-1",
+            "source_run_id": "run-1",
+            "task_id": "task-1",
+            "wake_context": {"secret": "must-not-be-projected"},
+            "outcome": {
+                "status": "completed",
+                "result": "complete child result must-not-be-projected",
+                "error": "child error must-not-be-projected",
+            },
+            "wake": {
+                "state": "failed",
+                "attempts": 3,
+                "wake_id": "wake-1",
+                "run_id": "wake-run-1",
+                "last_status": "http_503",
+                "claim_id": "claim-must-not-be-projected",
+            },
+        },
+    }
+
+
+def _background_projection_lane(handoff: dict | None = None) -> dict:
+    return {
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "round_id": "round-1",
+        "task_id": "task-1",
+        "user_id": str(_TEST_USER_ID),
+        "status": "completed",
+        "completed_at": "2026-07-17T00:00:01Z",
+        "updated_at": "2026-07-17T00:00:04Z",
+        "handoff": handoff or _background_recovery_handoff(),
+    }
 
 
 def _make_app(event_store=None, run_manager=None, *, user_id: UUID = _TEST_USER_ID):
@@ -174,6 +200,10 @@ def _make_app(event_store=None, run_manager=None, *, user_id: UUID = _TEST_USER_
     app.state.run_manager = run_manager
 
     return app
+
+
+def _set_wake_facts_projection(app, enabled: bool = True) -> None:
+    app.dependency_overrides[thread_runs.get_config] = lambda: SimpleNamespace(enterprise={"wake_facts_projection": enabled})
 
 
 def _make_event_store(rows: list[dict]):
@@ -249,7 +279,7 @@ def test_run_messages_require_explicit_thread_owner(owner_kind):
 
 
 def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
-    """GET /api/threads/{tid}/runtime-snapshot returns one recovery envelope."""
+    """GET /api/threads/{tid}/runtime-snapshot returns one factual envelope."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -347,8 +377,268 @@ def test_runtime_snapshot_returns_runs_messages_rounds_and_task_lanes():
     assert body["task_lanes"][0]["duration_ms"] == 2000
     assert body["task_lanes"][0]["completed_at"] == "2026-01-01T00:01:02+00:00"
     assert body["task_lanes"][0]["prompt"] is None
-    assert body.get("recovery") is None
+    assert "recovery" not in body
     assert round_store.seen_user_id == user_id
+
+
+@pytest.mark.parametrize(
+    "path, lane_from_response",
+    [
+        (
+            "/api/threads/thread-1/rounds/round-1/tasks",
+            lambda body: body[0],
+        ),
+        (
+            "/api/threads/thread-1/runtime-snapshot",
+            lambda body: body["task_lanes"][0],
+        ),
+    ],
+)
+def test_task_lane_gets_project_only_completed_failed_wake_without_writes(
+    monkeypatch,
+    path,
+    lane_from_response,
+):
+    user_id = str(_TEST_USER_ID)
+    handoff = _background_recovery_handoff()
+    round_store = _BackgroundProjectionRoundStore(
+        user_id=user_id,
+        task_lane=_background_projection_lane(handoff),
+    )
+    start_run = AsyncMock()
+    monkeypatch.setattr(thread_runs, "start_run", start_run)
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    lane = lane_from_response(response.json())
+    assert lane["status"] == "completed"
+    assert lane["background_recovery"] == {
+        "version": 1,
+        "outcome_status": "completed",
+        "wake": {
+            "state": "failed",
+            "attempts": 3,
+            "wake_id": "wake-1",
+            "run_id": "wake-run-1",
+            "last_status": "http_503",
+        },
+    }
+    assert lane["handoff"] == handoff
+    assert round_store.seen_user_ids and set(round_store.seen_user_ids) == {user_id}
+    round_store.record_task_events.assert_not_awaited()
+    round_store.claim_background_wake.assert_not_awaited()
+    round_store.renew_background_wake.assert_not_awaited()
+    round_store.persist_claimed_background_wake.assert_not_awaited()
+    start_run.assert_not_awaited()
+
+
+def test_wake_facts_endpoint_returns_only_the_allowlisted_contract_without_writes(monkeypatch):
+    user_id = str(_TEST_USER_ID)
+    round_store = _BackgroundProjectionRoundStore(
+        user_id=user_id,
+        task_lane=_background_projection_lane(),
+    )
+    start_run = AsyncMock()
+    monkeypatch.setattr(thread_runs, "start_run", start_run)
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    _set_wake_facts_projection(app)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=round-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == json.loads((_WAKE_FACTS_CONTRACT / "fixtures" / "wake_facts_projection.json").read_text())
+    assert set(body) == {"thread_id", "run_id", "round_id", "items"}
+    assert set(body["items"][0]) == {
+        "task_id",
+        "source_run_id",
+        "child_status",
+        "child_completed_at",
+        "wake_state",
+        "wake_attempts",
+        "wake_failure_reason",
+        "updated_at",
+    }
+    serialized = json.dumps(body)
+    for forbidden in ("handoff", "prompt", "result", "error", "last_status", "http_503", "claim_id"):
+        assert forbidden not in serialized
+    assert round_store.seen_user_ids == [user_id]
+    round_store.record_task_events.assert_not_awaited()
+    round_store.claim_background_wake.assert_not_awaited()
+    round_store.renew_background_wake.assert_not_awaited()
+    round_store.persist_claimed_background_wake.assert_not_awaited()
+    start_run.assert_not_awaited()
+
+
+def test_wake_facts_endpoint_is_empty_when_flag_is_off():
+    round_store = _BackgroundProjectionRoundStore(
+        user_id=str(_TEST_USER_ID),
+        task_lane=_background_projection_lane(),
+    )
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    _set_wake_facts_projection(app, enabled=False)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=round-1")
+
+    assert response.status_code == 200
+    assert response.json() == {"thread_id": "thread-1", "run_id": "run-1", "round_id": "round-1", "items": []}
+    assert round_store.seen_user_ids == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/threads/thread-1/command-room/wake-facts?run_id=&round_id=round-1",
+        "/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=",
+        "/api/threads/thread-1/command-room/wake-facts",
+    ],
+)
+def test_wake_facts_endpoint_fails_closed_for_invalid_request_scope(path):
+    round_store = _BackgroundProjectionRoundStore(
+        user_id=str(_TEST_USER_ID),
+        task_lane=_background_projection_lane(),
+    )
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    _set_wake_facts_projection(app)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert round_store.seen_user_ids == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("version", 2),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("thread_id", "thread-other"),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("source_run_id", "run-other"),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("task_id", "task-other"),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("round_id", "round-other"),
+        lambda lane: lane["handoff"]["background_recovery"]["outcome"].__setitem__("status", "failed"),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("state", "pending"),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("attempts", -1),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("attempts", True),
+        lambda lane: lane.__setitem__("run_id", "run-other"),
+        lambda lane: lane.__setitem__("round_id", "round-other"),
+        lambda lane: lane.__setitem__("updated_at", "not-a-timestamp"),
+    ],
+)
+def test_wake_facts_endpoint_fails_closed_for_malformed_or_mismatched_rows(mutate):
+    lane = json.loads(json.dumps(_background_projection_lane()))
+    mutate(lane)
+    round_store = _BackgroundProjectionRoundStore(user_id=str(_TEST_USER_ID), task_lane=lane)
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    _set_wake_facts_projection(app)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=round-1")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
+def test_wake_facts_endpoint_does_not_leak_another_owners_lane():
+    other_user = UUID("66666666-6666-6666-6666-666666666666")
+    round_store = _BackgroundProjectionRoundStore(
+        user_id=str(_TEST_USER_ID),
+        task_lane=_background_projection_lane(),
+    )
+    app = _make_app(
+        event_store=MemoryRunEventStore(),
+        run_manager=RunManager(store=MemoryRunStore()),
+        user_id=other_user,
+    )
+    _set_wake_facts_projection(app)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=round-1")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert round_store.seen_user_ids == [str(other_user)]
+
+
+@pytest.mark.parametrize(
+    ("attempts", "last_status", "reason"),
+    [
+        (3, "RuntimeError", "retry_exhausted"),
+        (1, "admission_unavailable", "wake_unavailable"),
+        (1, "RuntimeError", None),
+    ],
+)
+def test_wake_facts_endpoint_uses_only_closed_public_reason_codes(attempts, last_status, reason):
+    lane = _background_projection_lane()
+    wake = lane["handoff"]["background_recovery"]["wake"]
+    wake["attempts"] = attempts
+    wake["last_status"] = last_status
+    round_store = _BackgroundProjectionRoundStore(user_id=str(_TEST_USER_ID), task_lane=lane)
+    app = _make_app(event_store=MemoryRunEventStore(), run_manager=RunManager(store=MemoryRunStore()))
+    _set_wake_facts_projection(app)
+    app.state.round_state_store = round_store
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/command-room/wake-facts?run_id=run-1&round_id=round-1")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item.get("wake_failure_reason") == reason
+    if reason is None:
+        assert "wake_failure_reason" not in item
+    assert last_status not in json.dumps(item)
+
+
+def test_wake_facts_openapi_matches_the_public_contract():
+    contract = json.loads((_WAKE_FACTS_CONTRACT / "wake_facts_projection.schema.json").read_text())
+    model_schema = thread_runs.WakeFactsProjectionResponse.model_json_schema()
+
+    assert set(contract["properties"]) == set(model_schema["properties"])
+    assert set(contract["properties"]["items"]["items"]["properties"]) == {
+        "task_id",
+        "source_run_id",
+        "child_status",
+        "child_completed_at",
+        "wake_state",
+        "wake_attempts",
+        "wake_failure_reason",
+        "updated_at",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("version", 2),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("thread_id", "thread-other"),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("source_run_id", "run-other"),
+        lambda lane: lane["handoff"]["background_recovery"].__setitem__("task_id", "task-other"),
+        lambda lane: lane["handoff"]["background_recovery"]["outcome"].__setitem__("status", "failed"),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("state", "pending"),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("attempts", -1),
+        lambda lane: lane["handoff"]["background_recovery"]["wake"].__setitem__("attempts", True),
+        lambda lane: lane.__setitem__("round_id", ""),
+    ],
+)
+def test_task_lane_omits_malformed_transport_recovery_facts(mutate):
+    lane = json.loads(json.dumps(_background_projection_lane()))
+    mutate(lane)
+
+    response = thread_runs.TaskLaneResponse.model_validate(lane)
+
+    assert response.background_recovery is None
 
 
 def test_thread_timeline_returns_owner_scoped_cursor_page():
@@ -490,12 +780,12 @@ def test_runtime_snapshot_loads_message_pages_concurrently():
     assert [page.run_id for page in pages] == [record.run_id for record in records]
 
 
-def test_runtime_snapshot_does_not_repair_terminal_run_with_open_round_and_task_lane():
-    """A read snapshot reports stored state without repairing it."""
+def test_runtime_snapshot_returns_stored_run_and_task_facts_without_writes():
+    """A read snapshot returns stored facts without changing them."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
-    round_store = _RepairableRoundStoreForSnapshotTests(user_id=user_id)
+    round_store = _StoredRoundStoreForSnapshotTests(user_id=user_id)
     asyncio.run(
         run_store.put(
             "run-terminal",
@@ -518,11 +808,10 @@ def test_runtime_snapshot_does_not_repair_terminal_run_with_open_round_and_task_
     body = response.json()
     assert body["runs"][0]["status"] == "error"
     assert body["runs"][0]["terminal_reason"] == "worker_lost"
-    assert body["rounds"][0]["state"] == "executing"
+    assert body["rounds"][0]["round_id"] == "round-stale"
     assert body["task_lanes"][0]["status"] == "executing"
-    assert body.get("recovery") is None
-    assert round_store.set_run_state_calls == []
-    assert round_store.record_task_events_calls == []
+    assert "recovery" not in body
+    round_store.record_task_events.assert_not_awaited()
 
 
 def test_runtime_snapshot_does_not_recover_stale_store_only_inflight_run():
@@ -550,14 +839,14 @@ def test_runtime_snapshot_does_not_recover_stale_store_only_inflight_run():
     assert body["runs"][0]["run_id"] == "stale-run"
     assert body["runs"][0]["status"] == "running"
     assert body["runs"][0]["terminal_reason"] is None
-    assert body.get("recovery") is None
+    assert "recovery" not in body
     stored = asyncio.run(run_store.get("stale-run", user_id=user_id))
     assert stored["status"] == "running"
     assert stored.get("terminal_reason") is None
 
 
-def test_runtime_snapshot_keeps_stored_round_and_lane_states_isolated():
-    """A read snapshot preserves old and new stored states without writes."""
+def test_runtime_snapshot_keeps_stored_groups_and_task_facts_isolated():
+    """A read snapshot preserves stored groups and task facts without writes."""
     user_id = str(_TEST_USER_ID)
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -584,7 +873,7 @@ def test_runtime_snapshot_keeps_stored_round_and_lane_states_isolated():
             created_at="2026-01-01T00:01:00+00:00",
         )
     )
-    round_store = _RepairableRoundStoreForSnapshotTests(
+    round_store = _StoredRoundStoreForSnapshotTests(
         user_id=user_id,
         rounds=[
             {
@@ -592,14 +881,12 @@ def test_runtime_snapshot_keeps_stored_round_and_lane_states_isolated():
                 "thread_id": "thread-1",
                 "user_id": user_id,
                 "current_run_id": "run-old",
-                "state": "executing",
             },
             {
                 "round_id": "round-new",
                 "thread_id": "thread-1",
                 "user_id": user_id,
                 "current_run_id": "run-new",
-                "state": "executing",
             },
         ],
         task_lanes=[
@@ -632,12 +919,11 @@ def test_runtime_snapshot_keeps_stored_round_and_lane_states_isolated():
     assert response.status_code == 200
     body = response.json()
     assert [run["run_id"] for run in body["runs"]] == ["run-new", "run-old"]
-    round_states = {round_["round_id"]: round_["state"] for round_ in body["rounds"]}
+    round_runs = {round_["round_id"]: round_["current_run_id"] for round_ in body["rounds"]}
     lane_statuses = {lane["task_id"]: lane["status"] for lane in body["task_lanes"]}
-    assert round_states == {"round-old": "executing", "round-new": "executing"}
+    assert round_runs == {"round-old": "run-old", "round-new": "run-new"}
     assert lane_statuses == {"task-old": "executing", "task-new": "in_progress"}
-    assert round_store.set_run_state_calls == []
-    assert round_store.record_task_events_calls == []
+    round_store.record_task_events.assert_not_awaited()
 
 
 def test_returns_middleware_message_rows_as_control_rows():

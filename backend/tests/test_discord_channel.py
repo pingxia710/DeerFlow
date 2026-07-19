@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -135,19 +133,6 @@ def _build_send_file_channel(bg_loop: asyncio.AbstractEventLoop) -> DiscordChann
     return channel
 
 
-def _tracking_open():
-    """Wrap ``builtins.open`` to record every handle it returns."""
-    handles: list = []
-    real_open = builtins.open
-
-    def _open(path, *args, **kwargs):
-        handle = real_open(path, *args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    return handles, _open
-
-
 async def _noop_coro(*_args, **_kwargs):
     return None
 
@@ -173,13 +158,13 @@ async def test_send_file_closes_file_handle(tmp_path) -> None:
         att = ResolvedAttachment("/mnt/user-data/outputs/upload.txt", path, "upload.txt", "text/plain", 5, False)
         msg = OutboundMessage(channel_name="discord", chat_id="c1", thread_id="t1", text="t")
 
-        handles, tracking_open = _tracking_open()
-        with patch("builtins.open", tracking_open):
-            result = await channel.send_file(msg, att)
+        buffers = []
+        channel._discord_module = SimpleNamespace(File=lambda fp, filename=None: buffers.append(fp) or fp)
+        result = await channel.send_file(msg, att)
 
         assert result is True
-        assert len(handles) == 1
-        assert handles[0].closed is True
+        assert len(buffers) == 1
+        assert buffers[0].closed is True
     finally:
         _stop_bg_loop(bg_loop, bg_thread)
 
@@ -202,12 +187,12 @@ async def test_send_file_closes_handle_when_send_fails(tmp_path) -> None:
         att = ResolvedAttachment("/mnt/user-data/outputs/upload.txt", path, "upload.txt", "text/plain", 5, False)
         msg = OutboundMessage(channel_name="discord", chat_id="c1", thread_id="t1", text="t")
 
-        handles, tracking_open = _tracking_open()
-        with patch("builtins.open", tracking_open):
-            result = await channel.send_file(msg, att)
+        buffers = []
+        channel._discord_module = SimpleNamespace(File=lambda fp, filename=None: buffers.append(fp) or fp)
+        result = await channel.send_file(msg, att)
 
         assert result is False
-        assert len(handles) == 1
-        assert handles[0].closed is True
+        assert len(buffers) == 1
+        assert buffers[0].closed is True
     finally:
         _stop_bg_loop(bg_loop, bg_thread)

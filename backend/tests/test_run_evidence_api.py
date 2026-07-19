@@ -38,7 +38,7 @@ def _app(events: list[dict]):
     return app
 
 
-def test_run_evidence_api_extracts_normalized_refs_without_quality_verdict() -> None:
+def test_run_evidence_api_extracts_normalized_refs() -> None:
     events = [
         {
             "thread_id": "thread-1",
@@ -117,10 +117,7 @@ def test_run_evidence_api_extracts_normalized_refs_without_quality_verdict() -> 
         "command_output",
         "log",
     }
-    assert all(ref["strength"] is None for ref in refs)
-    assert body["summary"]["quality_verdict"] is None
-    assert body["summary"]["auto_rework"] is False
-    assert "by_strength" not in body["summary"]
+    assert body["summary"]["total"] == len(refs)
 
     public_json = json.dumps(body)
     assert "sk-123456789012345" not in public_json

@@ -1,6 +1,6 @@
 ---
 title: Lead Agent
-description: The Lead Agent owns conversation continuity and judgment. In Command Room it stays the brain while one-shot Codex sub-AIs execute, check, and challenge the work.
+description: The Lead Agent owns conversation continuity and judgment while one-shot Codex sub-AIs carry out self-contained tasks.
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -8,9 +8,10 @@ import { Callout, Steps } from "nextra/components";
 # Lead Agent
 
 <Callout type="info">
-  The Lead Agent keeps the user's goal, plan, progress, context, boundaries, and
-  final judgment. The `command-room` profile delegates execution so this brain
-  remains clear enough to direct large projects.
+  NextOS is the AI-organization layer built on the DeerFlow runtime. Its Lead
+  Agent keeps the user's goal, plan, progress, context, boundaries, and final
+  judgment. The internal `command-room` profile delegates execution so this
+  brain remains clear enough to direct large projects.
 </Callout>
 
 ## Responsibilities
@@ -24,20 +25,21 @@ replace model judgment.
 The default and ordinary custom-agent profiles may use configured direct tools.
 The `command-room` profile is intentionally different:
 
-- it receives no configured file, shell, web, MCP, image-inspection, or
+- it receives direct `file:read` tools (`ls`, `read_file`, `glob`, and `grep`)
+  for current facts, but no file-write, shell, web, MCP, image-inspection, or
   skill-management execution tools;
 - `task()` is always enabled, even if a client sends
   `subagent_enabled: false`;
-- direct tools are limited to delegation, necessary user clarification, and
-  presenting completed files;
-- each worker result goes to a different checking sub-AI and an independent
-  opposition sub-AI before the Lead Agent decides.
+- direct tools are limited to read-only investigation, delegation, necessary
+  user clarification, and presenting completed files;
+- the Lead Agent reads each complete result and chooses every next action inside
+  the AI-owned planning and plan-execution flow.
 
 Professional role context is developer-authored prompt text. It does not grant
 DeerFlow tools. Each task is one ephemeral Codex CLI AI that owns its plan and
 native tools, returns complete natural-language text, and ends.
 
-## Command Room Flow
+## NextOS Command Room Flow
 
 <Steps>
 
@@ -46,24 +48,46 @@ native tools, returns complete natural-language text, and ends.
 Keep the user goal, confirmed context, current boundary, and progress in the
 lead conversation.
 
-### Delegate execution
+### Obtain a planning proposal
 
-Send a one-shot sub-AI its professional role, goal, relevant facts and paths,
-authority, forbidden changes, definition of done, and requested natural result.
-Independent work can run together, up to six `task()` calls in one model
-response.
+For substantive work, send a `planner` the complete goal, facts, boundaries,
+criteria, and requested result. Multiple independent proposals may run in
+parallel when route exploration is useful; each remains a planning perspective.
 
-### Check and oppose
+### Run opposition
 
-Pass each complete worker result to a different checking AI. Ask an independent
-opposition AI to start from the other direction and expose missed assumptions,
-contrary evidence, or risk.
+After the complete proposal returns, send an `opposition` AI the original brief
+and the proposal for one challenge round. It looks for hidden assumptions,
+counterevidence, failure modes, boundary misses, and materially stronger
+alternatives. It may report that no material challenge exists and does not make
+the decision. If synthesis changes the core direction, run opposition again;
+local refinements do not require another round.
 
-### Adjudicate
+### Synthesize and confirm the execution plan
 
-Read the worker, checker, and opposition text. Decide whether the goal is met,
-another bounded task is needed, or the user must authorize a boundary change.
-Program metadata never makes that decision.
+Read the complete planner and opposition results, then synthesize one execution
+plan in the Chair: goal, scope, boundaries, key decisions, completion criteria,
+risks, and open human choices. Discuss that plan with the human and wait for
+explicit natural-language authorization before sending execution AIs their
+professional role, goal, relevant facts and paths, authority, forbidden
+changes, definition of done, and requested natural result. Independent
+execution can run together. The Chair chooses the useful `task()` count;
+DeerFlow does not truncate or defer calls.
+
+### Continue the confirmed plan
+
+Read task results and current facts directly, including files, code, logs,
+plans, and artifacts. Results are information for the Chair to act on, not a
+task-level acceptance event. Resolve ordinary implementation details and
+continue the confirmed plan without a required `verifier` role. Return to human
+plan discussion only when facts require a core direction, scope, authority, or
+business-decision change.
+
+### Complete the plan
+
+Read every complete natural result. End the work when the plan's actual
+completion criteria are satisfied; otherwise dispatch the next useful bounded
+task. Program metadata never makes that decision.
 
 ### Persist and respond
 
@@ -95,7 +119,7 @@ subagents:
 `thinking_enabled` controls supported Lead Agent reasoning features. Ordinary
 agents may enable `TodoMiddleware` with `is_plan_mode`. Command Room does not
 use the program todo list as its workflow: it keeps progress in the lead AI and
-delegates execution/review through prompts.
+delegates work through prompts.
 
 ## Custom Agents And Bootstrap
 

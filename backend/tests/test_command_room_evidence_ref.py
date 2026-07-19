@@ -14,7 +14,6 @@ def test_normalizes_explicit_provenance_without_classifying_prose() -> None:
     )
 
     assert ref["source_kind"] == "unknown"
-    assert ref["strength"] is None
     assert ref["claim"] == "tests completed"
     assert ref["ref"].startswith("command: python -m pytest")
     assert ref["ref_id"].startswith("evref_")
@@ -30,7 +29,6 @@ def test_preserves_explicit_source_kind_and_hash_only() -> None:
 
     assert ref["source_kind"] == "artifact"
     assert ref["sha256"] == "abc123"
-    assert ref["strength"] is None
 
 
 def test_redacts_secret_and_hidden_reasoning_from_public_fields() -> None:

@@ -17,10 +17,9 @@ function taskFixture(overrides: Partial<Subtask> = {}): Subtask {
   };
 }
 
-test("collects only declared container and artifact references", () => {
+test("collects only explicit artifact references", () => {
   const references = subtaskArtifactReferences(
     taskFixture({
-      containerArtifactPath: "/workspace/delivery.md",
       metadata: {
         refs: {
           artifact_refs: [
@@ -35,7 +34,6 @@ test("collects only declared container and artifact references", () => {
   );
 
   expect(references).toEqual([
-    "/workspace/delivery.md",
     "/mnt/user-data/outputs/report.md",
     "/mnt/user-data/outputs/chart.csv",
     "/mnt/user-data/outputs/summary.json",
@@ -84,7 +82,9 @@ test("shows only accessible artifacts matched to the task or its declared refere
 
 test("marks a temporary or missing reference unavailable instead of creating a link", () => {
   const task = taskFixture({
-    containerArtifactPath: "/tmp/unfinished-report.md",
+    metadata: {
+      refs: { artifact_refs: ["/tmp/unfinished-report.md"] },
+    },
   });
 
   expect(selectSubtaskArtifacts([], task)).toEqual({
@@ -96,7 +96,9 @@ test("marks a temporary or missing reference unavailable instead of creating a l
 test("keeps an unindexed reference unavailable beside an available task artifact", () => {
   const availablePath = "/mnt/user-data/outputs/report.md";
   const missingPath = "/tmp/unfinished-report.md";
-  const task = taskFixture({ containerArtifactPath: missingPath });
+  const task = taskFixture({
+    metadata: { refs: { artifact_refs: [missingPath] } },
+  });
 
   expect(
     selectSubtaskArtifacts(

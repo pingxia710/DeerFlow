@@ -260,11 +260,12 @@ async def run_codex_cli_task(
             raise RuntimeError(detail or f"Codex CLI exited with code {process.returncode}.")
 
         try:
-            result = output_path.read_text(encoding="utf-8")
+            result = await asyncio.to_thread(output_path.read_text, encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise RuntimeError(f"Codex CLI final message could not be read: {exc}") from exc
         if not result.strip():
             raise RuntimeError("Codex CLI completed without a final message.")
         return result
     finally:
-        output_path.unlink(missing_ok=True)
+        cleanup_task = asyncio.create_task(asyncio.to_thread(output_path.unlink, missing_ok=True))
+        await await_task_through_repeated_cancellation(cleanup_task)

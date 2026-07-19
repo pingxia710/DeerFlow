@@ -536,17 +536,12 @@ async def _discard_inconsistent_sandbox(
         logger.exception("Failed to discard sandbox after upload synchronization divergence")
 
 
-async def _write_upload_file_with_limits(
-    file: UploadFile,
-    *,
+def _open_upload_write_targets(
     uploads_dir: os.PathLike[str] | str,
-    uploads_fd: int,
     display_filename: str,
-    max_single_file_size: int,
-    max_total_size: int,
-    total_size: int,
-) -> tuple[os.PathLike[str] | str, int, int, Path]:
-    file_size = 0
+    *,
+    uploads_fd: int,
+):
     file_path, fh = open_upload_file_no_symlink(
         uploads_dir,
         display_filename,
@@ -566,7 +561,70 @@ async def _write_upload_file_with_limits(
         except FileNotFoundError:
             pass
         raise
-    snapshot_path = Path(snapshot.name)
+    return file_path, fh, snapshot, Path(snapshot.name)
+
+
+def _write_upload_chunk(fh, snapshot, chunk: bytes) -> None:
+    fh.write(chunk)
+    snapshot.write(chunk)
+
+
+def _finish_upload_writes(fh, snapshot) -> None:
+    try:
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+    finally:
+        try:
+            fh.close()
+        finally:
+            snapshot.close()
+
+
+def _abort_upload_writes(fh, snapshot, display_filename: str, snapshot_path: Path, *, uploads_fd: int) -> None:
+    try:
+        fh.close()
+    finally:
+        snapshot.close()
+    try:
+        os.unlink(display_filename, dir_fd=uploads_fd)
+    except FileNotFoundError:
+        pass
+    snapshot_path.unlink(missing_ok=True)
+
+
+def _delete_upload_snapshots(snapshot_path: Path) -> None:
+    snapshot_path.unlink(missing_ok=True)
+    snapshot_path.with_suffix(".md").unlink(missing_ok=True)
+
+
+async def _write_upload_file_with_limits(
+    file: UploadFile,
+    *,
+    uploads_dir: os.PathLike[str] | str,
+    uploads_fd: int,
+    display_filename: str,
+    max_single_file_size: int,
+    max_total_size: int,
+    total_size: int,
+) -> tuple[os.PathLike[str] | str, int, int, Path]:
+    file_size = 0
+    opened, deferred_cancellation = await _run_blocking_with_deferred_cancellation(
+        _open_upload_write_targets,
+        uploads_dir,
+        display_filename,
+        uploads_fd=uploads_fd,
+    )
+    file_path, fh, snapshot, snapshot_path = opened
+    if deferred_cancellation is not None:
+        await _run_blocking_completion_safe(
+            _abort_upload_writes,
+            fh,
+            snapshot,
+            display_filename,
+            snapshot_path,
+            uploads_fd=uploads_fd,
+        )
+        raise deferred_cancellation
     try:
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
@@ -575,22 +633,18 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
             if total_size > max_total_size:
                 raise HTTPException(status_code=413, detail="Total upload size too large")
-            fh.write(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        os.fsync(snapshot.fileno())
+            await _run_blocking_completion_safe(_write_upload_chunk, fh, snapshot, chunk)
+        await _run_blocking_completion_safe(_finish_upload_writes, fh, snapshot)
     except BaseException:
-        fh.close()
-        snapshot.close()
-        try:
-            os.unlink(display_filename, dir_fd=uploads_fd)
-        except FileNotFoundError:
-            pass
-        snapshot_path.unlink(missing_ok=True)
+        await _run_blocking_completion_safe(
+            _abort_upload_writes,
+            fh,
+            snapshot,
+            display_filename,
+            snapshot_path,
+            uploads_fd=uploads_fd,
+        )
         raise
-    else:
-        fh.close()
-        snapshot.close()
     return file_path, file_size, total_size, snapshot_path
 
 
@@ -749,11 +803,22 @@ async def _upload_files_locked(
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
 
     auto_convert_documents = _auto_convert_documents_enabled(config)
-    backup_dir, backup_fd = _create_pinned_upload_subdirectory(
+    backup_result, deferred_cancellation = await _run_blocking_with_deferred_cancellation(
+        _create_pinned_upload_subdirectory,
         uploads_dir,
         uploads_fd,
         prefix=".deerflow-upload-backup-",
     )
+    backup_dir, backup_fd = backup_result
+    if deferred_cancellation is not None:
+        await _run_blocking_completion_safe(
+            _discard_upload_backups,
+            backup_dir,
+            uploads_fd=uploads_fd,
+            backup_fd=backup_fd,
+        )
+        await release_sandbox_lease()
+        raise deferred_cancellation
     backups: dict[Path, Path] = {}
 
     for file, original_filename, safe_filename in prepared_files:
@@ -764,7 +829,7 @@ async def _upload_files_locked(
         attempted_generated_paths: list[Path] = []
         snapshot_path: Path | None = None
         try:
-            await asyncio.to_thread(
+            await _run_blocking_completion_safe(
                 _backup_existing_upload,
                 Path(uploads_dir) / safe_filename,
                 backup_dir,
@@ -805,7 +870,8 @@ async def _upload_files_locked(
             ocr_path = ocr_sidecar_path(file_path)
             create_ocr_sidecar = is_supported_image_path(file_path) and ocr_path.name not in explicit_filenames
             if create_ocr_sidecar:
-                _backup_existing_upload(
+                await _run_blocking_completion_safe(
+                    _backup_existing_upload,
                     ocr_path,
                     backup_dir,
                     backups,
@@ -849,7 +915,8 @@ async def _upload_files_locked(
                     generated_filenames,
                 )
                 markdown_target = file_path.with_name(markdown_filename)
-                _backup_existing_upload(
+                await _run_blocking_completion_safe(
+                    _backup_existing_upload,
                     markdown_target,
                     backup_dir,
                     backups,
@@ -878,7 +945,8 @@ async def _upload_files_locked(
                     file_info["markdown_virtual_path"] = md_virtual_path
                     file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
                 else:
-                    _cleanup_uploaded_paths(
+                    await _run_blocking_completion_safe(
+                        _cleanup_uploaded_paths,
                         [markdown_target],
                         directory_fd=uploads_fd,
                     )
@@ -915,7 +983,8 @@ async def _upload_files_locked(
         except UnsafeUploadPathError as e:
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
             current_written = written_paths[written_start:]
-            _cleanup_uploaded_paths(
+            await _run_blocking_completion_safe(
+                _cleanup_uploaded_paths,
                 [*current_written, *attempted_generated_paths],
                 directory_fd=uploads_fd,
             )
@@ -972,8 +1041,10 @@ async def _upload_files_locked(
             raise HTTPException(status_code=500, detail="Failed to upload file")
         finally:
             if snapshot_path is not None:
-                snapshot_path.unlink(missing_ok=True)
-                snapshot_path.with_suffix(".md").unlink(missing_ok=True)
+                await _run_blocking_completion_safe(
+                    _delete_upload_snapshots,
+                    snapshot_path,
+                )
 
     # Uploaded files are created with 0o600 permissions (owner read/write only).
     # Only providers that cross a host/container user boundary need broader
@@ -982,7 +1053,8 @@ async def _upload_files_locked(
         attempted_remote_syncs: list[tuple[Path, str]] = []
         if adjust_upload_permissions:
             for file_path in written_paths:
-                _make_file_sandbox_readable(
+                await _run_blocking_completion_safe(
+                    _make_file_sandbox_readable,
                     file_path,
                     directory_fd=uploads_fd,
                 )
@@ -999,7 +1071,8 @@ async def _upload_files_locked(
                     )
                     continue
                 if adjust_upload_permissions:
-                    _make_file_sandbox_writable(
+                    await _run_blocking_completion_safe(
+                        _make_file_sandbox_writable,
                         file_path,
                         directory_fd=uploads_fd,
                     )
@@ -1015,8 +1088,13 @@ async def _upload_files_locked(
                     content,
                 )
     except asyncio.CancelledError:
-        _cleanup_uploaded_paths(written_paths, directory_fd=uploads_fd)
-        _restore_upload_backups(
+        await _run_blocking_completion_safe(
+            _cleanup_uploaded_paths,
+            written_paths,
+            directory_fd=uploads_fd,
+        )
+        await _run_blocking_completion_safe(
+            _restore_upload_backups,
             backups,
             uploads_fd=uploads_fd,
             backup_fd=backup_fd,
@@ -1030,7 +1108,8 @@ async def _upload_files_locked(
         except BaseException:
             logger.exception("Failed to compensate sandbox files after cancelled upload")
             await _discard_inconsistent_sandbox(sandbox_provider, sandbox_id)
-        _discard_upload_backups(
+        await _run_blocking_completion_safe(
+            _discard_upload_backups,
             backup_dir,
             uploads_fd=uploads_fd,
             backup_fd=backup_fd,
@@ -1038,8 +1117,13 @@ async def _upload_files_locked(
         raise
     except Exception as exc:
         logger.exception("Failed to synchronize uploaded files to sandbox")
-        _cleanup_uploaded_paths(written_paths, directory_fd=uploads_fd)
-        _restore_upload_backups(
+        await _run_blocking_completion_safe(
+            _cleanup_uploaded_paths,
+            written_paths,
+            directory_fd=uploads_fd,
+        )
+        await _run_blocking_completion_safe(
+            _restore_upload_backups,
             backups,
             uploads_fd=uploads_fd,
             backup_fd=backup_fd,
@@ -1053,7 +1137,8 @@ async def _upload_files_locked(
         except BaseException:
             logger.exception("Failed to compensate sandbox files after upload error")
             await _discard_inconsistent_sandbox(sandbox_provider, sandbox_id)
-        _discard_upload_backups(
+        await _run_blocking_completion_safe(
+            _discard_upload_backups,
             backup_dir,
             uploads_fd=uploads_fd,
             backup_fd=backup_fd,
@@ -1065,7 +1150,8 @@ async def _upload_files_locked(
     finally:
         await release_sandbox_lease()
 
-    _discard_upload_backups(
+    await _run_blocking_completion_safe(
+        _discard_upload_backups,
         backup_dir,
         uploads_fd=uploads_fd,
         backup_fd=backup_fd,

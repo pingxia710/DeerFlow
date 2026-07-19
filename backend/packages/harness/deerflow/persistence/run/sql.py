@@ -657,16 +657,16 @@ class RunRepository(RunStore):
                     terminal_reason=metadata.get("terminal_reason"),
                 )
             current = metadata.get("cancel_action")
-            next_action = "rollback" if action == "rollback" or current == "rollback" else "interrupt"
+            cancel_action = "rollback" if action == "rollback" or current == "rollback" else "interrupt"
             metadata["cancellation_requested_at"] = metadata.get("cancellation_requested_at") or now_dt.isoformat()
-            metadata["cancel_action"] = next_action
+            metadata["cancel_action"] = cancel_action
             if requested_by is not None:
                 metadata["cancel_requested_by"] = requested_by
-            if next_action == "rollback":
+            if cancel_action == "rollback":
                 metadata["rollback_requested_at"] = metadata.get("rollback_requested_at") or now_dt.isoformat()
             row.metadata_json = metadata
             row.updated_at = now_dt
-            return CancelRequestResult(run_id=run_id, status=row.status, action=next_action, accepted=True)
+            return CancelRequestResult(run_id=run_id, status=row.status, action=cancel_action, accepted=True)
 
     async def consume_cancel_intent(
         self,

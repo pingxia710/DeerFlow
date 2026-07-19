@@ -28,7 +28,7 @@ class FakeClient:
                         "name": "task",
                         "args": {
                             "subagent_type": "opposition",
-                            "description": "Review from the other direction",
+                            "description": "Challenge from the other direction",
                         },
                     }
                 ],
@@ -55,3 +55,15 @@ def test_ai_native_probe_captures_facts_without_program_verdict(monkeypatch):
 
 def test_opposition_probe_captures_facts_without_program_verdict(monkeypatch):
     _assert_fact_only_capture(_load_probe("command-room-opposition-probe.py"), monkeypatch)
+
+
+def test_command_room_probes_request_plan_then_opposition_then_chair_synthesis():
+    for filename in (
+        "command-room-ai-native-probe.py",
+        "command-room-opposition-probe.py",
+    ):
+        prompt = _load_probe(filename).PROMPT
+        assert "planner 先形成完整方案" in prompt
+        assert "方案返回后" in prompt
+        assert "opposition 跑一轮" in prompt
+        assert "指挥室合成定案" in prompt

@@ -23,19 +23,20 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from pathlib import Path
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_serializer, model_validator
 
 from app.gateway.auth.config import get_auth_config
 from app.gateway.authz import require_permission
 from app.gateway.checkpoint_owner import owner_checkpoint_config
 from app.gateway.deps import (
     get_checkpointer,
+    get_config,
     get_feedback_repo,
     get_round_state_store,
     get_run_event_store,
@@ -48,12 +49,12 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.path_utils import get_request_storage_user_id, resolve_thread_virtual_path
 from app.gateway.services import resolve_thread_run, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
-from deerflow.command_room.ai_workspace import command_room_ai_workspace_dir, command_room_work_package_dir
 from deerflow.command_room.evidence import normalize_evidence_ref
-from deerflow.config.paths import UnsafePathError, get_paths, open_file_no_symlinks, read_file_no_symlinks
+from deerflow.config.app_config import AppConfig
+from deerflow.config.paths import UnsafePathError, open_file_no_symlinks
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.artifacts import build_artifact_index
-from deerflow.runtime.runs.schemas import is_inflight_status, is_terminal_status, run_status_value
+from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,6 @@ HIDDEN_CONTROL_MESSAGE_NAMES = frozenset({"summary", "loop_warning", "todo_remin
 INTERNAL_CONTEXT_TAG_RE = re.compile(r"<(uploaded_files|slash_skill_activation)>[\s\S]*?</\1>")
 _CANCEL_WAIT_TIMEOUT_SECONDS = 10.0
 _RUN_TERMINAL_REASON_ALIASES = {
-    "boundary_blocked": "boundary_stopped",
     "lease_expired_recovered": "worker_lost",
     "polling_timed_out": "timeout",
     "rollback_failed_owner_lost": "rollback_failed",
@@ -83,12 +83,6 @@ _ACTIVE_ARTIFACT_MIME_TYPES = {
 _ARTIFACT_HASH_CHUNK_BYTES = 1024 * 1024
 _ARTIFACT_TEXT_SAMPLE_BYTES = 8192
 _RUNTIME_SNAPSHOT_MESSAGE_CONCURRENCY = 8
-_PLAN_ARTIFACT_RELATIVE_PATHS = {
-    "spec": Path("01-planning") / "spec.md",
-    "technical-plan": Path("02-technical-design") / "technical-plan.md",
-}
-
-
 _SENSITIVE_RUN_ERROR_MARKERS = (
     "secret",
     "stack trace",
@@ -127,21 +121,6 @@ _RUN_EVIDENCE_EVENT_TYPES = [
     "task.cancelled",
     "task.timed_out",
 ]
-_TERMINAL_ROUND_STATES = frozenset({"closed", "blocked"})
-_ACTIVE_TASK_LANE_STATUSES = frozenset({"in_progress", "running", "pending", "executing"})
-_TASK_EVENT_PROJECTION_TYPES = frozenset({"task_started", "task_completed", "task_failed", "task_cancelled", "task_timed_out"})
-_TASK_EVENT_TERMINAL_STATUS_BY_TYPE = {
-    "task_completed": "completed",
-    "task_failed": "failed",
-    "task_cancelled": "cancelled",
-    "task_timed_out": "timed_out",
-}
-_TASK_LANE_TERMINAL_EVENT_BY_STATUS = {
-    "completed": "task_completed",
-    "failed": "task_failed",
-    "cancelled": "task_cancelled",
-    "timed_out": "task_timed_out",
-}
 _THREAD_TIMELINE_CATEGORIES = frozenset({"message", "lifecycle", "artifact"})
 _THREAD_TIMELINE_CURSOR_VERSION = 2
 _THREAD_TIMELINE_CURSOR_MAX_CHARS = 512
@@ -275,7 +254,6 @@ class RunResponse(BaseModel):
     run_id: str
     thread_id: str
     round_id: str | None = None
-    round_state: str | None = None
     assistant_id: str | None = None
     status: str
     terminal_reason: str | None = None
@@ -302,13 +280,202 @@ class RoundResponse(BaseModel):
     current_run_id: str | None = None
     source_goal_run_id: str | None = None
     current_intent: str | None = None
-    state: str
-    next_action: str | None = None
     artifact_refs: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
-    closed_at: str | None = None
+
+
+class BackgroundWakeFailureResponse(BaseModel):
+    state: Literal["failed"]
+    attempts: int
+    wake_id: str | None = None
+    run_id: str | None = None
+    last_status: str | None = None
+
+
+class BackgroundRecoveryFailureResponse(BaseModel):
+    version: Literal[1]
+    outcome_status: Literal["completed"]
+    wake: BackgroundWakeFailureResponse
+
+
+class WakeFactsProjectionItemResponse(BaseModel):
+    task_id: str
+    source_run_id: str
+    child_status: Literal["completed"]
+    child_completed_at: str | None
+    wake_state: Literal["failed"]
+    wake_attempts: int
+    wake_failure_reason: Literal["retry_exhausted", "wake_unavailable"] | None = None
+    updated_at: str
+
+    @model_serializer
+    def _public_fields(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "task_id": self.task_id,
+            "source_run_id": self.source_run_id,
+            "child_status": self.child_status,
+            "child_completed_at": self.child_completed_at,
+            "wake_state": self.wake_state,
+            "wake_attempts": self.wake_attempts,
+            "updated_at": self.updated_at,
+        }
+        if self.wake_failure_reason is not None:
+            payload["wake_failure_reason"] = self.wake_failure_reason
+        return payload
+
+
+class WakeFactsProjectionResponse(BaseModel):
+    thread_id: str
+    run_id: str
+    round_id: str
+    items: list[WakeFactsProjectionItemResponse] = Field(default_factory=list)
+
+
+_BACKGROUND_WAKE_LAST_STATUS_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+_WAKE_FACTS_RETRY_EXHAUSTED_ATTEMPTS = 3
+
+
+def _nonempty_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _background_optional_string(
+    value: Mapping[str, Any],
+    key: str,
+    *,
+    pattern: re.Pattern[str] | None = None,
+) -> tuple[bool, str | None]:
+    candidate = value.get(key)
+    if candidate is None:
+        return True, None
+    if not isinstance(candidate, str) or not candidate.strip():
+        return False, None
+    if pattern is not None and pattern.fullmatch(candidate) is None:
+        return False, None
+    return True, candidate
+
+
+def _background_recovery_failure_projection(lane: Mapping[str, Any]) -> dict[str, Any] | None:
+    thread_id = _nonempty_string(lane.get("thread_id"))
+    run_id = _nonempty_string(lane.get("run_id"))
+    round_id = _nonempty_string(lane.get("round_id"))
+    task_id = _nonempty_string(lane.get("task_id"))
+    handoff = lane.get("handoff")
+    if not all((thread_id, run_id, round_id, task_id)) or lane.get("status") != "completed" or not isinstance(handoff, Mapping):
+        return None
+
+    background = handoff.get("background_recovery")
+    if not isinstance(background, Mapping) or type(background.get("version")) is not int or background.get("version") != 1:
+        return None
+    if background.get("thread_id") != thread_id or background.get("source_run_id") != run_id or background.get("task_id") != task_id:
+        return None
+
+    outcome = background.get("outcome")
+    wake = background.get("wake")
+    if not isinstance(outcome, Mapping) or outcome.get("status") != "completed" or not isinstance(wake, Mapping):
+        return None
+    attempts = wake.get("attempts")
+    if wake.get("state") != "failed" or type(attempts) is not int or attempts < 0:
+        return None
+
+    valid_wake_id, wake_id = _background_optional_string(wake, "wake_id")
+    valid_wake_run_id, wake_run_id = _background_optional_string(wake, "run_id")
+    valid_last_status, last_status = _background_optional_string(
+        wake,
+        "last_status",
+        pattern=_BACKGROUND_WAKE_LAST_STATUS_RE,
+    )
+    if not all((valid_wake_id, valid_wake_run_id, valid_last_status)):
+        return None
+    return {
+        "version": 1,
+        "outcome_status": "completed",
+        "wake": {
+            "state": "failed",
+            "attempts": attempts,
+            "wake_id": wake_id,
+            "run_id": wake_run_id,
+            "last_status": last_status,
+        },
+    }
+
+
+def _wake_facts_projection_enabled(config: AppConfig) -> bool:
+    enterprise = getattr(config, "enterprise", None)
+    return isinstance(enterprise, Mapping) and enterprise.get("wake_facts_projection") is True
+
+
+def _rfc3339_timestamp(value: Any) -> tuple[bool, str | None]:
+    if value is None:
+        return True, None
+    if not isinstance(value, str) or not value.strip():
+        return False, None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False, None
+    if timestamp.tzinfo is None:
+        return False, None
+    return True, timestamp.isoformat().replace("+00:00", "Z")
+
+
+def _wake_fact_item_projection(
+    lane: Mapping[str, Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    round_id: str,
+) -> WakeFactsProjectionItemResponse | None:
+    task_id = _nonempty_string(lane.get("task_id"))
+    handoff = lane.get("handoff")
+    if not task_id or lane.get("thread_id") != thread_id or lane.get("run_id") != run_id or lane.get("round_id") != round_id or lane.get("status") != "completed" or not isinstance(handoff, Mapping):
+        return None
+
+    background = handoff.get("background_recovery")
+    if (
+        not isinstance(background, Mapping)
+        or type(background.get("version")) is not int
+        or background.get("version") != 1
+        or background.get("thread_id") != thread_id
+        or background.get("source_run_id") != run_id
+        or background.get("task_id") != task_id
+        or ("round_id" in background and background.get("round_id") != round_id)
+    ):
+        return None
+
+    outcome = background.get("outcome")
+    wake = background.get("wake")
+    attempts = wake.get("attempts") if isinstance(wake, Mapping) else None
+    if not isinstance(outcome, Mapping) or outcome.get("status") != "completed" or not isinstance(wake, Mapping) or wake.get("state") != "failed" or type(attempts) is not int or attempts < 0:
+        return None
+
+    completed_at = lane.get("completed_at")
+    finished_at = lane.get("finished_at")
+    if completed_at is not None and finished_at is not None and completed_at != finished_at:
+        return None
+    valid_completed_at, child_completed_at = _rfc3339_timestamp(completed_at if completed_at is not None else finished_at)
+    valid_updated_at, updated_at = _rfc3339_timestamp(lane.get("updated_at"))
+    if not valid_completed_at or not valid_updated_at or updated_at is None:
+        return None
+
+    wake_failure_reason: Literal["retry_exhausted", "wake_unavailable"] | None = None
+    if attempts >= _WAKE_FACTS_RETRY_EXHAUSTED_ATTEMPTS:
+        wake_failure_reason = "retry_exhausted"
+    elif wake.get("last_status") == "admission_unavailable":
+        wake_failure_reason = "wake_unavailable"
+
+    return WakeFactsProjectionItemResponse(
+        task_id=task_id,
+        source_run_id=run_id,
+        child_status="completed",
+        child_completed_at=child_completed_at,
+        wake_state="failed",
+        wake_attempts=attempts,
+        wake_failure_reason=wake_failure_reason,
+        updated_at=updated_at,
+    )
 
 
 class TaskLaneResponse(BaseModel):
@@ -329,6 +496,7 @@ class TaskLaneResponse(BaseModel):
     artifact_refs: list[str] = Field(default_factory=list)
     output_refs: list[str] = Field(default_factory=list)
     handoff: dict[str, Any] | None = None
+    background_recovery: BackgroundRecoveryFailureResponse | None = None
     error: str | None = None
     duration_ms: int | None = None
     started_at: str | None = None
@@ -345,6 +513,7 @@ class TaskLaneResponse(BaseModel):
         normalized = dict(value)
         normalized.setdefault("subagent_type", normalized.get("role"))
         normalized.setdefault("completed_at", normalized.get("finished_at"))
+        normalized["background_recovery"] = _background_recovery_failure_projection(normalized)
         return normalized
 
 
@@ -354,52 +523,12 @@ class RuntimeSnapshotRunMessages(BaseModel):
     has_more: bool = False
 
 
-class RuntimeSnapshotRecoveredRunResponse(BaseModel):
-    run_id: str
-    terminal_reason: str | None = None
-
-
-class RuntimeSnapshotStaleInflightRecoveryResponse(BaseModel):
-    recovered: bool = False
-    recovered_count: int = 0
-    run_ids: list[str] = Field(default_factory=list)
-    terminal_reason: str | None = None
-    runs: list[RuntimeSnapshotRecoveredRunResponse] = Field(default_factory=list)
-
-
-class RuntimeSnapshotSelfHealRoundResponse(BaseModel):
-    run_id: str
-    round_id: str
-    state: str
-
-
-class RuntimeSnapshotSelfHealTaskLaneResponse(BaseModel):
-    run_id: str
-    round_id: str
-    task_id: str
-    status: str
-
-
-class RuntimeSnapshotSelfHealResponse(BaseModel):
-    repaired: bool = False
-    round_count: int = 0
-    task_lane_count: int = 0
-    rounds: list[RuntimeSnapshotSelfHealRoundResponse] = Field(default_factory=list)
-    task_lanes: list[RuntimeSnapshotSelfHealTaskLaneResponse] = Field(default_factory=list)
-
-
-class RuntimeSnapshotRecoveryResponse(BaseModel):
-    stale_inflight: RuntimeSnapshotStaleInflightRecoveryResponse | None = None
-    snapshot_self_heal: RuntimeSnapshotSelfHealResponse | None = None
-
-
 class ThreadRuntimeSnapshotResponse(BaseModel):
     thread_id: str
     runs: list[RunResponse] = Field(default_factory=list)
     run_messages: list[RuntimeSnapshotRunMessages] = Field(default_factory=list)
     rounds: list[RoundResponse] = Field(default_factory=list)
     task_lanes: list[TaskLaneResponse] = Field(default_factory=list)
-    recovery: RuntimeSnapshotRecoveryResponse | None = None
 
 
 class ThreadTimelineRecord(BaseModel):
@@ -664,58 +793,6 @@ def _public_run_error_from_multiline(text: str) -> str | None:
     return None
 
 
-def _terminal_round_target(record: RunRecord) -> tuple[str, str] | None:
-    status = run_status_value(record.status)
-    if not is_terminal_status(status):
-        return None
-    if status == RunStatus.success.value:
-        return "closed", "run.completed"
-    return "blocked", "round.blocked"
-
-
-def _terminal_task_lane_status(record: RunRecord) -> str | None:
-    status = run_status_value(record.status)
-    if not is_terminal_status(status):
-        return None
-    reason = _run_terminal_reason(record)
-    if status == RunStatus.success.value:
-        return "completed"
-    if status in {RunStatus.timeout.value, "timed_out"} or reason == "timeout":
-        return "timed_out"
-    if status in {RunStatus.interrupted.value, "cancelled", "rolled_back"} or reason in {"cancelled", "rolled_back"}:
-        return "cancelled"
-    return "failed"
-
-
-def _terminal_task_lane_reason(record: RunRecord) -> str | None:
-    lane_status = _terminal_task_lane_status(record)
-    reason = _run_terminal_reason(record)
-    if lane_status == "timed_out":
-        return "timed_out"
-    if lane_status == "cancelled":
-        return "user_cancelled"
-    if reason == "boundary_stopped":
-        return "boundary_blocked"
-    if lane_status == "failed":
-        return "failed"
-    return None
-
-
-def _terminal_task_lane_error(record: RunRecord) -> str | None:
-    lane_status = _terminal_task_lane_status(record)
-    if lane_status == "completed":
-        return None
-    reason = _run_terminal_reason(record)
-    if lane_status == "timed_out":
-        return "Parent run timed out before this task lane completed."
-    if lane_status == "cancelled":
-        return "Parent run stopped before this task lane completed."
-    if reason:
-        return f"Parent run ended before this task lane completed: {reason}."
-    status = run_status_value(record.status) or "terminal"
-    return f"Parent run ended before this task lane completed with status {status}."
-
-
 async def _list_runtime_snapshot_task_lane_rows(
     round_store: Any,
     *,
@@ -743,229 +820,6 @@ async def _list_runtime_snapshot_task_lane_rows(
         task_lane_rows.extend(rows or [])
         remaining -= len(rows or [])
     return task_lane_rows
-
-
-def _task_projection_event_content(event: dict[str, Any]) -> dict[str, Any]:
-    content = event.get("content")
-    if isinstance(content, dict):
-        payload = dict(content)
-    else:
-        payload = {}
-    payload.setdefault("thread_id", event.get("thread_id"))
-    payload.setdefault("run_id", event.get("run_id"))
-    payload.setdefault("type", event.get("event_type"))
-    payload.setdefault("event_type", event.get("event_type"))
-    metadata = event.get("metadata")
-    if isinstance(metadata, dict):
-        payload.setdefault("task_id", metadata.get("task_id"))
-    payload["projection_repair"] = True
-    payload["source"] = "runtime_snapshot_event_projection_repair"
-    payload["observed_by"] = "system-observed"
-    payload["source_event_seq"] = event.get("seq")
-    return payload
-
-
-async def _repair_task_event_projection_from_store(
-    *,
-    event_store: Any,
-    round_store: Any,
-    records: list[RunRecord],
-    round_rows: list[dict[str, Any]],
-    task_lane_rows: list[dict[str, Any]],
-    user_id: str | None,
-) -> bool:
-    if not hasattr(event_store, "list_events") or not hasattr(round_store, "record_task_events"):
-        return False
-    round_run_ids = {row.get("current_run_id") for row in round_rows if isinstance(row.get("current_run_id"), str)}
-    if not round_run_ids:
-        return False
-    lanes_by_task = {(lane.get("run_id"), lane.get("task_id")): lane for lane in task_lane_rows}
-    repair_events: list[dict[str, Any]] = []
-    for record in records:
-        if record.run_id not in round_run_ids:
-            continue
-        events: list[dict[str, Any]] = []
-        after_seq: int | None = None
-        try:
-            while True:
-                kwargs: dict[str, Any] = {
-                    "event_types": _TASK_EVENT_PROJECTION_TYPES,
-                    "limit": 500,
-                    "after_seq": after_seq,
-                }
-                if _supports_user_id_keyword(event_store.list_events):
-                    kwargs["user_id"] = user_id
-                page = await event_store.list_events(record.thread_id, record.run_id, **kwargs)
-                events.extend(page or [])
-                if not page or len(page) < 500:
-                    break
-                next_after_seq = page[-1].get("seq")
-                if not isinstance(next_after_seq, int) or next_after_seq == after_seq:
-                    break
-                after_seq = next_after_seq
-        except Exception:
-            logger.warning("Failed to read task events for runtime snapshot projection repair", exc_info=True)
-            continue
-        latest_by_task: dict[str, dict[str, Any]] = {}
-        for event in events or []:
-            payload = _task_projection_event_content(event)
-            task_id = payload.get("task_id")
-            if not isinstance(task_id, str) or not task_id:
-                continue
-            merged = dict(latest_by_task.get(task_id, {}))
-            merged.update({key: value for key, value in payload.items() if value is not None})
-            latest_by_task[task_id] = merged
-        for task_id, payload in latest_by_task.items():
-            event_type = str(payload.get("type") or payload.get("event_type") or "")
-            terminal_status = _TASK_EVENT_TERMINAL_STATUS_BY_TYPE.get(event_type)
-            if terminal_status is not None:
-                payload["status"] = terminal_status
-            lane = lanes_by_task.get((record.run_id, task_id))
-            needs_repair = lane is None or not lane.get("status") or (terminal_status is not None and lane.get("status") in _ACTIVE_TASK_LANE_STATUSES)
-            if needs_repair:
-                repair_events.append(payload)
-    if not repair_events:
-        return False
-    try:
-        await round_store.record_task_events(repair_events)
-    except Exception:
-        logger.warning("Failed to repair task event projection from runtime snapshot", exc_info=True)
-        return False
-    return True
-
-
-async def _repair_terminal_runtime_snapshot_rows(
-    *,
-    round_store: Any,
-    records: list[RunRecord],
-    round_rows: list[dict[str, Any]],
-    task_lane_rows: list[dict[str, Any]],
-) -> RuntimeSnapshotSelfHealResponse:
-    recovery = RuntimeSnapshotSelfHealResponse()
-    terminal_records = {record.run_id: record for record in records if is_terminal_status(record.status)}
-    if not terminal_records:
-        return recovery
-
-    if hasattr(round_store, "set_run_state"):
-        for row in round_rows:
-            run_id = row.get("current_run_id")
-            if not isinstance(run_id, str):
-                continue
-            record = terminal_records.get(run_id)
-            if record is None:
-                continue
-            target = _terminal_round_target(record)
-            if target is None:
-                continue
-            state, event_type = target
-            if row.get("state") in _TERMINAL_ROUND_STATES:
-                continue
-            try:
-                updated = await round_store.set_run_state(
-                    run_id,
-                    thread_id=record.thread_id,
-                    user_id=record.user_id,
-                    round_id=row["round_id"],
-                    state=state,
-                    event_type=event_type,
-                    content={
-                        "source": "runtime_snapshot_recovery",
-                        "run_status": run_status_value(record.status),
-                        "terminal_reason": _run_terminal_reason(record),
-                        "error": run_error_for_response(record.error),
-                    },
-                )
-            except ValueError:
-                logger.debug("Skipped terminal round snapshot repair for run %s", sanitize_log_param(run_id), exc_info=True)
-                continue
-            except Exception:
-                logger.warning("Failed to repair terminal round snapshot state for run %s", sanitize_log_param(run_id), exc_info=True)
-                continue
-            if updated is None:
-                continue
-            round_id = updated.get("round_id") if isinstance(updated, dict) else row.get("round_id")
-            updated_state = updated.get("state") if isinstance(updated, dict) else state
-            if isinstance(round_id, str) and isinstance(updated_state, str):
-                recovery.rounds.append(
-                    RuntimeSnapshotSelfHealRoundResponse(
-                        run_id=run_id,
-                        round_id=round_id,
-                        state=updated_state,
-                    )
-                )
-
-    if not hasattr(round_store, "record_task_events"):
-        recovery.round_count = len(recovery.rounds)
-        recovery.task_lane_count = len(recovery.task_lanes)
-        recovery.repaired = recovery.round_count > 0
-        return recovery
-
-    task_events: list[dict[str, Any]] = []
-    task_lane_recoveries: list[RuntimeSnapshotSelfHealTaskLaneResponse] = []
-    for lane in task_lane_rows:
-        lane_status = lane.get("status")
-        if lane_status not in _ACTIVE_TASK_LANE_STATUSES:
-            continue
-        run_id = lane.get("run_id")
-        task_id = lane.get("task_id")
-        if not isinstance(run_id, str) or not isinstance(task_id, str):
-            continue
-        record = terminal_records.get(run_id)
-        if record is None:
-            continue
-        terminal_status = _terminal_task_lane_status(record)
-        if terminal_status is None:
-            continue
-        round_id = lane.get("round_id")
-        if isinstance(round_id, str):
-            task_lane_recoveries.append(
-                RuntimeSnapshotSelfHealTaskLaneResponse(
-                    run_id=run_id,
-                    round_id=round_id,
-                    task_id=task_id,
-                    status=terminal_status,
-                )
-            )
-        event_type = _TASK_LANE_TERMINAL_EVENT_BY_STATUS[terminal_status]
-        error_preview = _terminal_task_lane_error(record)
-        task_events.append(
-            {
-                "schema_version": "deerflow.task-event/v1",
-                "type": event_type,
-                "event_type": event_type,
-                "thread_id": lane.get("thread_id"),
-                "run_id": run_id,
-                "task_id": task_id,
-                "status": terminal_status,
-                "started_at": lane.get("created_at"),
-                "completed_at": lane.get("updated_at"),
-                "duration_ms": None,
-                "result_preview": None,
-                "error_preview": error_preview,
-                "artifact_refs": [],
-                "action_result": {
-                    "status": terminal_status,
-                    "terminal_reason": _terminal_task_lane_reason(record),
-                    "error": error_preview,
-                },
-                "usage": {},
-            }
-        )
-    if not task_events:
-        recovery.round_count = len(recovery.rounds)
-        recovery.task_lane_count = len(recovery.task_lanes)
-        recovery.repaired = recovery.round_count > 0
-        return recovery
-    try:
-        await round_store.record_task_events(task_events)
-    except Exception:
-        logger.warning("Failed to repair terminal task lane snapshot state", exc_info=True)
-    else:
-        recovery.task_lanes.extend(task_lane_recoveries)
-    recovery.round_count = len(recovery.rounds)
-    recovery.task_lane_count = len(recovery.task_lanes)
-    recovery.repaired = recovery.round_count > 0 or recovery.task_lane_count > 0
-    return recovery
 
 
 def _artifact_file_metadata(thread_id: str, virtual_path: str, *, user_id: str | None) -> dict[str, Any]:
@@ -1278,8 +1132,6 @@ def _run_evidence_summary(refs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "total": len(refs),
         "by_source_kind": by_source_kind,
-        "quality_verdict": None,
-        "auto_rework": False,
     }
 
 
@@ -1330,14 +1182,11 @@ async def _run_evidence_payload(thread_id: str, run_id: str, record: RunRecord, 
     }
 
 
-def _record_to_response(record: RunRecord, round_state: dict[str, Any] | None = None) -> RunResponse:
-    round_context = round_state or (record.metadata.get("round_context") if isinstance(record.metadata, dict) else None)
-    round_context = round_context if isinstance(round_context, dict) else {}
+def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
         round_id=record.round_id,
-        round_state=round_context.get("state") if isinstance(round_context.get("state"), str) else None,
         assistant_id=record.assistant_id,
         status=run_status_value(record.status) or RunStatus.error.value,
         terminal_reason=_run_terminal_reason(record),
@@ -1931,51 +1780,35 @@ async def list_round_tasks(
     return [TaskLaneResponse.model_validate(row) for row in rows]
 
 
-@router.get("/{thread_id}/command-room/tasks/{run_id}/{task_id}/plan-artifact")
+@router.get(
+    "/{thread_id}/command-room/wake-facts",
+    response_model=WakeFactsProjectionResponse,
+)
 @require_permission("runs", "read", owner_check=True)
-async def get_command_room_plan_artifact(
+async def get_command_room_wake_facts(
     thread_id: str,
-    run_id: str,
-    task_id: str,
     request: Request,
-) -> PlainTextResponse:
-    """Return one owner-scoped, AI-authored plan artifact without accepting a path."""
+    run_id: str = Query(default=""),
+    round_id: str = Query(default=""),
+    config: AppConfig = Depends(get_config),
+) -> WakeFactsProjectionResponse:
+    """Return one owner-scoped, allowlisted completed-child/wake-failed projection."""
+    response = WakeFactsProjectionResponse(thread_id=thread_id, run_id=run_id, round_id=round_id)
+    if not _wake_facts_projection_enabled(config) or not _nonempty_string(thread_id) or not _nonempty_string(run_id) or not _nonempty_string(round_id):
+        return response
+
     round_store = get_round_state_store(request)
-    if round_store is None or not hasattr(round_store, "get_task_lane"):
-        raise HTTPException(status_code=404, detail="Plan artifact not found")
-
+    if round_store is None or not hasattr(round_store, "list_task_lanes_by_round"):
+        return response
     user_id = get_request_storage_user_id(request)
-    lane = await round_store.get_task_lane(
+    rows = await round_store.list_task_lanes_by_round(
         thread_id=thread_id,
-        run_id=run_id,
-        task_id=task_id,
+        round_id=round_id,
         user_id=user_id,
+        limit=500,
     )
-    handoff = lane.get("handoff") if isinstance(lane, dict) else None
-    artifact_kind = handoff.get("container_artifact_kind") if isinstance(handoff, dict) else None
-    artifact_kind = artifact_kind if isinstance(artifact_kind, str) else None
-    artifact_written = handoff.get("container_artifact_written") is True if isinstance(handoff, dict) else False
-    relative_path = _PLAN_ARTIFACT_RELATIVE_PATHS.get(artifact_kind)
-    if lane is None or lane.get("status") != "completed" or not artifact_written or relative_path is None:
-        raise HTTPException(status_code=404, detail="Plan artifact not found")
-
-    try:
-        work_package_id = handoff.get("work_package_id") if isinstance(handoff, dict) else None
-        workspace_root = command_room_work_package_dir(
-            command_room_ai_workspace_dir(
-                get_paths().sandbox_work_dir(thread_id, user_id=user_id),
-                thread_id,
-            ),
-            work_package_id if isinstance(work_package_id, str) else None,
-        )
-        content = await asyncio.to_thread(read_file_no_symlinks, workspace_root / relative_path)
-        text = content.decode("utf-8")
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=404, detail="Plan artifact not found") from exc
-    return PlainTextResponse(
-        text,
-        headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"},
-    )
+    response.items = [item for row in rows if isinstance(row, Mapping) if (item := _wake_fact_item_projection(row, thread_id=thread_id, run_id=run_id, round_id=round_id)) is not None]
+    return response
 
 
 @router.get("/{thread_id}/runtime-snapshot", response_model=ThreadRuntimeSnapshotResponse)

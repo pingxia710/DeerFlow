@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor delivery-readiness detect-thread-boundaries detect-blocking-io test-wait-for-port command-room-opposition-probe command-room-ai-native-probe skillopt-probe dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor delivery-readiness detect-thread-boundaries detect-blocking-io test-wait-for-port command-room-opposition-probe command-room-ai-native-probe dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -29,7 +29,6 @@ help:
 	@echo "  make test-wait-for-port - Verify daemon port ownership checks"
 	@echo "  make command-room-opposition-probe - Capture opposition behavior for AI review"
 	@echo "  make command-room-ai-native-probe - Capture AI-native behavior for AI review"
-	@echo "  make skillopt-probe  - Run local SkillOpt probe for the NextOS Commander skill"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (stable Gateway, frontend hot-reload)"
@@ -62,7 +61,7 @@ delivery-readiness:
 	@$(PYTHON) ./scripts/delivery_readiness.py
 
 detect-thread-boundaries:
-	@$(PYTHON) ./scripts/detect_thread_boundaries.py
+	@$(BACKEND_UV_RUN) python ../scripts/detect_thread_boundaries.py
 
 detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
@@ -75,9 +74,6 @@ command-room-opposition-probe:
 
 command-room-ai-native-probe:
 	@$(RUN_WITH_GIT_BASH) ./scripts/command-room-ai-native-probe.sh
-
-skillopt-probe:
-	@$(RUN_WITH_GIT_BASH) ./scripts/skillopt-probe.sh
 
 config:
 	@$(PYTHON) ./scripts/configure.py

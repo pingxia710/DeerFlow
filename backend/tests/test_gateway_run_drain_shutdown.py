@@ -98,7 +98,7 @@ async def test_shutdown_cancels_and_awaits_inflight_run():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_projects_cancelled_run_into_terminal_round_state():
+async def test_shutdown_records_cancelled_run_without_changing_run_group():
     from deerflow.persistence.round_state import MemoryRoundStateStore
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -116,7 +116,8 @@ async def test_shutdown_projects_cancelled_run_into_terminal_round_state():
     [round_info] = await round_store.list_by_thread(record.thread_id)
     assert persisted is not None
     assert persisted["status"] == "interrupted"
-    assert round_info["state"] == "blocked"
+    assert round_info["current_run_id"] == record.run_id
+    assert "state" not in round_info
 
 
 @pytest.mark.asyncio

@@ -31,23 +31,29 @@ def test_transport_accepts_xhigh_and_model_label_override():
     config = SubagentsAppConfig(
         timeout_seconds=3600,
         reasoning_effort="xhigh",
-        agents={"general-purpose": {"model": "gpt-5.6-terra"}},
+        agents={
+            "general-purpose": {"model": "gpt-5.6-terra"},
+            "planner": {"model": "gpt-5.6", "reasoning_effort": "max"},
+        },
     )
 
     assert config.reasoning_effort == "xhigh"
     assert config.get_model_for("general-purpose") == "gpt-5.6-terra"
     assert config.get_model_for("opposition") == "gpt-5.6-terra"
+    assert config.get_model_for("planner") == "gpt-5.6"
+    assert config.get_reasoning_effort_for("planner") == "max"
+    assert config.get_reasoning_effort_for("executor") == "xhigh"
 
 
 def test_global_model_is_default_for_every_role():
     config = SubagentsAppConfig(
         model="gpt-5.6-terra",
-        agents={"opposition": {"model": "gpt-5.6-terra-review"}},
+        agents={"opposition": {"model": "gpt-5.6-terra-opposition"}},
     )
 
     assert config.get_model_for("general-purpose") == "gpt-5.6-terra"
     assert config.get_model_for("implementation") == "gpt-5.6-terra"
-    assert config.get_model_for("opposition") == "gpt-5.6-terra-review"
+    assert config.get_model_for("opposition") == "gpt-5.6-terra-opposition"
 
 
 def test_legacy_inherit_model_uses_global_or_general_default(caplog):
@@ -56,8 +62,8 @@ def test_legacy_inherit_model_uses_global_or_general_default(caplog):
             "model": "gpt-5.6-terra",
             "agents": {"opposition": {"model": "inherit"}},
             "custom_agents": {
-                "reviewer": {
-                    "description": "Review work.",
+                "verifier": {
+                    "description": "Verify work.",
                     "model": "inherit",
                 }
             },
@@ -66,7 +72,7 @@ def test_legacy_inherit_model_uses_global_or_general_default(caplog):
 
     config = get_subagents_app_config()
     assert config.get_model_for("opposition") == "gpt-5.6-terra"
-    assert config.get_model_for("reviewer") == "gpt-5.6-terra"
+    assert config.get_model_for("verifier") == "gpt-5.6-terra"
     assert "Legacy model='inherit' is ignored" in caplog.text
 
 
@@ -103,7 +109,10 @@ def test_removed_program_controls_are_not_part_of_the_model():
 
     assert not hasattr(config, "max_turns")
     assert not hasattr(config, "process_wide_queue_size")
-    assert config.agents["general-purpose"].model_dump() == {"model": "gpt-5.6-terra"}
+    assert config.agents["general-purpose"].model_dump() == {
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": None,
+    }
 
 
 def test_loader_replaces_the_runtime_transport_config():
@@ -111,25 +120,25 @@ def test_loader_replaces_the_runtime_transport_config():
         {
             "timeout_seconds": 1800,
             "reasoning_effort": "high",
-            "agents": {"reviewer": {"model": "gpt-5.6-terra"}},
+            "agents": {"verifier": {"model": "gpt-5.6-terra"}},
         }
     )
 
     config = get_subagents_app_config()
     assert config.timeout_seconds == 1800
     assert config.reasoning_effort == "high"
-    assert config.get_model_for("reviewer") == "gpt-5.6-terra"
+    assert config.get_model_for("verifier") == "gpt-5.6-terra"
 
 
 def test_loader_warns_when_legacy_program_controls_are_ignored(caplog):
     load_subagents_config_from_dict(
         {
             "process_wide_max_concurrent": 12,
-            "agents": {"reviewer": {"model": "gpt-5.6-terra", "max_turns": 20}},
+            "agents": {"verifier": {"model": "gpt-5.6-terra", "max_turns": 20}},
             "custom_agents": {
-                "reviewer": {
-                    "description": "Review work.",
-                    "system_prompt": "Act as a professional reviewer.",
+                "verifier": {
+                    "description": "Verify work.",
+                    "system_prompt": "Act as a professional verifier.",
                     "tools": ["bash"],
                 }
             },
@@ -138,5 +147,5 @@ def test_loader_warns_when_legacy_program_controls_are_ignored(caplog):
 
     assert "Ignored legacy subagent execution fields" in caplog.text
     assert "subagents.process_wide_max_concurrent" in caplog.text
-    assert "subagents.agents.reviewer.max_turns" in caplog.text
-    assert "subagents.custom_agents.reviewer.tools" in caplog.text
+    assert "subagents.agents.verifier.max_turns" in caplog.text
+    assert "subagents.custom_agents.verifier.tools" in caplog.text

@@ -999,28 +999,6 @@ export type {
   TaskLaneSnapshot,
 } from "./command-room-read-model";
 
-type RuntimeSnapshotRecovery = {
-  stale_inflight?: {
-    recovered?: boolean;
-    recovered_count?: number;
-    run_ids?: string[];
-    terminal_reason?: string | null;
-    runs?: Array<{ run_id: string; terminal_reason?: string | null }>;
-  } | null;
-  snapshot_self_heal?: {
-    repaired?: boolean;
-    round_count?: number;
-    task_lane_count?: number;
-    rounds?: Array<{ run_id: string; round_id: string; state: string }>;
-    task_lanes?: Array<{
-      run_id: string;
-      round_id: string;
-      task_id: string;
-      status: string;
-    }>;
-  } | null;
-};
-
 export type ThreadRunTerminalNotice = {
   runId: string;
   status: string;
@@ -1034,7 +1012,6 @@ type ThreadRuntimeSnapshotResponse = {
   rounds?: RuntimeRoundSnapshot[];
   run_messages: Array<RunMessagesPageResponse & { run_id: string }>;
   task_lanes?: TaskLaneSnapshot[];
-  recovery?: RuntimeSnapshotRecovery | null;
 };
 
 export const THREAD_RUNTIME_SNAPSHOT_RUN_LIMIT = 10;
@@ -4570,9 +4547,9 @@ export function useThreadHistory(
 
   const clearMissingThreadHistoryState = useCallback(
     (missingThreadId: string, missingError: unknown) => {
-      clearDeletedThreadClientState(queryClient, missingThreadId, {
-        clearSubtasksForThread,
-      });
+      // A missing or inaccessible thread is not the same as a user-confirmed
+      // deletion. Keep the route recoverable and preserve the error notice.
+      clearSubtasksForThread(missingThreadId);
       if (missingThreadId !== threadIdRef.current) {
         return;
       }
@@ -4595,7 +4572,7 @@ export function useThreadHistory(
       setMessageRows([]);
       setAppendedMessages([]);
     },
-    [clearSubtasksForThread, queryClient],
+    [clearSubtasksForThread],
   );
 
   const loadMessages = useCallback(async () => {
@@ -4990,7 +4967,13 @@ export function useThreadHistory(
     }
     const latestRunId =
       historyScopeRunIdRef.current ?? authoritativeRuns?.[0]?.run_id ?? null;
-    if (
+    const snapshotHasLatestRun = Boolean(
+      latestRunId &&
+      snapshot.data?.run_messages?.some((page) => page.run_id === latestRunId),
+    );
+    if (snapshotHasLatestRun) {
+      autoLoadedLatestRunIdRef.current = latestRunId;
+    } else if (
       shouldAutoLoadLatestRun(latestRunId, autoLoadedLatestRunIdRef.current)
     ) {
       autoLoadedLatestRunIdRef.current = latestRunId;
@@ -5003,6 +4986,7 @@ export function useThreadHistory(
     threadId,
     runsData,
     snapshot.data?.rounds,
+    snapshot.data?.run_messages,
     snapshot.data?.runs,
     loadMessages,
   ]);
@@ -5538,7 +5522,6 @@ export function useDeleteThread() {
   return useMutation({
     mutationFn: async ({
       threadId,
-      onRemoteDeleted,
       onRemoteDeleteStarted,
     }: {
       threadId: string;

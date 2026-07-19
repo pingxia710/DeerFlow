@@ -19,12 +19,7 @@
     "cancelled",
     "timed_out"
   ],
-  "terminal_reasons": [
-    "failed",
-    "user_cancelled",
-    "timed_out",
-    "boundary_blocked"
-  ],
+  "terminal_reasons": ["failed", "user_cancelled", "timed_out"],
   "required_event_fields": [
     "schema_version",
     "type",
@@ -48,20 +43,6 @@
   "task_started_fields": ["description", "subagent_type"],
   "task_running_fields": ["message_index", "total_messages"],
   "optional_task_running_fields": ["message"],
-  "optional_command_room_container_fields": [
-    "command_room_container",
-    "work_package_id",
-    "delivery_cycle_index",
-    "collaboration_round_index",
-    "container_artifact_path",
-    "container_artifact_kind",
-    "container_artifact_written"
-  ],
-  "command_room_container_values": ["context", "planning", "technical-design", "execution", "review", "project-steward", "debt-curation", "learning-curation", "collaboration", "evaluation"],
-  "current_command_room_container_values": ["context", "planning", "technical-design", "execution", "review", "project-steward", "debt-curation", "learning-curation"],
-  "legacy_command_room_container_values": ["collaboration", "evaluation"],
-  "command_room_artifact_kind_values": ["context-discovery", "context", "planning-forward", "planning-opposition", "spec", "technical-forward", "technical-opposition", "technical-plan", "execution", "findings", "project-status", "debt", "learning", "round-note", "evaluation", "chair-decision"],
-  "reserved_terminal_reasons": ["boundary_blocked"],
   "action_result_fields": [
     "action_id",
     "description",
@@ -74,10 +55,7 @@
     "error_sha256",
     "error_chars",
     "evidence_refs",
-    "output_ref",
-    "risks",
-    "conflicts",
-    "open_questions"
+    "output_ref"
   ],
   "terminal_cases": [
     {
@@ -108,9 +86,7 @@
   "compatibility_notes": [
     "The legacy type field remains for existing RunJournal/frontend code; event_type is the canonical duplicate and must match type.",
     "task_running.message is optional/reserved; the current backend does not emit raw AI message payloads in task_running events.",
-    "boundary_blocked is reserved for a future blocked task terminal reason; current task() terminal emissions are completed, failed, cancelled, and timed_out.",
     "Frontend cards may collapse cancelled and timed_out into their existing failed pill, but action_result.status and terminal_reason must preserve the real terminal cause.",
-    "Unknown structured terminal statuses must not leave a subtask permanently in_progress.",
-    "collaboration_round_index plus collaboration/evaluation values remain read-only compatibility for persisted task history; new Command Room runs emit delivery_cycle_index with planning/technical-design/execution/review."
+    "Unknown structured terminal statuses must not leave a subtask permanently in_progress."
   ]
 }

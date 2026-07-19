@@ -374,15 +374,15 @@ class MemoryRunStore(RunStore):
             )
         now_iso = self._now(now).isoformat()
         current = run.get("cancel_action")
-        next_action = "rollback" if action == "rollback" or current == "rollback" else "interrupt"
+        cancel_action = "rollback" if action == "rollback" or current == "rollback" else "interrupt"
         run["cancellation_requested_at"] = run.get("cancellation_requested_at") or now_iso
-        run["cancel_action"] = next_action
+        run["cancel_action"] = cancel_action
         if requested_by is not None:
             run["cancel_requested_by"] = requested_by
-        if next_action == "rollback":
+        if cancel_action == "rollback":
             run["rollback_requested_at"] = run.get("rollback_requested_at") or now_iso
         run["updated_at"] = now_iso
-        return CancelRequestResult(run_id=run_id, status=status, action=next_action, accepted=True)
+        return CancelRequestResult(run_id=run_id, status=status, action=cancel_action, accepted=True)
 
     async def consume_cancel_intent(
         self,

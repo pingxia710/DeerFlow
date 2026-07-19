@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
@@ -180,6 +182,36 @@ def test_grep_tool_case_sensitive(tmp_path, monkeypatch) -> None:
 
     assert "TODO: fix" in result
     assert "todo: also fix" not in result
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_async_forwards_search_options(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "file.py").write_text("TODO (a+b)\ntodo (a+b)\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("TODO (a+b)\n", encoding="utf-8")
+    sandbox = LocalSandbox(id="local")
+
+    async def initialized(_runtime):
+        return sandbox
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", initialized)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _runtime: sandbox)
+
+    result = await grep_tool.coroutine(
+        runtime=runtime,
+        description="forward all options",
+        pattern="TODO (a+b)",
+        path="/mnt/user-data/workspace",
+        glob="**/*.py",
+        literal=True,
+        case_sensitive=True,
+        max_results=7,
+    )
+
+    assert "/mnt/user-data/workspace/file.py:1: TODO (a+b)" in result
+    assert "todo (a+b)" not in result
+    assert "notes.txt" not in result
 
 
 def test_grep_tool_invalid_regex_returns_error(tmp_path, monkeypatch) -> None:

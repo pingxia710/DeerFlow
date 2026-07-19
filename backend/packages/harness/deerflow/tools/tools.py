@@ -6,7 +6,7 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import accept_handoff_tool, ask_clarification_tool, close_task_tool, present_file_tool, project_status_tool, task_tool, view_image_tool
+from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -19,9 +19,6 @@ BUILTIN_TOOLS = [
 
 SUBAGENT_TOOLS = [
     task_tool,
-    accept_handoff_tool,
-    close_task_tool,
-    project_status_tool,
 ]
 
 
@@ -100,7 +97,7 @@ def get_available_tools(
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
-        logger.info("Including subagent tools (task and Command Room lifecycle)")
+        logger.info("Including one-shot task tool")
 
     # If no model_name specified, use the first model (default)
     if model_name is None and config.models:

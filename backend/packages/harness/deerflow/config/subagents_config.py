@@ -12,12 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class SubagentOverrideConfig(BaseModel):
-    """Optional model selection for a task label."""
+    """Optional model settings for a task label."""
 
     model: str | None = Field(
         default=None,
         min_length=1,
         description="Model name for this task label (None = use the Codex CLI default)",
+    )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Optional reasoning effort for this task label",
     )
 
 
@@ -57,7 +61,7 @@ class SubagentsAppConfig(BaseModel):
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
-        description="Optional model overrides keyed by task label",
+        description="Optional model and reasoning-effort overrides keyed by task label",
     )
     custom_agents: dict[str, CustomSubagentConfig] = Field(
         default_factory=dict,
@@ -85,7 +89,7 @@ class SubagentsAppConfig(BaseModel):
                     normalized_agents[str(name)] = raw_config
                     continue
                 agent_config = dict(raw_config)
-                ignored_fields.extend(f"subagents.agents.{name}.{key}" for key in agent_config if key != "model")
+                ignored_fields.extend(f"subagents.agents.{name}.{key}" for key in agent_config if key not in {"model", "reasoning_effort"})
                 if agent_config.get("model") == "inherit":
                     legacy_inherit_fields.append(f"subagents.agents.{name}.model")
                     agent_config["model"] = None
@@ -145,6 +149,18 @@ class SubagentsAppConfig(BaseModel):
         general_override = self.agents.get("general-purpose")
         if general_override is not None and general_override.model not in {None, "inherit"}:
             return general_override.model
+        return None
+
+    def get_reasoning_effort_for(self, agent_name: str) -> ReasoningEffort | None:
+        """Get the configured reasoning effort for a task label."""
+        override = self.agents.get(agent_name)
+        if override is not None and override.reasoning_effort is not None:
+            return override.reasoning_effort
+        if self.reasoning_effort is not None:
+            return self.reasoning_effort
+        general_override = self.agents.get("general-purpose")
+        if general_override is not None:
+            return general_override.reasoning_effort
         return None
 
 

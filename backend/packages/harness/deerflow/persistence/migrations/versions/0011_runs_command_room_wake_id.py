@@ -67,7 +67,13 @@ def _legacy_candidates(bind) -> list[tuple[str, str]]:
         metadata = _metadata(row["metadata_json"])
         if metadata.get("command_room_wakeup") is not True:
             continue
-        wake_id = _canonical_uuid4(metadata.get("command_room_wake_id"))
+        raw_wake_id = metadata.get("command_room_wake_id")
+        if raw_wake_id is None:
+            # Wake runs created before this identity field existed remain
+            # valid history. The new nullable column intentionally leaves them
+            # unclaimed rather than inventing an identity or dropping a row.
+            continue
+        wake_id = _canonical_uuid4(raw_wake_id)
         if wake_id is None:
             invalid.append(str(row["run_id"]))
             continue

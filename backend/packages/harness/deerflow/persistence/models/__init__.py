@@ -15,13 +15,6 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.artifact_provenance.model import ArtifactProvenanceRow
-from deerflow.persistence.artifact_reservation.model import (
-    ArtifactExecutionRow,
-    ArtifactQuarantineRow,
-    ArtifactReservationHistoryRow,
-    ArtifactReservationRow,
-    WriterFenceProofRow,
-)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -37,10 +30,6 @@ from deerflow.persistence.user.model import UserRow
 
 __all__ = [
     "ArtifactProvenanceRow",
-    "ArtifactExecutionRow",
-    "ArtifactQuarantineRow",
-    "ArtifactReservationHistoryRow",
-    "ArtifactReservationRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
@@ -53,5 +42,4 @@ __all__ = [
     "TaskLaneRow",
     "ThreadMetaRow",
     "UserRow",
-    "WriterFenceProofRow",
 ]

@@ -18,9 +18,6 @@ class TaskActionResult:
     summary: str
     evidence_refs: list[str]
     output_ref: str | None = None
-    risks: list[str] | None = None
-    conflicts: list[str] | None = None
-    open_questions: list[str] | None = None
     error: str | None = None
 
 
@@ -32,7 +29,6 @@ _STATUS_ALIASES = {
     "error": "failed",
     "pending": "pending",
     "running": "running",
-    "blocked": "blocked",
     "cancelled": "cancelled",
     "canceled": "cancelled",
     "timed_out": "timed_out",
@@ -49,8 +45,6 @@ def _default_terminal_reason(status: str, *, has_error: bool) -> str | None:
         return "user_cancelled"
     if status == "timed_out":
         return "timed_out"
-    if status == "blocked":
-        return "boundary_blocked"
     if status == "failed" and has_error:
         return "failed"
     return None
@@ -91,9 +85,6 @@ def task_action_result_from_terminal_event(
         terminal_reason=terminal_reason or _default_terminal_reason(normalized_status, has_error=bool(error_text)),
         summary=_summary_from_result(result) or error_text or "",
         evidence_refs=list(dict.fromkeys(ref.strip() for ref in observed_evidence_refs or [] if isinstance(ref, str) and ref.strip())),
-        risks=[],
-        conflicts=[],
-        open_questions=[],
         error=error_text,
     )
 

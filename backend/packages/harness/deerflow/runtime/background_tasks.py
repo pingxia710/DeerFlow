@@ -16,7 +16,6 @@ class CommandRoomBackgroundOutcome:
     status: CommandRoomBackgroundStatus
     result: str | None = None
     error: str | None = None
-    container_artifact_written: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -29,11 +28,8 @@ class CommandRoomBackgroundJob:
     description: str
     subagent_type: str
     execute: Callable[[], Awaitable[CommandRoomBackgroundOutcome]] = field(repr=False)
+    round_id: str | None = None
     wake_context: Mapping[str, Any] = field(default_factory=dict, repr=False)
-    command_room_container: str | None = None
-    container_artifact_path: str | None = None
-    delivery_cycle_index: int | None = None
-    work_package_id: str | None = None
 
 
 class CommandRoomBackgroundDispatcher(Protocol):

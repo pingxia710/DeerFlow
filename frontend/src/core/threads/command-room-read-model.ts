@@ -1,7 +1,5 @@
 import type { Run } from "@langchain/langgraph-sdk";
 
-import type { CommandRoomContainer, Subtask } from "../tasks/types";
-
 import { hasStrongCommandRoomIdentity } from "./owner-scope";
 import { isActiveRunStatus, isTerminalRunStatus } from "./run-status";
 
@@ -54,11 +52,9 @@ export type TaskLaneSnapshot = {
 export type RuntimeRoundSnapshot = {
   round_id: string;
   thread_id: string;
-  state: string;
   current_run_id?: string | null;
   created_at?: string;
   updated_at?: string;
-  closed_at?: string | null;
 };
 
 type RunWithRound = {
@@ -77,50 +73,6 @@ export type CommandRoomReadModel = {
   taskLanes: TaskLaneSnapshot[];
   legacyTaskLanes: TaskLaneSnapshot[];
 };
-
-export type CommandRoomTrajectoryStep = {
-  id: string;
-  container: CommandRoomContainer;
-  workPackageId?: string;
-  runId?: string;
-  roundId?: string;
-  deliveryCycleIndex?: number;
-  status: "in_progress" | "completed" | "failed" | "mixed";
-  tasks: Subtask[];
-};
-
-export type CommandRoomTrajectorySections = {
-  context: CommandRoomTrajectoryStep[];
-  planResearch: CommandRoomTrajectoryStep[];
-  planProposals: CommandRoomTrajectoryStep[];
-  delivery: CommandRoomTrajectoryStep[];
-  other: CommandRoomTrajectoryStep[];
-};
-
-export type CommandRoomWorkPackageTrajectory = {
-  workPackageId?: string;
-  steps: CommandRoomTrajectoryStep[];
-};
-
-export type CommandRoomDeliveryCycle = {
-  id: string;
-  index: number;
-  workPackageId?: string;
-  status: CommandRoomTrajectoryStep["status"];
-  tasks: Subtask[];
-};
-
-function deliveryCycleStatus(
-  tasks: Subtask[],
-): CommandRoomDeliveryCycle["status"] {
-  if (tasks.some((task) => task.status === "in_progress")) {
-    return "in_progress";
-  }
-  if (tasks.some((task) => task.status === "failed")) {
-    return "failed";
-  }
-  return "completed";
-}
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -202,170 +154,6 @@ export function wakeFactForTask(
   return projection?.items.find((item) => item.task_id === taskId);
 }
 
-function trajectoryStatus(
-  tasks: Subtask[],
-): CommandRoomTrajectoryStep["status"] {
-  const statuses = new Set(tasks.map((task) => task.status));
-  if (statuses.size === 1) {
-    return tasks[0]?.status ?? "mixed";
-  }
-  return "mixed";
-}
-
-/**
- * Groups only explicit Command Room handoff facts. It never infers a phase
- * from task prose or decides which phase should run next.
- */
-export function buildCommandRoomTrajectory(tasks: Subtask[]) {
-  const grouped = new Map<string, CommandRoomTrajectoryStep>();
-  for (const task of tasks) {
-    const container = task.commandRoomContainer;
-    if (!container) {
-      continue;
-    }
-    const key = JSON.stringify([
-      task.runId ?? "",
-      task.roundId ?? "",
-      task.workPackageId ?? "",
-      container,
-      task.deliveryCycleIndex ?? "",
-    ]);
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.tasks.push(task);
-      existing.status = trajectoryStatus(existing.tasks);
-      continue;
-    }
-    grouped.set(key, {
-      id: key,
-      container,
-      ...(task.workPackageId ? { workPackageId: task.workPackageId } : {}),
-      ...(task.runId ? { runId: task.runId } : {}),
-      ...(task.roundId ? { roundId: task.roundId } : {}),
-      ...(task.deliveryCycleIndex !== undefined
-        ? { deliveryCycleIndex: task.deliveryCycleIndex }
-        : {}),
-      status: task.status,
-      tasks: [task],
-    });
-  }
-  return [...grouped.values()].sort((left, right) => {
-    const leftStartedAt = Math.min(
-      ...left.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-    );
-    const rightStartedAt = Math.min(
-      ...right.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-    );
-    return leftStartedAt - rightStartedAt;
-  });
-}
-
-export function splitCommandRoomTrajectory(
-  steps: CommandRoomTrajectoryStep[],
-): CommandRoomTrajectorySections {
-  const sections: CommandRoomTrajectorySections = {
-    context: [],
-    planResearch: [],
-    planProposals: [],
-    delivery: [],
-    other: [],
-  };
-  for (const step of steps) {
-    if (step.container === "context") {
-      sections.context.push(step);
-      continue;
-    }
-    if (step.container === "execution" || step.container === "review") {
-      sections.delivery.push(step);
-      continue;
-    }
-    if (
-      step.container === "planning" ||
-      step.container === "technical-design"
-    ) {
-      const isProposal = step.tasks.some(
-        (task) =>
-          task.containerArtifactKind === "spec" ||
-          task.containerArtifactKind === "technical-plan",
-      );
-      (isProposal ? sections.planProposals : sections.planResearch).push(step);
-      continue;
-    }
-    sections.other.push(step);
-  }
-  return sections;
-}
-
-export function groupCommandRoomTrajectoryByWorkPackage(
-  steps: CommandRoomTrajectoryStep[],
-): CommandRoomWorkPackageTrajectory[] {
-  const grouped = new Map<string, CommandRoomWorkPackageTrajectory>();
-  for (const step of steps) {
-    const key = step.workPackageId ?? "__legacy__";
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.steps.push(step);
-      continue;
-    }
-    grouped.set(key, {
-      ...(step.workPackageId ? { workPackageId: step.workPackageId } : {}),
-      steps: [step],
-    });
-  }
-  return [...grouped.values()].sort((left, right) => {
-    const leftStartedAt = Math.min(
-      ...left.steps.flatMap((step) =>
-        step.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-      ),
-    );
-    const rightStartedAt = Math.min(
-      ...right.steps.flatMap((step) =>
-        step.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-      ),
-    );
-    return leftStartedAt - rightStartedAt;
-  });
-}
-
-export function groupCommandRoomDeliveryCycles(tasks: Subtask[]) {
-  const grouped = new Map<string, CommandRoomDeliveryCycle>();
-  for (const task of tasks) {
-    if (
-      task.deliveryCycleIndex === undefined ||
-      (task.commandRoomContainer !== "execution" &&
-        task.commandRoomContainer !== "review")
-    ) {
-      continue;
-    }
-    const key = JSON.stringify([
-      task.workPackageId ?? "",
-      task.deliveryCycleIndex,
-    ]);
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.tasks.push(task);
-      existing.status = deliveryCycleStatus(existing.tasks);
-      continue;
-    }
-    grouped.set(key, {
-      id: key,
-      index: task.deliveryCycleIndex,
-      ...(task.workPackageId ? { workPackageId: task.workPackageId } : {}),
-      status: deliveryCycleStatus([task]),
-      tasks: [task],
-    });
-  }
-  return [...grouped.values()].sort((left, right) => {
-    const leftStartedAt = Math.min(
-      ...left.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-    );
-    const rightStartedAt = Math.min(
-      ...right.tasks.map((task) => task.startedAt ?? Number.MAX_SAFE_INTEGER),
-    );
-    return leftStartedAt - rightStartedAt || left.index - right.index;
-  });
-}
-
 export function roundIdOfRun(run: Run | CommandRoomRun | undefined) {
   const roundId = (run as RunWithRound | undefined)?.round_id;
   if (typeof roundId === "string") {
@@ -381,24 +169,6 @@ export function roundIdOfRun(run: Run | CommandRoomRun | undefined) {
 
 function roundCurrentRunId(round: RuntimeRoundSnapshot) {
   return stringValue(round.current_run_id);
-}
-
-function terminalRunPatchForRoundState(state: string):
-  | {
-      status: string;
-      terminalReason: string;
-    }
-  | undefined {
-  if (state === "closed") {
-    return undefined;
-  }
-  if (state === "blocked") {
-    return { status: "error", terminalReason: "blocked" };
-  }
-  if (state === "waiting_user") {
-    return { status: "interrupted", terminalReason: "waiting_user" };
-  }
-  return undefined;
 }
 
 export function applyNativeRoundsToSnapshotRuns(
@@ -427,33 +197,12 @@ export function applyNativeRoundsToSnapshotRuns(
       return run;
     }
 
-    const patch = terminalRunPatchForRoundState(round.state);
     const currentRoundId = roundIdOfRun(run);
-    const runWithRound = run as RunWithRound;
-    if (!patch) {
-      if (currentRoundId === round.round_id) {
-        return run;
-      }
-      changed = true;
-      return { ...run, round_id: round.round_id } as Run;
+    if (currentRoundId === round.round_id) {
+      return run;
     }
-
-    const nextRun = {
-      ...run,
-      round_id: round.round_id,
-      status: patch.status,
-      terminal_reason:
-        runWithRound.status === patch.status
-          ? (stringValue(runWithRound.terminal_reason) ?? patch.terminalReason)
-          : patch.terminalReason,
-    } as Run;
-    if (
-      currentRoundId !== round.round_id ||
-      runWithRound.status !== patch.status
-    ) {
-      changed = true;
-    }
-    return nextRun;
+    changed = true;
+    return { ...run, round_id: round.round_id } as Run;
   });
 
   return changed ? nextRuns : runs;
@@ -523,10 +272,20 @@ export function mergeRunsWithTerminalPrecedence({
   ) {
     return mergedRuns;
   }
+  const currentRunOrder = new Map<string, number>();
+  for (const [index, round] of (rounds ?? []).entries()) {
+    const runId = roundCurrentRunId(round);
+    if (runId) {
+      currentRunOrder.set(runId, index);
+    }
+  }
   return runsWithCreatedAt
     .sort(
       (left, right) =>
-        right.createdAtMs - left.createdAtMs || left.index - right.index,
+        right.createdAtMs - left.createdAtMs ||
+        (currentRunOrder.get(left.run.run_id) ?? Number.MAX_SAFE_INTEGER) -
+          (currentRunOrder.get(right.run.run_id) ?? Number.MAX_SAFE_INTEGER) ||
+        left.index - right.index,
     )
     .map(({ run }) => run);
 }

@@ -82,6 +82,7 @@ class TestAgentConfig:
         assert cfg.name == "my-agent"
         assert cfg.description == ""
         assert cfg.model is None
+        assert cfg.reasoning_effort is None
         assert cfg.tool_groups is None
 
     def test_full_config(self):
@@ -91,10 +92,12 @@ class TestAgentConfig:
             name="code-reviewer",
             description="Specialized for code review",
             model="deepseek-v3",
+            reasoning_effort="high",
             tool_groups=["file:read", "bash"],
         )
         assert cfg.name == "code-reviewer"
         assert cfg.model == "deepseek-v3"
+        assert cfg.reasoning_effort == "high"
         assert cfg.tool_groups == ["file:read", "bash"]
 
     def test_config_from_dict(self):
@@ -141,8 +144,10 @@ class TestLoadAgentConfig:
 
         assert config is not None
         assert config.name == "command-room"
-        assert config.model is None
-        assert config.skills == []
+        assert config.description.startswith("NextOS")
+        assert config.model == "gpt-5.6"
+        assert config.reasoning_effort == "max"
+        assert config.skills == ["nextos-commander"]
 
     def test_loads_builtin_command_room_with_memory_only_user_directory(self, tmp_path):
         user_dir = tmp_path / "users" / "u1" / "agents" / "command-room"
@@ -156,7 +161,10 @@ class TestLoadAgentConfig:
 
         assert config is not None
         assert config.name == "command-room"
-        assert config.skills == []
+        assert config.description.startswith("NextOS")
+        assert config.model == "gpt-5.6"
+        assert config.reasoning_effort == "max"
+        assert config.skills == ["nextos-commander"]
 
     def test_load_missing_config_yaml_raises(self, tmp_path):
         # Create directory without config.yaml
@@ -479,9 +487,37 @@ def _make_test_app(tmp_path: Path, *, system_role: str = "admin"):
     """Create a FastAPI app with the agents router, patching paths to tmp_path."""
     from fastapi import FastAPI
 
+    from app.gateway.deps import get_config
     from app.gateway.routers.agents import router
+    from deerflow.config.subagents_config import SubagentOverrideConfig, SubagentsAppConfig
 
     app = FastAPI()
+    models = {
+        "gpt-5.6": SimpleNamespace(
+            name="gpt-5.6",
+            model="gpt-5.6-sol",
+            supports_reasoning_effort=True,
+            reasoning_efforts=["high", "xhigh", "max"],
+            default_reasoning_effort="max",
+        ),
+        "gpt-5.6-terra": SimpleNamespace(
+            name="gpt-5.6-terra",
+            model="gpt-5.6-terra",
+            supports_reasoning_effort=True,
+            reasoning_efforts=["high", "xhigh"],
+            default_reasoning_effort="xhigh",
+        ),
+    }
+    app_config = SimpleNamespace(
+        models=list(models.values()),
+        subagents=SubagentsAppConfig(
+            model="gpt-5.6-terra",
+            reasoning_effort="xhigh",
+            agents={"planner": SubagentOverrideConfig(model="gpt-5.6", reasoning_effort="max")},
+        ),
+        get_model_config=models.get,
+    )
+    app.dependency_overrides[get_config] = lambda: app_config
 
     @app.middleware("http")
     async def _set_test_user(request, call_next):
@@ -500,7 +536,11 @@ def agent_client(tmp_path):
     paths_instance = _make_paths(tmp_path)
     previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+    with (
+        patch("deerflow.config.agents_config.get_paths", return_value=paths_instance),
+        patch("deerflow.config.role_assignments.get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_paths", return_value=paths_instance),
+    ):
         set_agents_api_config(AgentsApiConfig(enabled=True))
         try:
             app = _make_test_app(tmp_path)
@@ -519,7 +559,11 @@ def disabled_agent_client(tmp_path):
     paths_instance = _make_paths(tmp_path)
     previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+    with (
+        patch("deerflow.config.agents_config.get_paths", return_value=paths_instance),
+        patch("deerflow.config.role_assignments.get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_paths", return_value=paths_instance),
+    ):
         set_agents_api_config(AgentsApiConfig(enabled=False))
         try:
             app = _make_test_app(tmp_path)
@@ -534,7 +578,8 @@ class TestAgentsAPI:
         response = agent_client.get("/api/agents")
         assert response.status_code == 200
         data = response.json()
-        assert data["agents"] == []
+        assert [agent["name"] for agent in data["agents"]] == ["command-room"]
+        assert data["agents"][0]["system"] is True
 
     def test_create_agent(self, agent_client):
         payload = {
@@ -595,6 +640,26 @@ class TestAgentsAPI:
 
         assert response.status_code == 200
         assert response.json()["name"] == "command-room"
+        assert response.json()["system"] is True
+
+    def test_updates_builtin_command_room_model_without_restart(self, agent_client, tmp_path):
+        response = agent_client.put(
+            "/api/agents/command-room",
+            json={"model": "gpt-5.6-terra", "reasoning_effort": "xhigh"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["model"] == "gpt-5.6-terra"
+        assert response.json()["reasoning_effort"] == "xhigh"
+        config_path = tmp_path / "users" / "test-user-autouse" / "agents" / "command-room" / "config.yaml"
+        assert config_path.is_file()
+
+    def test_command_room_cannot_be_created_or_deleted(self, agent_client):
+        create_response = agent_client.post("/api/agents", json={"name": "command-room", "soul": "x"})
+        delete_response = agent_client.delete("/api/agents/command-room")
+
+        assert create_response.status_code == 409
+        assert delete_response.status_code == 409
 
     def test_get_missing_agent_404(self, agent_client):
         response = agent_client.get("/api/agents/nonexistent")
@@ -637,6 +702,7 @@ class TestAgentsAPI:
             "name": "specialized",
             "description": "Specialized agent",
             "model": "deepseek-v3",
+            "reasoning_effort": "high",
             "tool_groups": ["file:read", "bash"],
             "soul": "You are specialized.",
         }
@@ -644,6 +710,7 @@ class TestAgentsAPI:
         assert response.status_code == 201
         data = response.json()
         assert data["model"] == "deepseek-v3"
+        assert data["reasoning_effort"] == "high"
         assert data["tool_groups"] == ["file:read", "bash"]
 
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
@@ -705,6 +772,45 @@ class TestAgentsAPI:
         default_dir = tmp_path / "users" / "default" / "agents" / "internal-agent"
         assert (owner_dir / "SOUL.md").read_text(encoding="utf-8") == "owner soul"
         assert not default_dir.exists()
+
+
+class TestRolesAPI:
+    def test_list_roles_uses_static_defaults(self, agent_client):
+        response = agent_client.get("/api/roles")
+
+        assert response.status_code == 200
+        roles = {role["name"]: role for role in response.json()["roles"]}
+        assert set(roles) == {"planner", "executor", "fact-finder", "opposition", "recorder"}
+        assert roles["planner"]["model"] == "gpt-5.6"
+        assert roles["planner"]["reasoning_effort"] == "max"
+        assert roles["executor"]["model"] == "gpt-5.6-terra"
+        assert roles["executor"]["skill"] == "command-room-executor"
+
+    def test_update_role_persists_per_user_override(self, agent_client, tmp_path):
+        response = agent_client.put(
+            "/api/roles/executor",
+            json={"model": "gpt-5.6", "reasoning_effort": "max"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["model"] == "gpt-5.6"
+        assert response.json()["reasoning_effort"] == "max"
+        assignments_path = tmp_path / "users" / "test-user-autouse" / "role-assignments.json"
+        assert assignments_path.is_file()
+
+        refreshed = agent_client.get("/api/roles").json()["roles"]
+        executor = next(role for role in refreshed if role["name"] == "executor")
+        assert executor["model"] == "gpt-5.6"
+        assert executor["reasoning_effort"] == "max"
+
+    def test_update_role_rejects_unknown_role_model_and_effort(self, agent_client):
+        unknown_role = agent_client.put("/api/roles/critic", json={"model": "gpt-5.6", "reasoning_effort": "max"})
+        unknown_model = agent_client.put("/api/roles/planner", json={"model": "missing", "reasoning_effort": "max"})
+        unsupported_effort = agent_client.put("/api/roles/planner", json={"model": "gpt-5.6-terra", "reasoning_effort": "max"})
+
+        assert unknown_role.status_code == 404
+        assert unknown_model.status_code == 422
+        assert unsupported_effort.status_code == 422
 
 
 # ===========================================================================

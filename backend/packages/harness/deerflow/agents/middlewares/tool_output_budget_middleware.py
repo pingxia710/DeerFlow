@@ -642,7 +642,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         if self._config.enabled:
             messages = getattr(request, "messages", None)
             if isinstance(messages, list):
-                patched = _patch_model_messages(messages, self._config)
+                patched = await asyncio.to_thread(_patch_model_messages, messages, self._config)
                 if patched is not None:
                     request = request.override(messages=patched)
         return await handler(request)

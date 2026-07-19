@@ -1,13 +1,8 @@
-"""Native round-state persistence.
-
-This is deliberately mechanical: it records lifecycle, associations, and task
-lanes. It does not judge quality or choose the next AI role.
-"""
+"""Factual run-group and one-shot task records."""
 
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -20,19 +15,7 @@ from deerflow.persistence.round_state.model import RoundEventRow, RoundRow, Task
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.utils.time import coerce_iso
 
-ROUND_STATES = frozenset({"open", "executing", "validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"})
-TERMINAL_ROUND_STATES = frozenset({"closed", "blocked"})
-ALLOWED_ROUND_TRANSITIONS = {
-    "open": frozenset({"executing", "validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
-    "executing": frozenset({"validating", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
-    "validating": frozenset({"executing", "waiting_user", "awaiting_chair_decision", "closed", "blocked"}),
-    "waiting_user": frozenset({"executing", "awaiting_chair_decision", "closed", "blocked"}),
-    "awaiting_chair_decision": frozenset({"executing", "waiting_user", "closed", "blocked"}),
-    "closed": frozenset({"closed"}),
-    "blocked": frozenset({"blocked"}),
-}
 MAX_INTENT_CHARS = 4000
-MAX_NEXT_ACTION_CHARS = 4000
 
 
 class RoundBindingNotFoundError(LookupError):
@@ -40,7 +23,7 @@ class RoundBindingNotFoundError(LookupError):
 
 
 class RoundBindingConflictError(ValueError):
-    """Raised when an explicit round exists but cannot accept another run."""
+    """Retained for API compatibility with older callers."""
 
 
 def _explicit_round_id(metadata: dict[str, Any]) -> str | None:
@@ -57,14 +40,11 @@ def _validate_explicit_round(
     round_id: str,
     row_thread_id: str | None,
     row_user_id: str | None,
-    row_state: str | None,
     thread_id: str,
     user_id: str | None,
 ) -> None:
     if row_thread_id != thread_id or row_user_id != user_id:
         raise RoundBindingNotFoundError(f"Round {round_id} not found")
-    if row_state not in ROUND_STATES - TERMINAL_ROUND_STATES:
-        raise RoundBindingConflictError(f"Round {round_id} cannot accept a run in state {row_state}")
 
 
 def _now() -> datetime:
@@ -95,7 +75,7 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 def _row_to_dict(row: RoundRow) -> dict[str, Any]:
     data = row.to_dict()
-    for key in ("created_at", "updated_at", "closed_at"):
+    for key in ("created_at", "updated_at"):
         if isinstance(data.get(key), datetime):
             data[key] = coerce_iso(data[key])
     return data
@@ -166,58 +146,8 @@ def _task_evidence_ref(event: dict[str, Any]) -> str | None:
 
 
 def _task_handoff(event: dict[str, Any]) -> dict[str, Any] | None:
-    handoff = _safe_dict(event.get("handoff_envelope"))
-    container = event.get("command_room_container")
-    if isinstance(container, str) and container in {
-        "context",
-        "planning",
-        "technical-design",
-        "execution",
-        "review",
-        "project-steward",
-        "debt-curation",
-        "learning-curation",
-    }:
-        handoff["command_room_container"] = container
-    work_package_id = event.get("work_package_id")
-    if isinstance(work_package_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", work_package_id):
-        handoff["work_package_id"] = work_package_id
-    delivery_cycle_index = event.get("delivery_cycle_index")
-    if isinstance(delivery_cycle_index, int) and not isinstance(delivery_cycle_index, bool) and delivery_cycle_index >= 1:
-        handoff["delivery_cycle_index"] = delivery_cycle_index
-    artifact_path = event.get("container_artifact_path")
-    if isinstance(artifact_path, str) and artifact_path.strip():
-        handoff["container_artifact_path"] = artifact_path
-    artifact_written = event.get("container_artifact_written")
-    if isinstance(artifact_written, bool):
-        handoff["container_artifact_written"] = artifact_written
-    artifact_kind = event.get("container_artifact_kind")
-    if isinstance(artifact_kind, str) and artifact_kind in {
-        "context-discovery",
-        "context",
-        "planning-forward",
-        "planning-opposition",
-        "spec",
-        "technical-forward",
-        "technical-opposition",
-        "technical-plan",
-        "execution",
-        "findings",
-        "project-status",
-        "debt",
-        "learning",
-    }:
-        handoff["container_artifact_kind"] = artifact_kind
-    return handoff or None
-
-
-def _assert_allowed_transition(previous: str, state: str) -> None:
-    if state not in ROUND_STATES:
-        raise ValueError(f"Unknown round state: {state}")
-    if state == previous:
-        return
-    if state not in ALLOWED_ROUND_TRANSITIONS.get(previous, frozenset()):
-        raise ValueError(f"Invalid round state transition: {previous} -> {state}")
+    handoff = event.get("handoff_envelope")
+    return dict(handoff) if isinstance(handoff, dict) and handoff else None
 
 
 def _dedupe_refs(values: list[str | None], *, limit: int = 10) -> list[str]:
@@ -377,14 +307,11 @@ class RoundStateRepository:
                         round_id=explicit_round_id,
                         row_thread_id=round_row.thread_id if round_row is not None else None,
                         row_user_id=round_row.user_id if round_row is not None else None,
-                        row_state=round_row.state if round_row is not None else None,
                         thread_id=thread_id,
                         user_id=user_id,
                     )
                 latest = None if explicit_round_id is not None else await self._latest_round(session, thread_id, user_id)
                 created = False
-                if explicit_round_id is None and round_row is None and latest is not None and latest.state not in TERMINAL_ROUND_STATES:
-                    round_row = latest
                 previous_run_id = round_row.current_run_id if round_row is not None else None
                 previous_intent = round_row.current_intent if round_row is not None else None
                 previous_updated_at = coerce_iso(round_row.updated_at) if round_row is not None else None
@@ -398,8 +325,6 @@ class RoundStateRepository:
                         current_run_id=run_id,
                         source_goal_run_id=run_id,
                         current_intent=_clip(current_intent, MAX_INTENT_CHARS),
-                        state="open",
-                        next_action=None,
                         created_at=now,
                         updated_at=now,
                     )
@@ -547,107 +472,6 @@ class RoundStateRepository:
             for model in (RoundRow, RoundEventRow, TaskLaneRow):
                 owners.update(await session.scalars(select(model.user_id).where(model.thread_id == thread_id).distinct()))
             return owners
-
-    async def set_run_state(
-        self,
-        run_id: str,
-        *,
-        thread_id: str,
-        user_id: str | None,
-        round_id: str,
-        state: str,
-        event_type: str,
-        content: dict[str, Any] | None = None,
-        next_action: str | None = None,
-    ) -> dict[str, Any] | None:
-        now = _now()
-        async with self._sf() as session:
-            async with self._seq_write_guard(session), session.begin():
-                row = await session.get(RoundRow, round_id)
-                attached_rounds = await self._attached_rounds_for_run(
-                    session,
-                    run_id,
-                )
-                if row is None or row.thread_id != thread_id or row.user_id != user_id or set(attached_rounds) != {round_id} or attached_rounds.get(round_id) is not row:
-                    return None
-
-                is_current_run = row.current_run_id == run_id
-                previous = row.state
-                if is_current_run and previous == state:
-                    return {
-                        **_row_to_dict(row),
-                        **(await self._round_refs(session, round_id)),
-                    }
-                event_content = {
-                    **(content or {}),
-                    "from_state": previous,
-                    "to_state": state,
-                    "requested_state": state,
-                    "state_applied": is_current_run,
-                }
-                if is_current_run:
-                    _assert_allowed_transition(previous, state)
-                    row.state = state
-                    row.updated_at = now
-                    if state in TERMINAL_ROUND_STATES and row.closed_at is None:
-                        row.closed_at = now
-                    if state == "closed" and next_action is None:
-                        row.next_action = None
-                    elif next_action:
-                        row.next_action = _clip(
-                            next_action,
-                            MAX_NEXT_ACTION_CHARS,
-                        )
-                else:
-                    event_content["superseded_by_run_id"] = row.current_run_id
-                await self._append_event(
-                    session,
-                    round_id=round_id,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    user_id=user_id,
-                    event_type=event_type,
-                    content=event_content,
-                )
-                return {
-                    **_row_to_dict(row),
-                    **(await self._round_refs(session, round_id)),
-                }
-
-    async def rollback_terminal_projection(
-        self,
-        run_id: str,
-        *,
-        expected_state: str,
-        restore_state: str,
-    ) -> dict[str, Any] | None:
-        if restore_state not in ROUND_STATES - TERMINAL_ROUND_STATES:
-            raise ValueError(f"Invalid round rollback state: {restore_state}")
-        now = _now()
-        async with self._sf() as session:
-            async with self._seq_write_guard(session), session.begin():
-                row = await session.scalar(select(RoundRow).where(RoundRow.current_run_id == run_id).order_by(RoundRow.updated_at.desc()).limit(1))
-                if row is None or row.state != expected_state:
-                    return None
-                row.state = restore_state
-                row.closed_at = None
-                row.updated_at = now
-                await self._append_event(
-                    session,
-                    round_id=row.round_id,
-                    thread_id=row.thread_id,
-                    run_id=run_id,
-                    user_id=row.user_id,
-                    event_type="run.status_commit_failed",
-                    content={
-                        "from_state": expected_state,
-                        "to_state": restore_state,
-                    },
-                )
-                return {
-                    **_row_to_dict(row),
-                    **(await self._round_refs(session, row.round_id)),
-                }
 
     async def record_task_events(self, events: list[dict[str, Any]]) -> None:
         if not events:

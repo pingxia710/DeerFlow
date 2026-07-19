@@ -33,7 +33,6 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-from deerflow.agents.middlewares.subagent_limit_middleware import MAX_CONCURRENT_SUBAGENTS, SubagentLimitMiddleware, normalize_subagent_limit
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -52,10 +51,8 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
-_COMMAND_ROOM_DIRECT_TOOL_GROUPS: list[str] = []
-_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"accept_handoff", "ask_clarification", "close_task", "present_files", "project_status", "task"})
-_COMMAND_ROOM_CHAIR_SKILL = "command-room-chair"
-_COMMAND_ROOM_MAX_REASONING_EFFORT = "medium"
+_COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
+_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"ask_clarification", "present_files", "task", "ls", "read_file", "glob", "grep"})
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -86,17 +83,11 @@ def _is_coordinator_only_agent(agent_name: str | None) -> bool:
     return agent_name in _COORDINATOR_ONLY_AGENT_NAMES
 
 
-def _cap_coordinator_reasoning_effort(agent_name: str | None, reasoning_effort: str | None) -> str | None:
-    if agent_name == "command-room" and reasoning_effort in {"high", "xhigh", "max"}:
-        return _COMMAND_ROOM_MAX_REASONING_EFFORT
-    return reasoning_effort
-
-
 def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
     """Return config-tool groups for the lead agent.
 
-    Command Room execution belongs in delegated sub-AIs, so it receives no
-    configured file, shell, web, or MCP tool group.
+    Command Room can inspect current facts directly through the read-only file
+    group. Writes, shell, web, and MCP execution remain delegated.
     """
     if _is_coordinator_only_agent(agent_name):
         return list(_COMMAND_ROOM_DIRECT_TOOL_GROUPS)
@@ -104,7 +95,7 @@ def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig
 
 
 def _filter_coordinator_tools(agent_name: str | None, tools: list[BaseTool]) -> list[BaseTool]:
-    """Keep only coordination and result-delivery tools in Command Room."""
+    """Keep Command Room to read-only investigation and coordination tools."""
     if not _is_coordinator_only_agent(agent_name):
         return tools
     return [tool for tool in tools if tool.name in _COMMAND_ROOM_DIRECT_TOOL_NAMES]
@@ -125,10 +116,8 @@ def _uses_todo_list(agent_name: str | None, is_plan_mode: bool) -> bool:
 
 
 def _resolve_command_room_available_skills(agent_name: str | None, available_skills: set[str] | None) -> set[str] | None:
-    """Add the Chair operating skill to a non-empty Command Room allowlist."""
-    if available_skills is None or not available_skills or not _is_coordinator_only_agent(agent_name):
-        return available_skills
-    return {*available_skills, _COMMAND_ROOM_CHAIR_SKILL}
+    """Command Room uses its prompt directly; no workflow skill is injected."""
+    return available_skills
 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
@@ -413,12 +402,6 @@ def build_middlewares(
 
     middlewares.append(CommandRoomRoundContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
-    # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = _is_coordinator_only_agent(agent_name) or cfg.get("subagent_enabled", False)
-    if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS)
-        middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
-
     # Ordinary lead agents may use loop detection. The Command Room must leave
     # task sequencing and completion decisions to the lead AI.
     loop_detection_config = resolved_app_config.loop_detection
@@ -496,13 +479,14 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = normalize_subagent_limit(cfg.get("max_concurrent_subagents", MAX_CONCURRENT_SUBAGENTS))
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
     if _is_coordinator_only_agent(agent_name):
         subagent_enabled = True
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    if reasoning_effort is None and agent_config is not None:
+        reasoning_effort = agent_config.reasoning_effort
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     lead_available_skills = _resolve_command_room_available_skills(agent_name, available_skills)
     tool_groups = _resolve_agent_tool_groups(agent_name, agent_config)
@@ -524,10 +508,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         reasoning_effort,
         thinking_enabled=thinking_enabled,
     )
-    reasoning_effort = _cap_coordinator_reasoning_effort(agent_name, reasoning_effort)
-
     logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, reasoning_summary: %s, text_verbosity: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, reasoning_summary: %s, text_verbosity: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s",
         agent_name or "default",
         thinking_enabled,
         reasoning_effort,
@@ -536,7 +518,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         model_name,
         is_plan_mode,
         subagent_enabled,
-        max_concurrent_subagents,
     )
 
     # Inject run metadata for LangSmith trace tagging
@@ -599,7 +580,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_names=setup.deferred_names,
@@ -646,7 +626,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
-            max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
             available_skills=lead_available_skills,
             app_config=resolved_app_config,

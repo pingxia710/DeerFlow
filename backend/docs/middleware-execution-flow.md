@@ -17,11 +17,10 @@
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
 | 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
-| 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
-| 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓（指挥室除外） | ✗ | `loop_detection` |
-| 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
+| 11 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓（指挥室除外） | ✗ | `loop_detection` |
+| 12 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
 
-普通主 agent 默认 **14 个** middleware（`make_lead_agent`），指挥室不加载 LoopDetectionMiddleware。表中 subagent 的 **4 个** middleware（ThreadData、Sandbox、Guardrail、ToolErrorHandling）只描述可复用的进程内 `create_deerflow_agent` 配置，不是当前 `task()` 子 AI；当前一次性 Codex 子 AI 的 DeerFlow middleware 数量为零。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
+本表所列配置全开时，普通主 agent 有 **13 个** middleware；指挥室不加载 LoopDetectionMiddleware。`subagent` 功能只增加 `task` 工具，不增加决定任务数量的 middleware。表中 subagent 的 **4 个** middleware（ThreadData、Sandbox、Guardrail、ToolErrorHandling）只描述可复用的进程内 `create_deerflow_agent` 配置，不是当前 `task()` 子 AI；当前一次性 Codex 子 AI 的 DeerFlow middleware 数量为零。`create_deerflow_agent` Phase 1 实现 **12 个**（Guardrail 仅支持自定义实例，无内置默认）。
 
 ## 执行流程
 
@@ -35,7 +34,7 @@ graph TB
 
     subgraph BA ["<b>before_agent</b> 正序 0→N"]
         direction TB
-        TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[12] LoopDetection<br/>清理 stale warning"]
+        TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[11] LoopDetection<br/>清理 stale warning"]
     end
 
     subgraph BM ["<b>before_model</b> 正序 0→N"]
@@ -45,7 +44,7 @@ graph TB
 
     subgraph WM ["<b>wrap_model_call</b>"]
         direction TB
-        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
+        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[11] LoopDetection<br/>注入当前 run warning"]
     end
 
     LD_BA --> VI
@@ -54,14 +53,14 @@ graph TB
 
     subgraph AM ["<b>after_model</b> 反序 N→0"]
         direction TB
-        LD["[12] LoopDetection<br/>检测循环/排队 warning"] --> SL["[11] SubagentLimit<br/>截断多余 task"] --> TI["[8] Title<br/>生成标题"]
+        LD["[11] LoopDetection<br/>检测循环/排队 warning"] --> TI["[8] Title<br/>生成标题"]
     end
 
     M --> LD
 
     subgraph AA ["<b>after_agent</b> 反序 N→0"]
         direction TB
-        LD_CLEAN["[12] LoopDetection<br/>清理 pending warning"] --> MEM["[9] Memory<br/>入队记忆"] --> SBR["[2] Sandbox<br/>释放沙箱"]
+        LD_CLEAN["[11] LoopDetection<br/>清理 pending warning"] --> MEM["[9] Memory<br/>入队记忆"] --> SBR["[2] Sandbox<br/>释放沙箱"]
     end
 
     TI --> LD_CLEAN
@@ -77,7 +76,7 @@ graph TB
     class TD,UL,SB,LD_BA,VI beforeNode
     class DTC_WM,LD_WM wrapModelNode
     class M modelNode
-    class LD,SL,TI afterModelNode
+    class LD,TI afterModelNode
     class LD_CLEAN,SBR,MEM afterAgentNode
     class START,END terminalNode
 ```
@@ -94,7 +93,6 @@ sequenceDiagram
     participant VI as ViewImageMiddleware
     participant DTC as DanglingToolCallMiddleware
     participant M as MODEL
-    participant SL as SubagentLimitMiddleware
     participant TI as TitleMiddleware
     participant MEM as MemoryMiddleware
 
@@ -128,13 +126,8 @@ sequenceDiagram
     deactivate M
 
     Note right of LD: after_model 检测循环；warning 入队，hard-stop 清 tool_calls
-    LD -->> SL: after_model
+    LD -->> TI: after_model
     deactivate LD
-
-    activate SL
-    Note right of SL: after_model 截断多余 task
-    SL -->> TI: after_model
-    deactivate SL
 
     activate TI
     Note right of TI: after_model 生成标题
@@ -167,7 +160,7 @@ sequenceDiagram
 
 ```
 进入 before_*：   [0] → [1] → [2] → ... → [10] → MODEL
-退出 after_*：    MODEL → [13] → [11] → ... → [6] → [3] → [2] → [0]
+退出 after_*：    MODEL → [12] → [11] → ... → [6] → [3] → [2] → [0]
                           ↑ 最内层最先执行
 ```
 
@@ -236,7 +229,6 @@ sequenceDiagram
     participant VI as ViewImage
     participant DTC as DanglingToolCall
     participant M as MODEL
-    participant SL as SubagentLimit
     participant TI as Title
     participant MEM as Memory
 
@@ -259,9 +251,7 @@ sequenceDiagram
         LD ->> M: messages + tools
         M -->> LD: AI response
         Note right of LD: after_model 检测循环/排队 warning
-        LD -->> SL: .
-        Note right of SL: after_model 截断多余 task
-        SL -->> TI: .
+        LD -->> TI: .
         Note right of TI: after_model 生成标题
     end
 

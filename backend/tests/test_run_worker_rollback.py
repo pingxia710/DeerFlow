@@ -197,46 +197,6 @@ async def test_sync_checkpoint_title_uses_atomic_fill_if_empty_after_stale_read(
 
 
 @pytest.mark.anyio
-async def test_terminal_lease_control_does_not_cancel_slow_terminal_projection(monkeypatch):
-    class BlockingTerminalRoundStore(MemoryRoundStateStore):
-        def __init__(self):
-            super().__init__()
-            self.terminal_written = asyncio.Event()
-            self.allow_terminal_return = asyncio.Event()
-
-        async def set_run_state(self, *args, **kwargs):
-            result = await super().set_run_state(*args, **kwargs)
-            if kwargs.get("state") in {"closed", "blocked"}:
-                self.terminal_written.set()
-                await self.allow_terminal_return.wait()
-            return result
-
-    monkeypatch.setattr(
-        "deerflow.runtime.runs.worker._LEASE_CONTROL_INTERVAL_SECONDS",
-        0.01,
-    )
-    store = MemoryRunStore()
-    round_store = BlockingTerminalRoundStore()
-    manager = RunManager(store=store, round_store=round_store)
-    record = await manager.create_or_reject("thread-slow-terminal")
-    assert await manager.set_status(record.run_id, RunStatus.running) is True
-
-    owner_task = asyncio.create_task(manager.set_status(record.run_id, RunStatus.success, terminal_reason="success"))
-    control_task = asyncio.create_task(_lease_control_loop(manager, record, owner_task))
-    await round_store.terminal_written.wait()
-    try:
-        await asyncio.sleep(0.05)
-        assert not owner_task.done()
-    finally:
-        round_store.allow_terminal_return.set()
-
-    assert await owner_task is True
-    await control_task
-    [round_info] = await round_store.list_by_thread("thread-slow-terminal")
-    assert round_info["state"] == "closed"
-
-
-@pytest.mark.anyio
 async def test_repeated_cancel_does_not_interrupt_post_terminal_projection(monkeypatch):
     agent_started = asyncio.Event()
     terminal_flush_started = asyncio.Event()
@@ -501,8 +461,8 @@ async def test_run_agent_updates_thread_meta_with_run_owner():
 
 
 @pytest.mark.anyio
-async def test_run_agent_success_path_persists_terminal_runtime_state_without_snapshot():
-    """The normal worker finalizer must persist terminal state before any snapshot repair."""
+async def test_run_agent_success_path_persists_runtime_facts():
+    """The worker records the actual Run result and child-task result."""
     event_store = MemoryRunEventStore()
     round_store = MemoryRoundStateStore()
     run_manager = RunManager(store=MemoryRunStore(), round_store=round_store)
@@ -594,8 +554,7 @@ async def test_run_agent_success_path_persists_terminal_runtime_state_without_sn
 
     rounds = await round_store.list_by_thread("thread-main-path", user_id="owner-1")
     assert rounds[0]["round_id"] == record.round_id
-    assert rounds[0]["state"] == "closed"
-    assert rounds[0]["next_action"] is None
+    assert rounds[0]["current_run_id"] == record.run_id
     lanes = await round_store.list_task_lanes_by_round(
         thread_id="thread-main-path",
         round_id=record.round_id,

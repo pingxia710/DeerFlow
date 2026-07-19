@@ -215,13 +215,9 @@ test.describe("Thread history", () => {
                 round_id: "round-1",
                 task_id: "task-1",
                 role: "executor",
-                description: "Legacy execution task",
+                description: "Implement requested change",
                 status: "completed",
                 result: "preview",
-                metadata: {
-                  command_room_container: "execution",
-                  delivery_cycle_index: 1,
-                },
                 started_at: "2025-06-01T12:00:00Z",
                 finished_at: "2025-06-01T12:01:05Z",
                 duration_ms: 65_000,
@@ -231,8 +227,8 @@ test.describe("Thread history", () => {
                 run_id: "run-outside-loaded-history",
                 round_id: "round-outside-loaded-history",
                 task_id: "old-task",
-                role: "reviewer",
-                description: "Old task outside loaded history",
+                role: "fact-finder",
+                description: "Older task outside loaded history",
                 status: "completed",
                 started_at: "2025-05-01T12:00:00Z",
                 finished_at: "2025-05-01T12:01:00Z",
@@ -281,38 +277,19 @@ test.describe("Thread history", () => {
     expect(runtimeSnapshot.ok()).toBe(true);
     expect((await runtimeSnapshot.json()).task_lanes).toHaveLength(2);
     await expect(page).toHaveURL(new RegExp(`${commandRoomUrl}$`));
-    await expect(page.getByText("command-room", { exact: true })).toBeVisible();
+    await expect(page.getByText("NextOS", { exact: true })).toBeVisible();
     const taskCard = page
       .locator("[data-command-room-task]")
-      .filter({ hasText: "Legacy execution task" });
+      .filter({ hasText: "Implement requested change" });
     await expect(taskCard).toBeVisible({ timeout: 15_000 });
-    await expect(taskCard).toContainText("Execution · Cycle 1");
+    await expect(taskCard).toContainText("executor");
     await expect(taskCard).toContainText("1:05");
     await expect(
       page
         .locator("[data-command-room-task]")
-        .filter({ hasText: "Old task outside loaded history" }),
+        .filter({ hasText: "Older task outside loaded history" }),
     ).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Open activity" }).click();
-    const trajectory = page.locator("[data-command-room-trajectory]");
-    await expect(trajectory).toBeVisible({ timeout: 15_000 });
-    await expect(trajectory.getByText("Delivery cycle 1")).toBeVisible();
-    const executionTask = trajectory.getByRole("button", {
-      name: "Execution · Legacy execution task: Completed",
-    });
-    const completionTime = executionTask.locator("time");
-    await expect(completionTime).toHaveAttribute(
-      "datetime",
-      "2025-06-01T12:01:05.000Z",
-    );
-    await expect(completionTime).not.toContainText("2025");
-    await expect(executionTask).not.toContainText("00:01:05");
-    await executionTask.click();
-    await expect(taskCard).toBeVisible();
-    await expect(
-      trajectory.getByRole("button", { name: "Recent tasks" }),
-    ).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath("command-room-navigation-desktop.png"),
     });
@@ -322,7 +299,7 @@ test.describe("Thread history", () => {
     await expect(taskCard.getByText(fullResult)).toBeVisible();
   });
 
-  test("Activity links information and plans back to mobile chat", async ({
+  test("Command Room plan update remains visible on mobile", async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -364,35 +341,7 @@ test.describe("Thread history", () => {
                 updated_at: "2025-06-01T12:01:00Z",
               },
             ],
-            task_lanes: [
-              {
-                thread_id: MOCK_THREAD_ID,
-                run_id: "run-plan",
-                round_id: "round-plan",
-                task_id: "context-task",
-                role: "fact-finder",
-                description: "Inspect current evidence",
-                status: "completed",
-                metadata: { command_room_container: "context" },
-                started_at: "2025-06-01T12:00:00Z",
-                finished_at: "2025-06-01T12:00:10Z",
-              },
-              {
-                thread_id: MOCK_THREAD_ID,
-                run_id: "run-plan",
-                round_id: "round-plan",
-                task_id: "plan-task",
-                role: "recorder",
-                description: "Record the chosen plan",
-                status: "completed",
-                metadata: {
-                  command_room_container: "planning",
-                  container_artifact_kind: "planning-forward",
-                },
-                started_at: "2025-06-01T12:00:10Z",
-                finished_at: "2025-06-01T12:01:00Z",
-              },
-            ],
+            task_lanes: [],
           },
         },
       ],
@@ -401,33 +350,17 @@ test.describe("Thread history", () => {
     await page.goto(`/workspace/agents/command-room/chats/${MOCK_THREAD_ID}`);
     const planUpdate = page.locator("[data-command-room-update]");
     await expect(planUpdate).toBeVisible({ timeout: 15_000 });
-    await expect(
-      planUpdate.getByRole("button", { name: "Plan" }),
-    ).toHaveAttribute("aria-expanded", "true");
+    const updateButton = planUpdate.getByRole("button", {
+      name: "Command Room update",
+    });
+    await expect(updateButton).toHaveAttribute("aria-expanded", "false");
+    await updateButton.click();
+    await expect(updateButton).toHaveAttribute("aria-expanded", "true");
     await expect(
       planUpdate.getByRole("paragraph").filter({ hasText: planAnswer }),
     ).toBeVisible();
     await expect(page.getByTestId("run-terminal-notice")).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Open activity" }).click();
-    const sheet = page.locator('[data-slot="sheet-content"]');
-    await expect(sheet).toBeVisible();
-    await expect(
-      sheet.getByRole("button", { name: "Information layer" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    await expect(sheet.getByText("1 plan")).toBeVisible();
-    await page.screenshot({
-      path: testInfo.outputPath("command-room-navigation-mobile.png"),
-    });
-    await sheet
-      .getByRole("button", { name: "Planning analysis: Completed" })
-      .click();
-
-    await expect(sheet).toBeHidden();
-    await expect(planUpdate).toBeVisible();
-    await expect(
-      planUpdate.getByRole("paragraph").filter({ hasText: planAnswer }),
-    ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("command-room-plan-mobile.png"),
     });
@@ -1658,7 +1591,10 @@ test.describe("Thread history", () => {
       created_at: `2025-06-05T13:00:${String(index).padStart(2, "0")}Z`,
       updated_at: `2025-06-05T13:00:${String(index).padStart(2, "0")}Z`,
     });
-    const allRuns = [...snapshotRunIds, ...olderRunIds].map(run);
+    const allRunIds = [...snapshotRunIds, ...olderRunIds];
+    const allRuns = allRunIds.map((runId, index) =>
+      run(runId, allRunIds.length - index),
+    );
 
     await page.route(
       new RegExp(`/api/threads/${MOCK_THREAD_ID}/runtime-snapshot(?:\\?.*)?$`),
@@ -2053,11 +1989,14 @@ test.describe("Thread history", () => {
     await expect(page.getByText(oldMarker)).toBeVisible({ timeout: 15_000 });
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
+    const snapshotLoadsBeforeRoundChange = snapshotLoads;
     await textarea.fill("start the next round");
     await textarea.press("Enter");
 
-    await expect.poll(() => snapshotLoads).toBeGreaterThan(1);
-    await expect(page.getByText(newMarker)).toBeVisible();
+    await expect
+      .poll(() => snapshotLoads)
+      .toBeGreaterThan(snapshotLoadsBeforeRoundChange);
+    await expect(page.getByText(newMarker)).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText(oldMarker)).toHaveCount(0);
 
     const snapshotLoadsAfterRoundChange = snapshotLoads;

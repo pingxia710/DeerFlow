@@ -375,6 +375,34 @@ async def test_0011_legacy_conflict_fails_before_schema_changes(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_0011_preserves_legacy_wake_without_identity_as_null(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{(tmp_path / 'wake-migration-pre-identity.db').as_posix()}")
+    try:
+        config = _get_alembic_config(engine)
+        await asyncio.to_thread(_upgrade, config, "0010_task_lane_wake_claim")
+        await _insert_legacy_wake_runs(
+            engine,
+            (
+                (
+                    "legacy-before-wake-id",
+                    "thread-1",
+                    {"command_room_wakeup": True},
+                ),
+            ),
+        )
+
+        await asyncio.to_thread(_upgrade, config, "head")
+
+        async with engine.connect() as connection:
+            wake_value = await connection.scalar(sa.text("SELECT command_room_wake_id FROM runs WHERE run_id = 'legacy-before-wake-id'"))
+            version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        assert wake_value is None
+        assert version == "0013_factual_round_records"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_0011_backfills_one_valid_legacy_wake_and_installs_global_constraints(
     tmp_path: Path,
 ) -> None:

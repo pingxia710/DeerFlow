@@ -13,7 +13,7 @@ import { Callout } from "nextra/components";
   parallel or specialized work.
 </Callout>
 
-The Lead Agent is the Command Room brain. It keeps the goal, plan, progress, context, and final judgment clear while one-shot **sub-AIs** execute work from self-contained natural-language prompts.
+NextOS is the AI organization built on the DeerFlow runtime. Its Lead Agent is the Command Room brain. It keeps the goal, plan, progress, context, and final judgment clear while one-shot **sub-AIs** execute work from self-contained natural-language prompts.
 
 ## Why subagents matter
 
@@ -24,7 +24,7 @@ Sub-AIs solve two key problems in long-horizon work:
 
 ## Professional role labels
 
-DeerFlow exposes `general-purpose`, `bash`, and Command Room roles such as `planner`, `evidence`, `fact-finder`, and `opposition`. A role label selects developer-authored context that DeerFlow prepends to the task: a configured `system_prompt`, otherwise the role description. It does not grant DeerFlow tools, create a turn loop, or install a quality rule; the one-shot Codex AI owns its native tools and decisions.
+DeerFlow exposes `general-purpose`, `bash`, and Command Room roles such as `planner`, `executor`, `fact-finder`, `opposition`, and `recorder`. A role label selects developer-authored context that DeerFlow prepends to the task: a configured `system_prompt`, otherwise the role description. It does not grant DeerFlow tools or create a turn loop; the one-shot Codex AI owns its native tools and decisions.
 
 ### general-purpose
 
@@ -33,6 +33,16 @@ A general execution role for exploration, implementation, commands, checks, and 
 ### bash
 
 A command-execution role for builds, tests, diagnostics, and verbose terminal work. The label does not grant shell access; Codex CLI uses its own configured tools and permissions.
+
+### planner
+
+An independent planning role that turns the complete Chair brief into one coherent proposal with goals, boundaries, assumptions, route, and observable completion. Additional planners may explore alternative routes in parallel.
+
+### opposition
+
+An independent challenge role used after a planner proposal. It receives the original brief and complete plan, then reports hidden assumptions, counterevidence, failure modes, boundary misses, and the strongest materially different alternative. It does not force disagreement, approve or reject the plan, or replace Chair judgment.
+
+For substantive work, the Chair uses these temporary roles in an AI-owned `planner` proposal → one `opposition` challenge → Chair execution plan → human plan confirmation → execution → plan completion flow. Returned task results are facts for the Chair to use as it continues the confirmed plan; they are not task-level acceptance events. This sequence lives in AI prompts and natural results, not in runtime state or frontend gates.
 
 ## Delegation flow
 
@@ -53,7 +63,7 @@ The runtime then:
 1. Assembles the developer-authored role context, the Lead Agent's task prompt, applicable instruction guidance, and real task paths, then passes that self-contained prompt to one ephemeral Codex CLI process.
 2. Lets that Codex AI plan, use its tools, and complete the task autonomously.
 3. Returns the complete natural-language result unchanged to the Lead Agent.
-4. Ends the child process. The Lead Agent sends the complete result to a different checking sub-AI and obtains an independent opposition result before deciding.
+4. Ends the child process. The Lead Agent reads the result and decides whether any further AI work is useful.
 
 ## Configuration
 
@@ -68,27 +78,24 @@ subagents:
   reasoning_effort: xhigh
   # Optional professional role names shown to the Lead Agent
   custom_agents:
-    contract-reviewer:
-      description: Reviews API contracts and reports concrete mismatches.
-      system_prompt: Act as an independent professional API contract reviewer.
+    contract-inspector:
+      description: Inspects API contracts and reports concrete mismatches.
+      system_prompt: Act as an independent professional API contract inspector.
 ```
 
 There is no DeerFlow turn loop, tool allowlist, score, or programmatic completion rule for child AIs. The assembled natural-language prompt is the task contract; the timeout only owns process lifecycle.
 
 Delegation also requires the pinned `@openai/codex` CLI and `codex login`, or a supported Codex authentication environment. This remains true when the Lead Agent uses a different model provider. Docker images install the CLI but do not include personal credentials by default.
 
-## Concurrency limits
+## Dispatch count
 
-The `SubagentLimitMiddleware` controls how many `task()` calls the Lead Agent can emit in one model response. This is controlled through the per-request configuration:
+`subagent_enabled` controls whether delegation is active for a session. Once it is active, the Lead Agent chooses how many useful `task()` calls to emit from the goal and current context. DeerFlow does not truncate, queue, batch, or defer those calls programmatically; legacy `max_concurrent_subagents` request values are ignored.
 
-- `subagent_enabled`: whether subagent delegation is active for this session
-- `max_concurrent_subagents`: maximum task calls in one model response (default: 6)
+Independent Codex processes may run concurrently. Host/model capacity and each child's lifecycle timeout remain transport boundaries, not decisions about which AI work should run.
 
-If a response contains more calls than the configured limit, the middleware omits only the excess and reports that objective fact to the Lead Agent. It does not recommend a next step, queue calls, or silently schedule them; the Lead Agent decides from the returned AI results.
+## Factual dispatch record
 
-## Handoff audit
-
-Each `task` handoff writes a compact append-only audit record under the thread's audit directory when local storage is available. The record keeps factual dispatch identity, status, hashes, and character counts while omitting raw prompts, worker output, and error text. It does not parse worker prose or infer a verdict, evidence strength, or next action.
+Each `task` call writes a compact append-only record under the thread's audit directory when local storage is available. The record keeps factual dispatch identity, status, hashes, and character counts while omitting raw prompts, worker output, and error text. It does not interpret worker prose or decide what the Lead Agent should do next.
 
 When a child completes but the Chair wake fails, the UI can show that transport fact without treating it as Chair consumption, project completion, approval, or a retry request.
 

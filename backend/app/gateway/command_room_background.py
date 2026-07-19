@@ -92,18 +92,11 @@ def _wake_message(
     error = outcome.error if outcome.error is not None else "(none)"
     return (
         "[Internal Command Room background completion]\n"
-        "A one-shot child AI has reached a factual terminal state. This message is an internal AI handoff, not a new "
-        "human request. Compare it with the latest human conversation before deciding what remains valid. Do not ask "
-        "the human to type 'continue' merely to advance an already accepted workflow.\n\n"
+        "A one-shot child AI has reached a factual terminal state. This is an internal AI handoff, not a new human request.\n\n"
         f"source_run_id: {job.source_run_id}\n"
         f"task_id: {job.task_id}\n"
         f"role: {job.subagent_type}\n"
         f"description: {job.description}\n"
-        f"container: {job.command_room_container or '(none)'}\n"
-        f"work_package_id: {job.work_package_id or '(legacy)'}\n"
-        f"delivery_cycle_index: {job.delivery_cycle_index or '(none)'}\n"
-        f"artifact_path: {job.container_artifact_path or '(none)'}\n"
-        f"artifact_written: {outcome.container_artifact_written}\n"
         f"status: {outcome.status}\n"
         f"error: {error}\n\n"
         f"Current sibling task facts:\n{task_lane_facts or '(unavailable)'}\n\n"
@@ -137,10 +130,7 @@ async def _task_lane_facts(snapshot: _RequestSnapshot, job: CommandRoomBackgroun
         task_id = str(row.get("task_id") or "(unknown)")[:128]
         role = str(row.get("role") or row.get("subagent_type") or "(unknown)")[:128]
         status = str(row.get("status") or "(unknown)")[:64]
-        handoff = row.get("handoff")
-        package_id = handoff.get("work_package_id") if isinstance(handoff, dict) else None
-        package_label = package_id if isinstance(package_id, str) and package_id else "(legacy)"
-        facts.append(f"- {task_id} | {role} | {status} | work_package_id: {package_label}")
+        facts.append(f"- {task_id} | {role} | {status}")
     return "\n".join(facts)
 
 
@@ -196,7 +186,7 @@ async def _create_wake_run(
             "source_run_id": job.source_run_id,
             "source_task_id": job.task_id,
             **({"command_room_wake_id": wake_id} if wake_id else {}),
-            **({"source_work_package_id": job.work_package_id} if job.work_package_id else {}),
+            **({"round_id": job.round_id} if job.round_id else {}),
         },
         context=dict(job.wake_context),
         on_disconnect="continue",
@@ -307,8 +297,6 @@ class CommandRoomBackgroundService:
             lane = await self._get_lane(snapshot, job)
             background = self._background_from_lane(lane)
             if background is not None:
-                if background.get("work_package_id") != job.work_package_id:
-                    raise RuntimeError(f"Background task {job.task_id} belongs to a different work package")
                 raise RuntimeError(f"Background task {job.task_id} already has a durable admission")
             await self._persist_state(job, snapshot, outcome=None, wake={"state": "pending", "attempts": 0})
             task = asyncio.create_task(self._execute_and_wake(job, snapshot), name=f"command-room:{job.thread_id}:{job.task_id}")
@@ -372,7 +360,6 @@ class CommandRoomBackgroundService:
             "status": outcome.status,
             "result": outcome.result,
             "error": outcome.error,
-            "container_artifact_written": outcome.container_artifact_written,
         }
 
     @staticmethod
@@ -384,12 +371,10 @@ class CommandRoomBackgroundService:
             return None
         result = value.get("result")
         error = value.get("error")
-        artifact_written = value.get("container_artifact_written")
         return CommandRoomBackgroundOutcome(
             status=status,
             result=result if isinstance(result, str) else None,
             error=error if isinstance(error, str) else None,
-            container_artifact_written=artifact_written if isinstance(artifact_written, bool) else None,
         )
 
     @staticmethod
@@ -424,7 +409,7 @@ class CommandRoomBackgroundService:
             "task_id": job.task_id,
             "description": job.description,
             "subagent_type": job.subagent_type,
-            "work_package_id": job.work_package_id,
+            "round_id": job.round_id,
             "wake_context": dict(job.wake_context),
             "outcome": self._outcome_facts(previous_outcome or outcome) if previous_outcome or outcome else None,
             "wake": persisted_wake,
@@ -435,12 +420,9 @@ class CommandRoomBackgroundService:
             "thread_id": job.thread_id,
             "run_id": job.source_run_id,
             "task_id": job.task_id,
+            **({"round_id": job.round_id} if job.round_id else {}),
             "subagent_type": job.subagent_type,
             "description": job.description,
-            "command_room_container": job.command_room_container,
-            "container_artifact_path": job.container_artifact_path,
-            "delivery_cycle_index": job.delivery_cycle_index,
-            "work_package_id": job.work_package_id,
             "handoff_envelope": handoff,
         }
         if outcome is None and previous_outcome is None:
@@ -451,7 +433,6 @@ class CommandRoomBackgroundService:
                 status=outcome.status,
                 result_preview=outcome.result,
                 error_preview=outcome.error,
-                container_artifact_written=outcome.container_artifact_written,
             )
         if claim_id is not None:
             persist_claimed_wake = getattr(store, "persist_claimed_background_wake", None)
@@ -821,7 +802,6 @@ class CommandRoomBackgroundService:
             if background.get("thread_id") != thread_id or background.get("source_run_id") != run_id or background.get("task_id") != task_id:
                 logger.warning("Skipping mismatched Command Room background recovery record for task %s", task_id)
                 continue
-            handoff = lane.get("handoff") if isinstance(lane.get("handoff"), dict) else {}
             job = CommandRoomBackgroundJob(
                 thread_id=thread_id,
                 source_run_id=run_id,
@@ -829,11 +809,8 @@ class CommandRoomBackgroundService:
                 description=str(background.get("description") or lane.get("description") or "Background task"),
                 subagent_type=str(background.get("subagent_type") or lane.get("role") or "general-purpose"),
                 execute=self._unavailable_execute,
+                round_id=lane.get("round_id") if isinstance(lane.get("round_id"), str) else None,
                 wake_context=dict(background.get("wake_context") or {}),
-                command_room_container=handoff.get("command_room_container") if isinstance(handoff.get("command_room_container"), str) else None,
-                container_artifact_path=handoff.get("container_artifact_path") if isinstance(handoff.get("container_artifact_path"), str) else None,
-                delivery_cycle_index=handoff.get("delivery_cycle_index") if isinstance(handoff.get("delivery_cycle_index"), int) else None,
-                work_package_id=background.get("work_package_id") if isinstance(background.get("work_package_id"), str) else None,
             )
             snapshot = _RequestSnapshot.for_recovery(app, lane.get("user_id") if isinstance(lane.get("user_id"), str) else None)
             wake = background.get("wake") if isinstance(background.get("wake"), dict) else {}

@@ -292,7 +292,7 @@ def test_make_lead_agent_records_the_configured_default_reasoning_effort(monkeyp
     assert config["metadata"]["reasoning_effort"] == "max"
 
 
-def test_make_lead_agent_caps_command_room_reasoning_effort(monkeypatch):
+def test_make_lead_agent_preserves_command_room_reasoning_effort(monkeypatch):
     app_config = _make_app_config(
         [
             _make_model(
@@ -336,8 +336,51 @@ def test_make_lead_agent_caps_command_room_reasoning_effort(monkeypatch):
 
     lead_agent_module.make_lead_agent(config)
 
-    assert captured["reasoning_effort"] == "medium"
-    assert config["metadata"]["reasoning_effort"] == "medium"
+    assert captured["reasoning_effort"] == "xhigh"
+    assert config["metadata"]["reasoning_effort"] == "xhigh"
+
+
+def test_make_lead_agent_uses_agent_reasoning_effort_when_runtime_omits_it(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model(
+                "terra",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["medium", "high", "xhigh", "max"],
+                default_reasoning_effort="max",
+            )
+        ]
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda name: AgentConfig(name=name, model="terra", reasoning_effort="xhigh", tool_groups=[], skills=[]),
+    )
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: captured.update(kwargs) or object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config = {
+        "configurable": {
+            "agent_name": "command-room",
+            "model_name": "terra",
+            "thinking_enabled": True,
+        }
+    }
+
+    lead_agent_module.make_lead_agent(config)
+
+    assert captured["reasoning_effort"] == "xhigh"
+    assert config["metadata"]["reasoning_effort"] == "xhigh"
 
 
 def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
@@ -396,13 +439,13 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_command_room_has_no_direct_execution_tool_groups():
+def test_command_room_has_read_only_investigation_tools_only():
     agent_config = AgentConfig(
         name="command-room",
         tool_groups=["file:write", "web", "bash"],
     )
 
-    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == []
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == ["file:read"]
     assert lead_agent_module._can_update_self("command-room") is False
 
     ordinary_config = AgentConfig(
@@ -414,13 +457,13 @@ def test_command_room_has_no_direct_execution_tool_groups():
     assert lead_agent_module._uses_todo_list("command-room", True) is False
     assert lead_agent_module._uses_todo_list("builder", True) is True
 
-    chair_skills = lead_agent_module._resolve_command_room_available_skills("command-room", {"nextos-commander"})
-    assert chair_skills == {"nextos-commander", "command-room-chair"}
+    chair_skills = lead_agent_module._resolve_command_room_available_skills("command-room", {"command-room-opposition"})
+    assert chair_skills == {"command-room-opposition"}
     assert lead_agent_module._resolve_command_room_available_skills("command-room", set()) == set()
     assert lead_agent_module._resolve_command_room_available_skills("builder", {"safe-skill"}) == {"safe-skill"}
 
 
-def test_make_lead_agent_command_room_keeps_only_coordination_tools(monkeypatch):
+def test_make_lead_agent_command_room_keeps_read_only_and_coordination_tools(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -459,23 +502,23 @@ def test_make_lead_agent_command_room_keeps_only_coordination_tools(monkeypatch)
 
     result = lead_agent_module._make_lead_agent(config, app_config=app_config)
 
-    assert captured_tools_kwargs["groups"] == []
+    assert captured_tools_kwargs["groups"] == ["file:read"]
     assert captured_tools_kwargs["include_mcp"] is False
     assert captured_tools_kwargs["subagent_enabled"] is True
-    assert config["metadata"]["tool_groups"] == []
+    assert config["metadata"]["tool_groups"] == ["file:read"]
     assert "subagent_tool_groups" not in config["metadata"]
     assert "subagent_available_skills" not in config["metadata"]
     assert result["tools"] == []
 
 
-def test_command_room_filters_non_coordination_builtin_tools():
+def test_command_room_filters_to_read_only_and_coordination_tools():
     tools = [
+        SimpleNamespace(name="ls"),
         SimpleNamespace(name="read_file"),
+        SimpleNamespace(name="glob"),
+        SimpleNamespace(name="grep"),
         SimpleNamespace(name="view_image"),
         SimpleNamespace(name="task"),
-        SimpleNamespace(name="accept_handoff"),
-        SimpleNamespace(name="close_task"),
-        SimpleNamespace(name="project_status"),
         SimpleNamespace(name="ask_clarification"),
         SimpleNamespace(name="present_files"),
     ]
@@ -483,10 +526,11 @@ def test_command_room_filters_non_coordination_builtin_tools():
     filtered = lead_agent_module._filter_coordinator_tools("command-room", tools)
 
     assert [tool.name for tool in filtered] == [
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
         "task",
-        "accept_handoff",
-        "close_task",
-        "project_status",
         "ask_clarification",
         "present_files",
     ]
@@ -627,7 +671,7 @@ def test_build_middlewares_uses_loop_detection_config(monkeypatch):
     assert loop_detection.tool_freq_hard_limit == 60
 
 
-def test_build_middlewares_always_limits_command_room_task_calls(monkeypatch):
+def test_build_middlewares_does_not_limit_command_room_task_calls(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
@@ -647,8 +691,7 @@ def test_build_middlewares_always_limits_command_room_task_calls(monkeypatch):
         app_config=app_config,
     )
 
-    limiter = next(m for m in middlewares if isinstance(m, lead_agent_module.SubagentLimitMiddleware))
-    assert limiter.max_concurrent == 4
+    assert "SubagentLimitMiddleware" not in {type(m).__name__ for m in middlewares}
 
 
 def test_build_middlewares_does_not_programmatically_stop_command_room(monkeypatch):

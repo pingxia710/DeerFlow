@@ -198,11 +198,7 @@ def test_initialize_register_does_not_block_initialization(client):
 
 def test_initialize_accessible_without_cookie(client):
     """No access_token cookie needed for /initialize."""
-    resp = client.post(
-        "/api/v1/auth/initialize",
-        json=_init_payload(),
-        cookies={},
-    )
+    resp = client.post("/api/v1/auth/initialize", json=_init_payload())
     assert resp.status_code == 201
 
 

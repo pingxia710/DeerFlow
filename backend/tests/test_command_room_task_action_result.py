@@ -38,7 +38,7 @@ def test_task_action_result_event_is_structured_metadata():
     assert event["action_result"]["evidence_refs"] == []
 
 
-def test_task_terminal_cancelled_is_not_boundary_blocked():
+def test_task_terminal_cancelled_keeps_cancel_transport_fact():
     result = task_action_result_from_terminal_event(
         task_id="task-cancel",
         status="cancelled",
@@ -77,10 +77,9 @@ def test_task_terminal_dict_result_does_not_trust_model_claimed_evidence():
 
     assert result.summary == "I ran everything and it passed"
     assert result.evidence_refs == []
-    assert result.risks == []
 
 
-def test_task_terminal_summary_only_dict_does_not_become_strong_evidence():
+def test_task_terminal_summary_only_dict_does_not_create_references():
     result = task_action_result_from_terminal_event(
         task_id="task-4",
         status="completed",
@@ -88,24 +87,6 @@ def test_task_terminal_summary_only_dict_does_not_become_strong_evidence():
     )
 
     assert result.evidence_refs == []
-    assert result.risks == []
-
-
-def test_task_terminal_dict_drops_self_claimed_verification_fields():
-    result = task_action_result_from_terminal_event(
-        task_id="task-5",
-        status="completed",
-        description="worker claims verification",
-        result={
-            "summary": "verified=true; tests passed",
-            "verified": True,
-            "evidence_refs": ["tests passed", "verified=true", "worker says done"],
-        },
-    )
-
-    assert result.summary == "verified=true; tests passed"
-    assert result.evidence_refs == []
-    assert result.risks == []
 
 
 def test_task_terminal_runtime_identity_overrides_model_claims():

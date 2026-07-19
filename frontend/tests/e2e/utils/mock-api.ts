@@ -63,10 +63,19 @@ export type MockModel = {
   supports_reasoning_effort?: boolean;
 };
 
+export type MockRole = {
+  name: string;
+  description: string;
+  skill: string;
+  model: string | null;
+  reasoning_effort: string | null;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
   createdThreadIds?: string[];
   agents?: MockAgent[];
+  roles?: MockRole[];
   skills?: MockSkill[];
   models?: MockModel[];
 };
@@ -132,6 +141,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   let createdThreadCount = 0;
   const agents = options?.agents ?? [];
+  const roles = options?.roles ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
   const models = options?.models ?? DEFAULT_MODELS;
 
@@ -403,6 +413,27 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     },
   );
 
+  void page.route(
+    /\/api\/threads\/([^/]+)\/command-room\/wake-facts(?:\?.*)?$/,
+    (route) => {
+      if (route.request().method() !== "GET") {
+        return route.fallback();
+      }
+      const url = new URL(route.request().url());
+      const threadId = decodeURIComponent(url.pathname.split("/").at(-3) ?? "");
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          run_id: url.searchParams.get("run_id") ?? "",
+          round_id: url.searchParams.get("round_id") ?? "",
+          items: [],
+        }),
+      });
+    },
+  );
+
   void page.route(/\/api\/threads\/([^/]+)\/timeline(?:\?.*)?$/, (route) => {
     if (route.request().method() === "GET") {
       const threadId = decodeURIComponent(
@@ -639,6 +670,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ agents }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Professional roles — second tab in the agent gallery.
+  void page.route("**/api/roles", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ roles }),
       });
     }
     return route.fallback();

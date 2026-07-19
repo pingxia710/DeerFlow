@@ -406,6 +406,10 @@ class Paths:
         """Per-user per-agent memory: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
         return self.user_agent_dir(user_id, agent_name) / "memory.json"
 
+    def user_role_assignments_file(self, user_id: str) -> Path:
+        """Per-user professional-role model assignments."""
+        return self.user_dir(user_id) / "role-assignments.json"
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.

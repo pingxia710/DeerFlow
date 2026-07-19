@@ -8,18 +8,9 @@ from deerflow.subagents.config import SubagentConfig
 _CUSTOM_OVERRIDABLE_BUILTINS = {
     "planner",
     "executor",
-    "boundary",
-    "evidence",
     "fact-finder",
     "opposition",
-    "evaluator",
     "recorder",
-    "project-steward",
-    "debt-curator",
-    "freshness-keeper",
-    "capability-governor",
-    "learning-curator",
-    "conflict-mapper",
 }
 
 

@@ -161,7 +161,7 @@ def _assemble_from_features(
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
-    Middleware order matches ``make_lead_agent`` (14 middlewares):
+    Built-in middleware order matches ``make_lead_agent``:
 
       0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
       3.   DanglingToolCallMiddleware (always)
@@ -172,9 +172,13 @@ def _assemble_from_features(
       8.   TitleMiddleware (auto_title feature)
       9.   MemoryMiddleware (memory feature)
       10.  ViewImageMiddleware (vision feature)
-      11.  SubagentLimitMiddleware (subagent feature)
-      12.  LoopDetectionMiddleware (loop_detection feature)
+      11.  LoopDetectionMiddleware (loop_detection feature)
+      12.  TokenBudgetMiddleware (token_budget feature)
       13.  ClarificationMiddleware (always last)
+
+    The subagent feature adds the ``task`` tool, not a programmatic task-call
+    limiter. A caller-supplied subagent middleware is still inserted before
+    loop detection as an explicit extension.
 
     Two-phase ordering:
       1. Built-in chain — fixed sequential append.
@@ -260,19 +264,15 @@ def _assemble_from_features(
 
             extra_tools.append(view_image_tool)
 
-    # --- [11] Subagent ---
+    # --- Subagent tool / explicit custom extension ---
     if feat.subagent is not False:
         if isinstance(feat.subagent, AgentMiddleware):
             chain.append(feat.subagent)
-        else:
-            from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
-
-            chain.append(SubagentLimitMiddleware())
         from deerflow.tools.builtins import task_tool
 
         extra_tools.append(task_tool)
 
-    # --- [12] LoopDetection ---
+    # --- [11] LoopDetection ---
     if feat.loop_detection is not False:
         if isinstance(feat.loop_detection, AgentMiddleware):
             chain.append(feat.loop_detection)
@@ -282,7 +282,7 @@ def _assemble_from_features(
 
             chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
-    # --- [13] TokenBudget ---
+    # --- [12] TokenBudget ---
     if feat.token_budget is not False:
         if isinstance(feat.token_budget, AgentMiddleware):
             chain.append(feat.token_budget)
@@ -292,7 +292,7 @@ def _assemble_from_features(
 
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
 
-    # --- [14] Clarification (always last among built-ins) ---
+    # --- [13] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 

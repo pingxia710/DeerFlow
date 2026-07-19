@@ -49,7 +49,7 @@
   "consumer_rules": [
     "Treat cursor as opaque and do not construct it in the browser.",
     "Deduplicate by event_id and order only by seq; browser arrival order is not factual order.",
-    "The endpoint exposes persisted facts only. It does not decide task quality, acceptance, rework, or a next action.",
+    "The endpoint exposes persisted facts only. It does not make decisions about AI work.",
     "The current endpoint is forward-only. A truncated initial window is not a claim that the browser holds the complete thread history."
   ]
 }

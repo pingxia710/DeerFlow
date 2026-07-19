@@ -205,7 +205,7 @@ def test_convert_messages_ai_with_tool_calls():
     assert any(item.get("type") == "function_call" and item["name"] == "search" for item in items)
 
 
-def test_convert_messages_compacts_completed_task_prompt_replay():
+def test_convert_messages_preserves_completed_task_prompt_replay():
     model = _make_model()
     original_prompt = "inspect the frontend"
     ai = AIMessage(
@@ -226,8 +226,7 @@ def test_convert_messages_compacts_completed_task_prompt_replay():
     arguments = json.loads(items[0]["arguments"])
     assert arguments["description"] == "Audit frontend"
     assert arguments["subagent_type"] == "executor"
-    assert f"{len(original_prompt)} characters" in arguments["prompt"]
-    assert original_prompt not in items[0]["arguments"]
+    assert arguments["prompt"] == original_prompt
 
 
 def test_convert_messages_keeps_pending_task_prompt_before_tool_output():

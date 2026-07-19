@@ -77,7 +77,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { Tooltip } from "../tooltip";
 
-import { CommandRoomUpdateCard } from "./command-room-trajectory";
+import { CommandRoomUpdateCard } from "./command-room-update-card";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -175,13 +175,6 @@ function isTerminalSubtask(task: Subtask) {
     task.status === "completed" ||
     task.status === "failed" ||
     task.status === "unknown"
-  );
-}
-
-function isCommandRoomPlanTask(task: Subtask) {
-  return (
-    task.containerArtifactKind === "spec" ||
-    task.containerArtifactKind === "technical-plan"
   );
 }
 
@@ -1023,7 +1016,6 @@ export function MessageList({
     return contextSubtasks.filter(
       (task) =>
         task.status === "in_progress" &&
-        !task.commandRoomContainer &&
         !task.backgroundTask &&
         Boolean(task.runId) &&
         isRuntimeOnlySubtaskForActiveTurn(
@@ -1079,7 +1071,7 @@ export function MessageList({
     return null;
   }, [groupedMessages, thread.isLoading]);
 
-  const handleReviewTurnClick = useCallback(
+  const handleBackToTurnStartClick = useCallback(
     (event: MouseEvent<HTMLButtonElement>) => {
       const turnElement = event.currentTarget.closest(
         "[data-conversation-turn]",
@@ -1149,13 +1141,13 @@ export function MessageList({
                 </Button>
               </Tooltip>
             )}
-            <Tooltip content={t.chats.reviewTurn}>
+            <Tooltip content={t.chats.backToTurnStart}>
               <Button
-                aria-label={t.chats.reviewTurn}
+                aria-label={t.chats.backToTurnStart}
                 size="icon-sm"
                 type="button"
                 variant="ghost"
-                onClick={handleReviewTurnClick}
+                onClick={handleBackToTurnStartClick}
               >
                 <ChevronUpIcon className="size-3.5" />
               </Button>
@@ -1181,13 +1173,13 @@ export function MessageList({
     },
     [
       canRegenerate,
-      handleReviewTurnClick,
+      handleBackToTurnStartClick,
       onRegenerateMessage,
       regeneratingMessageId,
       t.contextUsage.charUnit,
       t.contextUsage.label,
       t.common.regenerate,
-      t.chats.reviewTurn,
+      t.chats.backToTurnStart,
     ],
   );
 
@@ -1254,7 +1246,7 @@ export function MessageList({
     ],
   );
 
-  if (thread.isThreadLoading && messages.length === 0) {
+  if (thread.isThreadLoading && messages.length === 0 && !recoveryStatus) {
     return <MessageListSkeleton />;
   }
 
@@ -1414,25 +1406,11 @@ export function MessageList({
                   if (!message) {
                     return null;
                   }
-                  const messageRoundId = getMessageRoundId(message);
-                  const messageRunId = getMessageRunId(message);
-                  const isPlanUpdate = contextSubtasks.some(
-                    (task) =>
-                      isCommandRoomPlanTask(task) &&
-                      (messageRoundId
-                        ? task.roundId === messageRoundId
-                        : Boolean(messageRunId && task.runId === messageRunId)),
-                  );
                   return (
                     <CommandRoomUpdateCard
-                      defaultOpen={Boolean(isPlanUpdate)}
                       key={groupKey}
                       message={message}
-                      title={
-                        isPlanUpdate
-                          ? t.chats.trajectory.plan
-                          : t.chats.trajectory.chairOutput
-                      }
+                      title={t.chats.commandRoomUpdate}
                     />
                   );
                 } else if (group.type === "assistant:clarification") {

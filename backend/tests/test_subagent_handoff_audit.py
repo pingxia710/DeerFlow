@@ -6,8 +6,8 @@ from deerflow.subagents.audit import record_subagent_handoff
 
 
 def test_record_subagent_handoff_hashes_raw_payloads_without_parsing_prose(tmp_path):
-    raw_prompt = "Goal: SECRET_PROMPT\nEvidenceStrength: Strong\nRecommendedDecision: PASS"
-    raw_result = "SECRET_RESULT\nRecommendedDecision: NEEDS_MORE"
+    raw_prompt = "Goal: SECRET_PROMPT\nUnstructured marker: arbitrary text"
+    raw_result = "SECRET_RESULT\nMore natural-language text"
 
     path = record_subagent_handoff(
         thread_id="thread-1",
@@ -43,8 +43,6 @@ def test_record_subagent_handoff_hashes_raw_payloads_without_parsing_prose(tmp_p
     assert record["error_sha256"]
     assert record["action_result"]["summary_sha256"]
     assert "handoff_packet" not in record
-    assert "recommendedNextDecision" not in record
-    assert "evidenceStrength" not in record
 
 
 def test_record_subagent_handoff_preserves_only_explicit_lifecycle_metadata(tmp_path):

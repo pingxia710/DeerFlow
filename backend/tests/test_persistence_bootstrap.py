@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0012_fenced_artifact_reservations"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 
@@ -536,6 +536,75 @@ async def test_0010_adds_task_lane_wake_claim_columns(tmp_path: Path) -> None:
         expected = {"wake_claim_id", "wake_claim_expires_at"}
         assert expected.isdisjoint(before)
         assert expected <= after
+        assert await _alembic_version(engine) == HEAD
+    finally:
+        await engine.dispose()
+
+
+@asyncio_test
+async def test_0013_removes_legacy_round_workflow_columns(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "legacy-round-workflow.db"))
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('0012_fenced_artifact_reservations')"))
+            await conn.execute(
+                sa.text(
+                    """
+                    CREATE TABLE rounds (
+                        round_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                        thread_id VARCHAR(64) NOT NULL,
+                        user_id VARCHAR(64),
+                        parent_round_id VARCHAR(64),
+                        current_run_id VARCHAR(64),
+                        source_goal_run_id VARCHAR(64),
+                        current_intent TEXT,
+                        state VARCHAR(24) NOT NULL,
+                        next_action TEXT,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        closed_at DATETIME
+                    )
+                    """
+                )
+            )
+            await conn.execute(sa.text("CREATE INDEX ix_rounds_thread_state_updated ON rounds (thread_id, state, updated_at)"))
+            await conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO rounds (
+                        round_id, thread_id, current_run_id, current_intent,
+                        state, next_action, created_at, updated_at, closed_at
+                    ) VALUES (
+                        'legacy-round', 'thread-1', 'legacy-run', 'legacy intent',
+                        'closed', 'legacy next action', '2026-01-01', '2026-01-02', '2026-01-02'
+                    )
+                    """
+                )
+            )
+
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(_upgrade, cfg, HEAD)
+
+        async with engine.begin() as conn:
+            columns = await conn.run_sync(lambda sync: {column["name"] for column in sa.inspect(sync).get_columns("rounds")})
+            indexes = await conn.run_sync(lambda sync: {index["name"] for index in sa.inspect(sync).get_indexes("rounds")})
+            legacy_row = (await conn.execute(sa.text("SELECT round_id, thread_id, current_run_id, current_intent FROM rounds WHERE round_id = 'legacy-round'"))).one()
+            await conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO rounds (
+                        round_id, thread_id, current_run_id, current_intent, created_at, updated_at
+                    ) VALUES (
+                        'new-round', 'thread-1', 'new-run', 'new intent', '2026-01-03', '2026-01-03'
+                    )
+                    """
+                )
+            )
+
+        assert {"state", "next_action", "closed_at"}.isdisjoint(columns)
+        assert "ix_rounds_thread_state_updated" not in indexes
+        assert tuple(legacy_row) == ("legacy-round", "thread-1", "legacy-run", "legacy intent")
         assert await _alembic_version(engine) == HEAD
     finally:
         await engine.dispose()

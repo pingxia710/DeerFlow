@@ -191,10 +191,6 @@ class RunManager:
         self._terminal_cleanup_delay = terminal_cleanup_delay
         self._cleanup_tasks: set[asyncio.Task] = set()
         self._worker_id = worker_id or f"run-manager-{uuid.uuid4().hex}"
-        self._pending_terminal_round_projections: dict[
-            str,
-            tuple[RunRecord, RunStatus, str | None, str | None],
-        ] = {}
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -769,7 +765,6 @@ class RunManager:
     def _round_context_from_info(info: dict[str, Any], *, run_id: str, current_intent: str | None) -> dict[str, Any]:
         context = {
             "round_id": info.get("round_id"),
-            "state": info.get("state"),
             "current_run_id": info.get("current_run_id", run_id),
             "source_goal_run_id": info.get("source_goal_run_id"),
             "parent_round_id": info.get("parent_round_id"),
@@ -803,138 +798,6 @@ class RunManager:
                 "round_id": round_id,
                 "round_context": self._round_context_from_info(info, run_id=record.run_id, current_intent=current_intent),
             }
-
-    async def _persist_round_state_for_status(
-        self,
-        record: RunRecord,
-        status: RunStatus,
-        *,
-        error: str | None = None,
-        terminal_reason: str | None = None,
-        next_action: str | None = None,
-    ) -> bool:
-        if self._round_store is None:
-            return True
-        if status == RunStatus.running:
-            state = "executing"
-            event_type = "run.executing"
-        elif status == RunStatus.success:
-            state = "closed"
-            event_type = "run.completed"
-        elif is_terminal_status(status):
-            state = "blocked"
-            event_type = "round.blocked"
-        else:
-            return True
-        if not isinstance(record.round_id, str) or not record.round_id:
-            return False
-        try:
-            info = await self._round_store.set_run_state(
-                record.run_id,
-                thread_id=record.thread_id,
-                user_id=record.user_id,
-                round_id=record.round_id,
-                state=state,
-                event_type=event_type,
-                content={"run_status": status.value, "terminal_reason": terminal_reason, "error": error},
-                next_action=next_action,
-            )
-            if isinstance(info, dict):
-                context = dict(record.metadata.get("round_context") or {})
-                context.update(self._round_context_from_info(info, run_id=record.run_id, current_intent=context.get("current_intent")))
-                record.round_id = context.get("round_id") if isinstance(context.get("round_id"), str) else record.round_id
-                record.metadata = {**(record.metadata or {}), "round_context": context}
-                if record.round_id is not None:
-                    record.metadata["round_id"] = record.round_id
-                return True
-            return False
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Failed to persist round state for run %s", record.run_id, exc_info=True)
-            return False
-
-    async def _rollback_terminal_round_projection(
-        self,
-        record: RunRecord,
-        status: RunStatus,
-        restore_state: str,
-    ) -> bool:
-        rollback = getattr(self._round_store, "rollback_terminal_projection", None)
-        if not callable(rollback):
-            return self._round_store is None
-        expected_state = "closed" if status == RunStatus.success else "blocked"
-        try:
-            info = await rollback(
-                record.run_id,
-                expected_state=expected_state,
-                restore_state=restore_state,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "Failed to roll back terminal round projection for run %s",
-                record.run_id,
-            )
-            return False
-        if not isinstance(info, dict):
-            return False
-        context = dict(record.metadata.get("round_context") or {})
-        context.update(
-            self._round_context_from_info(
-                info,
-                run_id=record.run_id,
-                current_intent=context.get("current_intent"),
-            )
-        )
-        record.metadata = {**(record.metadata or {}), "round_context": context}
-        return True
-
-    async def _queue_terminal_round_projection_retry(
-        self,
-        record: RunRecord,
-        status: RunStatus,
-        *,
-        error: str | None,
-        terminal_reason: str | None,
-    ) -> None:
-        if self._round_store is None:
-            return
-        async with self._lock:
-            self._pending_terminal_round_projections[record.run_id] = (
-                record,
-                status,
-                error,
-                terminal_reason,
-            )
-
-    async def _retry_terminal_round_projections(
-        self,
-        *,
-        run_id: str | None = None,
-        thread_id: str | None = None,
-    ) -> None:
-        if self._round_store is None:
-            return
-        async with self._lock:
-            pending = [
-                (candidate_run_id, projection)
-                for candidate_run_id, projection in self._pending_terminal_round_projections.items()
-                if (run_id is None or candidate_run_id == run_id) and (thread_id is None or projection[0].thread_id == thread_id)
-            ]
-        for candidate_run_id, projection in pending:
-            record, status, error, terminal_reason = projection
-            if not await self._persist_round_state_for_status(
-                record,
-                status,
-                error=error,
-                terminal_reason=terminal_reason,
-            ):
-                continue
-            async with self._lock:
-                if self._pending_terminal_round_projections.get(candidate_run_id) is projection:
-                    self._pending_terminal_round_projections.pop(candidate_run_id, None)
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
@@ -1142,18 +1005,6 @@ class RunManager:
                 live_record.lease_terminal_committing = False
                 live_record.lease_terminal_committed = True
                 record = live_record
-        if not await self._persist_round_state_for_status(
-            record,
-            RunStatus.error,
-            error=record.error,
-            terminal_reason=record.terminal_reason,
-        ):
-            await self._queue_terminal_round_projection_retry(
-                record,
-                RunStatus.error,
-                error=record.error,
-                terminal_reason=record.terminal_reason,
-            )
         return record
 
     async def find_command_room_wake(
@@ -1369,7 +1220,6 @@ class RunManager:
         """
         if recover_stale:
             await self.recover_stale_inflight_runs(run_id=run_id, user_id=user_id)
-        await self._retry_terminal_round_projections(run_id=run_id)
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -1429,7 +1279,6 @@ class RunManager:
             raise ValueError("limit must be greater than zero")
         if recover_stale:
             await self.recover_stale_inflight_runs(thread_id=thread_id, user_id=user_id)
-            await self._retry_terminal_round_projections(thread_id=thread_id)
         async with self._lock:
             thread_memory_records = self._thread_records_locked(thread_id)
             memory_records = [record for record in thread_memory_records if _record_matches_user_id(record, user_id)]
@@ -1510,8 +1359,6 @@ class RunManager:
 
             previous: tuple[RunStatus | str, str | None, str | None, str] | None = None
             fenced = False
-            previous_round_state = "executing"
-            terminal_round_projected = False
             terminal_lease_commit_started = False
             try:
                 async with self._lock:
@@ -1552,43 +1399,6 @@ class RunManager:
                     fenced = self._record_has_lease(record)
 
                 terminal = is_terminal_status(status)
-                round_context = record.metadata.get("round_context")
-                if isinstance(round_context, dict) and isinstance(round_context.get("state"), str):
-                    previous_round_state = round_context["state"]
-                terminal_round_attempted = terminal and self._round_store is not None
-                try:
-                    terminal_round_persisted = not terminal or await self._persist_round_state_for_status(
-                        record,
-                        status,
-                        error=error,
-                        terminal_reason=terminal_reason,
-                    )
-                except BaseException:
-                    if terminal_round_attempted:
-                        await self._rollback_terminal_round_projection(
-                            record,
-                            status,
-                            previous_round_state,
-                        )
-                    raise
-                if not terminal_round_persisted:
-                    if terminal_round_attempted:
-                        await self._rollback_terminal_round_projection(
-                            record,
-                            status,
-                            previous_round_state,
-                        )
-                    async with self._lock:
-                        if self._runs.get(run_id) is record and previous is not None:
-                            (
-                                record.status,
-                                record.error,
-                                record.terminal_reason,
-                                record.updated_at,
-                            ) = previous
-                    return False
-                terminal_round_projected = terminal and self._round_store is not None
-
                 if terminal and fenced:
                     record.lease_terminal_committing = True
                     terminal_lease_commit_started = True
@@ -1632,12 +1442,6 @@ class RunManager:
                                 )
                         if cancelled_while_reading and durable_terminal is None:
                             raise asyncio.CancelledError
-                    if terminal_round_projected:
-                        await self._rollback_terminal_round_projection(
-                            record,
-                            status,
-                            previous_round_state,
-                        )
                     if durable_terminal is not None:
                         durable_status_value = run_status_value(durable_terminal.status)
                         try:
@@ -1645,19 +1449,6 @@ class RunManager:
                         except (TypeError, ValueError):
                             durable_status = None
                         if durable_status is not None:
-                            projected = await self._persist_round_state_for_status(
-                                durable_terminal,
-                                durable_status,
-                                error=durable_terminal.error,
-                                terminal_reason=durable_terminal.terminal_reason,
-                            )
-                            if not projected:
-                                await self._queue_terminal_round_projection_retry(
-                                    durable_terminal,
-                                    durable_status,
-                                    error=durable_terminal.error,
-                                    terminal_reason=durable_terminal.terminal_reason,
-                                )
                             async with self._lock:
                                 record.status = durable_status
                                 record.error = durable_terminal.error
@@ -1696,24 +1487,12 @@ class RunManager:
                     )
                     return False
 
-                if not terminal:
-                    projected = await self._persist_round_state_for_status(
-                        record,
-                        status,
-                        error=error,
-                        terminal_reason=terminal_reason,
-                    )
-                    if not projected:
-                        logger.warning(
-                            "Run %s status committed but round projection failed; worker execution is fenced",
-                            run_id,
-                        )
-                        return False
-                    if fenced and not await self.heartbeat_active_lease(record):
+                if not terminal and fenced:
+                    if not await self.heartbeat_active_lease(record):
                         async with self._lock:
                             self._evict_run_locked(record)
                         logger.warning(
-                            "Run %s lost its active lease during status projection; discarded stale local state",
+                            "Run %s lost its active lease during status persistence; discarded stale local state",
                             run_id,
                         )
                         return False
@@ -1725,12 +1504,6 @@ class RunManager:
             except BaseException:
                 if terminal_lease_commit_started:
                     record.lease_terminal_committing = False
-                if terminal_round_projected:
-                    await self._rollback_terminal_round_projection(
-                        record,
-                        status,
-                        previous_round_state,
-                    )
                 async with self._lock:
                     if fenced:
                         if previous is not None:
@@ -1959,7 +1732,6 @@ class RunManager:
                 record.terminal_reason = terminal_reason
             record.updated_at = _now_iso()
         await self._persist_status(record, RunStatus.interrupted, terminal_reason=terminal_reason)
-        await self._persist_round_state_for_status(record, RunStatus.interrupted, terminal_reason=terminal_reason)
         self._schedule_terminal_cleanup(run_id)
         logger.info("Run %s cancelled (action=%s)", run_id, effective_action)
         return True
@@ -2026,7 +1798,6 @@ class RunManager:
                 thread_id=thread_id,
                 user_id=user_id,
             )
-            await self._retry_terminal_round_projections(thread_id=thread_id)
             record = await self._create_or_reject_after_start_gate(
                 thread_id,
                 assistant_id,
@@ -2165,7 +1936,6 @@ class RunManager:
 
         for interrupted_record in interrupted_records:
             await self._persist_status(interrupted_record, RunStatus.interrupted)
-            await self._persist_round_state_for_status(interrupted_record, RunStatus.interrupted)
             self._schedule_terminal_cleanup(interrupted_record.run_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
@@ -2402,22 +2172,6 @@ class RunManager:
                 )
                 raise
             if record is not None:
-                if not await self._persist_round_state_for_status(
-                    record,
-                    RunStatus.error,
-                    error=record.error,
-                    terminal_reason=record.terminal_reason,
-                ):
-                    logger.warning(
-                        "Failed to project recovered lease %s into round state",
-                        record.run_id,
-                    )
-                    await self._queue_terminal_round_projection_retry(
-                        record,
-                        RunStatus.error,
-                        error=record.error,
-                        terminal_reason=record.terminal_reason,
-                    )
                 recovered.append(record)
 
         if recovered:
@@ -2478,18 +2232,6 @@ class RunManager:
             if not persisted:
                 logger.warning("Skipped orphaned run %s recovery because error status was not persisted", record.run_id)
                 continue
-            if not await self._persist_round_state_for_status(
-                record,
-                RunStatus.error,
-                error=error,
-                terminal_reason="worker_lost",
-            ):
-                await self._queue_terminal_round_projection_retry(
-                    record,
-                    RunStatus.error,
-                    error=error,
-                    terminal_reason="worker_lost",
-                )
             recovered.append(record)
 
         if recovered:
@@ -2567,18 +2309,6 @@ class RunManager:
             if not persisted:
                 logger.warning("Skipped stale run %s recovery because error status was not persisted", record.run_id)
                 continue
-            if not await self._persist_round_state_for_status(
-                record,
-                RunStatus.error,
-                error=error,
-                terminal_reason="worker_lost",
-            ):
-                await self._queue_terminal_round_projection_retry(
-                    record,
-                    RunStatus.error,
-                    error=error,
-                    terminal_reason="worker_lost",
-                )
             recovered.append(record)
 
         if recovered:

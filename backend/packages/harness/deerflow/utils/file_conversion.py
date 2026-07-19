@@ -34,11 +34,6 @@ CONVERTIBLE_EXTENSIONS = {
     ".docx",
 }
 
-# Files larger than this threshold are converted in a background thread.
-# Small files complete in < 1s synchronously; spawning a thread adds unnecessary
-# scheduling overhead for them.
-_ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
-
 # If pymupdf4llm produces fewer characters *per page* than this threshold,
 # the PDF is likely image-based or encrypted — fall back to MarkItDown.
 # Rationale: normal text PDFs yield 200-2000 chars/page; image-based PDFs
@@ -135,12 +130,24 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
     return _convert_with_markitdown(file_path)
 
 
+def _convert_and_write_markdown(file_path: Path, output_path: Path | None, pdf_converter: str) -> tuple[Path, int]:
+    text = _do_convert(file_path, pdf_converter)
+    md_path = output_path or file_path.with_suffix(".md")
+    from deerflow.uploads.manager import write_upload_file_no_symlink
+
+    write_upload_file_no_symlink(
+        md_path.parent,
+        md_path.name,
+        text.encode("utf-8"),
+    )
+    return md_path, len(text)
+
+
 async def convert_file_to_markdown(file_path: Path, *, output_path: Path | None = None) -> Path | None:
     """Convert a supported document file to Markdown.
 
     PDF files are handled with a two-converter strategy (see module docstring).
-    Large files (> 1 MB) are offloaded to a thread pool to avoid blocking the
-    event loop.
+    Conversion and output writes run off the event loop for every file size.
 
     Args:
         file_path: Path to the file to convert.
@@ -151,23 +158,14 @@ async def convert_file_to_markdown(file_path: Path, *, output_path: Path | None 
     """
     try:
         pdf_converter = _get_pdf_converter()
-        file_size = file_path.stat().st_size
-
-        if file_size > _ASYNC_THRESHOLD_BYTES:
-            text = await asyncio.to_thread(_do_convert, file_path, pdf_converter)
-        else:
-            text = _do_convert(file_path, pdf_converter)
-
-        md_path = output_path or file_path.with_suffix(".md")
-        from deerflow.uploads.manager import write_upload_file_no_symlink
-
-        write_upload_file_no_symlink(
-            md_path.parent,
-            md_path.name,
-            text.encode("utf-8"),
+        md_path, text_length = await asyncio.to_thread(
+            _convert_and_write_markdown,
+            file_path,
+            output_path,
+            pdf_converter,
         )
 
-        logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
+        logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, text_length)
         return md_path
     except Exception as e:
         logger.error("Failed to convert %s to markdown: %s", file_path.name, e)

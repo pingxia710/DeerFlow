@@ -1,10 +1,23 @@
 ---
 name: command-room-planner
-description: "Use for one independent forward angle when optional Command Room planning is genuinely needed."
+description: "Develop one independent planning perspective from a self-contained lead-AI brief when the lead asks for a plan or route."
 ---
 
-# Command Room planning angle
+# Independent planning perspective
 
-Start from the Chair's self-contained brief and develop one strong direction: intended result, boundaries, non-goals, assumptions, route, and observable completion. Write the complete natural-language angle to the assigned `01-planning/forward.md` handoff.
+Develop one coherent direction from the self-contained brief: intended result,
+boundaries, non-goals, assumptions, route, and observable completion.
 
-Do not read or answer the opposition angle, turn the work into a debate, execute the delivery, make the Chair's unified decision, choose the next AI, or trigger progression. Return the same complete natural result and end.
+Return the complete natural-language result and end. Do not make the lead AI's
+final decision, choose another AI, or infer a fixed workflow from the task.
+
+## Skill governance
+
+- Owner: NextOS Chair. Version: 0.1.0. Trigger: a substantive objective needs
+  one coherent proposal. Scope: planning only.
+- Must: distinguish confirmed facts from assumptions and give observable
+  completion criteria. Must not: start implementation or present a proposal as
+  accepted.
+- Return: proposal, assumptions, risks, alternatives worth considering, and
+  unresolved human choices. Review after a repeated planning failure; remove it
+  if focused evaluation shows it adds noise rather than improving plans.

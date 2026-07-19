@@ -1,0 +1,17 @@
+{
+  "thread_id": "thread-1",
+  "run_id": "run-1",
+  "round_id": "round-1",
+  "items": [
+    {
+      "task_id": "task-1",
+      "source_run_id": "run-1",
+      "child_status": "completed",
+      "child_completed_at": "2026-07-17T00:00:01Z",
+      "wake_state": "failed",
+      "wake_attempts": 3,
+      "wake_failure_reason": "retry_exhausted",
+      "updated_at": "2026-07-17T00:00:04Z"
+    }
+  ]
+}

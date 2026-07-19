@@ -100,7 +100,7 @@ Instead, you MUST call the `task` tool to spawn subagents. The reason: extractin
 
 Split papers into batches of ~5, then for each batch, call the `task` tool with `subagent_type: "general-purpose"`. Each subagent receives the paper abstracts as text and returns structured JSON.
 
-**Response limit: at most 6 `task` calls in one Lead Agent response.** Dispatch up to six independent batches together. If more batches remain, wait for the natural results and issue the rest in a later response. The middleware omits excess calls with a model-visible warning; it does not silently queue or schedule them.
+Dispatch every useful independent extraction batch together when their prompts have compatible scope. The Lead Agent chooses the task count from the paper set and current context; DeerFlow does not omit, queue, or defer task calls programmatically.
 
 After extraction, give the complete worker results to a different sub-AI for checking before synthesis. Ask an independent opposition sub-AI to challenge the emerging themes from the other direction, then let the Lead Agent make the final synthesis judgment.
 
@@ -211,7 +211,7 @@ This is a single-paper peer review, not a literature survey. Do not use this ski
 
 - **Prerequisite: `subagent_enabled` must be `true`**. Phase 3 requires the `task` tool for parallel metadata extraction. This tool is only loaded when `subagent_enabled` is set to `true` in the runtime config (`config.configurable.subagent_enabled`). Without it, the `task` tool will not appear in the available tools and Phase 3 cannot execute as designed.
 - **arXiv only, by design**. This skill does not query Semantic Scholar, PubMed, or Google Scholar. arXiv covers the bulk of CS/ML/physics/math preprints, which is what DeerFlow users most often want to survey. Multi-source academic search belongs in a dedicated MCP server, not inside this skill.
-- **Hard upper bound of 50 papers**. At roughly five papers per worker this is at most ten one-shot extraction tasks, normally dispatched in two Lead Agent responses. Larger surveys degrade synthesis quality and are better split into sub-topics.
+- **Hard upper bound of 50 papers**. At roughly five papers per worker this is at most ten one-shot extraction tasks. Larger surveys degrade synthesis quality and are better split into sub-topics.
 - **Phase 3 requires subagents to be enabled**. This skill's parallel extraction step hard-requires the `task` tool, which is only available when `subagent_enabled=true` at runtime. If subagents are unavailable, do not claim to execute the Phase 3 parallel plan; instead, tell the user that subagents must be enabled for the full workflow, or offer to narrow/split the request into a smaller manual review.
 - **Subagent results are natural text**. When the prompt requests JSON-only output, parse that returned text directly; do not expect or strip a success prefix.
 - **The `id` field is a bare arXiv id** (e.g. `1706.03762`), not a URL and not with a version suffix. `abs_url` / `pdf_url` hold the full URLs if you need them.

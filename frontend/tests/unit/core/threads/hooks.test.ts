@@ -1174,6 +1174,51 @@ test("mergeRunsWithTerminalPrecedence promotes a newer snapshot-only background 
   ]);
 });
 
+test("mergeRunsWithTerminalPrecedence uses native round order when timestamps tie", async () => {
+  const { mergeRunsWithTerminalPrecedence } =
+    await import("@/core/threads/hooks");
+  const createdAt = "2026-07-19T06:00:00.000Z";
+
+  const result = mergeRunsWithTerminalPrecedence({
+    snapshotRuns: [
+      {
+        run_id: "current-run",
+        status: "success",
+        created_at: createdAt,
+      } as unknown as Run,
+      {
+        run_id: "previous-run",
+        status: "success",
+        created_at: createdAt,
+      } as unknown as Run,
+    ],
+    queriedRuns: [
+      {
+        run_id: "previous-run",
+        status: "success",
+        created_at: createdAt,
+      } as unknown as Run,
+    ],
+    rounds: [
+      {
+        thread_id: "thread-1",
+        round_id: "round-current",
+        current_run_id: "current-run",
+      },
+      {
+        thread_id: "thread-1",
+        round_id: "round-previous",
+        current_run_id: "previous-run",
+      },
+    ],
+  });
+
+  expect(result?.map((run) => run.run_id)).toEqual([
+    "current-run",
+    "previous-run",
+  ]);
+});
+
 test("shouldRefreshRunHistoryForThread rejects explicit refreshes for another thread", async () => {
   const { shouldRefreshRunHistoryForThread } =
     await import("@/core/threads/hooks");

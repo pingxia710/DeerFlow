@@ -20,16 +20,10 @@ class RoundRow(Base):
     current_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     source_goal_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_intent: Mapped[str | None] = mapped_column(Text)
-    state: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
-    next_action: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (
-        Index("ix_rounds_thread_state_updated", "thread_id", "state", "updated_at"),
-        Index("ix_rounds_thread_user_updated", "thread_id", "user_id", "updated_at"),
-    )
+    __table_args__ = (Index("ix_rounds_thread_user_updated", "thread_id", "user_id", "updated_at"),)
 
 
 class RoundEventRow(Base):

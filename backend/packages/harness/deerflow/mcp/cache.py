@@ -78,7 +78,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             _last_initialization_error_type = exc.__class__.__name__
             raise
         _cache_initialized = True
-        _config_mtime = _get_config_mtime()  # Record config file mtime
+        _config_mtime = await asyncio.to_thread(_get_config_mtime)  # Record config file mtime
         _last_initialization_error_type = None
         logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
 

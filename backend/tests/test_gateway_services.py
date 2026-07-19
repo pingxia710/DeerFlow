@@ -603,7 +603,6 @@ def test_context_merges_into_configurable():
         "reasoning_effort",
         "is_plan_mode",
         "subagent_enabled",
-        "max_concurrent_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -614,7 +613,7 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["thinking_enabled"] is True
     assert config["configurable"]["is_plan_mode"] is True
     assert config["configurable"]["subagent_enabled"] is True
-    assert config["configurable"]["max_concurrent_subagents"] == 5
+    assert "max_concurrent_subagents" not in config["configurable"]
     assert config["configurable"]["reasoning_effort"] == "high"
     assert config["configurable"]["mode"] == "ultra"
     # thread_id from context should NOT override the one from build_run_config
@@ -677,7 +676,6 @@ def test_context_does_not_override_existing_configurable():
         "reasoning_effort",
         "is_plan_mode",
         "subagent_enabled",
-        "max_concurrent_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:

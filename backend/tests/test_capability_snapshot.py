@@ -12,10 +12,11 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import capabilities
-from deerflow.capabilities import build_capability_snapshot
+from deerflow.capabilities import build_capability_snapshot, build_initialization_snapshot
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, McpServerConfig, SkillCatalogSourceConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.tool_config import ToolConfig
@@ -126,6 +127,7 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
         "agent_harness_profiles",
         "capability_release",
         "capability_center",
+        "initialization_snapshot",
     ):
         assert field in snapshot
 
@@ -147,6 +149,80 @@ def test_capability_snapshot_contains_required_facts_and_masks_secrets(tmp_path:
     center_dumped = json.dumps(snapshot["capability_center"])
     for secret in ("sk-live-secret", "ghp_secret", "Bearer real-token", "client-secret", "refresh-secret", "sandbox-secret"):
         assert secret not in center_dumped
+
+
+def test_initialization_snapshot_reports_zero_model_configuration(tmp_path: Path):
+    config = _app_config(tmp_path)
+    config.models = []
+
+    facts = build_initialization_snapshot(
+        config,
+        snapshot_source="gateway_startup_config",
+        captured_at="2026-07-19T00:00:00+00:00",
+    )
+
+    configuration = facts["configuration"]
+    assert configuration["model_config_entry_count"] == 0
+    assert configuration["default_model_route"] == {
+        "default_model": None,
+        "source": "config.models[0]",
+        "thinking_default": True,
+    }
+    assert configuration["structural_parse"] == {
+        "status": "validated",
+        "scope": "AppConfig structural parsing and validation only; no provider import, model request, or model-quality check",
+    }
+
+
+def test_initialization_snapshot_reports_explicit_memory_store(tmp_path: Path):
+    from deerflow.runtime.events.store import make_run_event_store
+
+    config = _app_config(tmp_path)
+    config.run_events = RunEventsConfig(backend="memory")
+    store = make_run_event_store(config.run_events)
+
+    facts = build_initialization_snapshot(
+        config,
+        snapshot_source="gateway_startup_config",
+        captured_at="2026-07-19T00:00:00+00:00",
+        run_event_store=store,
+        session_factory_present=False,
+        run_event_store_initialized_at="2026-07-19T00:00:01+00:00",
+    )
+
+    assert facts["run_event_store"] == {
+        "declared_backend": "memory",
+        "declared_backend_source": "gateway_startup_config.run_events.backend",
+        "actual_store_type": "MemoryRunEventStore",
+        "session_factory_present": False,
+        "initialized_at": "2026-07-19T00:00:01+00:00",
+        "initialization_error_type": None,
+        "initialization_error_at": None,
+    }
+
+
+def test_initialization_snapshot_keeps_declared_db_when_factory_falls_back_to_memory(tmp_path: Path, monkeypatch):
+    from deerflow.persistence import engine
+    from deerflow.runtime.events.store import make_run_event_store
+
+    config = _app_config(tmp_path)
+    config.run_events = RunEventsConfig(backend="db")
+    monkeypatch.setattr(engine, "get_session_factory", lambda: None)
+    session_factory = engine.get_session_factory()
+    store = make_run_event_store(config.run_events)
+
+    facts = build_initialization_snapshot(
+        config,
+        snapshot_source="gateway_startup_config",
+        captured_at="2026-07-19T00:00:00+00:00",
+        run_event_store=store,
+        session_factory_present=session_factory is not None,
+        run_event_store_initialized_at="2026-07-19T00:00:01+00:00",
+    )
+
+    assert facts["run_event_store"]["declared_backend"] == "db"
+    assert facts["run_event_store"]["actual_store_type"] == "MemoryRunEventStore"
+    assert facts["run_event_store"]["session_factory_present"] is False
 
 
 def test_capability_center_exposes_current_permission_facts(tmp_path: Path):
@@ -264,6 +340,11 @@ def test_mcp_cache_status_is_read_only_and_reports_loaded_tools(monkeypatch):
 
 def test_capability_api_returns_global_snapshot(tmp_path: Path):
     app = _router_app(_app_config(tmp_path))
+    app.state.capability_initialization_snapshot = build_initialization_snapshot(
+        _app_config(tmp_path),
+        snapshot_source="gateway_startup_config",
+        captured_at="2026-07-19T00:00:00+00:00",
+    )
 
     with TestClient(app) as client:
         response = client.get("/api/capabilities")
@@ -273,6 +354,7 @@ def test_capability_api_returns_global_snapshot(tmp_path: Path):
     assert data["user_id"] == str(_USER_ID)
     assert data["thread_id"] is None
     assert data["models"][0]["name"] == "main"
+    assert data["initialization_snapshot"]["source"] == "gateway_startup_config"
 
 
 def test_thread_capability_api_returns_thread_scoped_snapshot(tmp_path: Path):

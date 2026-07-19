@@ -9,7 +9,7 @@ from .profile import (
     SkillCapability,
     ToolCapability,
 )
-from .snapshot import build_capability_snapshot
+from .snapshot import build_capability_snapshot, build_initialization_snapshot
 
 __all__ = [
     "AgentHarnessProfile",
@@ -20,4 +20,5 @@ __all__ = [
     "SkillCapability",
     "ToolCapability",
     "build_capability_snapshot",
+    "build_initialization_snapshot",
 ]

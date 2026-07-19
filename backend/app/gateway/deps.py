@@ -168,13 +168,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         async with langgraph_runtime(app, startup_config):
             yield
     """
+    from deerflow.capabilities import build_initialization_snapshot
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
+    from deerflow.utils.time import now_iso
 
     async with AsyncExitStack() as stack:
         config = startup_config
+        initialization_snapshot_captured_at = now_iso()
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
@@ -220,7 +223,27 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # the previous backend.
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
+        try:
+            app.state.run_event_store = make_run_event_store(run_events_config)
+        except Exception as exc:
+            app.state.capability_initialization_snapshot = build_initialization_snapshot(
+                config,
+                snapshot_source="gateway_startup_config",
+                captured_at=initialization_snapshot_captured_at,
+                session_factory_present=sf is not None,
+                run_event_store_initialization_error=exc,
+                run_event_store_initialization_error_at=now_iso(),
+            )
+            raise
+        else:
+            app.state.capability_initialization_snapshot = build_initialization_snapshot(
+                config,
+                snapshot_source="gateway_startup_config",
+                captured_at=initialization_snapshot_captured_at,
+                run_event_store=app.state.run_event_store,
+                session_factory_present=sf is not None,
+                run_event_store_initialized_at=now_iso(),
+            )
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(

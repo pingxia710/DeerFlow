@@ -141,6 +141,44 @@ def _current_model_route(app_config: AppConfig) -> dict[str, Any]:
     }
 
 
+def build_initialization_snapshot(
+    app_config: AppConfig,
+    *,
+    snapshot_source: str,
+    captured_at: str | None,
+    run_event_store: object | None = None,
+    session_factory_present: bool | None = None,
+    run_event_store_initialized_at: str | None = None,
+    run_event_store_initialization_error: BaseException | None = None,
+    run_event_store_initialization_error_at: str | None = None,
+) -> dict[str, Any]:
+    """Project one AppConfig/startup-store pair into factual observability data."""
+
+    initialization_error = run_event_store_initialization_error
+    return {
+        "source": snapshot_source,
+        "configuration": {
+            "source": snapshot_source,
+            "captured_at": captured_at,
+            "structural_parse": {
+                "status": "validated",
+                "scope": "AppConfig structural parsing and validation only; no provider import, model request, or model-quality check",
+            },
+            "model_config_entry_count": len(app_config.models),
+            "default_model_route": _current_model_route(app_config),
+        },
+        "run_event_store": {
+            "declared_backend": app_config.run_events.backend,
+            "declared_backend_source": f"{snapshot_source}.run_events.backend",
+            "actual_store_type": type(run_event_store).__name__ if run_event_store is not None else None,
+            "session_factory_present": session_factory_present,
+            "initialized_at": run_event_store_initialized_at if initialization_error is None else None,
+            "initialization_error_type": initialization_error.__class__.__name__ if initialization_error is not None else None,
+            "initialization_error_at": run_event_store_initialization_error_at if initialization_error is not None else None,
+        },
+    }
+
+
 def _configured_tools(app_config: AppConfig) -> list[ToolCapability]:
     tools = [_tool_capability(tool.name, "config.tools", group=tool.group, use=tool.use) for tool in app_config.tools]
     for name in ("present_files", "ask_clarification"):
@@ -514,6 +552,7 @@ def build_capability_snapshot(
     *,
     thread_id: str | None = None,
     user_id: str | None = None,
+    initialization_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return factual AI-readable capability state."""
 
@@ -528,6 +567,15 @@ def build_capability_snapshot(
         app_config,
         user_id=effective_user_id,
         skills=skills,
+    )
+    startup_facts = (
+        initialization_snapshot
+        if initialization_snapshot is not None
+        else build_initialization_snapshot(
+            app_config,
+            snapshot_source="caller_supplied_app_config",
+            captured_at=None,
+        )
     )
 
     return {
@@ -566,6 +614,7 @@ def build_capability_snapshot(
             filesystem_permissions=filesystem_permissions,
         ),
         "command_room_runtime": command_room_runtime,
+        "initialization_snapshot": startup_facts,
         "risk_notes": _risk_notes(app_config),
         "agent_harness_profiles": [
             _profile(
@@ -581,4 +630,4 @@ def build_capability_snapshot(
     }
 
 
-__all__ = ["build_capability_snapshot"]
+__all__ = ["build_capability_snapshot", "build_initialization_snapshot"]

@@ -1251,7 +1251,10 @@ export function MessageList({
   }
 
   return (
-    <Conversation className={cn("flex size-full flex-col", className)}>
+    <Conversation
+      className={cn("flex size-full flex-col", className)}
+      initial={false}
+    >
       <ConversationContent
         data-conversation-content
         className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8"

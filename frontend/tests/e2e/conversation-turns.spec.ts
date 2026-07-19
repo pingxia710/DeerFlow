@@ -112,6 +112,34 @@ test.describe("Conversation turns", () => {
     await expect(turns.nth(1)).toContainText(/1m 7s/i);
   });
 
+  test("opens history at the beginning instead of the live edge", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Long history",
+          messages: LONG_HISTORY_MESSAGES,
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const conversationContent = page.locator("[data-conversation-content]");
+    const scrollRoot = conversationContent.locator("..");
+    await expect
+      .poll(() =>
+        scrollRoot.evaluate(
+          (element) => element.scrollHeight > element.clientHeight,
+        ),
+      )
+      .toBeTruthy();
+    await expect
+      .poll(() => scrollRoot.evaluate((element) => element.scrollTop <= 1))
+      .toBeTruthy();
+  });
+
   test("keeps a reader above the live edge until they return to the reply", async ({
     page,
   }) => {

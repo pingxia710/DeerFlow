@@ -18,9 +18,12 @@ for thread, replay, API, UI, and ownership implementation details.
 - Scope task state by thread, run, optional round, and task identity. Keep task
   events and hidden control rows out of visible chat while using them to restore
   factual task cards. Unknown terminal states must settle explicitly.
-- The Chair owns planning, human plan confirmation, plan-directed execution,
-  result interpretation, and plan completion. UI state and compatibility fields
-  must remain neutral and cannot become task acceptance or quality gates.
+- Human input establishes the Goal Mandate; within it, the Chair owns planning,
+  plan-directed execution, result interpretation, and plan completion. For a
+  substantive new or materially revised execution plan, the Chair presents the
+  plan and pauses for natural-language human discussion. UI state and
+  compatibility fields remain neutral and cannot authorize execution or become
+  task acceptance or quality gates.
 
 ## Hard Boundaries
 

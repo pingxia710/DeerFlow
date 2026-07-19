@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
+import {
+  MOCK_THREAD_ID,
+  MOCK_THREAD_ID_2,
+  mockLangGraphAPI,
+} from "./utils/mock-api";
 
 function timelineResponse() {
   return {
@@ -111,6 +115,186 @@ test("work record renders a factual desktop side panel", async ({
 
   await page.screenshot({
     path: testInfo.outputPath("work-record-desktop.png"),
+  });
+});
+
+test("work record exposes the AI organization without approval controls", async ({
+  page,
+}, testInfo) => {
+  await mockWorkRecord(page);
+  let historyRequests = 0;
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/goal-workspace`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        thread_id: MOCK_THREAD_ID,
+        goal_mandate: {
+          revision: 1,
+          body: "Explore a durable AI-native enterprise.",
+          content_hash: "mandate-hash",
+          author_run_id: "run-owner",
+          created_at: "2026-07-19T10:00:00Z",
+        },
+        operating_brief: {
+          revision: 2,
+          body: "Organize the V3 foundation and preserve every AI return.",
+          content_hash: "brief-hash",
+          author_run_id: "run-chair",
+          created_at: "2026-07-19T10:01:00Z",
+        },
+        organization_map: {
+          revision: 3,
+          body: "Research Cell returns facts to the Chair for the next decision.",
+          content_hash: "organization-hash",
+          author_run_id: "run-chair",
+          created_at: "2026-07-19T10:01:30Z",
+        },
+        acknowledged_through_seq: 7,
+        notified_through_seq: 9,
+        results: [
+          {
+            revision: 9,
+            body: "Complete research findings with source-level detail.",
+            content_hash: "result-hash",
+            author_run_id: "run-cell",
+            created_at: "2026-07-19T10:02:00Z",
+            metadata: { description: "Research Cell return" },
+          },
+        ],
+      }),
+    }),
+  );
+  await page.route(
+    `**/api/threads/${MOCK_THREAD_ID}/goal-workspace/history**`,
+    (route) => {
+      historyRequests += 1;
+      const beforeRevision = new URL(route.request().url()).searchParams.get(
+        "before_revision",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          beforeRevision === "6"
+            ? {
+                thread_id: MOCK_THREAD_ID,
+                events: [
+                  {
+                    revision: 1,
+                    event_type: "goal.mandate.revised",
+                    body: "Original mandate remains an unchanged fact.",
+                    content_hash: "older-mandate-hash",
+                    author_run_id: "run-owner",
+                    created_at: "2026-07-19T10:00:00Z",
+                    metadata: { source: "human" },
+                  },
+                ],
+                next_before_revision: null,
+              }
+            : {
+                thread_id: MOCK_THREAD_ID,
+                events: [
+                  {
+                    revision: 7,
+                    event_type: "result.inbox.acknowledged",
+                    body: "The Chair explicitly acknowledged result inbox through sequence 6.",
+                    content_hash: "acknowledgement-hash",
+                    author_run_id: "run-chair",
+                    created_at: "2026-07-19T10:03:00Z",
+                    metadata: { through_seq: 6 },
+                  },
+                  {
+                    revision: 6,
+                    event_type: "result.received",
+                    body: "Complete previously acknowledged result stays available in History.",
+                    content_hash: "acknowledged-result-hash",
+                    author_run_id: "run-cell",
+                    created_at: "2026-07-19T10:02:00Z",
+                    metadata: { task_id: "task-older", role: "fact-finder" },
+                  },
+                ],
+                next_before_revision: 6,
+              },
+        ),
+      });
+    },
+  );
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/goal-tree`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        root_thread_id: MOCK_THREAD_ID,
+        cells: [
+          {
+            thread_id: MOCK_THREAD_ID_2,
+            parent_thread_id: MOCK_THREAD_ID,
+            parent_run_id: "run-chair",
+            display_name: "Research Cell",
+            runtime_status: "running",
+            capability_refs: ["web-research"],
+            workspace_ref: null,
+            created_at: "2026-07-19T10:01:30Z",
+            updated_at: "2026-07-19T10:02:30Z",
+          },
+        ],
+      }),
+    }),
+  );
+
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  await page.getByLabel("Open activity").click();
+
+  const panel = page.getByRole("complementary", { name: "Activity" });
+  await expect(panel.getByText("Goal Mandate")).toBeVisible();
+  expect(historyRequests).toBe(0);
+  await panel.getByText("Goal Mandate").click();
+  await expect(
+    panel.getByText("Explore a durable AI-native enterprise."),
+  ).toBeVisible();
+  await expect(
+    panel.getByText("Organize the V3 foundation and preserve every AI return."),
+  ).toBeVisible();
+  await expect(panel.getByText("Current Organization Map")).toBeVisible();
+  await panel.getByText("Current Organization Map").click();
+  await expect(
+    panel.getByText(
+      "Research Cell returns facts to the Chair for the next decision.",
+    ),
+  ).toBeVisible();
+  await panel.getByText("Read on demand", { exact: true }).click();
+  await expect(
+    panel.getByText("result.inbox.acknowledged", { exact: true }),
+  ).toBeVisible();
+  expect(historyRequests).toBe(1);
+  await panel.getByText("result.received", { exact: true }).click();
+  await expect(
+    panel.getByText(
+      "Complete previously acknowledged result stays available in History.",
+    ),
+  ).toBeVisible();
+  await panel.getByText("Load older facts", { exact: true }).click();
+  await expect(
+    panel.getByText("goal.mandate.revised", { exact: true }),
+  ).toBeVisible();
+  await panel.getByText("goal.mandate.revised", { exact: true }).click();
+  await expect(
+    panel.getByText("Original mandate remains an unchanged fact."),
+  ).toBeVisible();
+  await expect(panel.getByText("notified through 9")).toBeVisible();
+  await panel.getByText("Research Cell return", { exact: true }).click();
+  await expect(
+    panel.getByText("Complete research findings with source-level detail."),
+  ).toBeVisible();
+  await expect(panel.getByText("Research Cell", { exact: true })).toBeVisible();
+  await expect(panel.getByText("runtime: running")).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: /approve|accept|acknowledge/i }),
+  ).toHaveCount(0);
+
+  await page.screenshot({
+    path: testInfo.outputPath("ai-organization-work-record.png"),
   });
 });
 

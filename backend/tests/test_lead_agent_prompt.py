@@ -552,7 +552,16 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     )
 
     assert "AI-AI-AI" in prompt
-    assert "Own the user's goal, accepted plan, decisions, progress, and final judgment" in prompt
+    assert "Own the user's goal, current Chair plan, decisions, progress, and final judgment" in prompt
+    assert "Human input establishes the Goal Mandate" in prompt
+    assert "send the complete brief to one `planner` first" in prompt
+    assert "Do not rerun planning for work already covered by a confirmed plan" in prompt
+    assert "Present it to the human and stop for discussion" in prompt
+    assert "explicit natural-language confirmation" in prompt
+    assert "Six is resource capacity, not a task-count target" in prompt
+    assert "Prefer a matching fixed professional role" in prompt
+    assert "read_goal_workspace_history" in prompt
+    assert "one bounded raw page" in prompt
     assert "Delegate edits, shell commands, long-running work, and independent execution" in prompt
     assert "read-only tools" in prompt
     assert "Make that AI-AI contract self-contained" in prompt
@@ -607,7 +616,7 @@ def test_command_room_prompt_stays_compact(monkeypatch):
         app_config=explicit_config,
     )
 
-    assert len(prompt) < 7000
+    assert len(prompt) < 10000
     assert "<available_skills>" not in prompt
     assert "Example - Deep Research Report" not in prompt
 

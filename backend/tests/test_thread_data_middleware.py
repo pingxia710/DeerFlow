@@ -47,6 +47,23 @@ class TestThreadDataMiddleware:
         assert _as_posix(result["thread_data"]["uploads_path"]).endswith("threads/thread-from-config/user-data/uploads")
         assert runtime.context == {}
 
+    def test_goal_cell_input_capsule_path_is_exposed_only_for_the_server_marker(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        ordinary = middleware.before_agent(state={}, runtime=Runtime(context={"thread_id": "ordinary-thread"}))
+        goal_cell = middleware.before_agent(
+            state={},
+            runtime=Runtime(
+                context={
+                    "thread_id": "goal-cell-thread",
+                    "__nextos_goal_cell_input_capsule": True,
+                }
+            ),
+        )
+
+        assert "inputs_path" not in ordinary["thread_data"]
+        assert _as_posix(goal_cell["thread_data"]["inputs_path"]).endswith("threads/goal-cell-thread/user-data/inputs")
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(

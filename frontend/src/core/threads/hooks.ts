@@ -49,6 +49,9 @@ import {
 import {
   fetchThreadContextDetail,
   fetchThreadContextUsage,
+  fetchGoalTree,
+  fetchGoalWorkspace,
+  fetchGoalWorkspaceHistory,
   fetchThreadTimeline,
   fetchThreadTokenUsage,
   ThreadTimelineRequestError,
@@ -75,6 +78,11 @@ import {
   shouldApplyStreamTitleUpdate,
   shouldRunCurrentStreamFinishSideEffects,
 } from "./effect-policy";
+import type {
+  GoalTree,
+  GoalWorkspace,
+  GoalWorkspaceHistoryPage,
+} from "./goal-workspace";
 import {
   applySnapshotRunMessagePageState,
   buildVisibleHistoryMessages,
@@ -4348,6 +4356,85 @@ export function useThreadWakeFacts(
 
 const THREAD_TIMELINE_POLL_INTERVAL_MS = 1_500;
 const THREAD_TIMELINE_CATCH_UP_INTERVAL_MS = 100;
+const GOAL_WORKSPACE_POLL_INTERVAL_MS = 3_000;
+const GOAL_WORKSPACE_HISTORY_PAGE_SIZE = 20;
+
+export function useThreadGoalWorkspace(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  const canRead =
+    enabled &&
+    hasPersistedThreadId(threadId) &&
+    !isStaticWebsiteOnly() &&
+    !isDeletedThreadTombstoned(threadId);
+  return useQuery<GoalWorkspace>({
+    queryKey: queryKeys.thread.goalWorkspace(threadId),
+    queryFn: async () => {
+      if (!threadId) throw new Error("Missing thread id.");
+      return fetchGoalWorkspace(threadId);
+    },
+    enabled: canRead,
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchIntervalInBackground: false,
+    refetchInterval: canRead ? GOAL_WORKSPACE_POLL_INTERVAL_MS : false,
+  });
+}
+
+export function useThreadGoalWorkspaceHistory(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  const canRead =
+    enabled &&
+    hasPersistedThreadId(threadId) &&
+    !isStaticWebsiteOnly() &&
+    !isDeletedThreadTombstoned(threadId);
+  return useInfiniteQuery({
+    queryKey: queryKeys.thread.goalWorkspaceHistory(threadId),
+    queryFn: async ({ pageParam, signal }) => {
+      if (!threadId) throw new Error("Missing thread id.");
+      return fetchGoalWorkspaceHistory(threadId, {
+        beforeRevision: pageParam,
+        limit: GOAL_WORKSPACE_HISTORY_PAGE_SIZE,
+        signal,
+      });
+    },
+    initialPageParam: null as number | null,
+    getNextPageParam: (page: GoalWorkspaceHistoryPage) =>
+      page.nextBeforeRevision ?? undefined,
+    enabled: canRead,
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useThreadGoalTree(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  const canRead =
+    enabled &&
+    hasPersistedThreadId(threadId) &&
+    !isStaticWebsiteOnly() &&
+    !isDeletedThreadTombstoned(threadId);
+  return useQuery<GoalTree>({
+    queryKey: queryKeys.thread.goalTree(threadId),
+    queryFn: async () => {
+      if (!threadId) throw new Error("Missing thread id.");
+      return fetchGoalTree(threadId);
+    },
+    enabled: canRead,
+    retry: false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchIntervalInBackground: false,
+    refetchInterval: canRead ? GOAL_WORKSPACE_POLL_INTERVAL_MS : false,
+  });
+}
 
 export function useThreadTimeline(
   threadId?: string,

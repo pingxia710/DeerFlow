@@ -45,6 +45,12 @@ skills/custom/*
 !skills/custom/command-room-executor/
 !skills/custom/command-room-fact-finder/
 !skills/custom/command-room-recorder/
+!skills/custom/command-room-project-manager/
+!skills/custom/command-room-runtime-reliability-auditor/
+!skills/custom/command-room-persistence-migration-auditor/
+!skills/custom/command-room-frontend-protocol-auditor/
+!skills/custom/command-room-security-auditor/
+!skills/custom/command-room-platform-ops-auditor/
 skills/custom/nextos-commander/*
 skills/custom/command-room-*/*
 !skills/custom/nextos-commander/AGENTS.md

@@ -45,6 +45,104 @@ test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", as
   );
 });
 
+test("fetchGoalWorkspace uses the owner-scoped endpoint and preserves results", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      thread_id: "thread 1",
+      goal_mandate: null,
+      operating_brief: null,
+      organization_map: null,
+      acknowledged_through_seq: 0,
+      notified_through_seq: 7,
+      results: [
+        {
+          revision: 7,
+          body: "Complete result.",
+          content_hash: "hash",
+          author_run_id: "run-1",
+          created_at: "2026-07-19T10:00:00Z",
+          metadata: {},
+        },
+      ],
+    }),
+  });
+
+  const { fetchGoalWorkspace } = await import("@/core/threads/api");
+  await expect(fetchGoalWorkspace("thread 1")).resolves.toMatchObject({
+    threadId: "thread 1",
+    results: [{ body: "Complete result." }],
+  });
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads/thread%201/goal-workspace"),
+    { method: "GET", timeoutMs: 15_000 },
+  );
+});
+
+test("fetchGoalWorkspaceHistory reads one bounded raw page", async () => {
+  const controller = new AbortController();
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      thread_id: "thread 1",
+      events: [
+        {
+          revision: 7,
+          event_type: "result.received",
+          body: "Complete acknowledged result.",
+          content_hash: "hash",
+          author_run_id: "child-run",
+          created_at: "2026-07-19T10:00:00Z",
+          metadata: { task_id: "task-1" },
+        },
+      ],
+      next_before_revision: 6,
+    }),
+  });
+
+  const { fetchGoalWorkspaceHistory } = await import("@/core/threads/api");
+  await expect(
+    fetchGoalWorkspaceHistory("thread 1", {
+      beforeRevision: 8,
+      limit: 1,
+      signal: controller.signal,
+    }),
+  ).resolves.toMatchObject({
+    threadId: "thread 1",
+    events: [
+      { eventType: "result.received", body: "Complete acknowledged result." },
+    ],
+    nextBeforeRevision: 6,
+  });
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining(
+      "/api/threads/thread%201/goal-workspace/history?limit=1&before_revision=8",
+    ),
+    {
+      method: "GET",
+      timeoutMs: 15_000,
+      signal: controller.signal,
+    },
+  );
+});
+
+test("fetchGoalTree reads recursive Goal Cell facts", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({ root_thread_id: "root", cells: [] }),
+  });
+
+  const { fetchGoalTree } = await import("@/core/threads/api");
+  await expect(fetchGoalTree("root")).resolves.toEqual({
+    rootThreadId: "root",
+    cells: [],
+  });
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads/root/goal-tree"),
+    { method: "GET", timeoutMs: 15_000 },
+  );
+});
+
 test("fetchThreadTokenUsage returns null for unavailable token usage", async () => {
   fetchWithAuth.mockResolvedValue({
     ok: false,

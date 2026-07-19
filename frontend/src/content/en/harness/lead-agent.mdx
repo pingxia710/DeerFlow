@@ -45,43 +45,52 @@ native tools, returns complete natural-language text, and ends.
 
 ### Receive and orient
 
-Keep the user goal, confirmed context, current boundary, and progress in the
-lead conversation.
+Record the human's interest, direction, non-goals, real-world permissions, and
+return-to-human boundaries as the Goal Mandate. Keep current facts, boundaries,
+and progress in the Chair's Operating Brief.
 
-### Obtain a planning proposal
+### Obtain one planning proposal
 
-For substantive work, send a `planner` the complete goal, facts, boundaries,
-criteria, and requested result. Multiple independent proposals may run in
-parallel when route exploration is useful; each remains a planning perspective.
+Give one `planner` the complete goal, facts, boundaries, permissions, and
+observable completion criteria. It returns one coherent proposal before the
+Chair dispatches execution or additional Planners. Any fact finding the
+proposal needs can become its first directed execution phase.
 
 ### Run opposition
 
-After the complete proposal returns, send an `opposition` AI the original brief
-and the proposal for one challenge round. It looks for hidden assumptions,
-counterevidence, failure modes, boundary misses, and materially stronger
-alternatives. It may report that no material challenge exists and does not make
-the decision. If synthesis changes the core direction, run opposition again;
-local refinements do not require another round.
+After the complete Planner proposal returns, send one `opposition` AI the
+original brief and complete proposal for one challenge round. It looks for
+hidden assumptions, counterevidence, failure modes, boundary misses, and
+materially stronger alternatives without making the decision.
 
-### Synthesize and confirm the execution plan
+### Form and discuss the execution plan
 
-Read the complete planner and opposition results, then synthesize one execution
-plan in the Chair: goal, scope, boundaries, key decisions, completion criteria,
-risks, and open human choices. Discuss that plan with the human and wait for
-explicit natural-language authorization before sending execution AIs their
-professional role, goal, relevant facts and paths, authority, forbidden
-changes, definition of done, and requested natural result. Independent
-execution can run together. The Chair chooses the useful `task()` count;
-DeerFlow does not truncate or defer calls.
+Read the complete Planner and Opposition results, then synthesize one execution
+plan in the Chair. Present it and pause for human discussion. Substantive
+execution begins only after explicit natural-language confirmation; no program
+field authorizes, blocks, or advances that conversation.
 
-### Continue the confirmed plan
+### Execute the confirmed plan in parallel
+
+Give each execution AI a complete professional role, goal, relevant facts,
+exact working, input, and output paths, authority, forbidden changes, observable
+completion criteria, and requested natural result. Run independent workstreams
+in parallel when useful. Six Command Room slots are capacity, not a task-count
+target; do not overload one child with independently separable professional
+domains just to keep the count low.
+
+### Continue the current plan
 
 Read task results and current facts directly, including files, code, logs,
 plans, and artifacts. Results are information for the Chair to act on, not a
 task-level acceptance event. Resolve ordinary implementation details and
-continue the confirmed plan without a required `verifier` role. Return to human
-plan discussion only when facts require a core direction, scope, authority, or
-business-decision change.
+continue the current plan without a required `verifier` role. When a phase-level
+report changes what should happen next, ask one `project-manager` for a
+next-stage proposal, give that complete proposal and the phase facts to one
+`opposition` AI, then form and present the Chair's next-stage plan and pause for
+human discussion. Also return to discussion if facts require a Goal Mandate,
+direction, material-boundary, real-world-permission, or irreversible-consequence
+change. The program does not enforce either conversation.
 
 ### Complete the plan
 
@@ -95,6 +104,23 @@ LangGraph persists messages and factual runtime state when configured. Return a
 natural user-facing conclusion and present completed artifacts when needed.
 
 </Steps>
+
+## Persistent organization state
+
+- **Goal Workspace** stores the complete Goal Mandate, Current Operating Brief,
+  and the Chair-authored Current Organization Map as append-only records. The
+  Map is a temporary organization judgment, not a program workflow.
+- **Result Inbox** preserves every complete child return separately. Coalesced
+  wake signals and explicit acknowledgements are delivery facts, not quality or
+  completion judgments.
+- **Workspace History** is an owner-scoped, on-demand, paginated read of those
+  same append-only facts. It returns original bodies unchanged; it neither
+  enters every Chair prompt automatically nor turns acknowledgement into
+  acceptance, completion, deletion, or hiding.
+- **Goal Cells** are recursive, owner-scoped child Threads with inherited
+  mandates and local briefs. They may coordinate narrower Cells and return a
+  complete result to their parent. Capability and workspace references do not
+  grant permissions or imply shared writable storage.
 
 ## Model Selection
 

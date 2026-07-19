@@ -42,7 +42,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     The provider now produces a fresh ``LocalSandbox`` per ``thread_id`` whose
     ``path_mappings`` include thread-scoped entries for
-    ``/mnt/user-data/{workspace,uploads,outputs}`` and ``/mnt/acp-workspace``,
+    ``/mnt/user-data/{workspace,uploads,inputs,outputs}`` and ``/mnt/acp-workspace``,
     mirroring how :class:`AioSandboxProvider` bind-mounts those paths into its
     docker container. The legacy ``acquire()`` / ``acquire(None)`` call still
     returns a generic singleton with id ``"local"`` for callers (and tests)
@@ -253,6 +253,11 @@ class LocalSandboxProvider(SandboxProvider):
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/uploads",
                 local_path=str(paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
+            ),
+            PathMapping(
+                container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/inputs",
+                local_path=str(paths.sandbox_inputs_dir(thread_id, user_id=effective_user_id)),
+                read_only=True,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs",

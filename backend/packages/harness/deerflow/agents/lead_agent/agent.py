@@ -52,7 +52,23 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
 _COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
-_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset({"ask_clarification", "present_files", "task", "ls", "read_file", "glob", "grep"})
+_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset(
+    {
+        "ask_clarification",
+        "acknowledge_workspace_results",
+        "create_goal_cell",
+        "present_files",
+        "read_goal_workspace_history",
+        "read_workspace_results",
+        "record_goal_workspace",
+        "return_to_parent",
+        "task",
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
+    }
+)
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -466,7 +482,16 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.models.reasoning_effort import resolve_reasoning_effort
     from deerflow.tools import get_available_tools
-    from deerflow.tools.builtins import setup_agent, update_agent
+    from deerflow.tools.builtins import (
+        acknowledge_workspace_results_tool,
+        create_goal_cell_tool,
+        read_goal_workspace_history_tool,
+        read_workspace_results_tool,
+        record_goal_workspace_tool,
+        return_to_parent_tool,
+        setup_agent,
+        update_agent,
+    )
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 
     cfg = _get_runtime_config(config)
@@ -590,6 +615,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
     extra_tools = [update_agent] if _can_update_self(agent_name) else []
+    if _is_coordinator_only_agent(agent_name):
+        extra_tools.extend(
+            [
+                record_goal_workspace_tool,
+                read_goal_workspace_history_tool,
+                read_workspace_results_tool,
+                acknowledge_workspace_results_tool,
+                create_goal_cell_tool,
+                return_to_parent_tool,
+            ]
+        )
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(
         model_name=model_name,

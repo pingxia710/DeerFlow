@@ -1,0 +1,38 @@
+[
+  {
+    "id": "train-substantive-plan",
+    "split": "train",
+    "intent": "The human gives a substantive objective; the Chair must obtain one coherent proposal, challenge it, form an execution plan, and pause for discussion before work begins.",
+    "required_rules": ["planning-boundary", "plan-pause"]
+  },
+  {
+    "id": "train-plan-directed-parallelism",
+    "split": "train",
+    "intent": "A confirmed plan has five independent professional workstreams and one domain is too broad for one child; use useful parallelism without filling six slots for appearance.",
+    "required_rules": ["planning-boundary", "parallel-execution", "complete-handoff"]
+  },
+  {
+    "id": "val-phase-handoff",
+    "split": "val",
+    "intent": "A multi-stream audit has returned its phase results; the organization must propose and challenge the next stage, then show the Chair plan and pause before implementation.",
+    "required_rules": ["phase-handoff", "plan-pause"]
+  },
+  {
+    "id": "val-result-recovery",
+    "split": "val",
+    "intent": "Several child AIs return concurrently and the Chair must recover every complete result without a program quality gate.",
+    "required_rules": ["result-inbox", "program-boundary"]
+  },
+  {
+    "id": "test-complete-child-brief",
+    "split": "test",
+    "intent": "The Chair delegates a bounded repository task; the one-shot child must receive exact workspace, source-input, and output-artifact addresses in a self-contained handoff.",
+    "required_rules": ["complete-handoff", "program-boundary"]
+  },
+  {
+    "id": "test-recursive-cell",
+    "split": "test",
+    "intent": "A large goal needs a child workstream lead that may create a narrower child Cell without expanding permissions.",
+    "required_rules": ["recursive-cells", "program-boundary"]
+  }
+]

@@ -192,17 +192,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.round_state import RoundStateRepository
             from deerflow.persistence.run import RunRepository
+            from deerflow.persistence.workspace_event import WorkspaceEventRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.round_state_store = RoundStateRepository(sf)
+            app.state.workspace_event_store = WorkspaceEventRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
             app.state.artifact_provenance_repo = ArtifactProvenanceRepository(sf)
         else:
             from deerflow.persistence.round_state import MemoryRoundStateStore
+            from deerflow.persistence.workspace_event import MemoryWorkspaceEventStore
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.round_state_store = MemoryRoundStateStore()
+            app.state.workspace_event_store = MemoryWorkspaceEventStore()
             app.state.feedback_repo = None
             app.state.artifact_provenance_repo = None
 
@@ -219,7 +223,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store, round_store=app.state.round_state_store)
+        app.state.run_manager = RunManager(
+            store=app.state.run_store,
+            round_store=app.state.round_state_store,
+        )
         from app.gateway.command_room_background import CommandRoomBackgroundService
 
         app.state.command_room_background_service = CommandRoomBackgroundService()
@@ -289,6 +296,11 @@ def get_round_state_store(request: Request) -> object | None:
     return getattr(request.app.state, "round_state_store", None)
 
 
+def get_workspace_event_store(request: Request) -> object | None:
+    """Return optional append-only Goal Workspace persistence."""
+    return getattr(request.app.state, "workspace_event_store", None)
+
+
 def get_store(request: Request):
     """Return the global store (may be ``None`` if not configured)."""
     return getattr(request.app.state, "store", None)
@@ -314,6 +326,15 @@ def get_run_context(request: Request) -> RunContext:
     """
     background_service = getattr(request.app.state, "command_room_background_service", None)
     background_dispatcher = background_service.bind(request) if background_service is not None else None
+    if background_dispatcher is not None:
+        from app.gateway.goal_cells import BoundGoalCellDispatcher
+
+        goal_cell_dispatcher = BoundGoalCellDispatcher(
+            request,
+            background_dispatcher,
+        )
+    else:
+        goal_cell_dispatcher = None
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -322,7 +343,9 @@ def get_run_context(request: Request) -> RunContext:
         thread_store=get_thread_store(request),
         app_config=get_config(),
         round_store=get_round_state_store(request),
+        workspace_event_store=get_workspace_event_store(request),
         command_room_background_dispatcher=background_dispatcher,
+        goal_cell_dispatcher=goal_cell_dispatcher,
     )
 
 

@@ -17,10 +17,19 @@ when changing transport, process, persistence, or API implementation details.
 - Command Room children wake a sequential Chair Run with the complete result.
   Programs enforce hard system boundaries and record facts only; they never
   interpret, choose, stage, judge, rework, or close AI work.
-- Substantive planning remains an AI prompt discipline: Planner proposal →
-  Opposition challenge → Chair execution plan → human authorization →
-  plan-directed execution → plan completion. Execution results are facts for
-  Chair continuation, not task acceptance or a required verifier handoff.
+- Human input establishes the Goal Mandate: interest, direction, non-goals,
+  real-world permissions, and return-to-human boundaries. Within it, a new
+  substantive execution plan or material revision uses one Planner proposal →
+  Opposition challenge → Chair execution plan → human discussion and
+  natural-language confirmation → plan-directed execution. Work already covered
+  by a confirmed plan continues directly, including ordinary fixes, stopping
+  low-value work, and bounded optimizations. A completed phase
+  that changes the next route uses Project Manager proposal → Opposition →
+  Chair next-stage plan → human discussion. Independent execution can run in
+  parallel; six slots are capacity, not a quota, and independently separable
+  professional domains should not be packed into one over-broad child. Programs
+  do not enforce this sequence. Execution results are facts for Chair
+  continuation, not task acceptance or a required verifier handoff.
 
 ## Hard Boundaries
 

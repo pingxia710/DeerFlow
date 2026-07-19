@@ -1,5 +1,286 @@
 # Progress
 
+## 2026-07-19 — Codex child-process performance boundary confirmed
+
+- A controlled one-shot Codex A/B probe confirmed that the remaining resource
+  cost is not a DeerFlow process leak. With the current complete user Codex
+  configuration, one idle-tool task peaked at 18 processes and 1,124.5 MiB
+  aggregate RSS. `--ignore-user-config` reduced that to 2 processes and
+  171.9 MiB, but removed the user's configured MCP/plugin capability surface.
+- The installed and current npm release is Codex CLI 0.144.6. It still eagerly
+  starts every enabled MCP server for each session; there is no supported lazy
+  startup or shared-server switch. DeerFlow already terminates the complete
+  child process group on success, failure, timeout, and cancellation, and the
+  probe left no DeerFlow child process behind.
+- Human Owner explicitly chose to retain all MCP, plugin, Skill, and agent
+  capabilities. Therefore no `--ignore-user-config`, MCP filter, tool profile,
+  reduced task concurrency, shared AI process, or programmatic tool gate was
+  added. The measured memory is an accepted capacity cost until Codex provides
+  lossless lazy/shared MCP lifecycle support, not a reason for program control
+  over AI capabilities.
+- Gateway `:8001` and Nginx `:2026` remain healthy and running for clean-window
+  testing. The benchmark invoked only a no-tool Codex response; it made no
+  production or business-system mutation and exposed no credential or customer
+  data.
+
+## 2026-07-19 — One-plan flow and professional audit roles restored
+
+- A real restart exposed one remaining program-lifecycle defect: every pending
+  Chair wake was retried after restart, even when its previous Run was
+  `interrupted`, and a gracefully cancelled child was recovered into another
+  automatic Chair Run. That revived the stopped audit twice and created two
+  unwanted tasks before the Gateway was stopped.
+- Corrected only the objective transport boundary. A cancelled child is now
+  recorded with terminal wake fact `child_cancelled` without starting Chair;
+  an interrupted or cancelled Chair wake is recorded as stopped and is not
+  retried. Other genuine delivery failures retain the existing bounded retry.
+  No prompt content is parsed, no result is accepted, and no AI workflow or
+  quality gate was added.
+- Focused background recovery, wake admission, Chair prompt, and stop-boundary
+  regression: **43 passed**; full backend `make lint` passed. Live restart then
+  settled the cancelled task without creating a new Run or an eleventh task;
+  Gateway, frontend, and Nginx are healthy at `http://localhost:2026`.
+- The Human Owner stopped the low-value real-project audit. Three independent
+  audit children completed and preserved their reports; the overloaded backend
+  child ran for about 51 minutes and ended without a final message, after which
+  the old Chair attempted one retry. That retry and the local Gateway were
+  stopped so the stale Thread could not continue waking or spending resources.
+- The observed first step—one Planner—was correct. The immediately preceding
+  “six-way planning wave” entry overcorrected a task-count concern and is now
+  explicitly superseded. The AI-owned organization flow is one Planner → one
+  Opposition → Chair execution plan → human discussion and explicit
+  natural-language confirmation → plan-directed parallel execution. After a
+  phase report changes the route, it is Project Manager → Opposition → Chair
+  next-stage plan → another human discussion pause. Programs do not enforce
+  either sequence. This planning sequence applies only to a new substantive
+  execution plan or material revision; confirmed-plan execution, ordinary
+  fixes, stopping low-value work, and bounded optimizations continue directly.
+- Six outstanding children remain resource capacity, never a quota. The Chair
+  chooses the useful plan-derived count and should split independently
+  separable professional domains instead of overloading one child. Every child
+  handoff now requires exact working, input, and output paths.
+- Added fixed, reusable role charters and method Skills for runtime reliability,
+  persistence and migrations, frontend protocol, security, and platform
+  operations. These labels inject professional prompt context only; they do not
+  grant tools, route work, score results, or approve completion. In particular,
+  the previously overloaded backend audit can now be split into runtime and
+  persistence work without inventing tasks merely to fill six slots.
+- Aligned repository/backend/frontend instructions, the Chair prompt and Skill,
+  English and Chinese user documentation, role API expectations, and the
+  NextOS SkillOpt scenarios. The focused prompt/role/task/background regression
+  selection passed **195** tests with one upstream TestClient deprecation
+  warning; the later confirmed-plan boundary correction passed **43** focused
+  tests. The full backend `make lint` and targeted MDX Prettier checks passed;
+  SkillOpt hard/soft was **1.0** on train, validation, and test splits; `git
+  diff --check` passed.
+- No scheduler, queue, retry, persistence, API, Goal Cell, History, or frontend
+  runtime behavior changed in this correction. No production or external
+  business system was accessed, and no credential or customer data was exposed.
+  The normal local Gateway remains intentionally stopped pending a clean new
+  pilot conversation or an explicit decision about the stale Thread.
+
+## 2026-07-19 — Superseded: broad planning restored to a six-way parallel wave
+
+- Superseded by the correction above. Kept only as development history; do not
+  use this entry as the current organization contract.
+
+- The first real-project conversation dispatched only one Planner because the
+  Chair prompt required that single proposal to return before Opposition or
+  execution. Human Owner clarified that the established planning flow remains,
+  but broad planning and information collection must not be serialized behind
+  one Planner.
+- The AI-owned flow is now parallel planning and fact finding → Opposition →
+  Chair plan → parallel execution → completion. Broad work may use all six
+  Command Room slots in its planning wave; the Gateway still supplies only the
+  existing content-blind 6/12/64 resource capacity and makes no AI decision.
+- Removed the singular Planner bottleneck from the Chair prompt and aligned the
+  repository/backend contract, Commander Skill, user documentation, focused
+  tests, and SkillOpt wording. No background scheduler, persistence, API,
+  Goal Cell, History, or Project Manager runtime code changed.
+- Focused prompt/role/task/background tests: 55 passed. Ruff, targeted MDX
+  Prettier, and the NextOS SkillOpt probe passed; SkillOpt hard/soft remained
+  1.0 on train, validation, and test cases. The already-running old Gateway was
+  not restarted while its child process remained active.
+
+## 2026-07-19 — V3 基础能力最终收口与本地 Gateway 核查
+
+- 按授权仅运行 Ruff 对 `backend/app/gateway/command_room_background.py` 的格式化；文件已符合格式，未产生逻辑或文本变化。
+- 全仓 `backend make lint` 全绿：Ruff check 通过，744 个文件格式检查通过。
+- 隔离本地 replay Gateway 的真实 HTTP 健康检查、专用 thread 创建和 owner-scoped History 路由可达性通过；正常本地 Gateway 无授权会话返回预期 401，因此未伪造会话或扩大权限，带 owner 的多版本/结果/ack/Chair 全链路证据留待 Human Owner 提供本地测试会话后再做。
+- 前端单元 829 passed；Work Record Playwright 6 passed。未访问生产或外部业务系统，未修改业务逻辑。
+- 未发现需要第三切片处理的 P0。按 Human Owner 授权停止在第三切片确认点，建议转入真实项目使用。
+
+## 2026-07-19 — NextOS V3 second slice: Workspace factual history and context recovery
+
+- The Human Owner confirmed the bounded second slice: Workspace factual history
+  and context recovery with only minimal Prompt, Skill, and read-only cockpit
+  projections. P1/Later items and every explicitly excluded workflow,
+  organization-graph, RAG, persistent-queue, approval, scoring, automatic-role,
+  and automatic-project-manager idea remain unimplemented.
+- Reused the existing append-only `workspace_events` store without a table,
+  migration, or event type. SQL and memory stores now expose an exact-owner,
+  newest-first, 1–100-item history page with an exclusive revision cursor and
+  unchanged body, metadata, hash, author Run, and timestamp values.
+- Added the Chair-only `read_goal_workspace_history` tool and owner-scoped
+  `GET /api/threads/{thread_id}/goal-workspace/history`. The existing current
+  context remains latest Mandate/Brief/Map plus the pending Inbox; the new route
+  contains all factual event types, including previously acknowledged complete
+  results and notification/acknowledgement delivery facts. Reading changes
+  nothing, and acknowledgement remains neither acceptance, completion, deletion,
+  nor hiding.
+- Added a lazy Work Record History section. It loads no history until expanded,
+  then reads bounded pages of raw facts and can load older pages. It adds no
+  approval, acceptance, acknowledgement, dispatch, priority, retry, phase, or
+  completion control. Chair/Project Manager handoff text now states that history
+  is selected by the Chair, Brief is a current AI-owned index, and Goal Cells/
+  PMs receive only Chair-selected facts.
+- Validation: relevant backend Workspace/API/background/Goal Cell/prompt/role
+  regression selection passed **235** tests (one upstream TestClient deprecation
+  warning); frontend unit suite passed **829** tests; `pnpm check` and targeted
+  Prettier passed; the six Work Record Playwright scenarios passed; `git diff
+  --check` passed; and the NextOS SkillOpt static probe scored hard/soft **1.0**
+  on train, validation, and both test cases.
+- Targeted Ruff checks and formatting for this slice passed. The repository-wide
+  backend `make lint` format check remains blocked only by the pre-existing,
+  untouched formatting difference in `backend/app/gateway/command_room_background.py`;
+  no queue behavior was changed here.
+- No production or external business system was accessed or mutated. No
+  credential, customer, or payment data was exposed. Stop at the third-slice
+  confirmation point; do not extend this implementation without a new Human
+  Owner decision.
+
+## 2026-07-19 — NextOS V3 Goal-Mandate autonomous organization foundation
+
+- The Human Owner confirmed the V3 product principle: people contribute
+  interest, direction, possibility, real-world permission, and material
+  boundaries; AI owns professional planning, opposition, organization,
+  execution, comparison, correction, and completion inside that Goal Mandate.
+  This entry supersedes earlier same-day requirements for per-plan human
+  confirmation; those entries remain only as development history.
+- Added an append-only, owner-scoped Goal Workspace event store and migration.
+  Command Room can persist the complete opaque Goal Mandate and Current
+  Operating Brief, and every later Run receives the current records without a
+  program parsing or interpreting their prose.
+- Added a durable Result Inbox. Every complete child return is persisted as a
+  separate unchanged envelope; reads never acknowledge or delete it, explicit
+  Chair acknowledgement is monotonic but is not acceptance, and concurrent
+  completions may coalesce only their wake signal. Recovery preserves the
+  result high-water mark and can finish notification after an already
+  successful wake without replaying child work.
+- Added recursive Goal Cells by reusing owner-scoped `command-room` Threads.
+  Each Cell inherits the complete Goal Mandate, receives a local opaque Brief,
+  can create narrower Cells through the same Chair loop, and explicitly returns
+  its complete result and artifact references to the parent Result Inbox.
+  Public metadata cannot forge the parent/root linkage.
+- Added the factual Activity-panel view for Goal Workspace, complete Result
+  Inbox envelopes, and the recursive Goal Tree in English and Chinese. The UI
+  contains no approval, acceptance, acknowledgement, retry, or completion
+  control for these records; runtime status is labelled only as a runtime fact.
+  The user-facing Lead Agent and Subagent documentation now describes
+  Goal-Mandate autonomy rather than plan-by-plan authorization.
+- Capability and workspace references currently remain structural facts and do
+  not grant permissions. Each Cell has an isolated Thread workspace. The next
+  product decision is the default parent/child material boundary: sealed input
+  snapshot, read-only parent view plus isolated writes, or shared writable
+  state. No sharing or capability expansion was silently selected.
+- The Human Owner selected the default material boundary: a Chair names exact
+  parent files; the Gateway copies their bytes into the child Cell's sealed
+  read-only input capsule, while the Cell keeps its own writable workspace and
+  outputs. The parent file list, child capsule paths, SHA-256 values, and byte
+  counts are objective transport facts. The program neither selects materials,
+  interprets their content, assesses relevance or quality, grants AI
+  capabilities, accepts a result, gates an AI-AI handoff, or decides whether
+  work is complete.
+- Goal Cell `task` execution now always uses `workspace-write`, even on a local
+  development profile that otherwise permits unrestricted host access. The
+  child Chair's direct read-only tools are likewise kept to the child's virtual
+  thread paths, so they can read the sealed capsule but not fall through to a
+  direct host path. This is an access-isolation boundary only: it prevents a
+  child from modifying the parent capsule or unrelated host state; it does not
+  impose a role, workflow, approval, score, result check, or any other program
+  judgment. A server-owned durable Cell marker supplies the capsule path only
+  when a snapshot exists.
+- Validation for the sealed-capsule increment: 245 focused backend tests passed,
+  including exact-byte snapshot immutability, idempotent recovery after a parent
+  source changes, read-only file mode, context injection, and forced child sandbox scope; Ruff
+  lint/format passed. The NextOS SkillOpt static probe remained hard 1.0 on its
+  train, validation, and two test cases.
+- Validation: backend full suite 6089 passed and 19 optional tests skipped;
+  focused persistence, recovery, recursion, prompt, role, wake, router, and
+  migration suite 221 passed; Ruff lint and format checks passed. Frontend unit
+  suite 827 passed, `pnpm check` and targeted Prettier passed, and the changed
+  desktop/mobile Activity workflow passed 6 Playwright scenarios with an
+  inspected browser screenshot. The NextOS Skill validator passed; the new
+  SkillOpt static probe scored hard 1.0 on train, validation, and two test
+  cases.
+- Restarted the local development stack. Gateway startup applied migration
+  `0013_factual_round_records -> 0014_goal_workspace_events`; Gateway, frontend,
+  and Nginx returned HTTP 200, while an unauthenticated Goal Workspace request
+  returned the expected HTTP 401. Docker Desktop already owned port 3000, so
+  the project launcher correctly selected frontend port 6001 behind Nginx
+  `:2026`.
+- A first embedded-client AI-behaviour probe exposed that the Planner and
+  Opposition override resolved to the Codex CLI model id `gpt-5.6-sol`, which
+  this local CLI account could not start. Both roles now use the already proven
+  local `gpt-5.6-terra` transport at maximum reasoning. The rerun completed the
+  intended Planner -> Opposition -> Chair synthesis -> Fact Finder -> Chair
+  result sequence without plan-by-plan human confirmation. The embedded client
+  intentionally bypasses Gateway persistence, so it was not used as Result
+  Inbox evidence.
+- A separate authenticated local Gateway smoke thread
+  `v3-gateway-smoke-1784448869` then proved the actual V3 transport. The first
+  Chair Run durably wrote one Goal Mandate and one Operating Brief, dispatched
+  one background Fact Finder, and ended. The child result was independently
+  appended unchanged; the automatic wake created one second successful Chair
+  Run, which explicitly acknowledged the result and wrote a revised Brief. The
+  notification fact was recorded only after that wake succeeded. SQLite shows
+  the six append-only facts in order: mandate, brief, result received,
+  acknowledgement, revised brief, notification. No result body was merged or
+  interpreted by the program.
+- The post-fix prompt/role selection passed 42 focused tests, Ruff passed, the
+  NextOS Skill validator passed, and the SkillOpt static probe remained hard
+  1.0 across train, validation, and two test cases. The one-off Gateway polling
+  wrapper was interrupted after the durable success facts appeared because its
+  exit predicate still required an unacknowledged result after the Chair had
+  already acknowledged it; that wrapper condition did not affect either Run or
+  the persisted events.
+- The permanently frozen program-is-fact-only subsection was not changed. No
+  production or live business system was accessed or mutated, and no
+  credential, customer, or payment data was exposed.
+
+## 2026-07-19 — NextOS V3 organization map, project manager, and factual capacity
+
+- Added `organization.map.revised` as an owner-scoped append-only Goal
+  Workspace fact. A Chair can record its complete temporary organization map;
+  the latest opaque body is returned in later Chair context, `/goal-workspace`,
+  and the existing read-only Work Record panel. The implementation reuses the
+  generic Workspace events table, so it adds no schema or migration.
+- Added the fixed `project-manager` professional role and its role package. It
+  receives a Chair-provided Goal Mandate, Brief, Organization Map, and complete
+  stage facts, then returns a proposed next stage, dependencies, temporary
+  organization, risks, and handoff. It cannot dispatch work, alter Workspace
+  facts, approve results, close a goal, or advance a program state. Its two
+  role files are explicitly versionable alongside the other built-in NextOS
+  role packages.
+- Replaced the unbounded Command Room background child launch with one
+  process-local FIFO resource pool: 12 child `execute` slots across the
+  Gateway, 64 waiting slots, and at most 6 admitted queued-or-running children
+  for one `(user, Command Room thread)`. Admission consults only identity and
+  fixed numeric capacity; it never reads prompt or result content, chooses a
+  role, ranks priority, judges quality, recognizes a phase, or decides a next
+  AI action. A finished child releases its execution slot before its Chair wake
+  runs, so waiting work is not held behind conversational wake handling.
+- TaskLane now exposes raw `queued`, `running`, and `finished` execution facts
+  using the existing factual handoff envelope. The pool is deliberately local
+  to the single-Gateway topology: a restart still never invents a replacement
+  Python callable or claims durable distributed queuing.
+- Focused verification passed: 209 backend tests (one dependency deprecation
+  warning), Ruff, 8 frontend unit tests, `pnpm check`, 6 Work Record Playwright
+  scenarios, `git diff --check`, and the NextOS SkillOpt static probe with hard
+  1.0 on train, validation, and test cases. No production or live business
+  system was accessed or mutated, and no secret, customer, or payment data was
+  exposed.
+
 ## 2026-07-19 — Frontend recovery, performance, stale checks, and AI-AI-AI governance
 
 - Fixed the real chat recovery failures found in the repository-wide run:

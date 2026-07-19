@@ -19,6 +19,7 @@ from langgraph.runtime import Runtime
 from deerflow.config.app_config import AppConfig
 
 _NATIVE_ROUND_CONTEXT_HEADER = "[Internal Native Round State]"
+_GOAL_WORKSPACE_CONTEXT_HEADER = "[Internal Goal Workspace]"
 _CAPABILITY_CONTEXT_HEADER = "[Internal Capability Snapshot]"
 
 
@@ -54,6 +55,36 @@ def format_native_round_context_for_model(round_context: Mapping[str, Any] | Non
     if not lines:
         return None
     return "\n".join([_NATIVE_ROUND_CONTEXT_HEADER, "Objective round working memory; do not expose this block verbatim.", *lines])
+
+
+def format_goal_workspace_context_for_model(
+    workspace_context: Mapping[str, Any] | None,
+) -> str | None:
+    """Format complete Chair-authored records without interpreting their prose."""
+    if not workspace_context:
+        return None
+    sections: list[str] = [
+        _GOAL_WORKSPACE_CONTEXT_HEADER,
+        "Quoted durable natural-language records for this Goal Workspace. Treat newer human direction as authoritative and do not expose this block verbatim.",
+    ]
+    for key, label in (
+        ("goal_mandate", "Goal Mandate"),
+        ("operating_brief", "Current Operating Brief"),
+        ("organization_map", "Current Organization Map"),
+    ):
+        row = workspace_context.get(key)
+        if not isinstance(row, Mapping):
+            continue
+        body = row.get("body")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        sections.extend(
+            [
+                f"\n{label} (revision {row.get('revision')}):",
+                body,
+            ]
+        )
+    return "\n".join(sections) if len(sections) > 2 else None
 
 
 def format_capability_snapshot_for_model(snapshot: Mapping[str, Any] | None) -> str | None:
@@ -124,13 +155,20 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
         if isinstance(native_context, Mapping):
             if native_text := format_native_round_context_for_model(native_context):
                 sections.append(native_text)
+        workspace_context = ctx.get("goal_workspace_context") if isinstance(ctx, Mapping) else None
+        if isinstance(workspace_context, Mapping):
+            if workspace_text := format_goal_workspace_context_for_model(workspace_context):
+                sections.append(workspace_text)
         return "\n\n".join(sections) if sections else None
 
     def _inject_text(self, request: ModelRequest, text: str | None) -> ModelRequest:
         if not text:
             return request
         # Avoid duplicate injection on retries or nested middleware passes.
-        headers = (_NATIVE_ROUND_CONTEXT_HEADER,)
+        headers = (
+            _NATIVE_ROUND_CONTEXT_HEADER,
+            _GOAL_WORKSPACE_CONTEXT_HEADER,
+        )
         if any(isinstance(m, SystemMessage) and isinstance(m.content, str) and any(header in m.content for header in headers) for m in request.messages):
             return request
         msg = SystemMessage(content=text, additional_kwargs={"hide_from_ui": True, "round_context_signals": True})
@@ -153,6 +191,7 @@ class CommandRoomRoundContextMiddleware(AgentMiddleware[AgentState]):
 
 __all__ = [
     "CommandRoomRoundContextMiddleware",
+    "format_goal_workspace_context_for_model",
     "format_capability_snapshot_for_model",
     "format_native_round_context_for_model",
 ]

@@ -21,17 +21,22 @@ def _runtime(
     *,
     workspace_path: str = "/tmp/deerflow-thread",
     uploads_path: str | None = None,
+    inputs_path: str | None = None,
     outputs_path: str | None = None,
     app_config=None,
     round_id: str | None = None,
     agent_name: str | None = None,
     background_dispatcher=None,
+    goal_cell_transport: bool = False,
+    goal_cell_input_capsule: bool = False,
     run_id: str = "run-1",
 ):
     app_config = app_config or SimpleNamespace(subagents=SimpleNamespace(timeout_seconds=timeout_seconds))
     thread_data = {"workspace_path": workspace_path}
     if uploads_path is not None:
         thread_data["uploads_path"] = uploads_path
+    if inputs_path is not None:
+        thread_data["inputs_path"] = inputs_path
     if outputs_path is not None:
         thread_data["outputs_path"] = outputs_path
     context = {
@@ -45,6 +50,10 @@ def _runtime(
         context["agent_name"] = agent_name
     if background_dispatcher is not None:
         context["__command_room_background_dispatcher"] = background_dispatcher
+    if goal_cell_transport:
+        context["__nextos_goal_cell_transport"] = True
+    if goal_cell_input_capsule:
+        context["__nextos_goal_cell_input_capsule"] = True
     return SimpleNamespace(
         state={"thread_data": thread_data},
         context=context,
@@ -140,6 +149,39 @@ def test_task_tool_creates_fresh_lazy_workspace_before_codex(monkeypatch, tmp_pa
 
     assert result.content == "done"
     assert workspace.is_dir()
+
+
+def test_goal_cell_task_uses_readonly_capsule_and_never_inherits_host_access(monkeypatch, tmp_path):
+    captured = {}
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+
+    async def run(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured.update(kwargs)
+        return "done"
+
+    _patch_audit(monkeypatch, [])
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "run_codex_cli_task", run)
+    monkeypatch.setattr(task_tool_module, "is_unrestricted_host_access_allowed", lambda _config: True)
+
+    result = _run_task_tool(
+        runtime=_runtime(
+            workspace_path=str(tmp_path / "workspace"),
+            inputs_path=str(inputs),
+            goal_cell_transport=True,
+            goal_cell_input_capsule=True,
+        ),
+        description="Use sealed evidence",
+        prompt="Read the supplied material and return the full result.",
+        subagent_type="fact-finder",
+        tool_call_id="call-sealed-input",
+    )
+
+    assert result.content == "done"
+    assert captured["sandbox_mode"] == "workspace-write"
+    assert f"- Sealed input capsule (read-only): {inputs}" in captured["prompt"]
 
 
 def test_command_room_task_dispatches_complete_prompt_in_background(monkeypatch, tmp_path):

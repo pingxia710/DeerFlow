@@ -30,6 +30,8 @@ class CommandRoomBackgroundJob:
     execute: Callable[[], Awaitable[CommandRoomBackgroundOutcome]] = field(repr=False)
     round_id: str | None = None
     wake_context: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    result_author_run_id: str | None = None
+    result_metadata: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
 
 class CommandRoomBackgroundDispatcher(Protocol):

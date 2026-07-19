@@ -20,6 +20,12 @@ export const queryKeys = {
     ) => ["thread", threadId, "wake-facts", runId, roundId] as const,
     timeline: (threadId?: string | null) =>
       ["thread", threadId, "timeline"] as const,
+    goalWorkspace: (threadId?: string | null) =>
+      ["thread", threadId, "goal-workspace"] as const,
+    goalWorkspaceHistory: (threadId?: string | null) =>
+      ["thread", threadId, "goal-workspace-history"] as const,
+    goalTree: (threadId?: string | null) =>
+      ["thread", threadId, "goal-tree"] as const,
     capabilitySnapshot: (threadId?: string | null) =>
       ["capability-snapshot", threadId ?? "global"] as const,
     metadata: (threadId?: string | null, isMock = false) =>
@@ -75,6 +81,9 @@ export function isThreadScopedQueryKey(
       queryKey[2] === "runtime-snapshot" ||
       queryKey[2] === "wake-facts" ||
       queryKey[2] === "timeline" ||
+      queryKey[2] === "goal-workspace" ||
+      queryKey[2] === "goal-workspace-history" ||
+      queryKey[2] === "goal-tree" ||
       queryKey[2] === "run" ||
       queryKey[2] === "task-result" ||
       queryKey[2] === "run-artifacts" ||

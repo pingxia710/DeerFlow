@@ -51,26 +51,36 @@ README files, or skills rather than expanding this file.
 - A professional role is prompt context only. Codex CLI owns its reasoning,
   planning, native tools, checks, and response.
 - DeerFlow has no program-defined work stages, approval chain, quality gate,
-  automatic checker, automatic rework, or automatic project close. For
-  substantive Command Room work, planning is distinct: `planner` proposal →
-  one `opposition` challenge → Chair execution plan → human discussion and
-  explicit execution authorization → plan-directed execution → plan completion.
-  This exists only through complete prompts and natural results, never program
-  state. Opposition runs after the complete proposal; repeat it only when
-  synthesis changes the core direction. Parallel alternatives are additional
-  planning perspectives, not opposition. Task results are facts for continuing
-  the plan, not task-level acceptance or a required verifier loop.
+  automatic checker, rework, or close. Human input sets the Goal Mandate:
+  interest, direction, non-goals, real permissions, and return boundaries.
+  For a new substantive execution plan or a material revision, planning is
+  AI-owned: one `planner` proposal → one `opposition` challenge → Chair execution
+  plan → human discussion and explicit natural-language confirmation →
+  plan-directed execution. Do not rerun planning for work already covered by a
+  confirmed plan; execution, ordinary fixes, stopping low-value work, and bounded
+  optimizations continue directly under Chair judgment. When a completed
+  audit, investigation, or other phase changes what should happen next, use a
+  `project-manager` proposal → one `opposition` challenge → Chair next-stage
+  plan → human discussion before that plan executes. This sequence uses complete
+  prompts and natural results, never program state. Independent execution should
+  run in parallel when useful; six Command Room slots are capacity, not a task
+  target. Do not overload one child with multiple independently separable
+  professional domains merely to keep the task count low. Task results are facts
+  for continuing the plan, not acceptance or a required verifier loop.
 - The lead AI chooses how many useful `task()` calls to issue from the current
-  goal and context. DeerFlow does not truncate, queue, batch, or defer those
-  calls programmatically. The configured child default remains `gpt-5.6-terra`,
-  reasoning effort `xhigh`, and timeout 3600 seconds.
+  goal and context. The Gateway applies only the confirmed content-blind
+  resource capacity; it does not choose roles, work, priority, or sequence. The
+  configured child default remains `gpt-5.6-terra`, reasoning effort `xhigh`,
+  and timeout 3600 seconds.
 
 ## Role Packages And Skill Method
 
 - Every configured reusable Command Room role has one role package under
   `skills/custom/<role-skill>/`: an `AGENTS.md` role charter and a `SKILL.md`
   method card. The Chair package is `nextos-commander`; the current worker
-  packages are planner, executor, fact-finder, opposition, and recorder.
+  packages are planner, project manager, executor, fact finder, opposition,
+  recorder, runtime reliability auditor, persistence and migration auditor,
+  frontend protocol auditor, security auditor, and platform operations auditor.
 - `AGENTS.md` defines the role's authority, boundaries, handoff responsibility,
   and decisions it must not make. `SKILL.md` defines only the narrow recurring
   method. The current task prompt supplies the goal, facts, paths, and complete
@@ -111,7 +121,7 @@ Write every role `SKILL.md` from the WorkOS skill-management practice:
   recurring professional method in role `SKILL.md`, task-only context in the
   current prompt, and long stable knowledge in docs or Skill `references/`.
   Do not copy the same full rule into every layer.
-- Within an already confirmed goal and governance model, the Chair may initiate
+- Within a confirmed Goal Mandate and governance model, the Chair may initiate
   and delegate a narrow role-Skill improvement or a clarification of an existing
   role boundary, run its focused positive and negative checks, record the facts,
   and report the change. Ask the human before changing project purpose, Goal

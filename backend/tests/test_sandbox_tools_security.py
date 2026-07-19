@@ -20,6 +20,7 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_local_read_path,
     _resolve_skills_path,
+    _should_use_direct_host_path,
     bash_tool,
     mask_local_paths_in_output,
     read_file_tool,
@@ -61,6 +62,20 @@ def _mock_local_sandbox_config(
 def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
     assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
+
+
+def test_goal_cell_input_capsule_maps_inside_the_current_thread_only() -> None:
+    thread_data = {**_THREAD_DATA, "inputs_path": "/tmp/deer-flow/threads/t1/user-data/inputs"}
+
+    assert Path(replace_virtual_path("/mnt/user-data/inputs/brief.md", thread_data)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/inputs/brief.md"
+    assert _resolve_and_validate_user_data_path("/mnt/user-data/inputs/brief.md", thread_data).endswith("/threads/t1/user-data/inputs/brief.md")
+
+
+def test_goal_cell_transport_never_uses_direct_host_paths(monkeypatch) -> None:
+    monkeypatch.setattr("deerflow.sandbox.tools._is_unrestricted_local_host_access_enabled", lambda: True)
+    runtime = SimpleNamespace(context={"__nextos_goal_cell_transport": True})
+
+    assert not _should_use_direct_host_path("/Users/pingxia/private.txt", runtime)
 
 
 def test_replace_virtual_path_preserves_trailing_slash() -> None:

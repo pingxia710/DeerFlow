@@ -38,6 +38,13 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.runtime.goal_cells import (
+    GOAL_CELL_INPUT_CAPSULE_CONTEXT_KEY,
+    GOAL_CELL_INPUT_CAPSULE_KEY,
+    GOAL_CELL_PARENT_THREAD_KEY,
+    GOAL_CELL_THREAD_METADATA_KEYS,
+    GOAL_CELL_TRANSPORT_CONTEXT_KEY,
+)
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.schemas import (
     CommandRoomWakeAdmission,
@@ -62,6 +69,8 @@ _RESERVED_COMMAND_ROOM_WAKE_METADATA = frozenset(
         "command_room_wake_id",
         "source_run_id",
         "source_task_id",
+        "workspace_inbox_through_seq",
+        "goal_cell_launch",
     }
 )
 _TASK_EVENT_REPLAY_TYPES = [
@@ -692,6 +701,11 @@ async def start_run(
             status_code=400,
             detail="Command Room wake metadata is reserved for internal use",
         )
+    if GOAL_CELL_THREAD_METADATA_KEYS.intersection(metadata):
+        raise HTTPException(
+            status_code=400,
+            detail="Goal Cell thread metadata is reserved for internal use",
+        )
     if command_room_wake_admission is not None and (command_room_wake_admission.thread_id != thread_id or command_room_wake_admission.assistant_id != getattr(body, "assistant_id", None)):
         raise ValueError("command room wake admission does not match the requested run")
     if return_command_room_wake_admission and command_room_wake_admission is None:
@@ -779,6 +793,22 @@ async def start_run(
         }
         await apply_checkpoint_to_run_config(config, body=execution_body, thread_id=thread_id, request=request)
         merge_run_context_overrides(config, getattr(execution_body, "context", None))
+        durable_metadata = durable_thread_record.get("metadata") if isinstance(durable_thread_record, dict) else None
+        if isinstance(durable_metadata, dict) and isinstance(durable_metadata.get(GOAL_CELL_PARENT_THREAD_KEY), str):
+            # This is an access-transport fact set from durable server metadata.
+            # It neither accepts, orders, nor evaluates the child AI's work.
+            config.setdefault("context", {})[GOAL_CELL_TRANSPORT_CONTEXT_KEY] = True
+            if isinstance(durable_metadata.get(GOAL_CELL_INPUT_CAPSULE_KEY), list) and durable_metadata[GOAL_CELL_INPUT_CAPSULE_KEY]:
+                config.setdefault("context", {})[GOAL_CELL_INPUT_CAPSULE_CONTEXT_KEY] = True
+        workspace_store = getattr(run_ctx, "workspace_event_store", None)
+        current_context = getattr(workspace_store, "current_context", None)
+        if execution_body.assistant_id == "command-room" and callable(current_context):
+            goal_workspace_context = await current_context(
+                thread_id=thread_id,
+                user_id=owner_user_id,
+            )
+            if any(goal_workspace_context.values()):
+                config.setdefault("context", {})["goal_workspace_context"] = goal_workspace_context
         inject_authenticated_user_context(config, request)
         return (
             resolve_agent_factory(execution_body.assistant_id),

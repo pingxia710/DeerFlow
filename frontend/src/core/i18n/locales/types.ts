@@ -314,6 +314,32 @@ export interface Translations {
       runRunning: string;
       tasksRunning: (count: number) => string;
       eventHistory: string;
+      goalWorkspace: string;
+      loadingGoalWorkspace: string;
+      goalWorkspaceUnavailable: string;
+      workspaceHistory: string;
+      workspaceHistoryOnDemand: string;
+      loadingWorkspaceHistory: string;
+      workspaceHistoryUnavailable: string;
+      noWorkspaceHistory: string;
+      loadOlderWorkspaceFacts: string;
+      loadingOlderWorkspaceFacts: string;
+      goalMandate: string;
+      operatingBrief: string;
+      organizationMap: string;
+      noMandate: string;
+      noOperatingBrief: string;
+      noOrganizationMap: string;
+      revision: (revision: number) => string;
+      resultInbox: string;
+      result: string;
+      noResults: string;
+      inboxFacts: (notified: number, acknowledged: number) => string;
+      goalTree: string;
+      goalTreeUnavailable: string;
+      noGoalCells: string;
+      goalCell: string;
+      runtimeStatus: (status: string) => string;
       backgroundWakeFailed: (
         taskId: string,
         sourceRunId: string,

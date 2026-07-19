@@ -508,7 +508,14 @@ def test_make_lead_agent_command_room_keeps_read_only_and_coordination_tools(mon
     assert config["metadata"]["tool_groups"] == ["file:read"]
     assert "subagent_tool_groups" not in config["metadata"]
     assert "subagent_available_skills" not in config["metadata"]
-    assert result["tools"] == []
+    assert [tool.name for tool in result["tools"]] == [
+        "record_goal_workspace",
+        "read_goal_workspace_history",
+        "read_workspace_results",
+        "acknowledge_workspace_results",
+        "create_goal_cell",
+        "return_to_parent",
+    ]
 
 
 def test_command_room_filters_to_read_only_and_coordination_tools():
@@ -521,6 +528,12 @@ def test_command_room_filters_to_read_only_and_coordination_tools():
         SimpleNamespace(name="task"),
         SimpleNamespace(name="ask_clarification"),
         SimpleNamespace(name="present_files"),
+        SimpleNamespace(name="record_goal_workspace"),
+        SimpleNamespace(name="read_goal_workspace_history"),
+        SimpleNamespace(name="read_workspace_results"),
+        SimpleNamespace(name="acknowledge_workspace_results"),
+        SimpleNamespace(name="create_goal_cell"),
+        SimpleNamespace(name="return_to_parent"),
     ]
 
     filtered = lead_agent_module._filter_coordinator_tools("command-room", tools)
@@ -533,6 +546,12 @@ def test_command_room_filters_to_read_only_and_coordination_tools():
         "task",
         "ask_clarification",
         "present_files",
+        "record_goal_workspace",
+        "read_goal_workspace_history",
+        "read_workspace_results",
+        "acknowledge_workspace_results",
+        "create_goal_cell",
+        "return_to_parent",
     ]
     assert lead_agent_module._filter_coordinator_tools("builder", tools) == tools
 

@@ -6,6 +6,14 @@ import { getBackendBaseURL } from "@/core/config";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import {
+  parseGoalTree,
+  parseGoalWorkspace,
+  parseGoalWorkspaceHistory,
+  type GoalTree,
+  type GoalWorkspace,
+  type GoalWorkspaceHistoryPage,
+} from "./goal-workspace";
+import {
   parseThreadTimelinePage,
   type ThreadTimelinePage,
 } from "./thread-timeline";
@@ -23,6 +31,66 @@ export class ThreadTimelineRequestError extends Error {
     super(message);
     this.name = "ThreadTimelineRequestError";
   }
+}
+
+export async function fetchGoalWorkspace(
+  threadId: string,
+): Promise<GoalWorkspace> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL().replace(/\/$/, "")}/api/threads/${encodeURIComponent(threadId)}/goal-workspace`,
+    {
+      method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Failed to load Goal Workspace.");
+  }
+  return parseGoalWorkspace(await response.json(), threadId);
+}
+
+export async function fetchGoalWorkspaceHistory(
+  threadId: string,
+  {
+    beforeRevision,
+    limit = 20,
+    signal,
+  }: {
+    beforeRevision?: number | null;
+    limit?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<GoalWorkspaceHistoryPage> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (typeof beforeRevision === "number") {
+    query.set("before_revision", String(beforeRevision));
+  }
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL().replace(/\/$/, "")}/api/threads/${encodeURIComponent(threadId)}/goal-workspace/history?${query}`,
+    {
+      method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Failed to load Goal Workspace history.");
+  }
+  return parseGoalWorkspaceHistory(await response.json(), threadId);
+}
+
+export async function fetchGoalTree(threadId: string): Promise<GoalTree> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL().replace(/\/$/, "")}/api/threads/${encodeURIComponent(threadId)}/goal-tree`,
+    {
+      method: "GET",
+      timeoutMs: DEFAULT_NON_STREAMING_REQUEST_TIMEOUT_MS,
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Failed to load Goal tree.");
+  }
+  return parseGoalTree(await response.json());
 }
 
 export async function fetchThreadTimeline(

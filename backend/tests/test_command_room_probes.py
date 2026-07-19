@@ -67,3 +67,6 @@ def test_command_room_probes_request_plan_then_opposition_then_chair_synthesis()
         assert "方案返回后" in prompt
         assert "opposition 跑一轮" in prompt
         assert "指挥室合成定案" in prompt
+        assert "记录为 Goal Mandate" in prompt
+        assert "不等待逐计划人工确认" in prompt
+        assert "人明确确认执行后" not in prompt

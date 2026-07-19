@@ -76,6 +76,7 @@ def _build_runtime_context(
     caller_context: Any | None,
     app_config: AppConfig | None = None,
     command_room_background_dispatcher: Any | None = None,
+    goal_cell_dispatcher: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -97,6 +98,8 @@ def _build_runtime_context(
         runtime_ctx["app_config"] = app_config
     if command_room_background_dispatcher is not None:
         runtime_ctx["__command_room_background_dispatcher"] = command_room_background_dispatcher
+    if goal_cell_dispatcher is not None:
+        runtime_ctx["__goal_cell_dispatcher"] = goal_cell_dispatcher
     return runtime_ctx
 
 
@@ -128,7 +131,9 @@ class RunContext:
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     round_store: Any | None = field(default=None)
+    workspace_event_store: Any | None = field(default=None)
     command_room_background_dispatcher: Any | None = field(default=None)
+    goal_cell_dispatcher: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -142,8 +147,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context["__run_journal"] = runtime_context["__run_journal"]
         if "round_context" in runtime_context:
             existing_context["round_context"] = runtime_context["round_context"]
+        if "__workspace_event_store" in runtime_context:
+            existing_context["__workspace_event_store"] = runtime_context["__workspace_event_store"]
         if "__command_room_background_dispatcher" in runtime_context:
             existing_context["__command_room_background_dispatcher"] = runtime_context["__command_room_background_dispatcher"]
+        if "__goal_cell_dispatcher" in runtime_context:
+            existing_context["__goal_cell_dispatcher"] = runtime_context["__goal_cell_dispatcher"]
         return
 
     config["context"] = dict(runtime_context)
@@ -347,7 +356,10 @@ async def run_agent(
             config.get("context"),
             ctx.app_config,
             ctx.command_room_background_dispatcher,
+            ctx.goal_cell_dispatcher,
         )
+        if ctx.workspace_event_store is not None:
+            runtime_ctx["__workspace_event_store"] = ctx.workspace_event_store
         round_context = (record.metadata or {}).get("round_context")
         if isinstance(round_context, dict):
             runtime_ctx["round_context"] = round_context

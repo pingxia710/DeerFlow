@@ -25,13 +25,40 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "Read applicable `AGENTS.md`, `Progress.md`" in prompt
     assert "Progress is factual memory, never authority" in prompt
     assert "Make that AI-AI contract self-contained" in prompt
+    assert "exact working/input/output paths" in prompt
     assert "Read every complete natural result and choose every next action yourself" in prompt
-    assert "send the complete brief to a separate `planner`" in prompt
+    assert "send the complete brief to one `planner` first" in prompt
+    assert "new substantive execution plan or a material revision" in prompt
+    assert "Do not rerun planning for work already covered by a confirmed plan" in prompt
+    assert "stopping or cancelling low-value work" in prompt
     assert "to one `opposition` AI" in prompt
-    assert "original goal, facts, constraints, and criteria" in prompt
-    assert "disagreement is not mandatory" in prompt
-    assert "Run opposition again only if synthesis changes the core direction" in prompt
-    assert "wait for explicit" in prompt and "natural-language authorization before execution" in prompt
+    assert "original brief and complete Planner proposal" in prompt
+    assert "Present it to the human and stop for discussion" in prompt
+    assert "explicit natural-language confirmation" in prompt
+    assert "never a program state or gate" in prompt
+    assert "Six is resource capacity, not a task-count target" in prompt
+    assert "Goal Mandate" in prompt
+    assert "record_goal_workspace" in prompt
+    assert "Current Organization Map" in prompt
+    assert "project-manager" in prompt
+    assert "Give that complete proposal and the phase facts to one `opposition` AI" in prompt
+    assert "Present that plan to the human and stop for discussion before starting it" in prompt
+    assert "Prefer a matching fixed professional role" in prompt
+    assert "only for a genuinely one-off perspective" in prompt
+    assert "six outstanding child jobs" in prompt
+    assert "a Recorder child cannot substitute" in prompt
+    assert "read_goal_workspace_history" in prompt
+    assert "one bounded raw page" in prompt
+    assert "read_workspace_results" in prompt
+    assert "Failure never authorizes redispatch" in prompt
+    assert "A cancelled or interrupted task is stopped" in prompt
+    assert "acknowledge_workspace_results" in prompt
+    assert "create_goal_cell" in prompt
+    assert "return_to_parent" in prompt
+    assert "capability references never expand" in prompt
+    assert "never copies an entire parent Workspace" in prompt
+    assert "relevant factual revisions with complete bodies" in prompt
+    assert "copies their bytes without choosing relevance or judging them" in prompt
     assert "without task-level acceptance or a required verifier" in prompt
     assert "Compare each complete child result" in prompt
     assert "temporary independent checking perspective" in prompt
@@ -72,10 +99,16 @@ def test_subagent_audit_records_hashes_without_worker_text(tmp_path):
 def test_command_room_role_catalog_contains_prompt_context_only():
     assert set(COMMAND_ROOM_ROLE_CONFIGS) == {
         "planner",
+        "project-manager",
         "executor",
         "fact-finder",
         "opposition",
         "recorder",
+        "runtime-reliability-auditor",
+        "persistence-migration-auditor",
+        "frontend-protocol-auditor",
+        "security-auditor",
+        "platform-ops-auditor",
     }
     for role in COMMAND_ROOM_ROLE_CONFIGS.values():
         assert role.system_prompt == role.description
@@ -83,3 +116,8 @@ def test_command_room_role_catalog_contains_prompt_context_only():
     assert "after a planner proposal" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
     assert "no material challenge exists" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
     assert "does not approve" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
+    assert "restart" in COMMAND_ROOM_ROLE_CONFIGS["runtime-reliability-auditor"].description
+    assert "each supported database" in COMMAND_ROOM_ROLE_CONFIGS["persistence-migration-auditor"].description
+    assert "end-to-end proof" in COMMAND_ROOM_ROLE_CONFIGS["frontend-protocol-auditor"].description
+    assert "reproduced exploits" in COMMAND_ROOM_ROLE_CONFIGS["security-auditor"].description
+    assert "supply-chain" in COMMAND_ROOM_ROLE_CONFIGS["platform-ops-auditor"].description

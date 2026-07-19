@@ -397,7 +397,7 @@ async def test_0011_preserves_legacy_wake_without_identity_as_null(tmp_path: Pat
             wake_value = await connection.scalar(sa.text("SELECT command_room_wake_id FROM runs WHERE run_id = 'legacy-before-wake-id'"))
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
         assert wake_value is None
-        assert version == "0013_factual_round_records"
+        assert version == "0014_goal_workspace_events"
     finally:
         await engine.dispose()
 

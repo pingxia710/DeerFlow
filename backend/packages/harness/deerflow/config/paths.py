@@ -288,6 +288,7 @@ class Paths:
                 └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
                     ├── workspace/     <-- /mnt/user-data/workspace/
                     ├── uploads/       <-- /mnt/user-data/uploads/
+                    ├── inputs/        <-- /mnt/user-data/inputs/ (Goal Cell sealed copies)
                     └── outputs/       <-- /mnt/user-data/outputs/
 
     BaseDir resolution (in priority order):
@@ -453,6 +454,15 @@ class Paths:
         Sandbox: `/mnt/user-data/outputs/`
         """
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
+
+    def sandbox_inputs_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
+        """Host path for a Goal Cell's sealed input capsule.
+
+        The directory is deliberately not part of :meth:`ensure_thread_dirs`:
+        a Goal Cell creator writes exact byte snapshots there and then makes
+        the capsule read-only. Ordinary threads do not need an inputs mount.
+        """
+        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "inputs"
 
     def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """

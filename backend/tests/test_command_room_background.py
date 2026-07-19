@@ -10,6 +10,10 @@ from app.gateway import command_room_background as background_module
 from deerflow.persistence.base import Base
 from deerflow.persistence.round_state import MemoryRoundStateStore, RoundStateRepository
 from deerflow.persistence.run import RunRepository
+from deerflow.persistence.workspace_event import (
+    RESULT_RECEIVED,
+    MemoryWorkspaceEventStore,
+)
 from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import (
@@ -26,6 +30,149 @@ async def _background_snapshot(*, user_id: str | None = None):
     app = SimpleNamespace(state=SimpleNamespace(round_state_store=round_store))
     state = {"user": SimpleNamespace(id=user_id)} if user_id else {}
     return background_module._RequestSnapshot(app=app, headers=[], state=state), round_store
+
+
+def test_background_capacity_is_fifo_and_content_blind(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(background_module, "_MAX_EXECUTING_CHILDREN", 2)
+        monkeypatch.setattr(background_module, "_MAX_QUEUED_CHILDREN", 2)
+        monkeypatch.setattr(
+            background_module,
+            "_MAX_OUTSTANDING_CHILDREN_PER_COMMAND_ROOM",
+            2,
+        )
+        round_store = MemoryRoundStateStore()
+        app = SimpleNamespace(state=SimpleNamespace(round_state_store=round_store))
+
+        async def snapshot(thread_id: str, run_id: str):
+            await round_store.bind_run(thread_id=thread_id, run_id=run_id)
+            return background_module._RequestSnapshot(app=app, headers=[], state={})
+
+        release = asyncio.Event()
+        two_running = asyncio.Event()
+        started = 0
+
+        async def execute():
+            nonlocal started
+            started += 1
+            if started == 2:
+                two_running.set()
+            await release.wait()
+            return CommandRoomBackgroundOutcome(status="completed", result="done")
+
+        async def wake(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(background_module, "_start_wake_run", wake)
+        service = background_module.CommandRoomBackgroundService()
+        first_snapshot = await snapshot("thread-a", "run-a")
+        second_snapshot = await snapshot("thread-b", "run-b")
+
+        def job(thread_id: str, run_id: str, task_id: str):
+            return CommandRoomBackgroundJob(
+                thread_id=thread_id,
+                source_run_id=run_id,
+                task_id=task_id,
+                description=task_id,
+                subagent_type="executor",
+                execute=execute,
+            )
+
+        await service.dispatch(job("thread-a", "run-a", "a-1"), first_snapshot)
+        await service.dispatch(job("thread-b", "run-b", "b-1"), second_snapshot)
+        await two_running.wait()
+        await service.dispatch(job("thread-a", "run-a", "a-2"), first_snapshot)
+        await service.dispatch(job("thread-b", "run-b", "b-2"), second_snapshot)
+
+        queued_lane = await round_store.get_task_lane(
+            thread_id="thread-a",
+            run_id="run-a",
+            task_id="a-2",
+        )
+        assert queued_lane["status"] == "pending"
+
+        try:
+            await service.dispatch(job("thread-c", "run-c", "c-1"), await snapshot("thread-c", "run-c"))
+        except RuntimeError as exc:
+            assert "queue is full" in str(exc)
+        else:
+            raise AssertionError("the global waiting queue should reject an admission after its numeric capacity")
+
+        try:
+            await service.dispatch(job("thread-a", "run-a", "a-3"), first_snapshot)
+        except RuntimeError as exc:
+            assert "2 queued or running" in str(exc)
+        else:
+            raise AssertionError("one Command Room should not hold more than its numeric capacity")
+
+        release.set()
+        await asyncio.gather(*tuple(service._tasks.values()))
+        assert started == 4
+        await service.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_background_waiting_jobs_run_in_fifo_order(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(background_module, "_MAX_EXECUTING_CHILDREN", 1)
+        monkeypatch.setattr(background_module, "_MAX_QUEUED_CHILDREN", 2)
+        monkeypatch.setattr(
+            background_module,
+            "_MAX_OUTSTANDING_CHILDREN_PER_COMMAND_ROOM",
+            2,
+        )
+        round_store = MemoryRoundStateStore()
+        app = SimpleNamespace(state=SimpleNamespace(round_state_store=round_store))
+
+        async def snapshot(thread_id: str, run_id: str):
+            await round_store.bind_run(thread_id=thread_id, run_id=run_id)
+            return background_module._RequestSnapshot(app=app, headers=[], state={})
+
+        release = asyncio.Event()
+        first_running = asyncio.Event()
+        started: list[str] = []
+
+        async def execute(task_id: str):
+            started.append(task_id)
+            if task_id == "a-1":
+                first_running.set()
+                await release.wait()
+            return CommandRoomBackgroundOutcome(status="completed", result=task_id)
+
+        async def wake(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(background_module, "_start_wake_run", wake)
+        service = background_module.CommandRoomBackgroundService()
+        first_snapshot = await snapshot("thread-a", "run-a")
+        second_snapshot = await snapshot("thread-b", "run-b")
+
+        def job(thread_id: str, run_id: str, task_id: str):
+            async def execute_job():
+                return await execute(task_id)
+
+            return CommandRoomBackgroundJob(
+                thread_id=thread_id,
+                source_run_id=run_id,
+                task_id=task_id,
+                description=task_id,
+                subagent_type="executor",
+                execute=execute_job,
+            )
+
+        await service.dispatch(job("thread-a", "run-a", "a-1"), first_snapshot)
+        await first_running.wait()
+        await service.dispatch(job("thread-a", "run-a", "a-2"), first_snapshot)
+        await service.dispatch(job("thread-b", "run-b", "b-1"), second_snapshot)
+        assert started == ["a-1"]
+
+        release.set()
+        await asyncio.gather(*tuple(service._tasks.values()))
+        assert started == ["a-1", "a-2", "b-1"]
+        await service.shutdown()
+
+    asyncio.run(scenario())
 
 
 def test_wake_status_wait_does_not_trigger_stale_recovery():
@@ -131,6 +278,184 @@ def test_background_service_retries_when_an_admitted_wake_run_fails(monkeypatch)
     asyncio.run(scenario())
 
 
+def test_concurrent_results_are_persisted_separately_and_wake_once(monkeypatch):
+    async def scenario():
+        class BarrierWorkspaceStore(MemoryWorkspaceEventStore):
+            def __init__(self):
+                super().__init__()
+                self.result_appends = 0
+                self.both_results_persisted = asyncio.Event()
+
+            async def append(self, **kwargs):
+                row = await super().append(**kwargs)
+                if kwargs["event_type"] == RESULT_RECEIVED:
+                    self.result_appends += 1
+                    if self.result_appends == 2:
+                        self.both_results_persisted.set()
+                    await self.both_results_persisted.wait()
+                return row
+
+        service = background_module.CommandRoomBackgroundService()
+        snapshot, round_store = await _background_snapshot(user_id="user-1")
+        workspace_store = BarrierWorkspaceStore()
+        snapshot.app.state.workspace_event_store = workspace_store
+        wake_batches = []
+
+        async def start_wake(_snapshot, _job, _outcome, **kwargs):
+            wake_batches.append(kwargs["workspace_results"])
+            return None
+
+        monkeypatch.setattr(background_module, "_start_wake_run", start_wake)
+
+        async def first_execute():
+            return CommandRoomBackgroundOutcome(
+                status="completed",
+                result="Complete planner result, unchanged.",
+            )
+
+        async def second_execute():
+            return CommandRoomBackgroundOutcome(
+                status="completed",
+                result="Complete opposition result, unchanged.",
+            )
+
+        jobs = [
+            CommandRoomBackgroundJob(
+                thread_id="thread-1",
+                source_run_id="run-1",
+                task_id="task-planner",
+                description="Plan",
+                subagent_type="planner",
+                execute=first_execute,
+            ),
+            CommandRoomBackgroundJob(
+                thread_id="thread-1",
+                source_run_id="run-1",
+                task_id="task-opposition",
+                description="Challenge",
+                subagent_type="opposition",
+                execute=second_execute,
+            ),
+        ]
+        for job in jobs:
+            await service.dispatch(job, snapshot)
+        await asyncio.gather(*tuple(service._tasks.values()))
+
+        assert len(wake_batches) == 1
+        assert [row["body"] for row in wake_batches[0]] == [
+            "Complete planner result, unchanged.",
+            "Complete opposition result, unchanged.",
+        ]
+        inbox = await workspace_store.result_inbox(
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+        assert [row["body"] for row in inbox["results"]] == [
+            "Complete planner result, unchanged.",
+            "Complete opposition result, unchanged.",
+        ]
+        assert inbox["acknowledged_through_seq"] == 0
+        assert inbox["notified_through_seq"] == max(row["revision"] for row in inbox["results"])
+
+        lanes = [
+            await round_store.get_task_lane(
+                thread_id="thread-1",
+                run_id="run-1",
+                task_id=job.task_id,
+                user_id="user-1",
+            )
+            for job in jobs
+        ]
+        wakes = [lane["handoff"]["background_recovery"]["wake"] for lane in lanes]
+        assert all(wake["state"] == "completed" for wake in wakes)
+        assert sorted(bool(wake.get("coalesced")) for wake in wakes) == [False, True]
+        await service.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_records_notification_for_an_already_successful_inbox_wake(
+    monkeypatch,
+):
+    async def scenario():
+        service = background_module.CommandRoomBackgroundService()
+        snapshot, round_store = await _background_snapshot(user_id="user-1")
+        workspace_store = MemoryWorkspaceEventStore()
+        snapshot.app.state.workspace_event_store = workspace_store
+        wake_id = str(uuid4())
+
+        class RunManager:
+            async def find_command_room_wake(self, admission, *, probe_stale):
+                assert admission.wake_id == wake_id
+                assert probe_stale is True
+                return SimpleNamespace(status="success")
+
+        snapshot.app.state.run_manager = RunManager()
+
+        async def execute():
+            raise AssertionError("recovery must not execute persisted work")
+
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-recovery-inbox",
+            description="Research",
+            subagent_type="fact-finder",
+            execute=execute,
+        )
+        outcome = CommandRoomBackgroundOutcome(
+            status="completed",
+            result="Complete recovered result, unchanged.",
+        )
+        result_event = await service._ensure_result_event(
+            snapshot,
+            job,
+            outcome,
+        )
+        assert result_event is not None
+        await service._persist_state(
+            job,
+            snapshot,
+            outcome=outcome,
+            wake={
+                "state": "running",
+                "attempts": 1,
+                "wake_id": wake_id,
+                "run_id": "wake-run",
+                "workspace_inbox_through_seq": result_event["revision"],
+            },
+            workspace_event_seq=result_event["revision"],
+        )
+
+        wake_calls = []
+
+        async def start_wake(*_args, **_kwargs):
+            wake_calls.append(True)
+
+        monkeypatch.setattr(background_module, "_start_wake_run", start_wake)
+        recovered_service = background_module.CommandRoomBackgroundService()
+        await recovered_service.recover(snapshot.app)
+        await asyncio.gather(*tuple(recovered_service._tasks.values()))
+
+        inbox = await workspace_store.result_inbox(
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+        lane = await round_store.get_task_lane(
+            thread_id="thread-1",
+            run_id="run-1",
+            task_id="task-recovery-inbox",
+            user_id="user-1",
+        )
+        assert wake_calls == []
+        assert inbox["notified_through_seq"] == result_event["revision"]
+        assert lane["handoff"]["background_recovery"]["wake"]["state"] == ("completed")
+        assert recovered_service._tasks == {}
+        await recovered_service.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch):
     async def scenario():
         snapshot, round_store = await _background_snapshot()
@@ -176,6 +501,87 @@ def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch)
         assert recovered_lane["status"] == "failed"
         assert background["wake"]["state"] == "completed"
         await recovered_service.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_records_cancelled_child_without_waking_chair(monkeypatch):
+    async def scenario():
+        snapshot, round_store = await _background_snapshot()
+        service = background_module.CommandRoomBackgroundService()
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-cancelled",
+            description="Cancelled work",
+            subagent_type="executor",
+            execute=service._unavailable_execute,
+        )
+        await service._persist_state(
+            job,
+            snapshot,
+            outcome=CommandRoomBackgroundOutcome(status="cancelled", error="stopped"),
+            wake={"state": "pending", "attempts": 0},
+        )
+
+        async def wake(*_args, **_kwargs):
+            raise AssertionError("a cancelled child must not wake the Chair")
+
+        monkeypatch.setattr(background_module, "_start_wake_run", wake)
+        await service.recover(snapshot.app)
+
+        lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-cancelled")
+        wake_state = lane["handoff"]["background_recovery"]["wake"]
+        assert wake_state["state"] == "failed"
+        assert wake_state["last_status"] == "child_cancelled"
+        assert service._tasks == {}
+        await service.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_recovery_does_not_retry_an_interrupted_chair_wake(monkeypatch):
+    async def scenario():
+        snapshot, round_store = await _background_snapshot()
+
+        class RunManager:
+            async def find_command_room_wake(self, *_args, **_kwargs):
+                return SimpleNamespace(status="interrupted")
+
+        snapshot.app.state.run_manager = RunManager()
+        service = background_module.CommandRoomBackgroundService()
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-interrupted-wake",
+            description="Completed work",
+            subagent_type="executor",
+            execute=service._unavailable_execute,
+        )
+        await service._persist_state(
+            job,
+            snapshot,
+            outcome=CommandRoomBackgroundOutcome(status="completed", result="done"),
+            wake={
+                "state": "running",
+                "attempts": 1,
+                "wake_id": str(uuid4()),
+                "run_id": "stopped-wake-run",
+            },
+        )
+
+        async def wake(*_args, **_kwargs):
+            raise AssertionError("an interrupted Chair wake must not be retried")
+
+        monkeypatch.setattr(background_module, "_start_wake_run", wake)
+        await service.recover(snapshot.app)
+
+        lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-interrupted-wake")
+        wake_state = lane["handoff"]["background_recovery"]["wake"]
+        assert wake_state["state"] == "failed"
+        assert wake_state["last_status"] == "interrupted"
+        assert service._tasks == {}
+        await service.shutdown()
 
     asyncio.run(scenario())
 
@@ -477,6 +883,29 @@ def test_wake_message_marks_child_output_as_internal_factual_handoff():
     assert "Compare it with the latest human conversation" not in message
     assert "Do not ask" not in message
     assert "inspection facts" in message
+
+
+def test_result_inbox_wake_message_keeps_each_complete_result_separate():
+    message = background_module._result_inbox_wake_message(
+        [
+            {
+                "revision": 7,
+                "body": "Complete first result.",
+                "metadata": {"task_id": "task-1", "role": "planner"},
+            },
+            {
+                "revision": 9,
+                "body": "Complete second result.",
+                "metadata": {"task_id": "task-2", "role": "opposition"},
+            },
+        ]
+    )
+
+    assert "inbox_through_seq: 9" in message
+    assert "--- result_seq: 7 ---" in message
+    assert "Complete first result." in message
+    assert "--- result_seq: 9 ---" in message
+    assert "Complete second result." in message
 
 
 def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):

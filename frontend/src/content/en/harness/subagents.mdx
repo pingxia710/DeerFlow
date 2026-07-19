@@ -24,7 +24,15 @@ Sub-AIs solve two key problems in long-horizon work:
 
 ## Professional role labels
 
-DeerFlow exposes `general-purpose`, `bash`, and Command Room roles such as `planner`, `executor`, `fact-finder`, `opposition`, and `recorder`. A role label selects developer-authored context that DeerFlow prepends to the task: a configured `system_prompt`, otherwise the role description. It does not grant DeerFlow tools or create a turn loop; the one-shot Codex AI owns its native tools and decisions.
+DeerFlow exposes `general-purpose`, `bash`, and reusable Command Room roles:
+`planner`, `project-manager`, `executor`, `fact-finder`, `opposition`,
+`recorder`, `runtime-reliability-auditor`,
+`persistence-migration-auditor`, `frontend-protocol-auditor`,
+`security-auditor`, and `platform-ops-auditor`. A role label selects
+developer-authored context that DeerFlow prepends to the task: a configured
+`system_prompt`, otherwise the role description. It does not grant DeerFlow
+tools or create a turn loop; the one-shot Codex AI owns its native tools and
+decisions.
 
 ### general-purpose
 
@@ -36,13 +44,36 @@ A command-execution role for builds, tests, diagnostics, and verbose terminal wo
 
 ### planner
 
-An independent planning role that turns the complete Chair brief into one coherent proposal with goals, boundaries, assumptions, route, and observable completion. Additional planners may explore alternative routes in parallel.
+An independent planning role that turns the complete Chair brief into one
+coherent proposal with goals, boundaries, assumptions, route, and observable
+completion. It returns before execution or additional Planners begin.
 
 ### opposition
 
 An independent challenge role used after a planner proposal. It receives the original brief and complete plan, then reports hidden assumptions, counterevidence, failure modes, boundary misses, and the strongest materially different alternative. It does not force disagreement, approve or reject the plan, or replace Chair judgment.
 
-For substantive work, the Chair uses these temporary roles in an AI-owned `planner` proposal → one `opposition` challenge → Chair execution plan → human plan confirmation → execution → plan completion flow. Returned task results are facts for the Chair to use as it continues the confirmed plan; they are not task-level acceptance events. This sequence lives in AI prompts and natural results, not in runtime state or frontend gates.
+### project-manager
+
+A one-shot phase-handoff role that proposes the next bounded stage from complete
+phase facts. It never starts, approves, advances, or closes work. The Chair gives
+its proposal to Opposition, forms the next-stage plan, and pauses for human
+discussion.
+
+### specialist auditors
+
+The five fixed audit perspectives keep evidence methods narrow:
+`runtime-reliability-auditor` covers Run/task/background/wake lifecycles;
+`persistence-migration-auditor` covers database invariants and migrations;
+`frontend-protocol-auditor` covers HTTP/SSE and browser state;
+`security-auditor` covers trust boundaries; and `platform-ops-auditor` covers
+deployment, readiness, observability, CI, and supply chain. They report evidence
+and limits; they do not implement fixes or approve completion.
+
+For substantive work, the Chair uses an AI-owned `planner` proposal → one
+`opposition` challenge → Chair execution plan → human discussion and explicit
+natural-language confirmation → plan execution flow. Returned task results are
+facts for the Chair to use, not task-level acceptance events. This sequence
+lives in AI prompts and natural results, not runtime state or frontend gates.
 
 ## Delegation flow
 
@@ -60,10 +91,29 @@ concise natural-language comparison with source links and any uncertainty.""",
 
 The runtime then:
 
-1. Assembles the developer-authored role context, the Lead Agent's task prompt, applicable instruction guidance, and real task paths, then passes that self-contained prompt to one ephemeral Codex CLI process.
+1. Assembles the developer-authored role context, the Lead Agent's task prompt, applicable instruction guidance, and exact working, input, and output paths, then passes that self-contained prompt to one ephemeral Codex CLI process.
 2. Lets that Codex AI plan, use its tools, and complete the task autonomously.
 3. Returns the complete natural-language result unchanged to the Lead Agent.
 4. Ends the child process. The Lead Agent reads the result and decides whether any further AI work is useful.
+
+## Goal Workspaces and recursive Goal Cells
+
+Command Room persists a complete Goal Mandate, Current Operating Brief, and
+Chair-authored Current Organization Map in an append-only Goal Workspace. Every successful child return remains a separate,
+complete Result Inbox envelope. A wake may signal several envelopes together,
+but reading or acknowledging them is only a Chair-authored fact, never approval
+or completion.
+
+When the root coordination context is genuinely insufficient, the Chair can
+create a recursive Goal Cell. Each Cell is an owner-scoped child Thread that
+inherits the current Goal Mandate, receives its own complete Operating Brief,
+may create narrower Cells, and explicitly returns its complete result to its
+parent. Capability and workspace references are structural facts only; they do
+not grant permissions or create a shared writable workspace.
+
+A `project-manager` is a one-shot planning perspective for a phase handoff: it
+proposes the next bounded stage from complete results, but never starts,
+approves, or advances work.
 
 ## Configuration
 
@@ -89,9 +139,16 @@ Delegation also requires the pinned `@openai/codex` CLI and `codex login`, or a 
 
 ## Dispatch count
 
-`subagent_enabled` controls whether delegation is active for a session. Once it is active, the Lead Agent chooses how many useful `task()` calls to emit from the goal and current context. DeerFlow does not truncate, queue, batch, or defer those calls programmatically; legacy `max_concurrent_subagents` request values are ignored.
-
-Independent Codex processes may run concurrently. Host/model capacity and each child's lifecycle timeout remain transport boundaries, not decisions about which AI work should run.
+`subagent_enabled` controls whether delegation is active for a session. Once it
+is active, the Lead Agent chooses useful `task()` calls from the confirmed plan
+and current context. Independent plan work should run concurrently when useful,
+but six Command Room slots are capacity, not a quota. Separable professional
+domains should not be packed into one child merely to keep the count low.
+Transport remains content blind: one Command Room may hold six queued or running
+children, the Gateway runs twelve child processes, and up to sixty-four more
+wait FIFO. These limits never parse prompts, rank work, choose roles, approve
+results, or decide the next action; legacy `max_concurrent_subagents` request
+values are ignored.
 
 ## Factual dispatch record
 

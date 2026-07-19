@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
@@ -35,6 +35,14 @@ from deerflow.config.paths import Paths, get_paths, validate_thread_id
 from deerflow.persistence.thread_meta import ThreadMetaConflictError
 from deerflow.persistence.thread_meta.base import LEGACY_CLAIM_COMPLETE_METADATA_KEY, LEGACY_CLAIMING_STATUS
 from deerflow.runtime import ConflictError, serialize_channel_values_for_api
+from deerflow.runtime.goal_cells import (
+    GOAL_CELL_CAPABILITY_REFS_KEY,
+    GOAL_CELL_PARENT_RUN_KEY,
+    GOAL_CELL_PARENT_THREAD_KEY,
+    GOAL_CELL_ROOT_THREAD_KEY,
+    GOAL_CELL_THREAD_METADATA_KEYS,
+    GOAL_CELL_WORKSPACE_REF_KEY,
+)
 from deerflow.runtime.runs.schemas import is_inflight_status, run_status_value
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.utils.cancellation import await_task_through_repeated_cancellation
@@ -50,7 +58,7 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", LEGACY_CLAIM_COMPLETE_METADATA_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", LEGACY_CLAIM_COMPLETE_METADATA_KEY}) | GOAL_CELL_THREAD_METADATA_KEYS
 _ACTIVE_THREAD_SEARCH_STATUSES = frozenset({"busy", "pending", "running", "cancelling", "rolling_back"})
 _WORKER_LOST_TERMINAL_REASONS = frozenset({"worker_lost", "lease_expired_recovered"})
 _DELETE_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
@@ -236,6 +244,69 @@ class ThreadPatchRequest(BaseModel):
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
 
 
+class GoalWorkspaceRecordResponse(BaseModel):
+    """One complete AI-authored durable record."""
+
+    revision: int
+    body: str
+    content_hash: str
+    author_run_id: str | None = None
+    created_at: str
+
+
+class GoalWorkspaceResultResponse(GoalWorkspaceRecordResponse):
+    """One complete child-result envelope and its structural provenance."""
+
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoalWorkspaceHistoryEventResponse(GoalWorkspaceResultResponse):
+    """One complete append-only Goal Workspace fact."""
+
+    event_type: str
+
+
+class GoalWorkspaceResponse(BaseModel):
+    """Current records for one Thread-backed Goal Workspace."""
+
+    thread_id: str
+    goal_mandate: GoalWorkspaceRecordResponse | None = None
+    operating_brief: GoalWorkspaceRecordResponse | None = None
+    organization_map: GoalWorkspaceRecordResponse | None = None
+    acknowledged_through_seq: int = 0
+    notified_through_seq: int = 0
+    results: list[GoalWorkspaceResultResponse] = Field(default_factory=list)
+
+
+class GoalWorkspaceHistoryResponse(BaseModel):
+    """One owner-scoped, newest-first page of opaque Workspace facts."""
+
+    thread_id: str
+    events: list[GoalWorkspaceHistoryEventResponse] = Field(default_factory=list)
+    next_before_revision: int | None = None
+
+
+class GoalCellNodeResponse(BaseModel):
+    """One structural Goal Cell fact; runtime status is not goal completion."""
+
+    thread_id: str
+    parent_thread_id: str
+    parent_run_id: str
+    display_name: str | None = None
+    runtime_status: str
+    capability_refs: list[str] = Field(default_factory=list)
+    workspace_ref: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class GoalTreeResponse(BaseModel):
+    """Flat owner-scoped facts from which clients can render the Goal tree."""
+
+    root_thread_id: str
+    cells: list[GoalCellNodeResponse] = Field(default_factory=list)
+
+
 class ThreadStateUpdateRequest(BaseModel):
     """Request body for updating thread state (human-in-the-loop resume)."""
 
@@ -397,6 +468,7 @@ async def _claim_legacy_thread_related_data(
         getattr(state, "feedback_repo", None),
         getattr(state, "artifact_provenance_repo", None),
         getattr(state, "round_state_store", None),
+        getattr(state, "workspace_event_store", None),
     ]
 
     await run_manager.begin_thread_delete(thread_id)
@@ -516,6 +588,7 @@ async def _assert_legacy_thread_claimable(
         getattr(state, "feedback_repo", None),
         getattr(state, "artifact_provenance_repo", None),
         getattr(state, "round_state_store", None),
+        getattr(state, "workspace_event_store", None),
     ]
     allowed_owners = {None, DEFAULT_USER_ID, owner_user_id}
     for repository in repositories:
@@ -613,6 +686,7 @@ async def _metadata_less_thread_has_legacy_surfaces(
         "feedback_repo",
         "artifact_provenance_repo",
         "round_state_store",
+        "workspace_event_store",
     ):
         repository = getattr(request.app.state, repository_name, None)
         list_by_thread = getattr(repository, "list_by_thread", None)
@@ -760,6 +834,30 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         except Exception as exc:
             logger.exception("Could not delete round state for %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to delete thread round state") from exc
+
+    workspace_event_store = getattr(request.app.state, "workspace_event_store", None)
+    if workspace_event_store is not None:
+        try:
+            await workspace_event_store.delete_by_thread(
+                thread_id,
+                user_id=storage_user_id,
+            )
+            delete_legacy = getattr(
+                workspace_event_store,
+                "delete_legacy_by_thread",
+                None,
+            )
+            if delete_legacy is not None:
+                await delete_legacy(thread_id)
+        except Exception as exc:
+            logger.exception(
+                "Could not delete Goal Workspace events for %s",
+                sanitize_log_param(thread_id),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete Goal Workspace events",
+            ) from exc
 
     # Owner metadata is the final boundary removed. Any earlier failure leaves
     # the deleting tombstone in place, blocking workers and API reads.
@@ -1049,6 +1147,126 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
     )
+
+
+@router.get(
+    "/{thread_id}/goal-workspace",
+    response_model=GoalWorkspaceResponse,
+)
+@require_permission("threads", "read", owner_check=True)
+async def get_goal_workspace(
+    thread_id: str,
+    request: Request,
+) -> GoalWorkspaceResponse:
+    """Return complete current Mandate and Brief without interpreting them."""
+    from app.gateway.deps import get_workspace_event_store
+
+    store = get_workspace_event_store(request)
+    current_context = getattr(store, "current_context", None)
+    result_inbox = getattr(store, "result_inbox", None)
+    if not callable(current_context) or not callable(result_inbox):
+        raise HTTPException(
+            status_code=503,
+            detail="Goal Workspace persistence not available",
+        )
+    context = await current_context(
+        thread_id=thread_id,
+        user_id=get_request_storage_user_id(request),
+    )
+    inbox = await result_inbox(
+        thread_id=thread_id,
+        user_id=get_request_storage_user_id(request),
+    )
+    return GoalWorkspaceResponse(
+        thread_id=thread_id,
+        goal_mandate=context.get("goal_mandate"),
+        operating_brief=context.get("operating_brief"),
+        organization_map=context.get("organization_map"),
+        acknowledged_through_seq=inbox["acknowledged_through_seq"],
+        notified_through_seq=inbox["notified_through_seq"],
+        results=inbox["results"],
+    )
+
+
+@router.get(
+    "/{thread_id}/goal-workspace/history",
+    response_model=GoalWorkspaceHistoryResponse,
+)
+@require_permission("threads", "read", owner_check=True)
+async def get_goal_workspace_history(
+    thread_id: str,
+    request: Request,
+    before_revision: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> GoalWorkspaceHistoryResponse:
+    """Return one raw Goal Workspace history page without interpreting it."""
+    from app.gateway.deps import get_workspace_event_store
+
+    store = get_workspace_event_store(request)
+    history = getattr(store, "history", None)
+    if not callable(history):
+        raise HTTPException(
+            status_code=503,
+            detail="Goal Workspace persistence not available",
+        )
+    page = await history(
+        thread_id=thread_id,
+        user_id=get_request_storage_user_id(request),
+        before_revision=before_revision,
+        limit=limit,
+    )
+    return GoalWorkspaceHistoryResponse(
+        thread_id=thread_id,
+        events=page["events"],
+        next_before_revision=page["next_before_revision"],
+    )
+
+
+@router.get(
+    "/{thread_id}/goal-tree",
+    response_model=GoalTreeResponse,
+)
+@require_permission("threads", "read", owner_check=True)
+async def get_goal_tree(
+    thread_id: str,
+    request: Request,
+) -> GoalTreeResponse:
+    """Return recursive Goal Cell relationships without inferring progress."""
+    from app.gateway.deps import get_thread_store
+
+    store = get_thread_store(request)
+    user_id = get_request_storage_user_id(request)
+    current = await store.get(thread_id, user_id=user_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    current_metadata = current.get("metadata") or {}
+    root_thread_id = current_metadata.get(GOAL_CELL_ROOT_THREAD_KEY)
+    if not isinstance(root_thread_id, str) or not root_thread_id:
+        root_thread_id = thread_id
+    rows = await store.search(limit=1000, user_id=user_id)
+    cells: list[GoalCellNodeResponse] = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        parent_thread_id = metadata.get(GOAL_CELL_PARENT_THREAD_KEY)
+        parent_run_id = metadata.get(GOAL_CELL_PARENT_RUN_KEY)
+        if metadata.get(GOAL_CELL_ROOT_THREAD_KEY) != root_thread_id or not isinstance(parent_thread_id, str) or not isinstance(parent_run_id, str):
+            continue
+        raw_capability_refs = metadata.get(GOAL_CELL_CAPABILITY_REFS_KEY)
+        cells.append(
+            GoalCellNodeResponse(
+                thread_id=row["thread_id"],
+                parent_thread_id=parent_thread_id,
+                parent_run_id=parent_run_id,
+                display_name=row.get("display_name"),
+                runtime_status=str(row.get("status") or "idle"),
+                capability_refs=([str(value) for value in raw_capability_refs] if isinstance(raw_capability_refs, list) else []),
+                workspace_ref=(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY) if isinstance(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY), str) else None),
+                created_at=coerce_iso(row.get("created_at", "")),
+                updated_at=coerce_iso(row.get("updated_at", "")),
+            )
+        )
+    cells.sort(key=lambda cell: (cell.created_at, cell.thread_id))
+    return GoalTreeResponse(root_thread_id=root_thread_id, cells=cells)
 
 
 @router.get("/{thread_id}", response_model=ThreadResponse)

@@ -27,6 +27,7 @@ from deerflow.persistence.round_state.model import RoundEventRow, RoundRow, Task
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspace_event.model import WorkspaceEventRow
 
 __all__ = [
     "ArtifactProvenanceRow",
@@ -42,4 +43,5 @@ __all__ = [
     "TaskLaneRow",
     "ThreadMetaRow",
     "UserRow",
+    "WorkspaceEventRow",
 ]

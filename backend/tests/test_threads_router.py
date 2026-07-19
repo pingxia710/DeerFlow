@@ -20,7 +20,21 @@ from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaCreateResult
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+from deerflow.persistence.workspace_event import (
+    GOAL_MANDATE_REVISED,
+    OPERATING_BRIEF_REVISED,
+    ORGANIZATION_MAP_REVISED,
+    RESULT_RECEIVED,
+    MemoryWorkspaceEventStore,
+)
 from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
+from deerflow.runtime.goal_cells import (
+    GOAL_CELL_CAPABILITY_REFS_KEY,
+    GOAL_CELL_PARENT_RUN_KEY,
+    GOAL_CELL_PARENT_THREAD_KEY,
+    GOAL_CELL_ROOT_THREAD_KEY,
+    GOAL_CELL_WORKSPACE_REF_KEY,
+)
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 _HISTORY_USER_ID = UUID("22222222-2222-2222-2222-222222222222")
@@ -119,6 +133,234 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
     assert exc_info.value.status_code == 422
     assert "Invalid thread_id" in exc_info.value.detail
+
+
+def test_goal_workspace_route_returns_complete_current_records():
+    app, _store, _checkpointer = _build_thread_app()
+    workspace_store = MemoryWorkspaceEventStore()
+    app.state.workspace_event_store = workspace_store
+    asyncio.run(app.state.thread_store.create("goal-thread", user_id=None))
+    user_id = str(_HISTORY_USER_ID)
+    asyncio.run(
+        workspace_store.append(
+            thread_id="goal-thread",
+            user_id=user_id,
+            event_type=GOAL_MANDATE_REVISED,
+            body="Human direction in full.",
+            author_run_id="run-1",
+            event_id="mandate-1",
+        )
+    )
+    result = asyncio.run(
+        workspace_store.append(
+            thread_id="goal-thread",
+            user_id=user_id,
+            event_type=RESULT_RECEIVED,
+            body="Complete executor result.",
+            author_run_id="run-3",
+            event_id="result-1",
+            metadata={"task_id": "task-1", "role": "executor"},
+        )
+    )
+    asyncio.run(
+        workspace_store.append(
+            thread_id="goal-thread",
+            user_id=user_id,
+            event_type=OPERATING_BRIEF_REVISED,
+            body="Chair operating brief in full.",
+            author_run_id="run-2",
+            event_id="brief-1",
+        )
+    )
+    asyncio.run(
+        workspace_store.append(
+            thread_id="goal-thread",
+            user_id=user_id,
+            event_type=ORGANIZATION_MAP_REVISED,
+            body="Current temporary organization in full.",
+            author_run_id="run-2",
+            event_id="organization-1",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/goal-thread/goal-workspace")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["goal_mandate"]["body"] == "Human direction in full."
+    assert payload["operating_brief"]["body"] == "Chair operating brief in full."
+    assert payload["organization_map"]["body"] == "Current temporary organization in full."
+    assert payload["acknowledged_through_seq"] == 0
+    assert payload["notified_through_seq"] == 0
+    assert payload["results"] == [
+        {
+            "revision": result["revision"],
+            "body": "Complete executor result.",
+            "content_hash": result["content_hash"],
+            "author_run_id": "run-3",
+            "created_at": result["created_at"],
+            "metadata": {"task_id": "task-1", "role": "executor"},
+        }
+    ]
+
+
+def test_goal_workspace_history_is_owner_scoped_paged_and_keeps_acknowledged_results():
+    app, _store, _checkpointer = _build_thread_app()
+    workspace_store = MemoryWorkspaceEventStore()
+    app.state.workspace_event_store = workspace_store
+    asyncio.run(app.state.thread_store.create("goal-history-thread", user_id=None))
+    owner_id = str(_HISTORY_USER_ID)
+    other_owner_id = "33333333-3333-3333-3333-333333333333"
+    mandate = asyncio.run(
+        workspace_store.append(
+            thread_id="goal-history-thread",
+            user_id=owner_id,
+            event_type=GOAL_MANDATE_REVISED,
+            body="Original owner mandate in full.",
+            author_run_id="owner-run",
+            event_id="history-owner-mandate",
+            metadata={"source": "human"},
+        )
+    )
+    asyncio.run(
+        workspace_store.append(
+            thread_id="goal-history-thread",
+            user_id=other_owner_id,
+            event_type=OPERATING_BRIEF_REVISED,
+            body="Other owner's private brief.",
+            author_run_id="other-run",
+            event_id="history-other-owner",
+        )
+    )
+    result = asyncio.run(
+        workspace_store.append(
+            thread_id="goal-history-thread",
+            user_id=owner_id,
+            event_type=RESULT_RECEIVED,
+            body="Complete result remains readable after delivery acknowledgement.",
+            author_run_id="child-run",
+            event_id="history-owner-result",
+            metadata={"task_id": "task-history", "role": "fact-finder"},
+        )
+    )
+    acknowledgement = asyncio.run(
+        workspace_store.acknowledge_results(
+            thread_id="goal-history-thread",
+            user_id=owner_id,
+            through_seq=result["revision"],
+            author_run_id="chair-run",
+            event_id="history-owner-acknowledgement",
+        )
+    )
+
+    with TestClient(app) as client:
+        current = client.get("/api/threads/goal-history-thread/goal-workspace")
+        newest = client.get(
+            "/api/threads/goal-history-thread/goal-workspace/history",
+            params={"limit": 2},
+        )
+        older = client.get(
+            "/api/threads/goal-history-thread/goal-workspace/history",
+            params={"before_revision": result["revision"], "limit": 2},
+        )
+        invalid_limit = client.get(
+            "/api/threads/goal-history-thread/goal-workspace/history",
+            params={"limit": 101},
+        )
+
+    assert current.status_code == 200
+    assert current.json()["results"] == []
+    assert newest.status_code == 200
+    assert newest.json() == {
+        "thread_id": "goal-history-thread",
+        "events": [
+            {
+                "revision": acknowledgement["revision"],
+                "event_type": "result.inbox.acknowledged",
+                "body": acknowledgement["body"],
+                "content_hash": acknowledgement["content_hash"],
+                "author_run_id": "chair-run",
+                "created_at": acknowledgement["created_at"],
+                "metadata": {"through_seq": result["revision"]},
+            },
+            {
+                "revision": result["revision"],
+                "event_type": RESULT_RECEIVED,
+                "body": "Complete result remains readable after delivery acknowledgement.",
+                "content_hash": result["content_hash"],
+                "author_run_id": "child-run",
+                "created_at": result["created_at"],
+                "metadata": {"task_id": "task-history", "role": "fact-finder"},
+            },
+        ],
+        "next_before_revision": result["revision"],
+    }
+    assert older.status_code == 200
+    assert older.json()["events"] == [
+        {
+            "revision": mandate["revision"],
+            "event_type": GOAL_MANDATE_REVISED,
+            "body": mandate["body"],
+            "content_hash": mandate["content_hash"],
+            "author_run_id": "owner-run",
+            "created_at": mandate["created_at"],
+            "metadata": {"source": "human"},
+        }
+    ]
+    assert older.json()["next_before_revision"] is None
+    assert invalid_limit.status_code == 422
+
+
+def test_goal_tree_route_returns_recursive_structural_facts():
+    app, _store, _checkpointer = _build_thread_app()
+    thread_store = app.state.thread_store
+    asyncio.run(
+        thread_store.create(
+            "root-goal",
+            assistant_id="command-room",
+            display_name="Root",
+        )
+    )
+    asyncio.run(
+        thread_store.create(
+            "cell-a",
+            assistant_id="command-room",
+            display_name="Cell A",
+            metadata={
+                GOAL_CELL_PARENT_THREAD_KEY: "root-goal",
+                GOAL_CELL_PARENT_RUN_KEY: "root-run",
+                GOAL_CELL_ROOT_THREAD_KEY: "root-goal",
+                GOAL_CELL_CAPABILITY_REFS_KEY: ["read-only"],
+                GOAL_CELL_WORKSPACE_REF_KEY: "workspace://a",
+            },
+        )
+    )
+    asyncio.run(
+        thread_store.create(
+            "cell-b",
+            assistant_id="command-room",
+            display_name="Cell B",
+            metadata={
+                GOAL_CELL_PARENT_THREAD_KEY: "cell-a",
+                GOAL_CELL_PARENT_RUN_KEY: "cell-a-run",
+                GOAL_CELL_ROOT_THREAD_KEY: "root-goal",
+                GOAL_CELL_CAPABILITY_REFS_KEY: [],
+                GOAL_CELL_WORKSPACE_REF_KEY: None,
+            },
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/root-goal/goal-tree")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["root_thread_id"] == "root-goal"
+    assert {cell["thread_id"]: cell["parent_thread_id"] for cell in payload["cells"]} == {"cell-a": "root-goal", "cell-b": "cell-a"}
+    cell_a = next(cell for cell in payload["cells"] if cell["thread_id"] == "cell-a")
+    assert cell_a["capability_refs"] == ["read-only"]
+    assert cell_a["workspace_ref"] == "workspace://a"
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
@@ -796,7 +1038,13 @@ def test_strip_reserved_metadata_empty_input():
 
 
 def test_strip_reserved_metadata_strips_all_reserved_keys():
-    out = threads._strip_reserved_metadata({"user_id": "x", "keep": "me"})
+    out = threads._strip_reserved_metadata(
+        {
+            "user_id": "x",
+            GOAL_CELL_PARENT_THREAD_KEY: "spoofed-parent",
+            "keep": "me",
+        }
+    )
     assert out == {"keep": "me"}
 
 

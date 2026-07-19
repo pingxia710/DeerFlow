@@ -780,7 +780,19 @@ class TestRolesAPI:
 
         assert response.status_code == 200
         roles = {role["name"]: role for role in response.json()["roles"]}
-        assert set(roles) == {"planner", "executor", "fact-finder", "opposition", "recorder"}
+        assert set(roles) == {
+            "planner",
+            "project-manager",
+            "executor",
+            "fact-finder",
+            "opposition",
+            "recorder",
+            "runtime-reliability-auditor",
+            "persistence-migration-auditor",
+            "frontend-protocol-auditor",
+            "security-auditor",
+            "platform-ops-auditor",
+        }
         assert roles["planner"]["model"] == "gpt-5.6"
         assert roles["planner"]["reasoning_effort"] == "max"
         assert roles["executor"]["model"] == "gpt-5.6-terra"

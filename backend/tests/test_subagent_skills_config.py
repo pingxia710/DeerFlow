@@ -29,19 +29,73 @@ def test_nextos_commander_defines_the_ai_enterprise_without_program_control():
     skill = _read_custom_skill(repo_root, "nextos-commander")
 
     assert "AI organization layer built on the DeerFlow runtime" in skill
-    assert "Planner proposal" in skill
+    assert "Use this sequence only for a new substantive execution plan" in skill
+    assert "Do not rerun it for work already covered by a confirmed plan" in skill
+    assert "Give one Planner the complete self-contained brief" in skill
     assert "Opposition challenge" in skill
     assert "Chair execution plan" in skill
-    assert "wait for explicit authorization to execute" in skill
+    assert "Present it and pause for human discussion" in skill
+    assert "Explicit natural-language confirmation" in skill
+    assert "Six slots are resource capacity, not a quota" in skill
+    assert "Every child handoff names the exact working, input, and output paths" in skill
+    assert "Goal Mandate" in skill
+    assert "The Chair itself calls `record_goal_workspace`" in skill
+    assert "Current Organization Map" in skill
+    assert "`read_goal_workspace_history`" in skill
+    assert "do not automatically" in skill
+    assert "load the whole history" in skill
+    assert "project-manager" in skill
+    assert "Give its complete next-stage proposal" in skill
+    assert "pauses for human discussion before execution" in skill
+    assert "twelve child processes" in skill
     assert "not task-level acceptance" in skill
-    assert "temporary workstream lead" in skill
+    assert "Workstream Lead" in skill
     assert "temporary independent checking perspective" in skill
     assert "## Governance learning" in skill
     assert "applicable `Progress.md`" in skill
     assert "Programs never count" in skill
     assert "failures or update governance" in skill
     assert "Programs only transport" in skill
+    assert "`input_refs`" in skill
+    assert "neither selects relevance nor evaluates their content" in skill
     assert "programmatic role router" not in skill
+
+
+def test_specialist_auditor_skills_keep_narrow_evidence_methods():
+    repo_root = Path(__file__).resolve().parents[2]
+    expectations = {
+        "command-room-runtime-reliability-auditor": (
+            "Trace the assigned lifecycle end to end",
+            "cancellation",
+            "Must not: implement fixes",
+        ),
+        "command-room-persistence-migration-auditor": (
+            "Evaluate every supported database separately",
+            "PostgreSQL behavior",
+            "mutate production or live business data",
+        ),
+        "command-room-frontend-protocol-auditor": (
+            "real end-to-end observation",
+            "claim end-to-end proof from static or unit tests",
+            "Must not: implement fixes",
+        ),
+        "command-room-security-auditor": (
+            "label each finding as reproduced, code-supported, or hypothetical",
+            "print credentials",
+            "Must not:",
+        ),
+        "command-room-platform-ops-auditor": (
+            "infer full readiness from `/health` or a Compose parse",
+            "mutate production or external services",
+            "usable service path",
+        ),
+    }
+
+    for skill_name, phrases in expectations.items():
+        text = _read_custom_skill(repo_root, skill_name)
+        assert "Version: 0.1.0" in text, skill_name
+        for phrase in phrases:
+            assert phrase in text, (skill_name, phrase)
 
 
 def test_command_room_fact_finder_skill_is_bounded_and_read_only():
@@ -51,6 +105,17 @@ def test_command_room_fact_finder_skill_is_bounded_and_read_only():
     assert "read-only" in text
     assert "direct observations" in text
     assert "Do not decide, authorize" in text
+
+
+def test_project_manager_proposes_without_advancing_work():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = _read_custom_skill(repo_root, "command-room-project-manager")
+
+    assert "proposed next objective" in text
+    assert "relevant factual" in text
+    assert "facts and\nassumptions" in text
+    assert "Must not: start work" in text
+    assert "advance" in text
 
 
 def test_command_room_recorder_preserves_only_durable_facts_when_useful():
@@ -91,7 +156,8 @@ def test_command_room_role_skills_keep_minimal_frontmatter_and_body_version():
         frontmatter = text.split("---", 2)[1]
         keys = {line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line}
         assert keys == {"name", "description"}, skill_name
-        assert "Version: 0.1.0" in text, skill_name
+        expected_version = "0.5.1" if skill_name == "nextos-commander" else "0.1.0"
+        assert f"Version: {expected_version}" in text, skill_name
 
 
 def test_custom_role_keeps_natural_language_role_prompt_but_not_program_controls():

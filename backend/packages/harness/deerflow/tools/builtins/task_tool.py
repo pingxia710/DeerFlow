@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import time
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -19,10 +21,11 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 
 from deerflow.command_room.task_action_result import task_action_result_event, task_action_result_from_terminal_event
-from deerflow.config.paths import ensure_directory_no_symlinks
+from deerflow.config.paths import ensure_directory_no_symlinks, open_directory_no_symlinks
 from deerflow.config.role_assignments import RoleAssignment, load_role_assignments
 from deerflow.config.subagents_config import get_subagents_app_config
 from deerflow.runtime.background_tasks import CommandRoomBackgroundJob, CommandRoomBackgroundOutcome
+from deerflow.runtime.goal_cells import GOAL_CELL_TRANSPORT_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import is_unrestricted_host_access_allowed
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -404,7 +407,12 @@ def _task_model_options(
     return model, reasoning_effort if isinstance(reasoning_effort, str) else None
 
 
-def _task_sandbox_mode(app_config: AppConfig | None) -> CodexSandboxMode:
+def _task_sandbox_mode(
+    app_config: AppConfig | None,
+    context: Mapping[str, Any] | None = None,
+) -> CodexSandboxMode:
+    if isinstance(context, Mapping) and context.get(GOAL_CELL_TRANSPORT_CONTEXT_KEY) is True:
+        return "workspace-write"
     return "danger-full-access" if is_unrestricted_host_access_allowed(app_config) else "workspace-write"
 
 
@@ -453,6 +461,8 @@ def _task_worker_prompt(
     ]
     if uploads_path := task_paths.get("uploads_path"):
         path_lines.append(f"- Uploaded files (read): {uploads_path}")
+    if inputs_path := task_paths.get("inputs_path"):
+        path_lines.append(f"- Sealed input capsule (read-only): {inputs_path}")
     if outputs_path := task_paths.get("outputs_path"):
         path_lines.append(f"- Output artifacts (write): {outputs_path}")
     path_lines.append("- Any /mnt/user-data paths in the handoff refer to the matching host paths above.")
@@ -465,7 +475,7 @@ def _task_paths(thread_data: dict[str, Any]) -> dict[str, str]:
     if not isinstance(workspace_path, str) or not workspace_path:
         raise RuntimeError("No thread workspace is available for the Codex CLI task.")
     paths = {"workspace_path": workspace_path}
-    for key in ("uploads_path", "outputs_path"):
+    for key in ("uploads_path", "outputs_path", "inputs_path"):
         value = thread_data.get(key)
         if isinstance(value, str) and value:
             paths[key] = value
@@ -474,7 +484,19 @@ def _task_paths(thread_data: dict[str, Any]) -> dict[str, str]:
 
 def _ensure_task_paths(task_paths: dict[str, str]) -> dict[str, str]:
     try:
-        return {key: str(ensure_directory_no_symlinks(value, mode=0o777)) for key, value in task_paths.items()}
+        prepared: dict[str, str] = {}
+        for key, value in task_paths.items():
+            if key == "inputs_path":
+                # The Goal Cell creator owns this sealed snapshot. Reopening it
+                # validates its path without recreating it or relaxing its mode.
+                descriptor = open_directory_no_symlinks(value)
+                try:
+                    prepared[key] = str(Path(value).absolute())
+                finally:
+                    os.close(descriptor)
+                continue
+            prepared[key] = str(ensure_directory_no_symlinks(value, mode=0o777))
+        return prepared
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Codex CLI task paths could not be prepared: {exc}") from exc
 
@@ -738,7 +760,7 @@ async def task_tool(
     timeout_seconds = _task_timeout_seconds(runtime_app_config)
     role_assignment = (await asyncio.to_thread(load_role_assignments, user_id)).roles.get(subagent_type)
     model, reasoning_effort = _task_model_options(runtime_app_config, subagent_type, role_assignment)
-    sandbox_mode = _task_sandbox_mode(runtime_app_config)
+    sandbox_mode = _task_sandbox_mode(runtime_app_config, context)
     worker_prompt = prompt
     is_command_room = context.get("agent_name") == "command-room"
     background_dispatcher = _command_room_background_dispatcher(context) if is_command_room else None

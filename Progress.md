@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-07-19 — V3 handoff and instruction/Skill evaluation closure
+
+- Saved the complete V3 organization foundation, tests, role packages,
+  planning records, and handoff as local commit `3f912d46`. The canonical next
+  entry is `.planning/v3-organization/v3-handoff-2026-07-19.md`; it directs the
+  next window to a bounded real-project pilot rather than an unproven third
+  implementation slice.
+- Compressed only duplicated method wording in repository `AGENTS.md`, from
+  12,848 to 11,333 bytes. The backend instruction chain is now approximately
+  32,130 bytes and the frontend chain 31,639 bytes, both below the 32 KiB
+  budget. The permanent frozen program-recording section and all Chair/program
+  authority boundaries are unchanged.
+- Extended `scripts/skillopt-probe.sh` with one shared positive/negative probe
+  set for runtime reliability, persistence/migration, frontend protocol,
+  security, and platform operations auditor Skills. Every auditor now checks a
+  bounded domain method, factual return, evidence class, no-overclaim boundary,
+  no-fix boundary, and no authority to approve or complete work. The existing
+  Skill bodies were not expanded.
+- Commander plus all five auditor packs scored hard/soft 1.0 on train,
+  validation, and test splits. All six Skill folders passed the Skill Creator
+  validator; focused role/prompt tests passed 40 tests; `git diff --check`
+  passed. No runtime, API, persistence, frontend, production, external service,
+  credential, customer, or payment behavior changed.
+
 ## 2026-07-19 — Codex child-process performance boundary confirmed
 
 - A controlled one-shot Codex A/B probe confirmed that the remaining resource

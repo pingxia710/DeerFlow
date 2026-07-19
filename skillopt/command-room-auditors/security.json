@@ -1,0 +1,20 @@
+{
+  "project": "deer-flow-security-auditor",
+  "skill_path": "skills/custom/command-room-security-auditor/SKILL.md",
+  "rules": {
+    "domain-method": "Define the asset, actor, entry point, trust boundary, and capability, using only safe local or disposable proof.",
+    "evidence-return": "Return the finding, evidence class, prerequisites, controls, uncertainty, and exact artifact paths.",
+    "evidence-class": "Label each finding as reproduced, code-supported, or hypothetical.",
+    "no-overclaim": "Do not convert a hardening idea into a proven vulnerability.",
+    "no-fix": "Do not implement fixes or attack live systems during an audit.",
+    "no-authority": "Do not approve a result or declare the project complete."
+  },
+  "aliases": {
+    "domain-method": [["Define the asset, actor, entry point, trust boundary", "Use only safe local or disposable proof"]],
+    "evidence-return": [["Return: finding", "exact artifact paths"]],
+    "evidence-class": [["label each finding as reproduced, code-supported, or hypothetical"]],
+    "no-overclaim": [["convert a hardening idea into a proven", "vulnerability"]],
+    "no-fix": [["implement fixes", "attack an external or", "production system"]],
+    "no-authority": [["approve a result", "declare the project complete"]]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "project": "deer-flow-platform-ops-auditor",
+  "skill_path": "skills/custom/command-room-platform-ops-auditor/SKILL.md",
+  "rules": {
+    "domain-method": "Start from the supported topology and use the smallest safe local or read-only operational probe.",
+    "evidence-return": "Return the topology, operational path, impact, untested conditions, and exact evidence paths.",
+    "evidence-class": "Distinguish configuration parsing, process health, dependency reachability, and a usable service path.",
+    "no-overclaim": "Do not infer full readiness from health or configuration parsing.",
+    "no-fix": "Do not implement fixes or mutate production or external services during an audit.",
+    "no-authority": "Do not approve a result or declare the project complete."
+  },
+  "aliases": {
+    "domain-method": [["Start from the supported operating topology", "smallest safe local or", "read-only operational probe"]],
+    "evidence-return": [["Return: topology checked", "exact evidence paths"]],
+    "evidence-class": [["distinguish configuration parse", "usable service path"]],
+    "no-overclaim": [["infer full readiness from `/health` or a Compose parse", "name unsupported or untested"]],
+    "no-fix": [["Must not:", "mutate production or external services", "implement", "fixes"]],
+    "no-authority": [["approve a result", "declare the project", "complete."]]
+  }
+}

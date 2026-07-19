@@ -1,0 +1,20 @@
+{
+  "project": "deer-flow-persistence-migration-auditor",
+  "skill_path": "skills/custom/command-room-persistence-migration-auditor/SKILL.md",
+  "rules": {
+    "domain-method": "Name the storage invariant and evaluate each supported database independently.",
+    "evidence-return": "Return checked invariants, database-specific evidence, impact, and exact evidence or artifact paths.",
+    "evidence-class": "Distinguish schema facts, transaction guarantees, test observations, and assumptions.",
+    "no-overclaim": "Do not infer PostgreSQL from SQLite or application readiness from migration success.",
+    "no-fix": "Do not implement fixes or mutate live data during an audit.",
+    "no-authority": "Do not approve a result or declare the project complete."
+  },
+  "aliases": {
+    "domain-method": [["Name the invariant first", "Evaluate every supported database separately"]],
+    "evidence-return": [["Return: invariants checked", "exact evidence or artifact paths"]],
+    "evidence-class": [["distinguish schema facts", "test observations", "assumptions"]],
+    "no-overclaim": [["infer PostgreSQL behavior", "from SQLite", "turn migration success into application", "readiness"]],
+    "no-fix": [["implement fixes", "mutate production or live business data"]],
+    "no-authority": [["approve a result", "declare the project complete"]]
+  }
+}

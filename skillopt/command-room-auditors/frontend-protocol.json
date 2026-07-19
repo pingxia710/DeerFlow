@@ -1,0 +1,20 @@
+{
+  "project": "deer-flow-frontend-protocol-auditor",
+  "skill_path": "skills/custom/command-room-frontend-protocol-auditor/SKILL.md",
+  "rules": {
+    "domain-method": "Trace the assigned user-visible contract through server, client state, and a real browser when needed.",
+    "evidence-return": "Return the contract path, tested states, impact, and exact evidence or artifact paths.",
+    "evidence-class": "Distinguish source inspection, unit evidence, mocked browser evidence, and real end-to-end observation.",
+    "no-overclaim": "Do not claim end-to-end proof from static or unit tests or infer backend guarantees.",
+    "no-fix": "Do not implement fixes during an audit.",
+    "no-authority": "Do not approve a result or declare the project complete."
+  },
+  "aliases": {
+    "domain-method": [["Trace the assigned user-visible behavior", "Use a real browser"]],
+    "evidence-return": [["Return: contract path", "exact evidence or artifact paths"]],
+    "evidence-class": [["distinguish source inspection", "real end-to-end observation"]],
+    "no-overclaim": [["claim end-to-end proof from static or unit tests", "infer backend durability or security guarantees"]],
+    "no-fix": [["Must not: implement fixes"]],
+    "no-authority": [["approve a result", "project complete"]]
+  }
+}

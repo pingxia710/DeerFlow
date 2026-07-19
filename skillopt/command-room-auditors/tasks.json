@@ -1,0 +1,20 @@
+[
+  {
+    "id": "train-bounded-evidence",
+    "split": "train",
+    "intent": "A bounded specialist audit must use its own domain method and return concrete evidence with exact artifact paths.",
+    "required_rules": ["domain-method", "evidence-return"]
+  },
+  {
+    "id": "val-no-overclaim",
+    "split": "val",
+    "intent": "The available evidence is narrower than an end-to-end conclusion; the auditor must label the evidence class and refuse a broader unsupported claim.",
+    "required_rules": ["evidence-class", "no-overclaim"]
+  },
+  {
+    "id": "test-no-execution-authority",
+    "split": "test",
+    "intent": "The audit finds a real problem; the specialist must report it without implementing a fix, approving the result, or declaring the project complete.",
+    "required_rules": ["no-fix", "no-authority"]
+  }
+]

@@ -75,36 +75,20 @@ README files, or skills rather than expanding this file.
 
 ## Role Packages And Skill Method
 
-- Every configured reusable Command Room role has one role package under
-  `skills/custom/<role-skill>/`: an `AGENTS.md` role charter and a `SKILL.md`
-  method card. The Chair package is `nextos-commander`; the current worker
-  packages are planner, project manager, executor, fact finder, opposition,
-  recorder, runtime reliability auditor, persistence and migration auditor,
-  frontend protocol auditor, security auditor, and platform operations auditor.
-- `AGENTS.md` defines the role's authority, boundaries, handoff responsibility,
-  and decisions it must not make. `SKILL.md` defines only the narrow recurring
-  method. The current task prompt supplies the goal, facts, paths, and complete
-  prior results. Task transport carries the selected role package after the
-  Chair chooses that role; it never uses a package to choose a role or stage.
-- A one-off perspective may be described directly in one task prompt. Before it
-  becomes a configured reusable role, add its package, owner, focused eval, and
-  explicit role-to-skill mapping; do not create a roster for hypothetical roles.
-
-Write every role `SKILL.md` from the WorkOS skill-management practice:
-
-- Start from a repeated, evidenced failure mode, not a README or project
-  encyclopedia. State the narrow trigger, scope, `must`, `must not`, factual
-  result/evidence expected, owner, version, and review/expiry condition.
-- Keep it short and failure-oriented: prefer concrete pitfalls and negative
-  rules over broad background. Default to not loading it outside its selected
-  role or explicit task context.
-- Give it a small positive and negative evaluation case. Keep it only when it
-  improves the relevant behavior without material token/noise cost; otherwise
-  shorten, merge, deprecate, or delete it. Update the evaluation when its role,
-  prompt, or operating boundary changes.
-- A Skill may guide an AI to inspect and report facts, but never grant tools,
-  declare task acceptance, produce a program gate, or decide plan completion.
-  Returned evidence remains input to the Chair's natural-language judgment.
+- Every configured reusable role maps to `skills/custom/<role-skill>/`, with an
+  `AGENTS.md` authority charter and a narrow `SKILL.md` method card. The Chair
+  package is `nextos-commander`; the canonical worker mapping is
+  `command_room_roles.py` and every mapped package must have both files.
+- The task prompt supplies the goal, facts, exact paths, and complete prior
+  results. Transport adds the package only after the Chair chooses a role; it
+  never chooses a role or stage. Keep one-off perspectives in the prompt. Add a
+  reusable role only with a clear owner, package, mapping, and focused eval.
+- Create or revise a role Skill only from evidenced recurring failure. Keep its
+  trigger, scope, must/must-not rules, factual return, owner, version, and review
+  condition concise; maintain one positive and one negative evaluation, and
+  shorten, merge, or remove Skills that add more noise than benefit.
+- A Skill never grants tools or permissions, accepts work, gates execution, or
+  decides completion. Its evidence remains input to the Chair's judgment.
 
 ### Governance Learning
 
@@ -113,23 +97,17 @@ Write every role `SKILL.md` from the WorkOS skill-management practice:
   a workflow state, authority source, quality gate, or substitute for reading
   current files and complete AI results. New entries mark superseded decisions
   without deleting historical facts.
-- When the Chair recognizes a repeated evidenced failure pattern, or one serious
-  redline failure, first correct the current handoff so the live plan can
-  continue safely. Then put the smallest durable correction in the lowest layer
-  that can prevent recurrence: cross-role invariants in project `AGENTS.md`,
-  Chair coordination in the Chair package, role authority in role `AGENTS.md`,
-  recurring professional method in role `SKILL.md`, task-only context in the
-  current prompt, and long stable knowledge in docs or Skill `references/`.
-  Do not copy the same full rule into every layer.
-- Within a confirmed Goal Mandate and governance model, the Chair may initiate
-  and delegate a narrow role-Skill improvement or a clarification of an existing
-  role boundary, run its focused positive and negative checks, record the facts,
-  and report the change. Ask the human before changing project purpose, Goal
-  Lock, the permanent program boundary, Chair authority, role authority, the
-  planning contract, or materially replacing a Skill or operating workflow.
-- Programs never detect, count, promote, write, accept, or roll back governance
-  rules. AI reads the complete failure evidence and decides whether a pattern
-  exists, where it belongs, whether the change helped, and what happens next.
+- For repeated evidenced failure or one serious redline, fix the live handoff,
+  then make the smallest correction at the lowest useful layer: project
+  invariant, Chair coordination, role authority, role method, task prompt, or
+  stable docs/reference. Do not duplicate the full rule across layers. Within a
+  confirmed Goal Mandate, the Chair may delegate a narrow role-method correction
+  and its focused checks; ask the human before changing purpose, Goal Lock, the
+  permanent boundary, Chair/role authority, planning contract, or materially
+  replacing a Skill or workflow.
+- Programs never detect, promote, write, accept, or roll back governance rules.
+  AI reads the complete evidence and decides whether a pattern exists, where a
+  correction belongs, whether it helped, and what happens next.
 
 ## Safety And Change Boundaries
 

@@ -1,0 +1,20 @@
+{
+  "project": "deer-flow-runtime-reliability-auditor",
+  "skill_path": "skills/custom/command-room-runtime-reliability-auditor/SKILL.md",
+  "rules": {
+    "domain-method": "Trace the complete bounded runtime lifecycle, including delivery, cancellation, wake, restart, and concurrency.",
+    "evidence-return": "Return the tested path, observed lifecycle, uncertainty, and exact evidence or artifact paths.",
+    "evidence-class": "Distinguish reproduced behavior, code-supported inference, and unknowns.",
+    "no-overclaim": "Do not infer persistence or security guarantees outside the evidence.",
+    "no-fix": "Do not implement fixes during an audit.",
+    "no-authority": "Do not approve a result or declare the project complete."
+  },
+  "aliases": {
+    "domain-method": [["Trace the assigned lifecycle end to end", "cancellation"]],
+    "evidence-return": [["Return: tested path", "exact evidence or artifact paths"]],
+    "evidence-class": [["distinguish reproduced behavior, code-supported inference, and unknowns"]],
+    "no-overclaim": [["infer", "persistence or security guarantees outside the evidence"]],
+    "no-fix": [["Must not: implement fixes"]],
+    "no-authority": [["approve a result", "declare the project complete"]]
+  }
+}

@@ -27,22 +27,18 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "Make that AI-AI contract self-contained" in prompt
     assert "exact working/input/output paths" in prompt
     assert "Read every complete natural result and choose every next action yourself" in prompt
-    assert "send the complete brief to one `planner` first" in prompt
-    assert "new substantive execution plan or a material revision" in prompt
-    assert "Do not rerun planning for work already covered by a confirmed plan" in prompt
-    assert "stopping or cancelling low-value work" in prompt
-    assert "to one `opposition` AI" in prompt
-    assert "original brief and complete Planner proposal" in prompt
-    assert "Present it to the human and stop for discussion" in prompt
-    assert "explicit natural-language confirmation" in prompt
+    assert "Ordinary safe, bounded work explicitly requested by the human is already authorized" in prompt
+    assert "Use Planner → Opposition → Chair plan → human discussion only" in prompt
+    assert "Do not create a new Brief solely for a task receipt" in prompt
+    assert "a result acknowledgement, or a history read" in prompt
+    assert "A single simple workstream does not need an Organization Map" in prompt
     assert "never a program state or gate" in prompt
     assert "Six is resource capacity, not a task-count target" in prompt
     assert "Goal Mandate" in prompt
     assert "record_goal_workspace" in prompt
     assert "Current Organization Map" in prompt
     assert "project-manager" in prompt
-    assert "Give that complete proposal and the phase facts to one `opposition` AI" in prompt
-    assert "Present that plan to the human and stop for discussion before starting it" in prompt
+    assert "Continue the current plan directly after a phase result" in prompt
     assert "Prefer a matching fixed professional role" in prompt
     assert "only for a genuinely one-off perspective" in prompt
     assert "six outstanding child jobs" in prompt
@@ -50,8 +46,8 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "read_goal_workspace_history" in prompt
     assert "one bounded raw page" in prompt
     assert "read_workspace_results" in prompt
-    assert "Failure never authorizes redispatch" in prompt
-    assert "A cancelled or interrupted task is stopped" in prompt
+    assert "re-dispatch exactly once with a new task id" in prompt
+    assert "Do not automatically retry a cancelled or interrupted task" in prompt
     assert "acknowledge_workspace_results" in prompt
     assert "create_goal_cell" in prompt
     assert "return_to_parent" in prompt
@@ -71,6 +67,7 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "MANDATORY Clarification Scenarios" not in prompt
     assert "CLARIFY → PLAN → ACT" not in prompt
     assert "Clarification ALWAYS comes BEFORE action" not in prompt
+    assert "Failure never authorizes redispatch" not in prompt
 
 
 def test_subagent_audit_records_hashes_without_worker_text(tmp_path):

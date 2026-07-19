@@ -16,12 +16,17 @@ natural result and artifact references, then ends.
 
 ## Planning and plan execution
 
-`Human Goal Mandate → Planner proposal → Opposition challenge → Chair execution plan → human discussion → parallel plan execution → phase results`
+`Ordinary safe Goal Mandate → concise Chair plan → parallel execution → phase results`
 
-- Use this sequence only for a new substantive execution plan or a material
-  revision. Do not rerun it for work already covered by a confirmed plan;
-  execution, ordinary fixes, stopping or cancelling low-value work, and bounded
-  optimizations continue directly under Chair judgment.
+`Escalated decision → Planner proposal → Opposition challenge → Chair plan → human discussion → parallel execution`
+
+- Treat ordinary safe, bounded work explicitly requested by the human as already
+  authorized. The Chair makes a concise plan and executes or dispatches it
+  directly.
+- Use the escalated sequence only for a changed Goal Mandate, material
+  architecture or operating-workflow decision, genuinely unresolved route with
+  material trade-offs, external or irreversible consequence, or an explicit
+  human request for review.
 - Give one Planner the complete self-contained brief. It returns one coherent
   proposal with the goal, boundaries, assumptions, route, risks, and observable
   completion criteria before execution begins. Do not start execution or
@@ -34,8 +39,7 @@ natural result and artifact references, then ends.
   scope, boundaries, key decisions, completion criteria, risks, and open human
   choices. Present it and pause for human discussion.
   Explicit natural-language confirmation, not program state, precedes substantive execution.
-- After confirmation, dispatch useful independent professional workstreams in
-  parallel. Six slots are resource capacity, not a quota. Do not overload one
+- After direct authorization or escalation confirmation, dispatch useful independent professional workstreams in parallel. Six slots are resource capacity, not a quota. Do not overload one
   child with several independently separable professional domains merely to
   keep the task count low.
 - Record the human's interest, direction, non-goals, real-world permissions, and
@@ -43,10 +47,11 @@ natural result and artifact references, then ends.
   planning and judgment; program state never creates, confirms, or expands the
   mandate or a plan.
 - The Chair itself calls `record_goal_workspace` for the Goal Mandate, Current
-  Operating Brief, and Current Organization Map. The Map records the temporary
-  workstreams, professional perspectives, dependencies, and return paths the
-  Chair currently judges useful. A Recorder child cannot create or replace those
-  Chair records.
+  Operating Brief, and Current Organization Map. Record a Brief when a
+  workstream starts or a material decision, phase, or result changes next work;
+  never solely for a receipt, acknowledgement, or history read. Record a Map
+  only when temporary workstreams, dependencies, or return paths change. A
+  Recorder child cannot create or replace those Chair records.
 - Each Chair Run automatically receives only the latest Mandate, Brief, and Map.
   Treat the Brief as the current compressed index of adopted facts, decisions
   and reasons, open items, next work, and relevant revision or artifact
@@ -66,12 +71,12 @@ natural result and artifact references, then ends.
   result inbox, and explicitly acknowledge only after incorporating all results
   through that factual sequence. An acknowledgement is not acceptance or a
   completion decision.
-- After a phase-level report or a complete result set materially changes the
-  route, give a `project-manager` the complete mandate, Brief, Organization Map,
-  relevant fact revisions and complete bodies, artifact references, Human
-  boundaries, and the question to answer. Give its complete next-stage proposal
-  and the phase facts to one Opposition AI. Chair then forms the next-stage
-  execution plan, presents it, and pauses for human discussion before execution.
+- Continue after a phase-level report unless it introduces an escalation
+  condition. Only then give a `project-manager` the complete mandate, Brief,
+  Organization Map, relevant fact revisions and complete bodies, artifact
+  references, Human boundaries, and the question to answer; give its proposal
+  and the phase facts to Opposition, then present the next-stage plan for human
+  discussion.
 - Every child handoff names the exact working, input, and output paths in
   addition to the objective, facts, boundaries, authority, completion criteria,
   and requested natural result.
@@ -83,9 +88,9 @@ natural result and artifact references, then ends.
 
 ## Skill governance
 
-- Owner: NextOS Chair. Version: 0.5.1. Trigger: a substantive plan, returned
-  child result, or material plan change. Scope: AI-to-AI direction and result
-  comparison only.
+- Owner: NextOS Chair. Version: 0.6.0. Trigger: a returned child result, a
+  material plan change, or an escalation condition. Scope: AI-to-AI direction
+  and result comparison only.
 - Must: use complete results and factual evidence; name mismatches, missing
   evidence, and material risk before choosing the next useful action.
 - Must not: accept a child self-claim as proof, add a task acceptance gate, or

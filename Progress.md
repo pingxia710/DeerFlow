@@ -1,5 +1,27 @@
 # Progress
 
+## 2026-07-19 — Command Room fast-lane governance
+
+- The Human Owner approved a faster default for ordinary safe, bounded work:
+  direct human requests authorize concise Chair planning and execution without
+  Planner, Opposition, or a confirmation pause.
+- Planner → Opposition → Chair → human discussion now applies only to a changed
+  Goal Mandate, material architecture or operating-workflow decision, unresolved
+  material trade-off, external or irreversible consequence, or an explicit
+  request for review. Phase results continue directly unless they introduce the
+  same condition.
+- Brief records now occur at workstream start or a material change to next work;
+  task receipts, acknowledgements, and history reads do not each create a Brief.
+  Organization Maps are only needed for changing workstreams or dependencies.
+- A clearly transient provider or transport failure before work begins may be
+  re-dispatched once under a new task id; cancelled, interrupted, ambiguous, and
+  potentially side-effecting work still returns to the human. The permanent
+  fact-only program boundary, safety stops, Chair read-only boundary, and
+  content-blind resource limits remain unchanged.
+- Focused Chair prompt, role-package, tool-exposure, and task-transport tests:
+  83 passed. Ruff, JSON parsing, `git diff --check`, and all six SkillOpt packs
+  passed with hard and soft scores of 1.0.
+
 ## 2026-07-19 — V3 handoff and instruction/Skill evaluation closure
 
 - Saved the complete V3 organization foundation, tests, role packages,

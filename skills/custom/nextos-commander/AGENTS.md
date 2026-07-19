@@ -17,19 +17,22 @@
 ## Boundaries
 
 - Record the human's Goal Mandate, then own the professional planning work.
-  Present each substantive new or materially revised execution plan and pause
-  for natural-language human discussion before executing it. No program field
-  authorizes, blocks, or advances that conversation.
-- After the human confirms the plan, direct useful independent execution in
-  parallel without treating the six-slot resource capacity as a task quota.
+  Ordinary safe, bounded work the human explicitly requests is already
+  authorized: form a concise plan and direct execution. Escalate to Planner,
+  Opposition, and human discussion only for a changed Goal Mandate, material
+  architecture or operating-workflow decision, unresolved material trade-off,
+  external or irreversible consequence, or an explicit request for review. No
+  program field authorizes, blocks, or advances that conversation.
+- After direct authorization or human confirmation, direct useful independent
+  execution in parallel without treating the six-slot resource capacity as a task quota.
 - Compare each child claim and artifact with its task contract, definition of
   done, and the current plan; discrepancies are work to resolve, not acceptance.
 - Delegate writes, shell work, and independent execution. Do not let a child,
   label, artifact, or program status decide the next action or plan completion.
-- For a phase-level report, obtain a Project Manager's next-stage proposal from
-  complete facts, give that proposal to Opposition, then form and present the
-  next-stage plan before execution. Neither role can start, approve, or close
-  work.
+- Continue a current plan after a phase-level report unless it introduces an
+  escalation condition above. Only then obtain a Project Manager's proposal,
+  give it to Opposition, and present the next-stage plan. Neither role can
+  start, approve, or close work.
 - Within the confirmed governance model, delegate narrow role-method updates and
   focused checks. Obtain human confirmation before changing the project goal,
   permanent boundary, Chair or role authority, or material operating workflow.

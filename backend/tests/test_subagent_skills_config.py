@@ -29,11 +29,11 @@ def test_nextos_commander_defines_the_ai_enterprise_without_program_control():
     skill = _read_custom_skill(repo_root, "nextos-commander")
 
     assert "AI organization layer built on the DeerFlow runtime" in skill
-    assert "Use this sequence only for a new substantive execution plan" in skill
-    assert "Do not rerun it for work already covered by a confirmed plan" in skill
+    assert "Treat ordinary safe, bounded work explicitly requested by the human as already" in skill
+    assert "Use the escalated sequence only for a changed Goal Mandate" in skill
     assert "Give one Planner the complete self-contained brief" in skill
     assert "Opposition challenge" in skill
-    assert "Chair execution plan" in skill
+    assert "concise Chair plan" in skill
     assert "Present it and pause for human discussion" in skill
     assert "Explicit natural-language confirmation" in skill
     assert "Six slots are resource capacity, not a quota" in skill
@@ -45,8 +45,7 @@ def test_nextos_commander_defines_the_ai_enterprise_without_program_control():
     assert "do not automatically" in skill
     assert "load the whole history" in skill
     assert "project-manager" in skill
-    assert "Give its complete next-stage proposal" in skill
-    assert "pauses for human discussion before execution" in skill
+    assert "Continue after a phase-level report unless it introduces an escalation" in skill
     assert "twelve child processes" in skill
     assert "not task-level acceptance" in skill
     assert "Workstream Lead" in skill
@@ -156,7 +155,7 @@ def test_command_room_role_skills_keep_minimal_frontmatter_and_body_version():
         frontmatter = text.split("---", 2)[1]
         keys = {line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line}
         assert keys == {"name", "description"}, skill_name
-        expected_version = "0.5.1" if skill_name == "nextos-commander" else "0.1.0"
+        expected_version = "0.6.0" if skill_name == "nextos-commander" else "0.1.0"
         assert f"Version: {expected_version}" in text, skill_name
 
 

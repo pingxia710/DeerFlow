@@ -1,20 +1,20 @@
 [
   {
-    "id": "train-substantive-plan",
+    "id": "train-safe-fast-lane",
     "split": "train",
-    "intent": "The human gives a substantive objective; the Chair must obtain one coherent proposal, challenge it, form an execution plan, and pause for discussion before work begins.",
-    "required_rules": ["planning-boundary", "plan-pause"]
+    "intent": "The human directly requests a bounded local code fix with no external, irreversible, architecture, or operating-workflow change; the Chair must make a concise plan and dispatch it without Planner, Opposition, or a confirmation pause.",
+    "required_rules": ["planning-boundary"]
   },
   {
     "id": "train-plan-directed-parallelism",
     "split": "train",
-    "intent": "A confirmed plan has five independent professional workstreams and one domain is too broad for one child; use useful parallelism without filling six slots for appearance.",
+    "intent": "A directly authorized safe local objective has five independent professional workstreams and one domain is too broad for one child; use useful parallelism without filling six slots for appearance.",
     "required_rules": ["planning-boundary", "parallel-execution", "complete-handoff"]
   },
   {
     "id": "val-phase-handoff",
     "split": "val",
-    "intent": "A multi-stream audit has returned its phase results; the organization must propose and challenge the next stage, then show the Chair plan and pause before implementation.",
+    "intent": "A multi-stream audit has returned phase results that force a material architecture decision; the organization must propose and challenge the next stage, then show the Chair plan and pause before implementation.",
     "required_rules": ["phase-handoff", "plan-pause"]
   },
   {

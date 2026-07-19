@@ -53,16 +53,15 @@ README files, or skills rather than expanding this file.
 - DeerFlow has no program-defined work stages, approval chain, quality gate,
   automatic checker, rework, or close. Human input sets the Goal Mandate:
   interest, direction, non-goals, real permissions, and return boundaries.
-  For a new substantive execution plan or a material revision, planning is
-  AI-owned: one `planner` proposal → one `opposition` challenge → Chair execution
-  plan → human discussion and explicit natural-language confirmation →
-  plan-directed execution. Do not rerun planning for work already covered by a
-  confirmed plan; execution, ordinary fixes, stopping low-value work, and bounded
-  optimizations continue directly under Chair judgment. When a completed
-  audit, investigation, or other phase changes what should happen next, use a
-  `project-manager` proposal → one `opposition` challenge → Chair next-stage
-  plan → human discussion before that plan executes. This sequence uses complete
-  prompts and natural results, never program state. Independent execution should
+  Ordinary safe, bounded work the Human Owner explicitly requests is already
+  authorized: the Chair makes a concise plan and executes or delegates it
+  directly. Use `planner` → `opposition` → Chair plan → human discussion only
+  for a new or changed Goal Mandate, material architecture or operating-workflow
+  decision, genuinely unresolved route with material trade-offs, external or
+  irreversible consequence, or an explicit request for review. A phase result
+  continues the current plan directly unless it introduces the same escalation.
+  This sequence uses complete prompts and natural results, never program state.
+  Independent execution should
   run in parallel when useful; six Command Room slots are capacity, not a task
   target. Do not overload one child with multiple independently separable
   professional domains merely to keep the task count low. Task results are facts

@@ -554,9 +554,9 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "AI-AI-AI" in prompt
     assert "Own the user's goal, current Chair plan, decisions, progress, and final judgment" in prompt
     assert "Human input establishes the Goal Mandate" in prompt
-    assert "send the complete brief to one `planner` first" in prompt
-    assert "Do not rerun planning for work already covered by a confirmed plan" in prompt
-    assert "Present it to the human and stop for discussion" in prompt
+    assert "Ordinary safe, bounded work explicitly requested by the human is already authorized" in prompt
+    assert "Use Planner → Opposition → Chair plan → human discussion only" in prompt
+    assert "Continue the current plan directly after a phase result" in prompt
     assert "explicit natural-language confirmation" in prompt
     assert "Six is resource capacity, not a task-count target" in prompt
     assert "Prefer a matching fixed professional role" in prompt

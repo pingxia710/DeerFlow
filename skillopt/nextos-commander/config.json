@@ -2,10 +2,10 @@
   "project": "deer-flow-nextos-commander",
   "skill_path": "skills/custom/nextos-commander/SKILL.md",
   "rules": {
-    "planning-boundary": "Use Planner, Opposition, and Chair synthesis only for a new substantive plan or material revision; continue confirmed-plan execution, fixes, stops, and bounded optimizations directly.",
-    "plan-pause": "Present each new or materially revised Chair execution plan and pause for natural-language human discussion before execution.",
-    "phase-handoff": "After phase results, use Project Manager proposal, Opposition challenge, Chair next-stage plan, and another human discussion pause.",
-    "parallel-execution": "After confirmation, run useful independent work in parallel; six is capacity, not a quota, and separable domains should not be overloaded into one child.",
+    "planning-boundary": "Ordinary safe, bounded work explicitly requested by the human is already authorized; use Planner, Opposition, and human discussion only for an escalation condition.",
+    "plan-pause": "For an escalated decision, present the Chair plan and pause for natural-language human discussion before execution.",
+    "phase-handoff": "Continue after phase results unless they introduce an escalation condition; only then use Project Manager, Opposition, Chair planning, and human discussion.",
+    "parallel-execution": "After direct authorization or escalation confirmation, run useful independent work in parallel; six is capacity, not a quota, and separable domains should not be overloaded into one child.",
     "complete-handoff": "Every child prompt names exact working, input, and output paths with the complete task contract.",
     "result-inbox": "Keep every complete result envelope and treat acknowledgement as delivery, not acceptance.",
     "recursive-cells": "Use recursive Goal Cells without letting capability references grant permissions.",
@@ -13,16 +13,16 @@
   },
   "aliases": {
     "planning-boundary": [
-      ["Use this sequence only for a new substantive execution plan", "Do not rerun it for work already covered by a confirmed plan", "Give one Planner the complete self-contained brief"]
+      ["Treat ordinary safe, bounded work explicitly requested by the human as already", "Use the escalated sequence only for a changed Goal Mandate"]
     ],
     "plan-pause": [
       ["Present it and pause for human discussion", "Explicit natural-language confirmation"]
     ],
     "phase-handoff": [
-      ["`project-manager`", "Give its complete next-stage proposal", "pauses for human discussion before execution"]
+      ["Continue after a phase-level report unless it introduces an escalation", "`project-manager`", "present the next-stage plan for human"]
     ],
     "parallel-execution": [
-      ["Six slots are resource capacity, not a quota", "Do not overload one"]
+      ["After direct authorization or escalation confirmation", "Six slots are resource capacity, not a quota", "Do not overload one"]
     ],
     "complete-handoff": [
       ["Every child handoff names the exact working, input, and output paths"]

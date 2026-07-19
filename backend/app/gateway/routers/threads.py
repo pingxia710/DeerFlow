@@ -63,6 +63,7 @@ _ACTIVE_THREAD_SEARCH_STATUSES = frozenset({"busy", "pending", "running", "cance
 _WORKER_LOST_TERMINAL_REASONS = frozenset({"worker_lost", "lease_expired_recovered"})
 _DELETE_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 _DELETE_GATE_ACQUIRED_REQUEST_ATTR = "_deerflow_delete_gate_acquired"
+_GOAL_TREE_SEARCH_PAGE_SIZE = 500
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -1243,28 +1244,39 @@ async def get_goal_tree(
     root_thread_id = current_metadata.get(GOAL_CELL_ROOT_THREAD_KEY)
     if not isinstance(root_thread_id, str) or not root_thread_id:
         root_thread_id = thread_id
-    rows = await store.search(limit=1000, user_id=user_id)
     cells: list[GoalCellNodeResponse] = []
-    for row in rows:
-        metadata = row.get("metadata") or {}
-        parent_thread_id = metadata.get(GOAL_CELL_PARENT_THREAD_KEY)
-        parent_run_id = metadata.get(GOAL_CELL_PARENT_RUN_KEY)
-        if metadata.get(GOAL_CELL_ROOT_THREAD_KEY) != root_thread_id or not isinstance(parent_thread_id, str) or not isinstance(parent_run_id, str):
-            continue
-        raw_capability_refs = metadata.get(GOAL_CELL_CAPABILITY_REFS_KEY)
-        cells.append(
-            GoalCellNodeResponse(
-                thread_id=row["thread_id"],
-                parent_thread_id=parent_thread_id,
-                parent_run_id=parent_run_id,
-                display_name=row.get("display_name"),
-                runtime_status=str(row.get("status") or "idle"),
-                capability_refs=([str(value) for value in raw_capability_refs] if isinstance(raw_capability_refs, list) else []),
-                workspace_ref=(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY) if isinstance(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY), str) else None),
-                created_at=coerce_iso(row.get("created_at", "")),
-                updated_at=coerce_iso(row.get("updated_at", "")),
-            )
+    offset = 0
+    while True:
+        rows = await store.search(
+            limit=_GOAL_TREE_SEARCH_PAGE_SIZE,
+            offset=offset,
+            user_id=user_id,
         )
+        if not rows:
+            break
+        for row in rows:
+            metadata = row.get("metadata") or {}
+            parent_thread_id = metadata.get(GOAL_CELL_PARENT_THREAD_KEY)
+            parent_run_id = metadata.get(GOAL_CELL_PARENT_RUN_KEY)
+            if metadata.get(GOAL_CELL_ROOT_THREAD_KEY) != root_thread_id or not isinstance(parent_thread_id, str) or not isinstance(parent_run_id, str):
+                continue
+            raw_capability_refs = metadata.get(GOAL_CELL_CAPABILITY_REFS_KEY)
+            cells.append(
+                GoalCellNodeResponse(
+                    thread_id=row["thread_id"],
+                    parent_thread_id=parent_thread_id,
+                    parent_run_id=parent_run_id,
+                    display_name=row.get("display_name"),
+                    runtime_status=str(row.get("status") or "idle"),
+                    capability_refs=([str(value) for value in raw_capability_refs] if isinstance(raw_capability_refs, list) else []),
+                    workspace_ref=(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY) if isinstance(metadata.get(GOAL_CELL_WORKSPACE_REF_KEY), str) else None),
+                    created_at=coerce_iso(row.get("created_at", "")),
+                    updated_at=coerce_iso(row.get("updated_at", "")),
+                )
+            )
+        if len(rows) < _GOAL_TREE_SEARCH_PAGE_SIZE:
+            break
+        offset += len(rows)
     cells.sort(key=lambda cell: (cell.created_at, cell.thread_id))
     return GoalTreeResponse(root_thread_id=root_thread_id, cells=cells)
 

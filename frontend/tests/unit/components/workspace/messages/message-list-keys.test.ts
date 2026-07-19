@@ -2,6 +2,7 @@ import { expect, test } from "@rstest/core";
 
 import {
   getActiveTurnSubtaskScope,
+  findMatchingActiveSubtaskForTask,
   findMatchingTerminalSubtaskForTask,
   getMessageGroupKey,
   getSubtaskCardKey,
@@ -190,6 +191,34 @@ test("missing historical roundId resolves one matching terminal lane without gue
       },
     ),
   ).toBeUndefined();
+});
+
+test("queued task lanes remain active without being treated as running", () => {
+  const queued = {
+    id: "task-1",
+    threadId: "thread-1",
+    runId: "run-1",
+    status: "queued" as const,
+    subagent_type: "executor",
+    description: "Wait for a worker",
+    prompt: "Execute after admission",
+  };
+
+  expect(
+    findMatchingActiveSubtaskForTask([queued], {
+      threadId: "thread-1",
+      runId: "run-1",
+      taskId: "task-1",
+    }),
+  ).toEqual(queued);
+  expect(
+    shouldKeepInferredSubtask({
+      status: "queued",
+      hasMatchingTerminal: false,
+      hasTerminalInOtherRun: true,
+      isVisibleRunning: true,
+    }),
+  ).toBe(false);
 });
 
 test("inferred task policy keeps matching terminal metadata updates and drops stale replays", () => {

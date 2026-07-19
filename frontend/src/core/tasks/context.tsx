@@ -295,6 +295,8 @@ export function mergeSubtaskUpdate(
     task.status === "completed" ||
     task.status === "failed" ||
     task.status === "unknown";
+  const isActiveStatus =
+    task.status === "queued" || task.status === "in_progress";
   const { roundId, runId, threadId } = task;
   const hasStrongerTiming =
     task.startedAt !== undefined ||
@@ -329,8 +331,10 @@ export function mergeSubtaskUpdate(
     previousStatus === "unknown" &&
     previous?.terminalReason === "recovery_exhausted";
   const shouldKeepTerminalStatus =
-    task.status === "in_progress" &&
+    isActiveStatus &&
     (isTerminalCompleted || isTerminalFailure || isRecoveryStatusUnknown);
+  const shouldKeepRunningStatus =
+    task.status === "queued" && previousStatus === "in_progress";
   const shouldKeepExistingMetadata =
     previous !== undefined &&
     (task.description === undefined ||
@@ -349,7 +353,7 @@ export function mergeSubtaskUpdate(
     ...(threadId ? { threadId } : {}),
     ...(runId ? { runId } : {}),
     ...(roundId ? { roundId } : {}),
-    ...(task.status === "in_progress" && previousStatus !== "completed"
+    ...(isActiveStatus && previousStatus !== "completed"
       ? { error: undefined, result: undefined }
       : {}),
     ...(task.startedAt !== undefined &&
@@ -376,7 +380,7 @@ export function mergeSubtaskUpdate(
       task.durationMs > previous.durationMs)
       ? { durationMs: task.durationMs }
       : {}),
-    ...(shouldKeepTerminalStatus
+    ...(shouldKeepTerminalStatus || shouldKeepRunningStatus
       ? {
           status: previousStatus,
           ...(isTerminalCompleted ? { result: previous?.result } : {}),

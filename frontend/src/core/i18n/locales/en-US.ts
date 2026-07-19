@@ -396,7 +396,10 @@ export const enUS: Translations = {
       runLifecycle: "Run lifecycle",
       artifactRecorded: "Artifact recorded",
       runRunning: "Run in progress",
+      tasksQueued: (count) => `${count} task${count === 1 ? "" : "s"} queued`,
       tasksRunning: (count) => `${count} task${count === 1 ? "" : "s"} running`,
+      tasksQueuedAndRunning: (queued, running) =>
+        `${queued} task${queued === 1 ? "" : "s"} queued · ${running} task${running === 1 ? "" : "s"} running`,
       runningSubtasks: "Running subtasks",
       executionTime: (elapsed) => `Execution time: ${elapsed}`,
       eventHistory: "Event history",
@@ -420,6 +423,10 @@ export const enUS: Translations = {
       revision: (revision) => `revision ${revision}`,
       resultInbox: "Result inbox",
       result: "AI result",
+      resultSourceRole: "Role",
+      resultSourceDescription: "Description",
+      resultSourceTaskId: "Task ID",
+      resultSourceRunId: "Source run ID",
       noResults: "No unacknowledged result envelopes.",
       inboxFacts: (notified, acknowledged) =>
         `notified through ${notified} · acknowledged through ${acknowledged}`,
@@ -507,6 +514,7 @@ export const enUS: Translations = {
     subtask: "Subtask",
     executing: (count: number) =>
       `Executing ${count === 1 ? "" : count + " "}subtask${count === 1 ? "" : "s in parallel"}`,
+    queued: "Subtask queued",
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
@@ -515,6 +523,8 @@ export const enUS: Translations = {
       "Recovery failed, so the final subtask status is unknown. Retry recovery to synchronize it again.",
     backgroundWakeFailed: (attempts) =>
       `Child task completed; the Chair wake did not complete after ${attempts} attempts. This fact does not mean the project is complete, accepted, or needs automatic retry.`,
+    artifactQueued:
+      "Artifact references will load after the queued subtask completes.",
     artifactPending:
       "Artifact references remain pending while the subtask runs.",
     artifactLoading: "Loading referenced artifacts…",

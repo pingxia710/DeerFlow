@@ -312,7 +312,9 @@ export interface Translations {
       runLifecycle: string;
       artifactRecorded: string;
       runRunning: string;
+      tasksQueued: (count: number) => string;
       tasksRunning: (count: number) => string;
+      tasksQueuedAndRunning: (queued: number, running: number) => string;
       runningSubtasks: string;
       executionTime: (elapsed: string) => string;
       eventHistory: string;
@@ -335,6 +337,10 @@ export interface Translations {
       revision: (revision: number) => string;
       resultInbox: string;
       result: string;
+      resultSourceRole: string;
+      resultSourceDescription: string;
+      resultSourceTaskId: string;
+      resultSourceRunId: string;
       noResults: string;
       inboxFacts: (notified: number, acknowledged: number) => string;
       goalTree: string;
@@ -415,12 +421,14 @@ export interface Translations {
   subtasks: {
     subtask: string;
     executing: (count: number) => string;
+    queued: string;
     in_progress: string;
     completed: string;
     failed: string;
     unknown: string;
     recoveryFailedUnknown: string;
     backgroundWakeFailed: (attempts: number) => string;
+    artifactQueued: string;
     artifactPending: string;
     artifactLoading: string;
     artifactUnavailable: string;

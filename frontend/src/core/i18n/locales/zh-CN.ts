@@ -400,7 +400,10 @@ export const zhCN: Translations = {
       runLifecycle: "运行生命周期",
       artifactRecorded: "已记录工件",
       runRunning: "任务运行中",
+      tasksQueued: (count) => `${count} 个子任务排队中`,
       tasksRunning: (count) => `正在执行 ${count} 个子任务`,
+      tasksQueuedAndRunning: (queued, running) =>
+        `${queued} 个子任务排队中 · 正在执行 ${running} 个子任务`,
       runningSubtasks: "正在执行的子任务",
       executionTime: (elapsed) => `执行时间：${elapsed}`,
       eventHistory: "事件记录",
@@ -423,6 +426,10 @@ export const zhCN: Translations = {
       revision: (revision) => `版本 ${revision}`,
       resultInbox: "结果收件箱",
       result: "AI 结果",
+      resultSourceRole: "角色",
+      resultSourceDescription: "描述",
+      resultSourceTaskId: "任务 ID",
+      resultSourceRunId: "来源运行 ID",
       noResults: "没有尚未确认的完整结果。",
       inboxFacts: (notified, acknowledged) =>
         `已通知至 ${notified} · 已确认至 ${acknowledged}`,
@@ -508,6 +515,7 @@ export const zhCN: Translations = {
     subtask: "子任务",
     executing: (count: number) =>
       `${count > 1 ? "并行" : ""}执行 ${count} 个子任务`,
+    queued: "子任务排队中",
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
@@ -516,6 +524,7 @@ export const zhCN: Translations = {
       "恢复失败，尚未取得子任务最终状态。可重试恢复以重新同步状态。",
     backgroundWakeFailed: (attempts) =>
       `子任务已完成；Chair 唤醒在 ${attempts} 次尝试后仍未完成。该事实不表示项目已完成、已接受，或需要自动重试。`,
+    artifactQueued: "排队中的子任务完成后将加载工件引用。",
     artifactPending: "子任务运行时，工件引用保持待加载状态。",
     artifactLoading: "正在加载引用的工件…",
     artifactUnavailable: "某个引用的工件不可用。",

@@ -52,12 +52,7 @@ type WorkRecordToggleProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-const ACTIVE_TASK_LANE_STATUSES = new Set([
-  "in_progress",
-  "running",
-  "pending",
-  "executing",
-]);
+const QUEUED_TASK_LANE_STATUSES = new Set(["pending", "queued"]);
 const RUNNING_TASK_LANE_STATUSES = new Set([
   "in_progress",
   "running",
@@ -67,13 +62,26 @@ const RUNNING_TASK_LANE_STATUSES = new Set([
 function useWorkActivity(threadId: string, enabled: boolean) {
   const { t } = useI18n();
   const snapshot = useThreadRuntimeSnapshot(threadId, { enabled });
-  const activeTaskCount =
+  const queuedTaskCount =
     snapshot.data?.task_lanes?.filter((lane) =>
-      ACTIVE_TASK_LANE_STATUSES.has(lane.status),
+      QUEUED_TASK_LANE_STATUSES.has(lane.status),
+    ).length ?? 0;
+  const runningTaskCount =
+    snapshot.data?.task_lanes?.filter((lane) =>
+      RUNNING_TASK_LANE_STATUSES.has(lane.status),
     ).length ?? 0;
 
-  if (activeTaskCount > 0) {
-    return t.chats.workRecord.tasksRunning(activeTaskCount);
+  if (queuedTaskCount > 0 && runningTaskCount > 0) {
+    return t.chats.workRecord.tasksQueuedAndRunning(
+      queuedTaskCount,
+      runningTaskCount,
+    );
+  }
+  if (queuedTaskCount > 0) {
+    return t.chats.workRecord.tasksQueued(queuedTaskCount);
+  }
+  if (runningTaskCount > 0) {
+    return t.chats.workRecord.tasksRunning(runningTaskCount);
   }
   return snapshot.data?.runs?.some((run) => isActiveRunStatus(run.status))
     ? t.chats.workRecord.runRunning
@@ -164,6 +172,28 @@ function resultHeading(result: GoalWorkspaceResult, fallback: string) {
     return description;
   }
   return typeof role === "string" && role.trim() ? role : fallback;
+}
+
+function resultSourceFacts(
+  result: GoalWorkspaceResult,
+  labels: {
+    role: string;
+    description: string;
+    taskId: string;
+    sourceRunId: string;
+  },
+) {
+  const metadata = result.metadata;
+  const fields = [
+    [labels.role, metadata.role],
+    [labels.description, metadata.description],
+    [labels.taskId, metadata.task_id],
+    [labels.sourceRunId, metadata.source_run_id],
+  ] as const;
+  return fields.filter(
+    (field): field is readonly [string, string] =>
+      typeof field[1] === "string" && field[1].trim().length > 0,
+  );
 }
 
 function historyFactDetails(event: GoalWorkspaceHistoryEvent, locale: Locale) {
@@ -491,26 +521,44 @@ function WorkRecordBody({
             </p>
           ) : (
             <div className="space-y-2">
-              {workspace?.results.map((result) => (
-                <details
-                  className="rounded-md border border-amber-500/25 bg-amber-500/[0.04]"
-                  key={result.revision}
-                >
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs">
-                    <span className="truncate font-medium">
-                      {resultHeading(result, t.chats.workRecord.result)}
-                    </span>
-                    <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
-                      #{result.revision}
-                    </span>
-                  </summary>
-                  <div className="border-t border-amber-500/20 px-3 py-3">
-                    <p className="max-h-96 overflow-y-auto text-sm leading-6 break-words whitespace-pre-wrap">
-                      {result.body}
-                    </p>
-                  </div>
-                </details>
-              ))}
+              {workspace?.results.map((result) => {
+                const sourceFacts = resultSourceFacts(result, {
+                  role: t.chats.workRecord.resultSourceRole,
+                  description: t.chats.workRecord.resultSourceDescription,
+                  taskId: t.chats.workRecord.resultSourceTaskId,
+                  sourceRunId: t.chats.workRecord.resultSourceRunId,
+                });
+                return (
+                  <details
+                    className="rounded-md border border-amber-500/25 bg-amber-500/[0.04]"
+                    key={result.revision}
+                  >
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <span className="truncate font-medium">
+                        {resultHeading(result, t.chats.workRecord.result)}
+                      </span>
+                      <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
+                        #{result.revision}
+                      </span>
+                    </summary>
+                    <div className="border-t border-amber-500/20 px-3 py-3">
+                      {sourceFacts.length > 0 && (
+                        <dl className="text-muted-foreground mb-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                          {sourceFacts.map(([label, value]) => (
+                            <div className="contents" key={label}>
+                              <dt>{label}</dt>
+                              <dd className="font-mono break-words">{value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      <p className="max-h-96 overflow-y-auto text-sm leading-6 break-words whitespace-pre-wrap">
+                        {result.body}
+                      </p>
+                    </div>
+                  </details>
+                );
+              })}
             </div>
           )}
         </section>

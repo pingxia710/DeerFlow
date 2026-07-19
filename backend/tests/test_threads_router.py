@@ -363,6 +363,50 @@ def test_goal_tree_route_returns_recursive_structural_facts():
     assert cell_a["workspace_ref"] == "workspace://a"
 
 
+def test_goal_tree_paginates_all_owner_cells_without_cross_owner_leakage():
+    user = _make_user()
+    owner_id = str(user.id)
+    other_owner_id = "33333333-3333-3333-3333-333333333333"
+    app = make_authed_test_app(user_factory=lambda: user)
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.state.thread_store = thread_store
+    app.include_router(threads.router)
+
+    async def seed() -> None:
+        await thread_store.create("root-goal", user_id=owner_id)
+        for index in range(1001):
+            await thread_store.create(
+                f"cell-{index:04d}",
+                user_id=owner_id,
+                metadata={
+                    GOAL_CELL_PARENT_THREAD_KEY: "root-goal",
+                    GOAL_CELL_PARENT_RUN_KEY: f"run-{index:04d}",
+                    GOAL_CELL_ROOT_THREAD_KEY: "root-goal",
+                },
+            )
+        await thread_store.create(
+            "other-owner-cell",
+            user_id=other_owner_id,
+            metadata={
+                GOAL_CELL_PARENT_THREAD_KEY: "root-goal",
+                GOAL_CELL_PARENT_RUN_KEY: "other-owner-run",
+                GOAL_CELL_ROOT_THREAD_KEY: "root-goal",
+            },
+        )
+
+    asyncio.run(seed())
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/root-goal/goal-tree")
+
+    assert response.status_code == 200
+    cells = response.json()["cells"]
+    expected_thread_ids = [f"cell-{index:04d}" for index in range(1001)]
+    assert [cell["thread_id"] for cell in cells] == expected_thread_ids
+    assert len(cells) == len(set(cell["thread_id"] for cell in cells))
+    assert "other-owner-cell" not in {cell["thread_id"] for cell in cells}
+
+
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
     paths = Paths(tmp_path)
     user_id = str(_HISTORY_USER_ID)

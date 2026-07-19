@@ -300,10 +300,13 @@ function taskLaneStatus(status: string): NonNullable<SubtaskUpdate["status"]> {
   if (status === "completed") {
     return "completed";
   }
+  if (status === "pending" || status === "queued") {
+    return "queued";
+  }
   if (
     status === "in_progress" ||
     status === "running" ||
-    status === "pending"
+    status === "executing"
   ) {
     return "in_progress";
   }
@@ -351,15 +354,17 @@ export function taskLaneSubtaskUpdate(lane: TaskLaneSnapshot): SubtaskUpdate {
     ...(lane.details ?? {}),
     ...(Object.keys(refs).length > 0 ? { refs } : {}),
   };
-  const startedAt = taskEventStartedAt(lane.started_at);
-  if (startedAt !== undefined) {
-    update.startedAt = startedAt;
+  if (status === "in_progress") {
+    const startedAt = taskEventStartedAt(lane.started_at);
+    if (startedAt !== undefined) {
+      update.startedAt = startedAt;
+    }
   }
   const durationMs = taskEventDurationMs(lane.duration_ms);
   if (durationMs !== undefined) {
     update.durationMs = durationMs;
   }
-  if (status !== "in_progress") {
+  if (status === "completed" || status === "failed") {
     const finishedAt =
       taskEventTimestamp(lane.finished_at) ??
       taskEventTimestamp(lane.completed_at);
@@ -505,11 +510,17 @@ export function applyTaskEventToSubtask(
   }
 
   if (eventType === "task_started") {
-    const update: SubtaskUpdate = { ...base, status: "in_progress" };
+    const status =
+      eventStatus === "pending" || eventStatus === "queued"
+        ? "queued"
+        : "in_progress";
+    const update: SubtaskUpdate = { ...base, status };
     const eventStartedAt =
-      taskEventStartedAt(taskEvent.started_at) ??
-      taskEventStartedAt(taskEvent.created_at) ??
-      startedAt;
+      status === "in_progress"
+        ? (taskEventStartedAt(taskEvent.started_at) ??
+          taskEventStartedAt(taskEvent.created_at) ??
+          startedAt)
+        : undefined;
     if (eventStartedAt !== undefined) {
       update.startedAt = eventStartedAt;
     }

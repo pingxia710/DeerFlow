@@ -197,6 +197,92 @@ test("task lane facts merge with a complete live result", () => {
   });
 });
 
+test("queued task events and snapshots remain distinct from running tasks", () => {
+  const updates: SubtaskUpdate[] = [];
+  let tasks: Record<string, Subtask> = {};
+  const update = (task: SubtaskUpdate) => {
+    updates.push(task);
+    tasks = applySubtaskUpdateInState(tasks, task);
+  };
+  const pendingEvent = {
+    type: "task_started",
+    task_id: "task-queued",
+    thread_id: "thread-1",
+    run_id: "run-1",
+    status: "pending",
+    description: "Wait for a worker",
+  };
+
+  expect(applyTaskEventToSubtask(pendingEvent, update)).toBe(true);
+  expect(updates[0]).toMatchObject({
+    id: "task-queued",
+    status: "queued",
+    description: "Wait for a worker",
+  });
+  expect(updates[0]).not.toHaveProperty("startedAt");
+  expect(
+    mergeTaskLaneSubtasks(
+      [
+        {
+          thread_id: "thread-1",
+          run_id: "run-1",
+          task_id: "task-queued",
+          status: "pending",
+        },
+      ],
+      Object.values(tasks),
+    )[0]?.status,
+  ).toBe("queued");
+
+  expect(
+    mergeTaskLaneSubtasks(
+      [
+        {
+          thread_id: "thread-1",
+          run_id: "run-1",
+          task_id: "task-queued",
+          status: "pending",
+        },
+        {
+          thread_id: "thread-1",
+          run_id: "run-1",
+          task_id: "task-running",
+          status: "running",
+          started_at: "2026-07-17T01:00:00.000Z",
+        },
+      ],
+      [],
+    ).map((task) => [task.id, task.status]),
+  ).toEqual([
+    ["task-running", "in_progress"],
+    ["task-queued", "queued"],
+  ]);
+
+  expect(
+    applyTaskEventToSubtask(
+      { ...pendingEvent, type: "task_running", status: "in_progress" },
+      update,
+    ),
+  ).toBe(true);
+  expect(updates[1]).toMatchObject({
+    id: "task-queued",
+    status: "in_progress",
+  });
+  expect(
+    mergeTaskLaneSubtasks(
+      [
+        {
+          thread_id: "thread-1",
+          run_id: "run-1",
+          task_id: "task-queued",
+          status: "pending",
+        },
+      ],
+      Object.values(tasks),
+    )[0]?.status,
+  ).toBe("in_progress");
+});
+
 test("terminal task result lookup ignores background receipts", () => {
   const messages = [
     {

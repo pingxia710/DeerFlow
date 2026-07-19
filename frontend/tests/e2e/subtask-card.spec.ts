@@ -7,6 +7,12 @@ const STOPPED_TASK_ID = "call-stopped-subtask";
 const STOPPED_TASK_DESCRIPTION = "Research stopped reload regression";
 const STOPPED_TASK_PROMPT =
   "Investigate why the stopped subtask card should not remain running after reload.";
+const QUEUED_RUN_ID = `run-queued-${MOCK_THREAD_ID}`;
+const QUEUED_TASK_ID = "call-queued-subtask";
+const QUEUED_TASK_DESCRIPTION = "Queued subtask reload regression";
+const QUEUED_TASK_PROMPT =
+  "Wait for a worker slot before starting this queued subtask.";
+const QUEUED_ARTIFACT = "/workspace/queued-artifact.md";
 
 const stoppedSubtaskMessages = [
   {
@@ -117,6 +123,79 @@ test.describe("Subtask card", () => {
     });
     await expect(page.getByText("Subtask failed")).toBeVisible();
     await expect(page.getByText("Running subtask")).toHaveCount(0);
+  });
+
+  test("shows queued status and queued artifact text after reload", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Queued subtask",
+          agent_name: "command-room",
+          messages: [
+            {
+              type: "ai",
+              id: "msg-ai-queued-subtask",
+              content: "This subtask is queued.",
+              additional_kwargs: { run_id: QUEUED_RUN_ID },
+              response_metadata: {},
+            },
+          ],
+          runtimeSnapshot: {
+            runs: [
+              {
+                run_id: QUEUED_RUN_ID,
+                thread_id: MOCK_THREAD_ID,
+                assistant_id: "lead_agent",
+                status: "pending",
+                metadata: {},
+                kwargs: {},
+                created_at: "2026-07-19T12:00:00Z",
+                updated_at: "2026-07-19T12:00:00Z",
+              },
+            ],
+            task_lanes: [
+              {
+                thread_id: MOCK_THREAD_ID,
+                run_id: QUEUED_RUN_ID,
+                task_id: QUEUED_TASK_ID,
+                status: "pending",
+                subagent_type: "general-purpose",
+                description: QUEUED_TASK_DESCRIPTION,
+                prompt: QUEUED_TASK_PROMPT,
+                artifact_refs: [QUEUED_ARTIFACT],
+                created_at: "2026-07-19T12:00:00Z",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await page.reload();
+
+    const taskCard = page
+      .locator("[data-command-room-task]")
+      .filter({ hasText: QUEUED_TASK_DESCRIPTION });
+    await expect(taskCard.getByText("Subtask queued")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(taskCard.getByText("Running subtask")).toHaveCount(0);
+    await taskCard.getByRole("button", { name: /Subtask queued/ }).click();
+    await expect(taskCard.getByText("Subtask queued")).toBeVisible();
+    await expect(
+      taskCard.getByText(
+        "Artifact references will load after the queued subtask completes.",
+      ),
+    ).toBeVisible();
+    await expect(
+      taskCard.getByText(
+        "Artifact references remain pending while the subtask runs.",
+      ),
+    ).toHaveCount(0);
   });
 });
 

@@ -175,6 +175,7 @@ function SubtaskArtifactLinks({
   const canLoad =
     references.length > 0 &&
     task.status !== "in_progress" &&
+    task.status !== "queued" &&
     !isStaticWebsiteOnly();
   const runArtifacts = useQuery({
     queryKey: queryKeys.thread.runArtifacts(threadId, runId),
@@ -186,6 +187,13 @@ function SubtaskArtifactLinks({
 
   if (references.length === 0) {
     return null;
+  }
+  if (task.status === "queued") {
+    return (
+      <p className="text-muted-foreground px-3 pb-2 text-xs" role="status">
+        {t.subtasks.artifactQueued}
+      </p>
+    );
   }
   if (task.status === "in_progress") {
     return (
@@ -456,7 +464,11 @@ function SubtaskCardBody({
       const page = await readRunMessagesPageResponse(response);
       return terminalTaskToolResult(page.data, task.id) ?? null;
     },
-    enabled: isOpen && canLoadFullResult && task.status !== "in_progress",
+    enabled:
+      isOpen &&
+      canLoadFullResult &&
+      task.status !== "in_progress" &&
+      task.status !== "queued",
     retry: false,
     staleTime: Infinity,
   });
@@ -500,6 +512,8 @@ function SubtaskCardBody({
       return <XCircleIcon className="size-3 text-red-500" />;
     } else if (task.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
+    } else if (task.status === "queued") {
+      return <ClipboardListIcon className="size-3" />;
     } else if (task.status === "unknown") {
       return <AlertCircleIcon className="size-3" />;
     }
@@ -687,6 +701,12 @@ function SubtaskCardBody({
                 {explainLastToolCall(task.latestMessage, t)}
               </ChainOfThoughtStep>
             )}
+          {task.status === "queued" && (
+            <ChainOfThoughtStep
+              label={t.subtasks.queued}
+              icon={<ClipboardListIcon className="size-4" />}
+            ></ChainOfThoughtStep>
+          )}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

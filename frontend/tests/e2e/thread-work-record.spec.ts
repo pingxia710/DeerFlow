@@ -159,7 +159,33 @@ test("work record exposes the AI organization without approval controls", async 
             content_hash: "result-hash",
             author_run_id: "run-cell",
             created_at: "2026-07-19T10:02:00Z",
-            metadata: { description: "Research Cell return" },
+            metadata: {
+              role: "fact-finder",
+              description: "Research Cell return",
+              task_id: "task-research-a",
+              source_run_id: "run-research-a",
+            },
+          },
+          {
+            revision: 10,
+            body: "Complete research findings with source-level detail.",
+            content_hash: "result-hash-b",
+            author_run_id: "run-cell-b",
+            created_at: "2026-07-19T10:02:01Z",
+            metadata: {
+              role: "fact-finder",
+              description: "Research Cell return",
+              task_id: "task-research-b",
+              source_run_id: "run-research-b",
+            },
+          },
+          {
+            revision: 11,
+            body: "Result without source fields remains readable.",
+            content_hash: "result-hash-c",
+            author_run_id: "run-cell-c",
+            created_at: "2026-07-19T10:02:02Z",
+            metadata: {},
           },
         ],
       }),
@@ -283,10 +309,37 @@ test("work record exposes the AI organization without approval controls", async 
     panel.getByText("Original mandate remains an unchanged fact."),
   ).toBeVisible();
   await expect(panel.getByText("notified through 9")).toBeVisible();
-  await panel.getByText("Research Cell return", { exact: true }).click();
+  const resultInbox = panel.locator("section").filter({
+    hasText: "Result inbox",
+  });
+  const resultCards = resultInbox
+    .locator("details")
+    .filter({ hasText: "Research Cell return" });
+  await expect(resultCards).toHaveCount(2);
+  await resultCards.nth(0).locator("summary").click();
   await expect(
-    panel.getByText("Complete research findings with source-level detail."),
+    resultCards
+      .nth(0)
+      .getByText("Complete research findings with source-level detail."),
   ).toBeVisible();
+  await expect(resultCards.nth(0)).toContainText("Role");
+  await expect(resultCards.nth(0)).toContainText("fact-finder");
+  await expect(resultCards.nth(0)).toContainText("Task ID");
+  await expect(resultCards.nth(0)).toContainText("task-research-a");
+  await expect(resultCards.nth(0)).toContainText("Source run ID");
+  await expect(resultCards.nth(0)).toContainText("run-research-a");
+  await expect(resultCards.nth(0).locator("a")).toHaveCount(0);
+  await resultCards.nth(1).locator("summary").click();
+  await expect(resultCards.nth(1)).toContainText("task-research-b");
+  await expect(resultCards.nth(1)).toContainText("run-research-b");
+  const fallbackResult = resultInbox
+    .locator("details")
+    .filter({ hasText: "Result without source fields remains readable." });
+  await fallbackResult.locator("summary").click();
+  await expect(fallbackResult).toContainText(
+    "Result without source fields remains readable.",
+  );
+  await expect(fallbackResult.locator("dl")).toHaveCount(0);
   await expect(panel.getByText("Research Cell", { exact: true })).toBeVisible();
   await expect(panel.getByText("runtime: running")).toBeVisible();
   await expect(
@@ -349,6 +402,57 @@ test("active background tasks are visible before work facts arrive", async ({
     /^\d{2}:\d{2}$/,
   );
   await expect(sections.nth(1)).toContainText("Goal workspace");
+});
+
+test("work record calls queued task lanes queued, not running", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: "Queued work",
+        runtimeSnapshot: {
+          runs: [{ run_id: "run-queued", status: "success" }],
+          task_lanes: [
+            { task_id: "task-1", status: "pending" },
+            { task_id: "task-2", status: "pending" },
+          ],
+        },
+      },
+    ],
+  });
+
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  await expect(
+    page.getByRole("button", { name: "2 tasks queued" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /running/i })).toHaveCount(0);
+});
+
+test("work record distinguishes queued and running task lanes", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: "Mixed work",
+        runtimeSnapshot: {
+          runs: [{ run_id: "run-mixed", status: "success" }],
+          task_lanes: [
+            { task_id: "task-queued", status: "pending" },
+            { task_id: "task-running", status: "running" },
+          ],
+        },
+      },
+    ],
+  });
+
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  await expect(
+    page.getByRole("button", { name: "1 task queued · 1 task running" }),
+  ).toBeVisible();
 });
 
 test("work record keeps a failed Chair wake with its task, source run, and round", async ({

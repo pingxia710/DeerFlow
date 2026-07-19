@@ -1253,7 +1253,7 @@ export function MessageList({
   return (
     <Conversation
       className={cn("flex size-full flex-col", className)}
-      initial={false}
+      initial="instant"
     >
       <ConversationContent
         data-conversation-content

@@ -112,9 +112,7 @@ test.describe("Conversation turns", () => {
     await expect(turns.nth(1)).toContainText(/1m 7s/i);
   });
 
-  test("opens history at the beginning instead of the live edge", async ({
-    page,
-  }) => {
+  test("opens history at the live edge", async ({ page }) => {
     mockLangGraphAPI(page, {
       threads: [
         {
@@ -136,7 +134,13 @@ test.describe("Conversation turns", () => {
       )
       .toBeTruthy();
     await expect
-      .poll(() => scrollRoot.evaluate((element) => element.scrollTop <= 1))
+      .poll(() =>
+        scrollRoot.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop <=
+            70,
+        ),
+      )
       .toBeTruthy();
   });
 

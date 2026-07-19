@@ -401,6 +401,8 @@ export const zhCN: Translations = {
       artifactRecorded: "已记录工件",
       runRunning: "任务运行中",
       tasksRunning: (count) => `正在执行 ${count} 个子任务`,
+      runningSubtasks: "正在执行的子任务",
+      executionTime: (elapsed) => `执行时间：${elapsed}`,
       eventHistory: "事件记录",
       goalWorkspace: "目标工作区",
       loadingGoalWorkspace: "正在读取目标上下文...",

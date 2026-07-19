@@ -301,6 +301,7 @@ test("work record exposes the AI organization without approval controls", async 
 test("active background tasks are visible before work facts arrive", async ({
   page,
 }) => {
+  const startedAt = new Date(Date.now() - 5_000).toISOString();
   mockLangGraphAPI(page, {
     threads: [
       {
@@ -312,8 +313,20 @@ test("active background tasks are visible before work facts arrive", async ({
         runtimeSnapshot: {
           runs: [{ run_id: "run-1", status: "success" }],
           task_lanes: [
-            { task_id: "task-1", status: "in_progress" },
-            { task_id: "task-2", status: "in_progress" },
+            {
+              run_id: "run-1",
+              task_id: "task-1",
+              status: "in_progress",
+              description: "Research current behavior",
+              started_at: startedAt,
+            },
+            {
+              run_id: "run-1",
+              task_id: "task-2",
+              status: "in_progress",
+              description: "Check implementation details",
+              started_at: startedAt,
+            },
           ],
         },
       },
@@ -324,6 +337,18 @@ test("active background tasks are visible before work facts arrive", async ({
   await expect(
     page.getByRole("button", { name: "2 tasks running" }),
   ).toBeVisible();
+
+  await page.getByLabel("Open activity").click();
+  const panel = page.getByRole("complementary", { name: "Activity" });
+  const sections = panel.locator("section");
+  await expect(sections.nth(0)).toContainText("Running subtasks");
+  await expect(sections.nth(0)).toContainText("Research current behavior");
+  await expect(sections.nth(0)).toContainText("Check implementation details");
+  await expect(sections.nth(0).locator("time")).toHaveCount(2);
+  await expect(sections.nth(0).locator("time").first()).toHaveText(
+    /^\d{2}:\d{2}$/,
+  );
+  await expect(sections.nth(1)).toContainText("Goal workspace");
 });
 
 test("work record keeps a failed Chair wake with its task, source run, and round", async ({

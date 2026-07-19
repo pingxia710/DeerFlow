@@ -10,7 +10,7 @@ import {
   XIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -41,7 +41,7 @@ import {
   type ThreadTimelineRecord,
 } from "@/core/threads/thread-timeline";
 import { pathOfThread } from "@/core/threads/utils";
-import { formatDateTime } from "@/core/utils/datetime";
+import { formatDateTime, formatDuration } from "@/core/utils/datetime";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -56,6 +56,11 @@ const ACTIVE_TASK_LANE_STATUSES = new Set([
   "in_progress",
   "running",
   "pending",
+  "executing",
+]);
+const RUNNING_TASK_LANE_STATUSES = new Set([
+  "in_progress",
+  "running",
   "executing",
 ]);
 
@@ -192,6 +197,12 @@ function WorkRecordBody({
   });
   const goalTree = useThreadGoalTree(threadId, { enabled });
   const snapshot = useThreadRuntimeSnapshot(threadId, { enabled });
+  const runningTaskLanes =
+    snapshot.data?.task_lanes?.filter((lane) =>
+      RUNNING_TASK_LANE_STATUSES.has(lane.status),
+    ) ?? [];
+  const hasRunningTaskLanes = runningTaskLanes.length > 0;
+  const [now, setNow] = useState(0);
   const timeline = useThreadTimeline(threadId, { enabled });
   const wakeScope = useMemo(() => {
     const runId = snapshot.data?.runs?.[0]?.run_id;
@@ -218,6 +229,16 @@ function WorkRecordBody({
     () => workspaceHistory.data?.pages.flatMap((page) => page.events) ?? [],
     [workspaceHistory.data],
   );
+
+  useEffect(() => {
+    if (!hasRunningTaskLanes) {
+      return;
+    }
+    const updateNow = () => setNow(Date.now());
+    updateNow();
+    const interval = window.setInterval(updateNow, 1_000);
+    return () => window.clearInterval(interval);
+  }, [hasRunningTaskLanes]);
 
   return (
     <>
@@ -275,6 +296,55 @@ function WorkRecordBody({
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+        {hasRunningTaskLanes && (
+          <section className="space-y-3 border-b px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <LoaderCircleIcon
+                  aria-hidden
+                  className="size-3.5 animate-spin text-blue-600 motion-reduce:animate-none dark:text-blue-400"
+                />
+                <h3 className="text-xs font-semibold tracking-wide uppercase">
+                  {t.chats.workRecord.runningSubtasks}
+                </h3>
+              </div>
+              <span className="bg-muted rounded-full px-2 py-0.5 font-mono text-[10px]">
+                {runningTaskLanes.length}
+              </span>
+            </div>
+            <ol className="space-y-2">
+              {runningTaskLanes.map((lane) => {
+                const startedAt = Date.parse(lane.started_at ?? "");
+                const elapsed =
+                  formatDuration(
+                    Number.isFinite(startedAt) && now > 0
+                      ? Math.max(0, now - startedAt)
+                      : 0,
+                  ) ?? "00:00";
+                const name =
+                  [lane.description, lane.role, lane.subagent_type]
+                    .find((value) => value?.trim())
+                    ?.trim() ?? lane.task_id;
+                return (
+                  <li
+                    className="flex items-center justify-between gap-3 rounded-md border border-blue-500/25 bg-blue-500/[0.04] px-3 py-2.5"
+                    key={`${lane.run_id}:${lane.round_id ?? ""}:${lane.task_id}`}
+                  >
+                    <span className="min-w-0 truncate text-xs font-medium">
+                      {name}
+                    </span>
+                    <time
+                      aria-label={t.chats.workRecord.executionTime(elapsed)}
+                      className="text-muted-foreground shrink-0 font-mono text-xs tabular-nums"
+                    >
+                      {elapsed}
+                    </time>
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        )}
         <section className="space-y-3 border-b px-4 py-4">
           <div className="flex items-center gap-2">
             <TargetIcon className="size-3.5 text-blue-600 dark:text-blue-400" />

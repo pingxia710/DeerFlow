@@ -397,6 +397,8 @@ export const enUS: Translations = {
       artifactRecorded: "Artifact recorded",
       runRunning: "Run in progress",
       tasksRunning: (count) => `${count} task${count === 1 ? "" : "s"} running`,
+      runningSubtasks: "Running subtasks",
+      executionTime: (elapsed) => `Execution time: ${elapsed}`,
       eventHistory: "Event history",
       goalWorkspace: "Goal workspace",
       loadingGoalWorkspace: "Loading goal context...",

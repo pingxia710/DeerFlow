@@ -313,6 +313,8 @@ export interface Translations {
       artifactRecorded: string;
       runRunning: string;
       tasksRunning: (count: number) => string;
+      runningSubtasks: string;
+      executionTime: (elapsed: string) => string;
       eventHistory: string;
       goalWorkspace: string;
       loadingGoalWorkspace: string;

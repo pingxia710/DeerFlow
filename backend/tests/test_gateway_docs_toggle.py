@@ -257,6 +257,17 @@ def test_gateway_cors_allows_configured_origin():
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
+def test_gateway_cors_exposes_content_location_to_configured_cross_port_origin():
+    client = _make_gateway_client("http://localhost:3000")
+
+    response = client.get("/health", headers={"Origin": "http://localhost:3000"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.headers["access-control-expose-headers"] == "Content-Location"
+    assert "content-location" not in response.headers
+
+
 def test_gateway_cors_rejects_unconfigured_origin():
     client = _make_gateway_client("https://app.example")
 

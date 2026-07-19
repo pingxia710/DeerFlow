@@ -552,6 +552,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=["Content-Location"],
         )
 
     # Include routers

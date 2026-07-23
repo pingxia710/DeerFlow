@@ -308,10 +308,10 @@ export default function ChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+              "border-border/60 absolute top-0 right-0 left-0 z-30 flex h-10 shrink-0 items-center gap-2 border-b px-2 sm:px-4",
               isWelcomeMode
-                ? "bg-background/0 backdrop-blur-none"
-                : "bg-background/80 shadow-xs backdrop-blur",
+                ? "bg-background/0 border-b-transparent backdrop-blur-none"
+                : "bg-background/85 backdrop-blur",
             )}
           >
             <SidebarTrigger className="md:hidden" />

@@ -6,8 +6,6 @@ import {
   ChevronDownIcon,
   GraduationCapIcon,
   LightbulbIcon,
-  PaperclipIcon,
-  PlusIcon,
   RocketIcon,
   SparklesIcon,
   XIcon,
@@ -24,7 +22,6 @@ import {
   type ComponentProps,
   type FormEvent,
   type KeyboardEvent,
-  type RefObject,
 } from "react";
 import { toast } from "sonner";
 
@@ -37,17 +34,14 @@ import {
   PromptInputAttachment,
   PromptInputAttachments,
   PromptInputBody,
-  PromptInputButton,
   PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
-  usePromptInputAttachments,
   usePromptInputController,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
-import { ConfettiButton } from "@/components/ui/confetti-button";
 import {
   Dialog,
   DialogContent,
@@ -71,7 +65,6 @@ import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
 } from "@/core/models/reasoning-efforts";
-import type { Model } from "@/core/models/types";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
@@ -87,140 +80,49 @@ import { cn } from "@/lib/utils";
 
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { AddAttachmentsButton } from "./add-attachments-button";
 import {
   getFollowupSuggestionsErrorAction,
   getPromptInputComposerKey,
   shouldApplyPromptInputSubmitContinuation,
 } from "./input-box-state";
+import {
+  findSuggestionTemplatePlaceholder,
+  getCompactModelLabel,
+  getLeadingSlashSkillQuery,
+  getMatchingSkillSuggestions,
+  getModelProviderLabel,
+  getResolvedMode,
+  groupModelsByProvider,
+  type InputMode,
+} from "./input-box-utils";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { usePromptInputScope } from "./prompt-input-scope";
-import { Tooltip } from "./tooltip";
+import { SuggestionList } from "./suggestion-list";
 
-type InputMode = "flash" | "thinking" | "pro" | "ultra";
+export {
+  AddAttachmentsButton,
+  SuggestionList,
+  findSuggestionTemplatePlaceholder,
+  getCompactModelLabel,
+  getLeadingSlashSkillQuery,
+  getMatchingSkillSuggestions,
+  getModelProviderLabel,
+  getResolvedMode,
+  groupModelsByProvider,
+  type InputMode,
+};
+
 type VisibleReasoningEffort = Extract<
   ReasoningEffort,
   "medium" | "high" | "xhigh" | "max"
 >;
-
-const MAX_SKILL_SUGGESTIONS = 6;
-const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
-  /\[(?:主题|来源|topic|source)\]/i;
-
-function getCompactModelLabel(
-  displayName: string | undefined,
-  modelName: string | undefined,
-) {
-  const raw = displayName ?? modelName ?? "";
-  const compact = raw
-    .replace(/\s*\([^)]*\)\s*$/u, "")
-    .replace(/^GPT-/iu, "")
-    .trim();
-
-  return compact || raw;
-}
-
-function getModelProviderLabel(model: Model, fallbackProviderLabel: string) {
-  const provider = model.provider?.trim();
-  if (provider) {
-    return provider;
-  }
-  if (/^gpt-5\.\d+/u.test(model.model)) {
-    return "Codex CLI";
-  }
-  return fallbackProviderLabel;
-}
-
-function groupModelsByProvider(models: Model[], fallbackProviderLabel: string) {
-  const groups = new Map<string, Model[]>();
-  for (const model of models) {
-    const provider = getModelProviderLabel(model, fallbackProviderLabel);
-    const providerModels = groups.get(provider);
-    if (providerModels) {
-      providerModels.push(model);
-    } else {
-      groups.set(provider, [model]);
-    }
-  }
-  return Array.from(groups, ([provider, providerModels]) => ({
-    provider,
-    models: providerModels,
-  }));
-}
-
-function findSuggestionTemplatePlaceholder(text: string) {
-  const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    start: match.index,
-    end: match.index + match[0].length,
-  };
-}
-
-function getLeadingSlashSkillQuery(value: string): string | null {
-  if (!value.startsWith("/")) {
-    return null;
-  }
-
-  const query = value.slice(1);
-  if (query.includes("/") || /\s/.test(query)) {
-    return null;
-  }
-
-  return query;
-}
-
-function getMatchingSkillSuggestions(skills: Skill[], query: string): Skill[] {
-  const normalizedQuery = query.toLowerCase();
-
-  return skills
-    .map((skill, index) => ({
-      skill,
-      index,
-      name: skill.name.toLowerCase(),
-    }))
-    .filter(({ skill, name }) => {
-      if (!skill.enabled) {
-        return false;
-      }
-      return !normalizedQuery || name.includes(normalizedQuery);
-    })
-    .sort((a, b) => {
-      const aStartsWith = a.name.startsWith(normalizedQuery);
-      const bStartsWith = b.name.startsWith(normalizedQuery);
-      if (aStartsWith !== bStartsWith) {
-        return aStartsWith ? -1 : 1;
-      }
-      return a.index - b.index;
-    })
-    .slice(0, MAX_SKILL_SUGGESTIONS)
-    .map(({ skill }) => skill);
-}
-
-function getResolvedMode(
-  mode: InputMode | undefined,
-  supportsThinking: boolean,
-): InputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "ultra" : "flash";
-}
 
 export function InputBox({
   className,
@@ -1086,7 +988,7 @@ export function InputBox({
       )}
       <PromptInput
         className={cn(
-          "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          "bg-card/90 border-input rounded-xl border backdrop-blur-md transition-colors duration-150 *:data-[slot='input-group']:rounded-xl",
           className,
         )}
         disabled={disabled}
@@ -1566,89 +1468,5 @@ export function InputBox({
         </DialogContent>
       </Dialog>
     </div>
-  );
-}
-
-function SuggestionList({
-  textareaRef,
-}: {
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
-}) {
-  const { t } = useI18n();
-  const { textInput } = usePromptInputController();
-  const handleSuggestionClick = useCallback(
-    (prompt: string | undefined) => {
-      if (!prompt) return;
-      textInput.setInput(prompt);
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        const placeholder = findSuggestionTemplatePlaceholder(prompt);
-        if (textarea && placeholder) {
-          textarea.focus();
-          textarea.setSelectionRange(placeholder.start, placeholder.end);
-        }
-      });
-    },
-    [textareaRef, textInput],
-  );
-  return (
-    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
-      <ConfettiButton
-        className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
-        variant="outline"
-        size="sm"
-        onClick={() => handleSuggestionClick(t.inputBox.surpriseMePrompt)}
-      >
-        <SparklesIcon className="size-4" /> {t.inputBox.surpriseMe}
-      </ConfettiButton>
-      {t.inputBox.suggestions.map((suggestion) => (
-        <Suggestion
-          key={suggestion.suggestion}
-          icon={suggestion.icon}
-          suggestion={suggestion.suggestion}
-          onClick={() => handleSuggestionClick(suggestion.prompt)}
-        />
-      ))}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Suggestion icon={PlusIcon} suggestion={t.common.create} />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuGroup>
-            {t.inputBox.suggestionsCreate.map((suggestion, index) =>
-              "type" in suggestion && suggestion.type === "separator" ? (
-                <DropdownMenuSeparator key={index} />
-              ) : (
-                !("type" in suggestion) && (
-                  <DropdownMenuItem
-                    key={suggestion.suggestion}
-                    onClick={() => handleSuggestionClick(suggestion.prompt)}
-                  >
-                    {suggestion.icon && <suggestion.icon className="size-4" />}
-                    {suggestion.suggestion}
-                  </DropdownMenuItem>
-                )
-              ),
-            )}
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </Suggestions>
-  );
-}
-
-function AddAttachmentsButton({ className }: { className?: string }) {
-  const { t } = useI18n();
-  const attachments = usePromptInputAttachments();
-  return (
-    <Tooltip content={t.inputBox.addAttachments}>
-      <PromptInputButton
-        aria-label={t.inputBox.addAttachments}
-        className={cn("px-2!", className)}
-        onClick={() => attachments.openFileDialog()}
-      >
-        <PaperclipIcon className="size-3" />
-      </PromptInputButton>
-    </Tooltip>
   );
 }

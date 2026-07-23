@@ -2,7 +2,6 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import {
   AlertCircleIcon,
-  ArrowDownIcon,
   BrainCircuitIcon,
   ChevronUpIcon,
   Loader2Icon,
@@ -11,11 +10,9 @@ import {
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type MutableRefObject,
   type MouseEvent,
 } from "react";
 
@@ -54,7 +51,6 @@ import {
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import {
-  normalizeSubtaskRoundId,
   type SubtaskUpdate,
   useSubtasksForThread,
   useUpdateSubtask,
@@ -65,7 +61,6 @@ import {
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
 import {
-  HISTORY_CREATED_AT_KEY,
   isActiveRunStatus,
   type ThreadRunTerminalNotice,
   type useThreadStream,
@@ -78,65 +73,55 @@ import { CopyButton } from "../copy-button";
 import { Tooltip } from "../tooltip";
 
 import { CommandRoomUpdateCard } from "./command-room-update-card";
+import { ConversationTurnScrollController } from "./conversation-turn-scroll-controller";
+import { LoadMoreHistoryIndicator } from "./load-more-history-indicator";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
+import {
+  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  findMatchingActiveSubtaskForTask,
+  findMatchingTerminalSubtaskForTask,
+  formatConversationTime,
+  getActiveTurnSubtaskScope,
+  getMessageGroupKey,
+  getMessageHistoryTime,
+  getMessagesHistoryStartTime,
+  getRunScopedSubtaskKey,
+  getSubtaskCardKey,
+  hasTerminalSubtaskForTask,
+  isActiveSubtaskStatus,
+  isInferredRunningSubtaskVisible,
+  isMessageActivelyStreaming,
+  isRuntimeOnlySubtaskForActiveTurn,
+  shouldKeepInferredSubtask,
+  type HistoryPrependRunner,
+} from "./message-list-utils";
 import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
-import { useConversationTurnScroll } from "./use-conversation-turn-scroll";
 
-export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
-
-const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
-
-type HistoryPrependRunner = (
-  loadMore: () => Promise<void> | void,
-) => Promise<void>;
+export {
+  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  findMatchingActiveSubtaskForTask,
+  findMatchingTerminalSubtaskForTask,
+  getActiveTurnSubtaskScope,
+  getMessageGroupKey,
+  getSubtaskCardKey,
+  hasMatchingTerminalSubtaskForTask,
+  hasTerminalSubtaskForTask,
+  isInferredRunningSubtaskVisible,
+  isRuntimeOnlySubtaskForActiveTurn,
+  shouldKeepInferredSubtask,
+} from "./message-list-utils";
 
 type LocalTurnTiming = {
   startedAt: number;
   completedAt?: number;
 };
-
-export function getMessageGroupKey(
-  group: { type: string; id?: string | null },
-  index: number,
-) {
-  return group.id
-    ? `${group.type}-${group.id}`
-    : `fallback-${index}-${group.type}`;
-}
-
-export function getSubtaskCardKey(
-  taskId: string,
-  runId?: string | null,
-  roundId?: string | null,
-) {
-  if (!runId) {
-    return `task-group-${taskId}`;
-  }
-  return `task-group-${JSON.stringify([
-    runId,
-    normalizeSubtaskRoundId(roundId),
-    taskId,
-  ])}`;
-}
-
-function getRunScopedSubtaskKey(
-  taskId: string,
-  runId?: string | null,
-  roundId?: string | null,
-) {
-  return JSON.stringify([
-    runId ?? "",
-    normalizeSubtaskRoundId(roundId),
-    taskId,
-  ]);
-}
 
 type ThreadRecoveryStatus = ReturnType<
   typeof useThreadStream
@@ -145,400 +130,6 @@ type MessageListRun = {
   run_id?: string | null;
   status?: unknown;
 };
-
-function getMessageHistoryTime(message: Message) {
-  const value = message.additional_kwargs?.[HISTORY_CREATED_AT_KEY];
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? time : undefined;
-}
-
-function isMessageActivelyStreaming(
-  message: Message,
-  groupIsLoading: boolean,
-  activeRunIds: ReadonlySet<string>,
-) {
-  if (!groupIsLoading) {
-    return false;
-  }
-  if (getMessageHistoryTime(message) === undefined) {
-    return true;
-  }
-  const runId = getMessageRunId(message);
-  return runId !== undefined && activeRunIds.has(runId);
-}
-
-function isTerminalSubtask(task: Subtask) {
-  return (
-    task.status === "completed" ||
-    task.status === "failed" ||
-    task.status === "unknown"
-  );
-}
-
-type SubtaskTaskLookup = {
-  threadId: string;
-  runId?: string | null;
-  taskId: string;
-  roundId?: string | null;
-};
-
-function matchesRequestedRound(
-  task: Subtask,
-  roundId: string | null | undefined,
-) {
-  return (
-    !roundId ||
-    normalizeSubtaskRoundId(task.roundId) === normalizeSubtaskRoundId(roundId)
-  );
-}
-
-export function hasTerminalSubtaskForTask(
-  subtasks: Subtask[],
-  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
-) {
-  return subtasks.some(
-    (task) =>
-      task.threadId === threadId &&
-      task.id === taskId &&
-      task.runId !== runId &&
-      matchesRequestedRound(task, roundId) &&
-      isTerminalSubtask(task),
-  );
-}
-
-export function findMatchingTerminalSubtaskForTask(
-  subtasks: Subtask[],
-  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
-) {
-  const candidates = subtasks.filter(
-    (task) =>
-      task.threadId === threadId &&
-      task.id === taskId &&
-      task.runId === runId &&
-      isTerminalSubtask(task),
-  );
-  if (roundId) {
-    return candidates.find((task) => matchesRequestedRound(task, roundId));
-  }
-  return candidates.length === 1 ? candidates[0] : undefined;
-}
-
-function isActiveSubtaskStatus(status: Subtask["status"]) {
-  return status === "queued" || status === "in_progress";
-}
-
-export function findMatchingActiveSubtaskForTask(
-  subtasks: Subtask[],
-  { threadId, runId, taskId, roundId }: SubtaskTaskLookup,
-) {
-  const candidates = subtasks.filter(
-    (task) =>
-      task.threadId === threadId &&
-      task.id === taskId &&
-      task.runId === runId &&
-      isActiveSubtaskStatus(task.status),
-  );
-  if (roundId) {
-    return candidates.find((task) => matchesRequestedRound(task, roundId));
-  }
-  return candidates.length === 1 ? candidates[0] : undefined;
-}
-
-export function hasMatchingTerminalSubtaskForTask(
-  subtasks: Subtask[],
-  lookup: SubtaskTaskLookup,
-) {
-  return Boolean(findMatchingTerminalSubtaskForTask(subtasks, lookup));
-}
-
-export function shouldKeepInferredSubtask({
-  status,
-  hasMatchingTerminal,
-  hasTerminalInOtherRun,
-  isVisibleRunning,
-}: {
-  status: Subtask["status"];
-  hasMatchingTerminal: boolean;
-  hasTerminalInOtherRun: boolean;
-  isVisibleRunning: boolean;
-}) {
-  if (!isActiveSubtaskStatus(status)) {
-    return true;
-  }
-  if (hasMatchingTerminal) {
-    return true;
-  }
-  if (hasTerminalInOtherRun) {
-    return false;
-  }
-  return isVisibleRunning;
-}
-
-export function isRuntimeOnlySubtaskForActiveTurn(
-  task: Pick<Subtask, "runId" | "roundId" | "startedAt">,
-  activeRunIds: ReadonlySet<string>,
-  activeRoundIdsByRunId: ReadonlyMap<string, ReadonlySet<string>>,
-  turnStartTime: number | null,
-) {
-  if (!task.runId) {
-    return false;
-  }
-  if (activeRunIds.size === 0) {
-    return (
-      turnStartTime !== null &&
-      task.startedAt !== undefined &&
-      task.startedAt >= turnStartTime
-    );
-  }
-  if (!activeRunIds.has(task.runId)) {
-    return false;
-  }
-  const activeRoundIds = activeRoundIdsByRunId.get(task.runId);
-  return (
-    !activeRoundIds ||
-    activeRoundIds.size === 0 ||
-    !task.roundId ||
-    activeRoundIds.has(normalizeSubtaskRoundId(task.roundId))
-  );
-}
-
-export function isInferredRunningSubtaskVisible({
-  runId,
-  startedAt,
-  groupIsLoading,
-  activeRunIds,
-  turnStartTime,
-  hasMatchingActiveTask = false,
-}: {
-  runId?: string | null;
-  startedAt?: number;
-  groupIsLoading: boolean;
-  activeRunIds: ReadonlySet<string>;
-  turnStartTime: number | null;
-  hasMatchingActiveTask?: boolean;
-}) {
-  if (!runId) {
-    return false;
-  }
-  if (hasMatchingActiveTask) {
-    return true;
-  }
-  if (activeRunIds.has(runId)) {
-    return true;
-  }
-  if (!groupIsLoading) {
-    return false;
-  }
-  if (startedAt === undefined) {
-    return true;
-  }
-  return turnStartTime !== null && startedAt >= turnStartTime;
-}
-
-export function getActiveTurnSubtaskScope(
-  groupedMessages: ReturnType<typeof getMessageGroups>,
-) {
-  const runIds = new Set<string>();
-  const roundIdsByRunId = new Map<string, Set<string>>();
-
-  for (
-    let groupIndex = groupedMessages.length - 1;
-    groupIndex >= 0;
-    groupIndex--
-  ) {
-    const group = groupedMessages[groupIndex];
-    if (!group || group.type === "human") {
-      break;
-    }
-    for (
-      let messageIndex = group.messages.length - 1;
-      messageIndex >= 0;
-      messageIndex--
-    ) {
-      const message = group.messages[messageIndex];
-      if (!message) {
-        continue;
-      }
-      const runId = getMessageRunId(message);
-      if (!runId) {
-        continue;
-      }
-      runIds.add(runId);
-      const roundId = getMessageRoundId(message);
-      if (roundId) {
-        let roundIds = roundIdsByRunId.get(runId);
-        if (!roundIds) {
-          roundIds = new Set<string>();
-          roundIdsByRunId.set(runId, roundIds);
-        }
-        roundIds.add(normalizeSubtaskRoundId(roundId));
-      }
-    }
-  }
-
-  return { runIds, roundIdsByRunId };
-}
-
-function getMessagesHistoryStartTime(messages: Message[]) {
-  let startTime: number | undefined;
-  for (const message of messages) {
-    const time = getMessageHistoryTime(message);
-    if (time !== undefined) {
-      startTime = startTime === undefined ? time : Math.min(startTime, time);
-    }
-  }
-  return startTime;
-}
-
-function formatConversationTime(timestamp: number, locale: string) {
-  return new Intl.DateTimeFormat(locale, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(timestamp);
-}
-
-function LoadMoreHistoryIndicator({
-  historyPrependRef,
-  isLoading,
-  hasMore,
-  loadMore,
-}: {
-  historyPrependRef: MutableRefObject<HistoryPrependRunner | null>;
-  isLoading?: boolean;
-  hasMore?: boolean;
-  loadMore?: () => Promise<void> | void;
-}) {
-  const { t } = useI18n();
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastLoadRef = useRef(0);
-
-  const runLoadMore = useCallback(() => {
-    if (!loadMore) {
-      return;
-    }
-    const runWithHistoryAnchor = historyPrependRef.current;
-    if (runWithHistoryAnchor) {
-      void runWithHistoryAnchor(loadMore);
-      return;
-    }
-    void loadMore();
-  }, [historyPrependRef, loadMore]);
-
-  const throttledLoadMore = useCallback(() => {
-    if (!hasMore || isLoading) {
-      return;
-    }
-
-    const now = Date.now();
-    const remaining =
-      LOAD_MORE_HISTORY_THROTTLE_MS - (now - lastLoadRef.current);
-
-    if (remaining <= 0) {
-      lastLoadRef.current = now;
-      runLoadMore();
-      return;
-    }
-
-    if (timeoutRef.current) {
-      return;
-    }
-
-    timeoutRef.current = setTimeout(() => {
-      timeoutRef.current = null;
-      if (!hasMore || isLoading) {
-        return;
-      }
-      lastLoadRef.current = Date.now();
-      runLoadMore();
-    }, remaining);
-  }, [hasMore, isLoading, runLoadMore]);
-
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
-
-  if (!hasMore && !isLoading) {
-    return null;
-  }
-
-  return (
-    <div className="flex w-full justify-center">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="text-muted-foreground hover:text-foreground rounded-full px-3"
-        disabled={(isLoading ?? false) || !hasMore}
-        onClick={throttledLoadMore}
-      >
-        {isLoading ? (
-          <>
-            <Loader2Icon className="mr-2 size-4 animate-spin" />
-            {t.common.loading}
-          </>
-        ) : (
-          <>
-            <ChevronUpIcon className="mr-2 size-4" />
-            {t.common.loadMore}
-          </>
-        )}
-      </Button>
-    </div>
-  );
-}
-
-function ConversationTurnScrollController({
-  historyPrependRef,
-  threadId,
-  activeTurnId,
-  isStreaming,
-}: {
-  historyPrependRef: MutableRefObject<HistoryPrependRunner | null>;
-  threadId: string;
-  activeTurnId?: string;
-  isStreaming: boolean;
-}) {
-  const { t } = useI18n();
-  const {
-    runWithHistoryAnchor,
-    returnToCurrentReply,
-    shouldShowReturnToCurrentReply,
-  } = useConversationTurnScroll({ threadId, activeTurnId, isStreaming });
-
-  useLayoutEffect(() => {
-    historyPrependRef.current = runWithHistoryAnchor;
-    return () => {
-      if (historyPrependRef.current === runWithHistoryAnchor) {
-        historyPrependRef.current = null;
-      }
-    };
-  }, [historyPrependRef, runWithHistoryAnchor]);
-
-  if (!shouldShowReturnToCurrentReply) {
-    return null;
-  }
-
-  return (
-    <Button
-      aria-label={t.conversation.returnToCurrentReply}
-      className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-sm"
-      onClick={returnToCurrentReply}
-      size="sm"
-      type="button"
-      variant="outline"
-    >
-      <ArrowDownIcon className="mr-1 size-3.5" />
-      {t.conversation.returnToCurrentReply}
-    </Button>
-  );
-}
 
 function RunRecoveryNotice({
   status,

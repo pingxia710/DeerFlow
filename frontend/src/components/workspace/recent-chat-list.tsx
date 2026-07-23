@@ -282,14 +282,14 @@ export function RecentChatList() {
   return (
     <>
       <SidebarGroup>
-        <SidebarGroupLabel>
+        <SidebarGroupLabel className="text-muted-foreground/70 text-[11px] font-medium tracking-wider uppercase">
           {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true"
             ? t.sidebar.recentChats
             : t.sidebar.demoChats}
         </SidebarGroupLabel>
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
-            <div className="flex w-full flex-col gap-1">
+            <div className="flex w-full flex-col gap-0.5">
               {threads.map((thread) => {
                 const threadPath = pathOfThread(thread);
                 const isActive = threadPath === pathname;
@@ -309,8 +309,14 @@ export function RecentChatList() {
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
-                    className="group/side-menu-item"
+                    className="group/side-menu-item relative"
                   >
+                    {isActive && (
+                      <span
+                        aria-hidden="true"
+                        className="bg-primary absolute top-1 bottom-1 left-0 w-0.5 rounded-full"
+                      />
+                    )}
                     <SidebarMenuButton isActive={isActive} asChild>
                       <Link
                         aria-label={
@@ -318,7 +324,7 @@ export function RecentChatList() {
                             ? `${threadTitle}, ${activityLabel}`
                             : threadTitle
                         }
-                        className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                        className="text-muted-foreground min-w-0 text-[13px] whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                         href={pathOfThread(thread)}
                         onNavigate={() =>
                           markThreadChatNavigationIntent(pathOfThread(thread))
@@ -339,13 +345,13 @@ export function RecentChatList() {
                             {isRunning && (
                               <LoaderCircleIcon
                                 aria-hidden="true"
-                                className="text-muted-foreground size-3.5 animate-spin"
+                                className="text-status-running size-3.5 animate-spin"
                               />
                             )}
                             {isFinished && (
                               <span
                                 aria-hidden="true"
-                                className="size-2 rounded-full bg-blue-500"
+                                className="bg-status-success size-2 rounded-full"
                               />
                             )}
                             {channelSource && (

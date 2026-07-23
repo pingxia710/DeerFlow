@@ -507,15 +507,17 @@ function SubtaskCardBody({
       : null;
   const icon = useMemo(() => {
     if (task.status === "completed") {
-      return <CheckCircleIcon className="size-3" />;
+      return <CheckCircleIcon className="text-status-success size-3" />;
     } else if (task.status === "failed") {
-      return <XCircleIcon className="size-3 text-red-500" />;
+      return <XCircleIcon className="text-status-error size-3" />;
     } else if (task.status === "in_progress") {
-      return <Loader2Icon className="size-3 animate-spin" />;
+      return (
+        <Loader2Icon className="text-status-running size-3 animate-spin" />
+      );
     } else if (task.status === "queued") {
-      return <ClipboardListIcon className="size-3" />;
+      return <ClipboardListIcon className="text-status-wake size-3" />;
     } else if (task.status === "unknown") {
-      return <AlertCircleIcon className="size-3" />;
+      return <AlertCircleIcon className="text-muted-foreground size-3" />;
     }
   }, [task.status]);
 

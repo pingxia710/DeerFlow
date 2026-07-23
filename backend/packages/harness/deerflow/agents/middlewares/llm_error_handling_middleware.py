@@ -211,6 +211,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "auth"
         if _matches_any(lowered, _CONTEXT_LENGTH_PATTERNS):
             return False, "context"
+        if str(error_code).lower() in {"server_error", "internal_server_error"} or "code=server_error" in lowered:
+            return True, "transient"
         if _matches_any(lowered, _TRANSIENT_CONNECTION_PATTERNS):
             return True, "transient"
 

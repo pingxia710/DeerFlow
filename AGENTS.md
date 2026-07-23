@@ -19,7 +19,7 @@ README files, or skills rather than expanding this file.
 - AI-AI的工作模式是prompt传递信息、目的、边界等，给子AI的prompt是什么，子AI就输出什么结果，这跟程序最后才输出结果完全不一样
 - 子AI/子任务执行完成后，把自然结果传递给下一个环节或者主AI，AI能读懂这些自然语言文本。子任务完成就结束，没有常驻的逻辑，也不会影响主AI/指挥室
 - 指挥室AI明确目标、制定方案并推动进度；子AI执行专业工作或按需提供独立核对视角。当前不设逐任务验收，指挥室根据完整结果和当前事实继续方案，最终判断的是方案是否完成
-- AI有幻想，只会往一个方向上思考，这不全面。需要反方走另一个方向，把可能的角度暴露出来。指挥室根据正反2个方面进行最终的裁决
+- AI有幻想，只会往一个方向上思考，这不全面。必要时需要反方走另一个方向，把可能的角度暴露出来。指挥室根据正反2个方面进行最终的裁决
 - 子AI结果出现高风险、事实冲突、依据不足或指挥室无法直接核实时，可以临时交给另一个子AI独立核对。核对只暴露差异、未知和后果，不形成固定 Reviewer、验收环节或程序门禁
 - 本段内容由开发者维护，任何改动都需要经过开发者授权才能更改
 
@@ -41,9 +41,9 @@ README files, or skills rather than expanding this file.
   NextOS.
 - The Command Room is the only continuing lead AI. It owns the user goal,
   context, progress, trade-offs, and every decision about what happens next.
-- The Chair may directly inspect files, code, logs, plans, and artifacts with
-  read-only tools when current facts are needed for command. It delegates
-  writes, shell commands, long-running work, and independent execution.
+- The Chair directly uses configured tools for in-scope work by default. It
+  delegates through `task()` only for genuinely independent, parallel,
+  separate-perspective, or context-exceeding work.
 - `task()` carries one self-contained natural-language prompt to one
   `codex exec --ephemeral` process. The child returns its complete natural result
   and ends. Command Room children run in background and wake a new sequential
@@ -55,10 +55,14 @@ README files, or skills rather than expanding this file.
   interest, direction, non-goals, real permissions, and return boundaries.
   Ordinary safe, bounded work the Human Owner explicitly requests is already
   authorized: the Chair makes a concise plan and executes or delegates it
-  directly. Use `planner` → `opposition` → Chair plan → human discussion only
-  for a new or changed Goal Mandate, material architecture or operating-workflow
-  decision, genuinely unresolved route with material trade-offs, external or
-  irreversible consequence, or an explicit request for review. A phase result
+  directly. The Chair drafts the plan itself and takes it to human discussion,
+  running one `opposition` challenge for every new root goal, every
+  substantially new or revised plan, and every material route change; for any
+  other decision, the Chair adds an `opposition` challenge when it decides an
+  independent contrary check is necessary. Opposition exposes hidden
+  assumptions, counterevidence, failure modes, and the strongest materially
+  different alternative; it reports plainly when no material challenge exists
+  and never approves, rejects, or replaces the Chair's judgment. A phase result
   continues the current plan directly unless it introduces the same escalation.
   This sequence uses complete prompts and natural results, never program state.
   Independent execution should
@@ -117,9 +121,11 @@ README files, or skills rather than expanding this file.
 - Child environments receive core runtime and explicit Codex auth variables
   only. Never expose other secrets to a child, logs, chat, commits, or services.
 - Local DeerFlow optimization may be done in the current worktree and current
-  branch, including `main`, when the user is actively iterating. Do not push,
-  rewrite history, delete evidence, or touch unrelated projects unless the user
-  explicitly authorizes that action.
+  branch, including `main`, when the user is actively iterating. Local git
+  operations — branch, merge, commit, and deleting local branches — are
+  authorized as ordinary work. Pushing to any remote, force operations,
+  rewriting history, deleting historical evidence or records, and touching
+  unrelated projects still require explicit human authorization.
 - Stop before production/public or live-data changes, money/customer/credential
   actions, destructive work, new external dependencies, permission expansion,
   or changes to auth, storage, network, deployment, MCP, host access, or AI-AI.

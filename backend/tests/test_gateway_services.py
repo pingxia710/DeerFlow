@@ -274,6 +274,18 @@ def test_build_run_config_basic():
     assert config["recursion_limit"] == 100
 
 
+def test_build_run_config_command_room_defaults_to_high_recursion_limit_and_honors_explicit_value():
+    from app.gateway.services import build_run_config
+
+    default_config = build_run_config("thread-1", None, None, assistant_id="command-room")
+    alias_config = build_run_config("thread-1", None, None, assistant_id="command_room")
+    explicit_config = build_run_config("thread-1", {"recursion_limit": 321}, None, assistant_id="command-room")
+
+    assert default_config["recursion_limit"] == 1000
+    assert alias_config["recursion_limit"] == 1000
+    assert explicit_config["recursion_limit"] == 321
+
+
 def test_build_run_config_with_overrides():
     from app.gateway.services import build_run_config
 
@@ -285,28 +297,6 @@ def test_build_run_config_with_overrides():
     assert config["configurable"]["model_name"] == "gpt-4"
     assert config["tags"] == ["test"]
     assert config["metadata"]["user"] == "alice"
-
-
-def test_build_run_config_command_room_default_budget_restored():
-    """Round 003-A: bare command-room requests restore the 1000-step default."""
-    from app.gateway.services import build_run_config
-
-    config = build_run_config("thread-1", None, None, assistant_id="command-room")
-    assert config["recursion_limit"] == 1000
-
-
-def test_build_run_config_command_room_explicit_budget_wins():
-    from app.gateway.services import build_run_config
-
-    config = build_run_config("thread-1", {"recursion_limit": 500}, None, assistant_id="command-room")
-    assert config["recursion_limit"] == 500
-
-
-def test_build_run_config_non_command_room_keeps_shared_default():
-    from app.gateway.services import build_run_config
-
-    assert build_run_config("thread-1", None, None, assistant_id="fact-finder")["recursion_limit"] == 100
-    assert build_run_config("thread-1", None, None, assistant_id="lead_agent")["recursion_limit"] == 100
 
 
 def test_build_run_config_path_thread_id_overrides_stale_configurable_thread_id():

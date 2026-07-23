@@ -983,8 +983,8 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
         assert captured_model["name"] == "safe-model"
-        assert mock_get_tools.call_args.kwargs["groups"] == ["file:read"]
-        assert mock_get_tools.call_args.kwargs["include_mcp"] is False
+        assert mock_get_tools.call_args.kwargs["groups"] == ["sandbox", "bash"]
+        assert mock_get_tools.call_args.kwargs["include_mcp"] is True
         assert mock_get_tools.call_args.kwargs["subagent_enabled"] is True
         assert mock_build_middlewares.call_args.kwargs["available_skills"] == {"command-room-opposition"}
         assert mock_apply_prompt.call_args.kwargs["available_skills"] == {"command-room-opposition"}

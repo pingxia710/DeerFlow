@@ -1054,7 +1054,7 @@ sandbox:
 #     general-purpose:
 #       model: gpt-5.6-terra
 #     planner:
-#       model: gpt-5.6
+#       model: gpt-5.6-terra
 #       reasoning_effort: max
 #   # Add role names for the lead AI to use when writing complete task prompts.
 #   custom_agents:

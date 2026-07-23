@@ -6,7 +6,6 @@ from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
 
 _CUSTOM_OVERRIDABLE_BUILTINS = {
-    "planner",
     "executor",
     "fact-finder",
     "opposition",

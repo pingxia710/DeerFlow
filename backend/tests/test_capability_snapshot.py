@@ -296,15 +296,16 @@ def test_command_room_runtime_snapshot_reports_direct_and_codex_transport_facts(
     assert runtime["agent_config"]["model_fallback"] is True
     assert runtime["skills"]["loaded"] == ["command-room-opposition"]
     assert runtime["skills"]["missing"] == ["missing-skill"]
-    assert runtime["direct"]["include_mcp"] is False
-    assert runtime["direct"]["tool_groups"] == ["file:read"]
+    assert runtime["direct"]["include_mcp"] is True
+    assert runtime["direct"]["mcp_access"] == "exposed_to_command_room"
+    assert runtime["direct"]["tool_groups"] is None
     assert runtime["direct"]["configured_tools"] == [
         "ask_clarification",
+        "bash",
         "present_files",
         "read_file",
         "task",
     ]
-    assert "bash" not in runtime["direct"]["configured_tools"]
     assert runtime["task_transport"] == {
         "runtime": "codex-cli-one-shot",
         "model": "gpt-4.1",

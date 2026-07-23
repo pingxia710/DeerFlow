@@ -12,10 +12,6 @@ def _role_config(name: str, *, description: str) -> SubagentConfig:
 
 
 COMMAND_ROOM_ROLE_CONFIGS = {
-    "planner": _role_config(
-        "planner",
-        description=("One-shot planning perspective; independently develops one coherent direction, goal, boundaries, route, and observable completion from the lead AI's brief."),
-    ),
     "project-manager": _role_config(
         "project-manager",
         description=("One-shot project-management perspective; turns the Chair's complete stage facts into a proposed next stage, dependencies, temporary organization, risks, and handoff without deciding or advancing the work."),
@@ -31,8 +27,8 @@ COMMAND_ROOM_ROLE_CONFIGS = {
     "opposition": _role_config(
         "opposition",
         description=(
-            "One-shot independent opposition role used after a planner proposal; starts from the original Chair "
-            "brief and complete proposed plan, then exposes hidden assumptions, counterevidence, failure modes, "
+            "One-shot independent opposition role used after a Chair draft plan, only when the Chair decides a challenge is necessary; starts from the original Chair "
+            "brief and complete draft plan, then exposes hidden assumptions, counterevidence, failure modes, "
             "boundary misses, overconfidence, and the strongest materially different alternative; reports plainly "
             "when no material challenge exists; does not approve, reject, debate another AI, or replace the Chair's "
             "judgment."
@@ -67,7 +63,6 @@ COMMAND_ROOM_ROLE_CONFIGS = {
 # The Chair chooses a role; task transport then carries that role's compact
 # charter and method. This map never chooses, sequences, or judges AI work.
 COMMAND_ROOM_ROLE_SKILLS = {
-    "planner": "command-room-planner",
     "project-manager": "command-room-project-manager",
     "executor": "command-room-executor",
     "fact-finder": "command-room-fact-finder",

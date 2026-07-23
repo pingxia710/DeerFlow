@@ -408,6 +408,28 @@ def test_classify_context_length_error_is_non_retriable() -> None:
     assert reason == "context"
 
 
+def test_codex_server_error_retries_and_hides_provider_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _CodexResponseTerminalError("status=failed code=server_error message=An error occurred while processing your request. Please include the request ID example-request-id in your message.")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert attempts == 2
+    assert "temporarily unavailable" in result.content
+    assert "server_error" not in result.content
+    assert "example-request-id" not in result.content
+
+
 def test_sync_codex_provider_retry_exhaustion_is_not_retried_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

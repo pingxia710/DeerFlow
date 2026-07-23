@@ -34,7 +34,6 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import (
     _available_skill_names,
-    _filter_coordinator_tools,
     _include_direct_mcp_tools,
     _load_enabled_skills_for_tool_policy,
     _resolve_agent_tool_groups,
@@ -281,7 +280,6 @@ class DeerFlowClient:
         if tools:
             skills_for_tool_policy = _load_enabled_skills_for_tool_policy(lead_available_skills, app_config=self._app_config)
             filtered_tools = filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy)
-            filtered_tools = _filter_coordinator_tools(self._agent_name, filtered_tools)
         else:
             filtered_tools = []
         final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=self._app_config.tool_search.enabled)

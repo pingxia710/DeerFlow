@@ -25,7 +25,6 @@ import logging
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
@@ -51,24 +50,6 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _COORDINATOR_ONLY_AGENT_NAMES = {"command-room"}
-_COMMAND_ROOM_DIRECT_TOOL_GROUPS = ["file:read"]
-_COMMAND_ROOM_DIRECT_TOOL_NAMES = frozenset(
-    {
-        "ask_clarification",
-        "acknowledge_workspace_results",
-        "create_goal_cell",
-        "present_files",
-        "read_goal_workspace_history",
-        "read_workspace_results",
-        "record_goal_workspace",
-        "return_to_parent",
-        "task",
-        "ls",
-        "read_file",
-        "glob",
-        "grep",
-    }
-)
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -100,25 +81,12 @@ def _is_coordinator_only_agent(agent_name: str | None) -> bool:
 
 
 def _resolve_agent_tool_groups(agent_name: str | None, agent_config: AgentConfig | None) -> list[str] | None:
-    """Return config-tool groups for the lead agent.
-
-    Command Room can inspect current facts directly through the read-only file
-    group. Writes, shell, web, and MCP execution remain delegated.
-    """
-    if _is_coordinator_only_agent(agent_name):
-        return list(_COMMAND_ROOM_DIRECT_TOOL_GROUPS)
+    """Return configured direct-tool groups for the lead agent."""
     return agent_config.tool_groups if agent_config else None
 
 
-def _filter_coordinator_tools(agent_name: str | None, tools: list[BaseTool]) -> list[BaseTool]:
-    """Keep Command Room to read-only investigation and coordination tools."""
-    if not _is_coordinator_only_agent(agent_name):
-        return tools
-    return [tool for tool in tools if tool.name in _COMMAND_ROOM_DIRECT_TOOL_NAMES]
-
-
 def _include_direct_mcp_tools(agent_name: str | None) -> bool:
-    return not _is_coordinator_only_agent(agent_name)
+    return True
 
 
 def _can_update_self(agent_name: str | None) -> bool:
@@ -635,7 +603,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         app_config=resolved_app_config,
     )
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
-    filtered = _filter_coordinator_tools(agent_name, filtered)
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
     model_kwargs = {
         "name": model_name,

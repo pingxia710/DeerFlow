@@ -14,18 +14,25 @@ when changing transport, process, persistence, or API implementation details.
 - `task()` transports one complete natural-language prompt to one
   `codex exec --ephemeral` process and returns its complete result. A role is
   prompt context only; it grants no tools or program authority.
+- Command Room directly uses its configured DeerFlow tools for in-scope work by
+  default and dispatches one-shot delegates only when the work genuinely needs
+  independent context, parallelism, a separate perspective, or more context.
 - Command Room children wake a sequential Chair Run with the complete result.
   Programs enforce hard system boundaries and record facts only; they never
   interpret, choose, stage, judge, rework, or close AI work.
 - Human input establishes the Goal Mandate: interest, direction, non-goals,
   real-world permissions, and return-to-human boundaries. Within it, a new
-  substantive execution plan or material revision uses one Planner proposal →
-  Opposition challenge → Chair execution plan → human discussion and
-  natural-language confirmation → plan-directed execution. Work already covered
+  substantive execution plan or material revision is drafted by the Chair
+  itself → human discussion and natural-language confirmation → plan-directed
+  execution, with one Opposition challenge for every new root goal, every
+  substantially new or revised plan, and every material route change; for any
+  other decision, the Chair adds an Opposition challenge when it decides an
+  independent contrary check is necessary. Work already covered
   by a confirmed plan continues directly, including ordinary fixes, stopping
   low-value work, and bounded optimizations. A completed phase
-  that changes the next route uses Project Manager proposal → Opposition →
-  Chair next-stage plan → human discussion. Independent execution can run in
+  that changes the next route uses Project Manager proposal →
+  Chair next-stage plan → human discussion, with Opposition when the
+  Chair decides one is necessary. Independent execution can run in
   parallel; six slots are capacity, not a quota, and independently separable
   professional domains should not be packed into one over-broad child. Programs
   do not enforce this sequence. Execution results are facts for Chair

@@ -56,6 +56,9 @@ async def record_goal_workspace_tool(
     The program stores this body unchanged. It does not parse the text, infer
     stages, judge completion, or choose any next action.
 
+    Do not use for read-only discovery or simple questions answerable with the
+    Chair's read-only tools—those need no Mandate, Brief, or Map.
+
     Args:
         kind: Record a relatively stable human Goal Mandate, the Chair's
             current Operating Brief, or its current temporary Organization Map.

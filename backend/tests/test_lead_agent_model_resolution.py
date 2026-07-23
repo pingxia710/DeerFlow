@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -439,13 +438,14 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_command_room_has_read_only_investigation_tools_only():
+def test_command_room_uses_configured_direct_execution_tools():
     agent_config = AgentConfig(
         name="command-room",
         tool_groups=["file:write", "web", "bash"],
     )
 
-    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == ["file:read"]
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", agent_config) == ["file:write", "web", "bash"]
+    assert lead_agent_module._resolve_agent_tool_groups("command-room", None) is None
     assert lead_agent_module._can_update_self("command-room") is False
 
     ordinary_config = AgentConfig(
@@ -463,7 +463,7 @@ def test_command_room_has_read_only_investigation_tools_only():
     assert lead_agent_module._resolve_command_room_available_skills("builder", {"safe-skill"}) == {"safe-skill"}
 
 
-def test_make_lead_agent_command_room_keeps_read_only_and_coordination_tools(monkeypatch):
+def test_make_lead_agent_command_room_keeps_direct_execution_and_coordination_tools(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -502,10 +502,10 @@ def test_make_lead_agent_command_room_keeps_read_only_and_coordination_tools(mon
 
     result = lead_agent_module._make_lead_agent(config, app_config=app_config)
 
-    assert captured_tools_kwargs["groups"] == ["file:read"]
-    assert captured_tools_kwargs["include_mcp"] is False
+    assert captured_tools_kwargs["groups"] == ["sandbox", "bash"]
+    assert captured_tools_kwargs["include_mcp"] is True
     assert captured_tools_kwargs["subagent_enabled"] is True
-    assert config["metadata"]["tool_groups"] == ["file:read"]
+    assert config["metadata"]["tool_groups"] == ["sandbox", "bash"]
     assert "subagent_tool_groups" not in config["metadata"]
     assert "subagent_available_skills" not in config["metadata"]
     assert [tool.name for tool in result["tools"]] == [
@@ -516,44 +516,6 @@ def test_make_lead_agent_command_room_keeps_read_only_and_coordination_tools(mon
         "create_goal_cell",
         "return_to_parent",
     ]
-
-
-def test_command_room_filters_to_read_only_and_coordination_tools():
-    tools = [
-        SimpleNamespace(name="ls"),
-        SimpleNamespace(name="read_file"),
-        SimpleNamespace(name="glob"),
-        SimpleNamespace(name="grep"),
-        SimpleNamespace(name="view_image"),
-        SimpleNamespace(name="task"),
-        SimpleNamespace(name="ask_clarification"),
-        SimpleNamespace(name="present_files"),
-        SimpleNamespace(name="record_goal_workspace"),
-        SimpleNamespace(name="read_goal_workspace_history"),
-        SimpleNamespace(name="read_workspace_results"),
-        SimpleNamespace(name="acknowledge_workspace_results"),
-        SimpleNamespace(name="create_goal_cell"),
-        SimpleNamespace(name="return_to_parent"),
-    ]
-
-    filtered = lead_agent_module._filter_coordinator_tools("command-room", tools)
-
-    assert [tool.name for tool in filtered] == [
-        "ls",
-        "read_file",
-        "glob",
-        "grep",
-        "task",
-        "ask_clarification",
-        "present_files",
-        "record_goal_workspace",
-        "read_goal_workspace_history",
-        "read_workspace_results",
-        "acknowledge_workspace_results",
-        "create_goal_cell",
-        "return_to_parent",
-    ]
-    assert lead_agent_module._filter_coordinator_tools("builder", tools) == tools
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):

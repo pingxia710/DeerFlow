@@ -731,6 +731,9 @@ async def task_tool(
     the background and starts a fresh sequential Chair run with the complete
     result. Codex CLI owns planning, tool use, and task completion.
 
+    In Command Room, never delegate read-only inspection the Chair can do
+    itself with `ls`, `read_file`, `glob`, and `grep`.
+
     Args:
         description: A short task label for the user interface and audit log.
         prompt: Complete instructions for the Codex CLI worker.

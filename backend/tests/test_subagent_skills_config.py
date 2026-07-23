@@ -18,7 +18,7 @@ def test_command_room_opposition_skill_challenges_the_completed_plan():
     repo_root = Path(__file__).resolve().parents[2]
     opposition = _read_custom_skill(repo_root, "command-room-opposition")
 
-    assert "original self-contained Chair brief and the complete planner proposal" in opposition
+    assert "original self-contained Chair brief and the complete Chair draft plan" in opposition
     assert "hidden assumptions" in opposition
     assert "no material challenge exists" in opposition
     assert "Do not approve, reject" in opposition
@@ -30,10 +30,16 @@ def test_nextos_commander_defines_the_ai_enterprise_without_program_control():
 
     assert "AI organization layer built on the DeerFlow runtime" in skill
     assert "Treat ordinary safe, bounded work explicitly requested by the human as already" in skill
+    assert "Read-only discovery—locating a project" in skill
+    assert "do not create a Mandate, Brief, Organization Map, an Opposition task" in skill
     assert "Use the escalated sequence only for a changed Goal Mandate" in skill
-    assert "Give one Planner the complete self-contained brief" in skill
+    assert "Draft the complete plan yourself" in skill
+    assert "mandatory for new root goals, new or materially revised plans, and material route changes" in skill
     assert "Opposition challenge" in skill
-    assert "concise Chair plan" in skill
+    assert "directly execute only the four direct-work" in skill
+    assert "five-step contract" in skill
+    assert "read_workspace_results" in skill
+    assert "self-claim is not evidence" in skill
     assert "Present it and pause for human discussion" in skill
     assert "Explicit natural-language confirmation" in skill
     assert "Six slots are resource capacity, not a quota" in skill
@@ -155,7 +161,8 @@ def test_command_room_role_skills_keep_minimal_frontmatter_and_body_version():
         frontmatter = text.split("---", 2)[1]
         keys = {line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line}
         assert keys == {"name", "description"}, skill_name
-        expected_version = "0.6.0" if skill_name == "nextos-commander" else "0.1.0"
+        expected_versions = {"nextos-commander": "0.7.1", "command-room-opposition": "0.2.0", "command-room-executor": "0.1.1"}
+        expected_version = expected_versions.get(skill_name, "0.1.0")
         assert f"Version: {expected_version}" in text, skill_name
 
 

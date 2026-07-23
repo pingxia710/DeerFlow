@@ -20,15 +20,26 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "The organization persists through these facts and complete results, not resident model processes" in prompt
     assert "temporary workstream lead is allowed only for a bounded objective" in prompt
     assert "COMMAND ROOM AI-AI-AI" in prompt
-    assert "files, code, logs, plans, and artifacts directly with read-only tools" in prompt
-    assert "Delegate edits, shell commands, long-running work, and independent execution" in prompt
+    assert "files, code, logs, plans, and artifacts directly with configured tools" in prompt
+    assert "EVERY RUN — the five-step contract" in prompt
+    assert "turn every dependency-satisfied card into a task" in prompt
+    assert "RECONCILE EVERY RUN" in prompt
+    assert "INTENT RECEIPT" in prompt
+    assert "do not delegate merely to preserve context" in prompt
+    assert "FIRST — classify every request before any tool call" in prompt
+    assert "Read-only discovery—locating a project" in prompt
+    assert "Direct-handling example" in prompt
+    assert "do not create a Goal Mandate, Brief, Organization Map, an Opposition task" in prompt
     assert "Read applicable `AGENTS.md`, `Progress.md`" in prompt
     assert "Progress is factual memory, never authority" in prompt
     assert "Make that AI-AI contract self-contained" in prompt
     assert "exact working/input/output paths" in prompt
     assert "Read every complete natural result and choose every next action yourself" in prompt
-    assert "Ordinary safe, bounded work explicitly requested by the human is already authorized" in prompt
-    assert "Use Planner → Opposition → Chair plan → human discussion only" in prompt
+    assert "Ordinary safe, bounded work explicitly requested by the human is authorized" in prompt
+    assert "Never require or present a plan for read-only discovery" in prompt
+    assert "Use Chair plan → human discussion only" in prompt
+    assert "four human gates" in prompt
+    assert "Run one Opposition challenge for every new root goal" in prompt
     assert "Do not create a new Brief solely for a task receipt" in prompt
     assert "a result acknowledgement, or a history read" in prompt
     assert "A single simple workstream does not need an Organization Map" in prompt
@@ -95,7 +106,6 @@ def test_subagent_audit_records_hashes_without_worker_text(tmp_path):
 
 def test_command_room_role_catalog_contains_prompt_context_only():
     assert set(COMMAND_ROOM_ROLE_CONFIGS) == {
-        "planner",
         "project-manager",
         "executor",
         "fact-finder",
@@ -110,7 +120,7 @@ def test_command_room_role_catalog_contains_prompt_context_only():
     for role in COMMAND_ROOM_ROLE_CONFIGS.values():
         assert role.system_prompt == role.description
         assert not hasattr(role, "skills")
-    assert "after a planner proposal" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
+    assert "after a Chair draft plan" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
     assert "no material challenge exists" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
     assert "does not approve" in COMMAND_ROOM_ROLE_CONFIGS["opposition"].description
     assert "restart" in COMMAND_ROOM_ROLE_CONFIGS["runtime-reliability-auditor"].description

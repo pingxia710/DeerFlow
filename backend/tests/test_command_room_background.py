@@ -947,6 +947,14 @@ def test_start_wake_run_uses_hidden_input_and_command_room_context(monkeypatch):
         message = body.input["messages"][0]
         assert captured["thread_id"] == "thread-1"
         assert body.assistant_id == "command-room"
+        assert body.config is None
+        config = services.build_run_config(
+            captured["thread_id"],
+            body.config,
+            body.metadata,
+            assistant_id=body.assistant_id,
+        )
+        assert config["recursion_limit"] == 1000
         assert body.context["model_name"] == "configured-model"
         assert captured["command_room_wake_admission"].wake_id == body.metadata["command_room_wake_id"]
         assert message["name"] == "command_room_background_result"

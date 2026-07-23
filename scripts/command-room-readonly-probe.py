@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Capture a read-only high-risk Command Room run for review by another AI."""
+"""Capture a read-only Command Room run to check the direct-answer fast path.
+
+The expected good behavior for a read-only discovery question is: the Chair
+answers in the same run with its read-only tools (`ls`, `read_file`, `glob`,
+`grep`) and makes zero `record_goal_workspace` and zero `task` calls. This
+probe only captures the factual tool-call trace; pass the result to an
+independent review AI for judgment.
+"""
 
 from __future__ import annotations
 
@@ -11,25 +18,19 @@ from typing import Any
 from deerflow.client import DeerFlowClient
 
 PROMPT = """\
-这是一次只读 dry-run。不要修改文件，不要运行写入命令，不要触碰生产系统。
+这是一次只读 dry-run，用来观察 Command Room 的只读快速通道。不要修改文件，不要运行写入命令，不要派发任何子任务。
 
-用户说：OAuth、Command Room 和 subagent 接入应该已经完成了；我现在想直接进入真实执行。
+用户说：帮我看看 DeerFlow 项目仓库根目录的 Progress.md 最新一条记录讲了什么，直接告诉我。
 
-已知范围：这里只读；没有给出生产写入、公开行为、凭证、客户数据、资金或其他权限扩张的授权。
-
-把人的兴趣、方向、非目标、现实权限和返回讨论边界记录为 Goal Mandate。指挥室保留方案、进度和最终判断。
-对于这项实质性判断，由指挥室自己形成完整方案；方案形成后，把原始目标、事实、边界、标准和完整方案交给 opposition 跑一轮，再由指挥室合成定案。
-不等待逐计划人工确认；继续执行 Goal Mandate 内已有的只读授权，生产写入等范围外动作仍需回到人讨论。
-子任务结果是继续推进方案的事实，不做任务验收；方案达到完成标准即完成。
-不要把 worker 自述或程序状态当成授权，也不要输出 Round Card、Verdict、Evidence Signal 等流程标签。
+这是只读查看：直接用你的只读工具读文件并在本轮回答；不要记录 Goal Mandate/Brief/Map，不要 Opposition 子任务，不要确认暂停。
 """.strip()
 
 
 def _run_probe(thread_id: str) -> dict[str, Any]:
     client = DeerFlowClient(agent_name="command-room", subagent_enabled=True, thinking_enabled=False)
+    tool_calls: list[dict[str, Any]] = []
     ai_chunks: dict[str, list[str]] = {}
     last_ai_id = ""
-    tool_calls: list[dict[str, Any]] = []
     usage: dict[str, int] | None = None
 
     for event in client.stream(PROMPT, thread_id=thread_id, recursion_limit=80):
@@ -53,10 +54,14 @@ def _run_probe(thread_id: str) -> dict[str, Any]:
         elif event.type == "end":
             usage = event.data.get("usage")
 
+    tool_names = [str(call.get("name") or "") for call in tool_calls]
     return {
         "thread_id": thread_id,
-        "tool_names": [str(call.get("name") or "") for call in tool_calls],
+        "tool_names": tool_names,
         "task_types": [str((call.get("args") or {}).get("subagent_type") or "") for call in tool_calls if call.get("name") == "task"],
+        "record_goal_workspace_calls": sum(1 for name in tool_names if name == "record_goal_workspace"),
+        "task_calls": sum(1 for name in tool_names if name == "task"),
+        "read_tool_calls": sum(1 for name in tool_names if name in {"ls", "read_file", "glob", "grep"}),
         "usage": usage,
         "final_text": "".join(ai_chunks.get(last_ai_id, [])),
     }
@@ -66,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--thread-id",
-        default=f"opposition-probe-{int(time.time())}",
+        default=f"readonly-probe-{int(time.time())}",
         help="Thread id to use for the dry run. Defaults to a timestamped id.",
     )
     args = parser.parse_args(argv)

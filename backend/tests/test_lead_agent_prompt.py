@@ -554,31 +554,34 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "AI-AI-AI" in prompt
     assert "Own the user's goal, current Chair plan, decisions, progress, and final judgment" in prompt
     assert "Human input establishes the Goal Mandate" in prompt
-    assert "Ordinary safe, bounded work explicitly requested by the human is already authorized" in prompt
-    assert "Use Planner → Opposition → Chair plan → human discussion only" in prompt
+    assert "Ordinary safe, bounded work explicitly requested by the human is authorized" in prompt
+    assert "Use Chair plan → human discussion only for the four human gates" in prompt
     assert "Continue the current plan directly after a phase result" in prompt
-    assert "explicit natural-language confirmation" in prompt
+    assert "Obtain explicit natural-language" in prompt
     assert "Six is resource capacity, not a task-count target" in prompt
     assert "Prefer a matching fixed professional role" in prompt
     assert "read_goal_workspace_history" in prompt
     assert "one bounded raw page" in prompt
-    assert "Delegate edits, shell commands, long-running work, and independent execution" in prompt
-    assert "read-only tools" in prompt
+    assert "EVERY RUN — the five-step contract" in prompt
+    assert "command work itself, sensing, no-contract work, and work too small for a card" in prompt
+    assert "RECONCILE EVERY RUN" in prompt
+    assert "INTENT RECEIPT" in prompt
+    assert "four human gates" in prompt
     assert "Make that AI-AI contract self-contained" in prompt
     assert "Read every complete natural result and choose every next action yourself" in prompt
     assert "Programs may only transport text" in prompt
     assert "records never authorize, block, sequence, judge, repair, advance, or close AI work" in prompt
     assert "Real work uses" not in prompt
     assert "2 minutes" not in prompt
-    assert "Delegated Local Sandbox Paths" in prompt
-    assert "Command Room lead does not inspect them directly" in prompt
+    assert "Local Sandbox Paths" in prompt
+    assert "configured mount paths directly" in prompt
     assert "You may use direct host absolute paths" not in prompt
     assert "Use `read_file`" not in prompt
     assert "immediately call `read_file`" not in prompt
     assert "`str_replace` over `write_file`" not in prompt
     assert "`bash cp`" not in prompt
     assert "Use web_search" not in prompt
-    assert "The Command Room does not call ACP or file tools directly" in prompt
+    assert "Use `task` to dispatch a contract-able card" in prompt
     assert "maximum 2 `task` calls per response" not in prompt
     assert "Choose the useful task count from the goal" in prompt
     assert "returns a background receipt, not a result" in prompt
@@ -592,7 +595,7 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "Only use `task` when you can launch 2+ subagents in parallel" not in prompt
 
 
-def test_command_room_prompt_stays_compact(monkeypatch):
+def test_command_room_prompt_keeps_the_T1_contract_without_embedded_skill_catalog(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
             use="deerflow.sandbox.local:LocalSandboxProvider",
@@ -616,7 +619,8 @@ def test_command_room_prompt_stays_compact(monkeypatch):
         app_config=explicit_config,
     )
 
-    assert len(prompt) < 10000
+    assert "evidence requirements (commands with exit codes, diffs, logs, screenshots—self-claims are not evidence)" in prompt
+    assert "Speak outcomes, options, and consequences" in prompt
     assert "<available_skills>" not in prompt
     assert "Example - Deep Research Report" not in prompt
 

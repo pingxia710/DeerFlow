@@ -513,7 +513,7 @@ def _make_test_app(tmp_path: Path, *, system_role: str = "admin"):
         subagents=SubagentsAppConfig(
             model="gpt-5.6-terra",
             reasoning_effort="xhigh",
-            agents={"planner": SubagentOverrideConfig(model="gpt-5.6", reasoning_effort="max")},
+            agents={"opposition": SubagentOverrideConfig(model="gpt-5.6", reasoning_effort="max")},
         ),
         get_model_config=models.get,
     )
@@ -781,7 +781,6 @@ class TestRolesAPI:
         assert response.status_code == 200
         roles = {role["name"]: role for role in response.json()["roles"]}
         assert set(roles) == {
-            "planner",
             "project-manager",
             "executor",
             "fact-finder",
@@ -793,8 +792,8 @@ class TestRolesAPI:
             "security-auditor",
             "platform-ops-auditor",
         }
-        assert roles["planner"]["model"] == "gpt-5.6"
-        assert roles["planner"]["reasoning_effort"] == "max"
+        assert roles["opposition"]["model"] == "gpt-5.6"
+        assert roles["opposition"]["reasoning_effort"] == "max"
         assert roles["executor"]["model"] == "gpt-5.6-terra"
         assert roles["executor"]["skill"] == "command-room-executor"
 
@@ -817,8 +816,8 @@ class TestRolesAPI:
 
     def test_update_role_rejects_unknown_role_model_and_effort(self, agent_client):
         unknown_role = agent_client.put("/api/roles/critic", json={"model": "gpt-5.6", "reasoning_effort": "max"})
-        unknown_model = agent_client.put("/api/roles/planner", json={"model": "missing", "reasoning_effort": "max"})
-        unsupported_effort = agent_client.put("/api/roles/planner", json={"model": "gpt-5.6-terra", "reasoning_effort": "max"})
+        unknown_model = agent_client.put("/api/roles/opposition", json={"model": "missing", "reasoning_effort": "max"})
+        unsupported_effort = agent_client.put("/api/roles/opposition", json={"model": "gpt-5.6-terra", "reasoning_effort": "max"})
 
         assert unknown_role.status_code == 404
         assert unknown_model.status_code == 422

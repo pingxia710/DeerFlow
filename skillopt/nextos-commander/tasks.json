@@ -2,7 +2,7 @@
   {
     "id": "train-safe-fast-lane",
     "split": "train",
-    "intent": "The human directly requests a bounded local code fix with no external, irreversible, architecture, or operating-workflow change; the Chair must make a concise plan and dispatch it without Planner, Opposition, or a confirmation pause.",
+    "intent": "The human directly requests a bounded local code fix with no external, irreversible, architecture, or operating-workflow change; the Chair must make a concise plan and dispatch it without an Opposition task or a confirmation pause.",
     "required_rules": ["planning-boundary"]
   },
   {

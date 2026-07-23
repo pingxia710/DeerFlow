@@ -343,8 +343,8 @@ def _command_room_runtime_facts(
         "direct": {
             "tool_groups": direct_groups,
             "configured_tools": sorted(set(direct_tools)),
-            "include_mcp": False,
-            "mcp_access": "not_exposed_to_command_room",
+            "include_mcp": True,
+            "mcp_access": "exposed_to_command_room",
         },
         "task_transport": {
             "runtime": "codex-cli-one-shot",

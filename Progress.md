@@ -1068,3 +1068,10 @@
 - 07-23 cleanup 丢失的 NextOS 2.0 治理态自 codex 会话恢复(`54b5a424`):planner 角色移除、委派纪律(Chair 只读自查、task 只派真独立活)、MCP 对 command-room 开放、server_error 归瞬时重试、prompt 刷新稿、probe 脚本、skillopt、2.0 蓝图文档;重申 planner skill 与 update-card 删除(`30c4ce76` 补齐配套)。
 - 验证:438 后端聚焦测试、前端全量单测、typecheck、eslint/prettier、ruff 全绿;pre-existing 3 条 E501(prompt.py)顺带清除。
 - 未 push;Gateway 旧进程(09:44 启)仍为内存中旧代码,重启后生效已提交状态。
+
+## 2026-07-23 — 前端第二刀与 turbopack 事件
+
+- 第二刀:agents 页密度(8cc634ca)、设置页蓝条导航(3b0ce21e)、landing hero 效率化(49374e7a)。
+- WordRotate 弃 framer-motion 改纯 React+CSS(轮转词此前冻结在 SSR 初始态)。
+- **turbopack dev 故障**:重启后 hero 动画/FlickeringGrid/login 切换全部冻结在 SSR 初始态,webpack 模式正常。dev 脚本已改 `next dev --webpack`(03ff1fbf)。旧 13 天 turbo server 的 .next 缓存也是旧 tokens 的来源。
+- 全在本地 commit,未 push;Gateway 仍待拼多多 thread 完成后重启。

@@ -53,7 +53,7 @@ export function RoleCard({ role, models }: RoleCardProps) {
 
   return (
     <>
-      <Card className="flex flex-col transition-shadow hover:shadow-md">
+      <Card className="hover:border-foreground/20 flex flex-col transition-colors">
         <CardHeader className="pb-3">
           <div className="flex min-w-0 items-center gap-2">
             <div className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">

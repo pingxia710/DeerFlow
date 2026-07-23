@@ -452,29 +452,94 @@ class RunRepository(RunStore):
 
         Returns ``False`` when no run row matched the requested ``run_id``.
         """
-        values: dict[str, Any] = {
-            "status": status,
-            "total_input_tokens": total_input_tokens,
-            "total_output_tokens": total_output_tokens,
-            "total_tokens": total_tokens,
-            "llm_call_count": llm_call_count,
-            "lead_agent_tokens": lead_agent_tokens,
-            "subagent_tokens": subagent_tokens,
-            "middleware_tokens": middleware_tokens,
-            "token_usage_by_model": self._safe_json(token_usage_by_model) or {},
-            "message_count": message_count,
-            "updated_at": datetime.now(UTC),
-        }
-        if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
-        if first_human_message is not None:
-            values["first_human_message"] = first_human_message[:2000]
-        if error is not None:
-            values["error"] = error
-        async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
-            await session.commit()
-            return result.rowcount != 0
+        async with self._lease_session() as session:
+            row = await self._locked_run(session, run_id)
+            if row is None:
+                return False
+            metadata = dict(row.metadata_json or {})
+            pending = metadata.pop("_pending_external_subagent_usage", None)
+            if not isinstance(pending, dict):
+                pending = {}
+            input_total = total_input_tokens + int(pending.get("input_tokens") or 0)
+            output_total = total_output_tokens + int(pending.get("output_tokens") or 0)
+            combined_total = total_tokens + int(pending.get("total_tokens") or 0)
+            usage_by_model = {name: dict(usage) for name, usage in (token_usage_by_model or {}).items()}
+            for name, usage in (pending.get("by_model") or {}).items():
+                if not isinstance(name, str) or not isinstance(usage, dict):
+                    continue
+                bucket = usage_by_model.setdefault(name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                for key in bucket:
+                    bucket[key] += int(usage.get(key) or 0)
+            row.status = status
+            row.total_input_tokens = input_total
+            row.total_output_tokens = output_total
+            row.total_tokens = combined_total
+            row.llm_call_count = llm_call_count
+            row.lead_agent_tokens = lead_agent_tokens
+            row.subagent_tokens = subagent_tokens + int(pending.get("total_tokens") or 0)
+            row.middleware_tokens = middleware_tokens
+            row.token_usage_by_model = self._safe_json(usage_by_model) or {}
+            row.message_count = message_count
+            row.metadata_json = self._safe_json(metadata) or {}
+            row.updated_at = datetime.now(UTC)
+            if last_ai_message is not None:
+                row.last_ai_message = last_ai_message[:2000]
+            if first_human_message is not None:
+                row.first_human_message = first_human_message[:2000]
+            if error is not None:
+                row.error = error
+            return True
+
+    async def record_external_subagent_usage(
+        self,
+        run_id: str,
+        *,
+        source_run_id: str,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> bool:
+        """Persist one deduplicated child-token fact without changing run status."""
+        async with self._lease_session() as session:
+            row = await self._locked_run(session, run_id)
+            if row is None:
+                return False
+            metadata = dict(row.metadata_json or {})
+            source_ids = metadata.get("_external_subagent_usage_sources")
+            if not isinstance(source_ids, list):
+                source_ids = []
+            if source_run_id in source_ids:
+                return False
+            source_ids.append(source_run_id)
+            metadata["_external_subagent_usage_sources"] = source_ids
+            pending = metadata.get("_pending_external_subagent_usage")
+            if not isinstance(pending, dict):
+                pending = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "by_model": {}}
+            metadata["_pending_external_subagent_usage"] = pending
+            pending["input_tokens"] = int(pending.get("input_tokens") or 0) + input_tokens
+            pending["output_tokens"] = int(pending.get("output_tokens") or 0) + output_tokens
+            pending["total_tokens"] = int(pending.get("total_tokens") or 0) + total_tokens
+            by_model = pending.get("by_model")
+            if not isinstance(by_model, dict):
+                by_model = {}
+                pending["by_model"] = by_model
+            bucket_name = self._normalize_model_name(model_name) or "unknown"
+            pending_bucket = by_model.setdefault(bucket_name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+            usage_by_model = dict(row.token_usage_by_model or {})
+            bucket = dict(usage_by_model.get(bucket_name) or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+            for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens), ("total_tokens", total_tokens)):
+                pending_bucket[key] = int(pending_bucket.get(key) or 0) + value
+                bucket[key] = int(bucket.get(key) or 0) + value
+            usage_by_model[bucket_name] = bucket
+            row.total_input_tokens += input_tokens
+            row.total_output_tokens += output_tokens
+            row.total_tokens += total_tokens
+            row.subagent_tokens += total_tokens
+            row.token_usage_by_model = self._safe_json(usage_by_model) or {}
+            row.metadata_json = self._safe_json(metadata) or {}
+            row.updated_at = datetime.now(UTC)
+            return True
 
     async def update_run_progress(
         self,
@@ -778,7 +843,20 @@ class RunRepository(RunStore):
             existing = self._metadata(row)
             if row.status != terminal_status or existing.get("lease_token") != lease_token or existing.get("generation") != generation or existing.get("terminal_reason") != terminal_reason:
                 return False
-            for key, value in (metadata or {}).items():
+            completion_metadata = dict(metadata or {})
+            pending = existing.pop("_pending_external_subagent_usage", None)
+            if isinstance(pending, dict):
+                for field, key in (("total_input_tokens", "input_tokens"), ("total_output_tokens", "output_tokens"), ("total_tokens", "total_tokens"), ("subagent_tokens", "total_tokens")):
+                    completion_metadata[field] = int(completion_metadata.get(field) or 0) + int(pending.get(key) or 0)
+                usage_by_model = {name: dict(usage) for name, usage in (completion_metadata.get("token_usage_by_model") or {}).items()}
+                for name, usage in (pending.get("by_model") or {}).items():
+                    if not isinstance(name, str) or not isinstance(usage, dict):
+                        continue
+                    bucket = usage_by_model.setdefault(name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                    for key in bucket:
+                        bucket[key] += int(usage.get(key) or 0)
+                completion_metadata["token_usage_by_model"] = usage_by_model
+            for key, value in completion_metadata.items():
                 if key in {"status", "terminal_reason"} or value is None:
                     continue
                 if hasattr(row, key):

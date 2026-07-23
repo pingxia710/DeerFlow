@@ -15,7 +15,9 @@ from deerflow.subagents.codex_cli import run_codex_cli_task
 class _Process:
     def __init__(self, *, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
         self.returncode = returncode
-        self.stdout = stdout
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
         self.stderr = asyncio.StreamReader()
         self.stderr.feed_data(stderr)
         self.stderr.feed_eof()
@@ -70,7 +72,7 @@ async def test_run_codex_cli_task_passes_prompt_and_returns_final_text(monkeypat
         captured["kwargs"] = kwargs
         output_path = Path(args[args.index("--output-last-message") + 1])
         output_path.write_text("  finished task\n", encoding="utf-8")
-        process = _Process()
+        process = _Process(stdout=b'{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\n')
         captured["process"] = process
         return process
 
@@ -83,10 +85,11 @@ async def test_run_codex_cli_task_passes_prompt_and_returns_final_text(monkeypat
         additional_writable_paths=[outputs_path],
     )
 
-    assert result == "  finished task\n"
+    assert result.result == "  finished task\n"
+    assert result.usage == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
     args = captured["args"]
     assert args[:3] == ("codex", "exec", "--ephemeral")
-    assert "--json" not in args
+    assert "--json" in args
     assert args[args.index("--sandbox") + 1] == "workspace-write"
     assert args[args.index("--cd") + 1] == str(tmp_path.resolve())
     assert args[args.index("--add-dir") + 1] == str(outputs_path.resolve())
@@ -97,7 +100,7 @@ async def test_run_codex_cli_task_passes_prompt_and_returns_final_text(monkeypat
     assert args[-1] == "-"
     assert captured["process"].input == b"do the task"
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
-    assert captured["kwargs"]["stdout"] == asyncio.subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["start_new_session"] is True
     assert captured["kwargs"]["env"]["PATH"]
@@ -117,7 +120,7 @@ async def test_run_codex_cli_task_reads_leading_dash_and_large_prompt_from_stdin
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
-    assert await run_codex_cli_task(prompt, workspace_path=tmp_path, timeout_seconds=60) == "finished"
+    assert (await run_codex_cli_task(prompt, workspace_path=tmp_path, timeout_seconds=60)).result == "finished"
     assert captured["args"][-1] == "-"
     assert captured["process"].input == prompt.encode("utf-8")
 
@@ -139,7 +142,7 @@ async def test_run_codex_cli_task_does_not_inherit_gateway_secrets(monkeypatch, 
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
-    assert await run_codex_cli_task("do the task", workspace_path=tmp_path, timeout_seconds=60) == "finished"
+    assert (await run_codex_cli_task("do the task", workspace_path=tmp_path, timeout_seconds=60)).result == "finished"
     assert captured["env"]["CODEX_HOME"] == str(tmp_path / ".codex")
     assert captured["env"]["PATH"] == os.environ["PATH"]
     assert "DATABASE_URL" not in captured["env"]

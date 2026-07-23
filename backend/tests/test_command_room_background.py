@@ -278,6 +278,50 @@ def test_background_service_retries_when_an_admitted_wake_run_fails(monkeypatch)
     asyncio.run(scenario())
 
 
+def test_background_cancelled_child_is_delivered_and_wakes_chair(monkeypatch):
+    async def scenario():
+        service = background_module.CommandRoomBackgroundService()
+        snapshot, round_store = await _background_snapshot(user_id="user-1")
+        workspace_store = MemoryWorkspaceEventStore()
+        snapshot.app.state.workspace_event_store = workspace_store
+        wake_calls = []
+
+        async def execute():
+            raise asyncio.CancelledError
+
+        async def wake(_snapshot, job, outcome, **_kwargs):
+            wake_calls.append((job.task_id, outcome.status, outcome.error))
+
+        monkeypatch.setattr(background_module, "_start_wake_run", wake)
+        job = CommandRoomBackgroundJob(
+            thread_id="thread-1",
+            source_run_id="run-1",
+            task_id="task-cancelled",
+            description="Cancelled work",
+            subagent_type="executor",
+            execute=execute,
+        )
+
+        await service.dispatch(job, snapshot)
+        await asyncio.gather(*tuple(service._tasks.values()))
+
+        lane = await round_store.get_task_lane(
+            thread_id="thread-1",
+            run_id="run-1",
+            task_id="task-cancelled",
+            user_id="user-1",
+        )
+        inbox = await workspace_store.result_inbox(thread_id="thread-1", user_id="user-1")
+        assert wake_calls == [("task-cancelled", "cancelled", "Background task cancelled")]
+        assert lane["status"] == "cancelled"
+        assert lane["handoff"]["background_recovery"]["wake"]["state"] == "completed"
+        assert inbox["results"][0]["metadata"]["status"] == "cancelled"
+        assert inbox["notified_through_seq"] == inbox["results"][0]["revision"]
+        await service.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_concurrent_results_are_persisted_separately_and_wake_once(monkeypatch):
     async def scenario():
         class BarrierWorkspaceStore(MemoryWorkspaceEventStore):
@@ -505,7 +549,7 @@ def test_restart_marks_unrecoverable_callable_failed_and_wakes_once(monkeypatch)
     asyncio.run(scenario())
 
 
-def test_recovery_records_cancelled_child_without_waking_chair(monkeypatch):
+def test_recovery_delivers_cancelled_child_and_wakes_chair(monkeypatch):
     async def scenario():
         snapshot, round_store = await _background_snapshot()
         service = background_module.CommandRoomBackgroundService()
@@ -524,16 +568,19 @@ def test_recovery_records_cancelled_child_without_waking_chair(monkeypatch):
             wake={"state": "pending", "attempts": 0},
         )
 
-        async def wake(*_args, **_kwargs):
-            raise AssertionError("a cancelled child must not wake the Chair")
+        wake_calls = []
+
+        async def wake(_snapshot, recovered_job, recovered_outcome, **_kwargs):
+            wake_calls.append((recovered_job.task_id, recovered_outcome.status))
 
         monkeypatch.setattr(background_module, "_start_wake_run", wake)
         await service.recover(snapshot.app)
+        await asyncio.gather(*tuple(service._tasks.values()))
 
         lane = await round_store.get_task_lane(thread_id="thread-1", run_id="run-1", task_id="task-cancelled")
         wake_state = lane["handoff"]["background_recovery"]["wake"]
-        assert wake_state["state"] == "failed"
-        assert wake_state["last_status"] == "child_cancelled"
+        assert wake_calls == [("task-cancelled", "cancelled")]
+        assert wake_state["state"] == "completed"
         assert service._tasks == {}
         await service.shutdown()
 

@@ -246,11 +246,24 @@ class MemoryRunStore(RunStore):
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         if run_id in self._runs:
-            self._runs[run_id]["status"] = status
+            run = self._runs[run_id]
+            metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+            pending = metadata.pop("_pending_external_subagent_usage", None)
+            if isinstance(pending, dict):
+                for field, key in (("total_input_tokens", "input_tokens"), ("total_output_tokens", "output_tokens"), ("total_tokens", "total_tokens"), ("subagent_tokens", "total_tokens")):
+                    kwargs[field] = (kwargs.get(field) or 0) + (pending.get(key) or 0)
+                by_model = kwargs.get("token_usage_by_model") or {}
+                by_model = {name: dict(usage) for name, usage in by_model.items()}
+                for name, usage in (pending.get("by_model") or {}).items():
+                    bucket = by_model.setdefault(name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                    for key in bucket:
+                        bucket[key] += usage.get(key, 0) or 0
+                kwargs["token_usage_by_model"] = by_model
+            run["status"] = status
             for key, value in kwargs.items():
                 if value is not None:
-                    self._runs[run_id][key] = value
-            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+                    run[key] = value
+            run["updated_at"] = datetime.now(UTC).isoformat()
             return True
         return False
 
@@ -260,6 +273,47 @@ class MemoryRunStore(RunStore):
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+
+    async def record_external_subagent_usage(
+        self,
+        run_id,
+        *,
+        source_run_id,
+        model_name,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    ):
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        metadata = run.setdefault("metadata", {})
+        source_ids = metadata.setdefault("_external_subagent_usage_sources", [])
+        if source_run_id in source_ids:
+            return False
+        source_ids.append(source_run_id)
+        pending = metadata.setdefault(
+            "_pending_external_subagent_usage",
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "by_model": {}},
+        )
+        for field, key, value in (
+            ("total_input_tokens", "input_tokens", input_tokens),
+            ("total_output_tokens", "output_tokens", output_tokens),
+            ("total_tokens", "total_tokens", total_tokens),
+        ):
+            run[field] = run.get(field, 0) + value
+            pending[key] = pending.get(key, 0) + value
+        run["subagent_tokens"] = run.get("subagent_tokens", 0) + total_tokens
+        bucket = (run.setdefault("token_usage_by_model", {})).setdefault(
+            model_name or "unknown",
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+        pending_bucket = pending["by_model"].setdefault(model_name or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+        for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens), ("total_tokens", total_tokens)):
+            bucket[key] += value
+            pending_bucket[key] += value
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
 
     async def try_acquire_active_slot(
         self,
@@ -500,7 +554,19 @@ class MemoryRunStore(RunStore):
         run = self._runs.get(run_id)
         if run is None or run.get("status") != terminal_status or run.get("lease_token") != lease_token or run.get("generation") != generation or self._terminal_reason(run) != terminal_reason:
             return False
-        for key, value in (metadata or {}).items():
+        completion_metadata = dict(metadata or {})
+        run_metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        pending = run_metadata.pop("_pending_external_subagent_usage", None)
+        if isinstance(pending, dict):
+            for field, key in (("total_input_tokens", "input_tokens"), ("total_output_tokens", "output_tokens"), ("total_tokens", "total_tokens"), ("subagent_tokens", "total_tokens")):
+                completion_metadata[field] = (completion_metadata.get(field) or 0) + (pending.get(key) or 0)
+            usage_by_model = {name: dict(usage) for name, usage in (completion_metadata.get("token_usage_by_model") or {}).items()}
+            for name, usage in (pending.get("by_model") or {}).items():
+                bucket = usage_by_model.setdefault(name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                for key in bucket:
+                    bucket[key] += usage.get(key, 0) or 0
+            completion_metadata["token_usage_by_model"] = usage_by_model
+        for key, value in completion_metadata.items():
             if key not in {"status", "terminal_reason"} and value is not None:
                 run[key] = value
         run["updated_at"] = self._now(now).isoformat()

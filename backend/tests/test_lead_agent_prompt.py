@@ -555,7 +555,7 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "Own the user's goal, current Chair plan, decisions, progress, and final judgment" in prompt
     assert "Human input establishes the Goal Mandate" in prompt
     assert "Ordinary safe, bounded work explicitly requested by the human is authorized" in prompt
-    assert "Use Chair plan → human discussion only for the four human gates" in prompt
+    assert "Use Chair plan → human discussion only for the five human gates above" in prompt
     assert "Continue the current plan directly after a phase result" in prompt
     assert "Obtain explicit natural-language" in prompt
     assert "Six is resource capacity, not a task-count target" in prompt
@@ -566,7 +566,7 @@ def test_command_room_subagent_prompt_encodes_ai_ai_ai_contract(monkeypatch):
     assert "command work itself, sensing, no-contract work, and work too small for a card" in prompt
     assert "RECONCILE EVERY RUN" in prompt
     assert "INTENT RECEIPT" in prompt
-    assert "four human gates" in prompt
+    assert "four human gates" not in prompt
     assert "Make that AI-AI contract self-contained" in prompt
     assert "Read every complete natural result and choose every next action yourself" in prompt
     assert "Programs may only transport text" in prompt

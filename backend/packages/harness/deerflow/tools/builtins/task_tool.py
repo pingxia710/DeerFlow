@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import os
 import re
@@ -31,7 +32,7 @@ from deerflow.sandbox.security import is_unrestricted_host_access_allowed
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.subagents.audit import record_subagent_handoff
 from deerflow.subagents.builtins.command_room_roles import COMMAND_ROOM_ROLE_SKILLS
-from deerflow.subagents.codex_cli import CodexSandboxMode, run_codex_cli_task
+from deerflow.subagents.codex_cli import CodexCliTaskResult, CodexSandboxMode, run_codex_cli_task
 from deerflow.subagents.registry import get_subagent_config
 from deerflow.subagents.status_contract import SubagentStatusValue, make_subagent_additional_kwargs
 from deerflow.tools.types import Runtime
@@ -83,9 +84,7 @@ _SECRET_LIKE_RE = re.compile(
     r"(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*['\"]?[^'\"\s]+)"
 )
 
-# The token-usage middleware imports these functions dynamically. Codex CLI's
-# JSON stream currently has no stable usage contract, so direct CLI tasks do not
-# populate this cache.
+# The token-usage middleware imports these functions dynamically.
 _subagent_usage_cache: dict[tuple[str | None, str], dict[str, int]] = {}
 
 
@@ -124,6 +123,49 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
         if hasattr(callback, "record_external_llm_usage_records"):
             return callback
     return None
+
+
+async def _record_verified_subagent_usage(
+    *,
+    runtime: Any,
+    is_background: bool,
+    task_id: str,
+    subagent_type: str,
+    model: str | None,
+    usage: Mapping[str, int] | None,
+) -> None:
+    if not usage or usage.get("total_tokens", 0) <= 0:
+        return
+    record: dict[str, int | str | None] = {
+        "source_run_id": f"codex-cli:{task_id}",
+        "caller": f"subagent:{subagent_type}",
+        "model_name": model,
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage["total_tokens"],
+    }
+    if not is_background:
+        context = getattr(runtime, "context", None)
+        run_id = context.get("run_id") if isinstance(context, Mapping) else None
+        _subagent_usage_cache[_subagent_usage_cache_key(task_id, run_id=run_id)] = dict(usage)
+        recorder = _find_usage_recorder(runtime)
+        try:
+            if recorder is not None:
+                recorder.record_external_llm_usage_records([record])
+        except Exception:
+            logger.warning("Failed to record Codex child usage for task %s", task_id, exc_info=True)
+        return
+
+    context = getattr(runtime, "context", None)
+    callback = context.get("__record_external_subagent_usage") if isinstance(context, Mapping) else None
+    if not callable(callback):
+        return
+    try:
+        callback_result = callback(record)
+        if inspect.isawaitable(callback_result):
+            await callback_result
+    except Exception:
+        logger.warning("Failed to persist Codex child usage for task %s", task_id, exc_info=True)
 
 
 def _find_task_event_recorder(runtime: Any) -> Any | None:
@@ -575,6 +617,7 @@ async def _execute_started_task(
     writer: Any,
     runtime: Any,
     recorder_to_flush: Any | None,
+    is_background: bool,
     task_id: str,
     thread_id: str,
     run_id: str,
@@ -593,7 +636,7 @@ async def _execute_started_task(
 ) -> CommandRoomBackgroundOutcome:
     try:
         writable_paths = [prepared_paths["outputs_path"]] if "outputs_path" in prepared_paths else []
-        result = await run_codex_cli_task(
+        execution = await run_codex_cli_task(
             worker_prompt,
             workspace_path=prepared_paths["workspace_path"],
             timeout_seconds=timeout_seconds,
@@ -602,6 +645,12 @@ async def _execute_started_task(
             sandbox_mode=sandbox_mode,
             additional_writable_paths=writable_paths,
         )
+        if isinstance(execution, CodexCliTaskResult):
+            result = execution.result
+            usage = execution.usage
+        else:  # Compatibility for existing custom transports and test doubles.
+            result = str(execution)
+            usage = None
     except TimeoutError as exc:
         error = str(exc)
         await _record_terminal_task(
@@ -684,6 +733,15 @@ async def _execute_started_task(
         flush = getattr(recorder_to_flush, "flush", None)
         if callable(flush):
             await flush()
+
+    await _record_verified_subagent_usage(
+        runtime=runtime,
+        is_background=is_background,
+        task_id=task_id,
+        subagent_type=subagent_type,
+        model=model,
+        usage=usage,
+    )
 
     await _record_terminal_task(
         writer=writer,
@@ -841,6 +899,7 @@ async def task_tool(
                 writer=lambda _event: None,
                 runtime=background_runtime,
                 recorder_to_flush=background_recorder,
+                is_background=True,
                 task_id=task_id,
                 thread_id=thread_id,
                 run_id=run_id,
@@ -900,6 +959,7 @@ async def task_tool(
         writer=writer,
         runtime=runtime,
         recorder_to_flush=None,
+        is_background=False,
         task_id=task_id,
         thread_id=thread_id,
         run_id=run_id,

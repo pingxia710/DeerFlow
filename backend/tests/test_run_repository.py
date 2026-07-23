@@ -259,6 +259,44 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_external_subagent_usage_is_deduplicated_and_merged_on_completion(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put("r1", thread_id="t1", status="running")
+            assert await repo.record_external_subagent_usage(
+                "r1",
+                source_run_id="codex-cli:task-1",
+                model_name="gpt-5.6-terra",
+                input_tokens=12,
+                output_tokens=3,
+                total_tokens=15,
+            )
+            assert not await repo.record_external_subagent_usage(
+                "r1",
+                source_run_id="codex-cli:task-1",
+                model_name="gpt-5.6-terra",
+                input_tokens=12,
+                output_tokens=3,
+                total_tokens=15,
+            )
+            await repo.update_run_completion(
+                "r1",
+                status="success",
+                total_input_tokens=100,
+                total_output_tokens=20,
+                total_tokens=120,
+                lead_agent_tokens=120,
+            )
+            row = await repo.get("r1")
+            assert row["total_input_tokens"] == 112
+            assert row["total_output_tokens"] == 23
+            assert row["total_tokens"] == 135
+            assert row["subagent_tokens"] == 15
+            assert row["token_usage_by_model"]["gpt-5.6-terra"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_metadata_preserved(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", metadata={"key": "value"})

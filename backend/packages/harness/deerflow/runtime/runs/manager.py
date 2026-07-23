@@ -155,6 +155,12 @@ class RunRecord:
         repr=False,
         compare=False,
     )
+    _external_subagent_usage_source_ids: set[str] = field(default_factory=set, repr=False, compare=False)
+    _pending_external_subagent_usage: dict[str, Any] = field(
+        default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "by_model": {}},
+        repr=False,
+        compare=False,
+    )
 
 
 class RunManager:
@@ -802,10 +808,23 @@ class RunManager:
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         lease_payload: tuple[str, int, str, str | None] | None = None
+        persisted_kwargs = dict(kwargs)
+        completion_kwargs = dict(kwargs)
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
-                for key, value in kwargs.items():
+                pending = record._pending_external_subagent_usage
+                if pending["total_tokens"]:
+                    for field, key in (("total_input_tokens", "input_tokens"), ("total_output_tokens", "output_tokens"), ("total_tokens", "total_tokens"), ("subagent_tokens", "total_tokens")):
+                        completion_kwargs[field] = (completion_kwargs.get(field) or 0) + pending[key]
+                    usage_by_model = {name: dict(usage) for name, usage in (completion_kwargs.get("token_usage_by_model") or {}).items()}
+                    for name, usage in pending["by_model"].items():
+                        bucket = usage_by_model.setdefault(name, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                        for key in bucket:
+                            bucket[key] += usage[key]
+                    completion_kwargs["token_usage_by_model"] = usage_by_model
+                    record._pending_external_subagent_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "by_model": {}}
+                for key, value in completion_kwargs.items():
                     if key == "status":
                         continue
                     if hasattr(record, key) and value is not None:
@@ -829,7 +848,7 @@ class RunManager:
                         lease_token=lease_token,
                         generation=generation,
                         terminal_reason=terminal_reason,
-                        metadata={k: v for k, v in kwargs.items() if k != "status"},
+                        metadata={k: v for k, v in persisted_kwargs.items() if k != "status"},
                     ),
                 )
                 if updated is False:
@@ -846,7 +865,7 @@ class RunManager:
                 updated = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
-                    lambda: self._store.update_run_completion(run_id, **kwargs),
+                    lambda: self._store.update_run_completion(run_id, **persisted_kwargs),
                 )
                 if updated is False:
                     logger.warning(
@@ -855,6 +874,64 @@ class RunManager:
                     )
             except Exception:
                 logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+
+    async def record_external_subagent_usage(
+        self,
+        run_id: str,
+        *,
+        source_run_id: str,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> bool:
+        """Add one verified Codex child usage fact to its source Run Ledger."""
+        input_tokens = max(0, int(input_tokens or 0))
+        output_tokens = max(0, int(output_tokens or 0))
+        total_tokens = max(0, int(total_tokens or 0)) or input_tokens + output_tokens
+        if not source_run_id or total_tokens <= 0:
+            return False
+        if self._store is not None:
+            try:
+                changed = await self._call_store_with_retry(
+                    "record_external_subagent_usage",
+                    run_id,
+                    lambda: self._store.record_external_subagent_usage(
+                        run_id,
+                        source_run_id=source_run_id,
+                        model_name=model_name,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                    ),
+                )
+            except NotImplementedError:
+                logger.warning("Run store cannot persist external child usage for %s", run_id)
+                return False
+            except Exception:
+                logger.warning("Failed to persist external child usage for %s", run_id, exc_info=True)
+                return False
+            if not changed:
+                return False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return self._store is not None
+            if source_run_id in record._external_subagent_usage_source_ids:
+                return False
+            record._external_subagent_usage_source_ids.add(source_run_id)
+            record.total_input_tokens += input_tokens
+            record.total_output_tokens += output_tokens
+            record.total_tokens += total_tokens
+            record.subagent_tokens += total_tokens
+            bucket = record.token_usage_by_model.setdefault(model_name or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+            pending_bucket = record._pending_external_subagent_usage["by_model"].setdefault(model_name or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+            for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens), ("total_tokens", total_tokens)):
+                bucket[key] += value
+                pending_bucket[key] += value
+                record._pending_external_subagent_usage[key] += value
+            record.updated_at = _now_iso()
+        return True
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""

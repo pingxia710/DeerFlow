@@ -435,6 +435,49 @@ async def test_completion_persistence_warns_when_store_row_is_missing(caplog):
 
 
 @pytest.mark.anyio
+async def test_external_subagent_usage_survives_source_run_completion():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    assert await manager.record_external_subagent_usage(
+        record.run_id,
+        source_run_id="codex-cli:task-1",
+        model_name="gpt-5.6-terra",
+        input_tokens=12,
+        output_tokens=3,
+        total_tokens=15,
+    )
+    assert not await manager.record_external_subagent_usage(
+        record.run_id,
+        source_run_id="codex-cli:task-1",
+        model_name="gpt-5.6-terra",
+        input_tokens=12,
+        output_tokens=3,
+        total_tokens=15,
+    )
+
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    await manager.update_run_completion(
+        record.run_id,
+        status="success",
+        total_input_tokens=100,
+        total_output_tokens=20,
+        total_tokens=120,
+        lead_agent_tokens=120,
+    )
+
+    stored = await store.get(record.run_id)
+    assert stored["total_input_tokens"] == 112
+    assert stored["total_output_tokens"] == 23
+    assert stored["total_tokens"] == 135
+    assert stored["subagent_tokens"] == 15
+    assert stored["token_usage_by_model"]["gpt-5.6-terra"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
+
+
+@pytest.mark.anyio
 async def test_progress_persistence_retries_transient_sqlite_lock():
     """Running progress snapshots should survive short SQLite write pressure."""
     store = FlakyProgressRunStore(progress_failures=2)

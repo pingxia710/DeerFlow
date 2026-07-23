@@ -8,8 +8,9 @@ import os
 import signal
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from deerflow.utils.cancellation import await_task_through_repeated_cancellation
 
@@ -57,6 +58,14 @@ _CODEX_ENV_KEYS = frozenset(
 )
 
 CodexSandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
+
+
+@dataclass(frozen=True)
+class CodexCliTaskResult:
+    """Final child message plus verified usage from Codex's completion event."""
+
+    result: str
+    usage: dict[str, int] | None = None
 
 
 def _codex_subprocess_env(source: dict[str, str] | None = None) -> dict[str, str]:
@@ -142,12 +151,14 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
 async def _finish_process_cleanup(
     process: asyncio.subprocess.Process,
     stderr_task: asyncio.Task[bytes],
-) -> bytes:
+    stdout_task: asyncio.Task[dict[str, int] | None],
+) -> tuple[bytes, dict[str, int] | None]:
     try:
         await _stop_process(process)
     finally:
         stderr_tail = await stderr_task
-    return stderr_tail
+        usage = await stdout_task
+    return stderr_tail, usage
 
 
 async def _read_bounded_stream(stream: asyncio.StreamReader | None) -> bytes:
@@ -164,6 +175,56 @@ async def _read_bounded_stream(stream: asyncio.StreamReader | None) -> bytes:
 
 def _bounded_error_text(value: bytes) -> str:
     return value.decode("utf-8", errors="replace").strip()[-_MAX_ERROR_CHARS:]
+
+
+def _token_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _completion_usage(event: Any) -> dict[str, int] | None:
+    if not isinstance(event, dict) or event.get("type") != "turn.completed":
+        return None
+    payload = event.get("usage")
+    if not isinstance(payload, dict):
+        return None
+    input_tokens = _token_count(payload.get("input_tokens"))
+    output_tokens = _token_count(payload.get("output_tokens"))
+    total_tokens = input_tokens + output_tokens
+    if total_tokens <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+async def _read_codex_completion_usage(stream: asyncio.StreamReader | None) -> dict[str, int] | None:
+    """Drain JSONL stdout and retain only the compact terminal usage fact."""
+    if stream is None:
+        return None
+    usage: dict[str, int] | None = None
+    pending = bytearray()
+    while chunk := await stream.read(4096):
+        pending.extend(chunk)
+        while b"\n" in pending:
+            line, _, remainder = pending.partition(b"\n")
+            pending = bytearray(remainder)
+            try:
+                event = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            usage = _completion_usage(event) or usage
+        # Codex JSONL events are line-delimited. Discard an unexpectedly large
+        # nonterminal event rather than retaining child output in process memory.
+        if len(pending) > _MAX_ERROR_BYTES:
+            pending.clear()
+    if pending:
+        try:
+            usage = _completion_usage(json.loads(pending)) or usage
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+    return usage
 
 
 async def _feed_prompt_and_wait(process: asyncio.subprocess.Process, prompt: str) -> None:
@@ -187,8 +248,8 @@ async def run_codex_cli_task(
     sandbox_mode: CodexSandboxMode = "workspace-write",
     additional_writable_paths: Sequence[str | Path] = (),
     binary: str = "codex",
-) -> str:
-    """Pass a prompt to Codex and return its complete final message."""
+) -> CodexCliTaskResult:
+    """Pass a prompt to Codex and return its final message and terminal usage."""
     workspace = _workspace_path(workspace_path)
     output_file = tempfile.NamedTemporaryFile(prefix="deerflow-codex-", suffix=".txt", delete=False)
     output_path = Path(output_file.name)
@@ -220,6 +281,7 @@ async def run_codex_cli_task(
                 "--skip-git-repo-check",
                 "--cd",
                 str(workspace),
+                "--json",
                 "--output-last-message",
                 str(output_path),
                 "-",
@@ -230,7 +292,7 @@ async def run_codex_cli_task(
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_codex_subprocess_env(),
                 start_new_session=True,
@@ -241,6 +303,7 @@ async def run_codex_cli_task(
             raise RuntimeError(f"Codex CLI could not be started: {exc}") from exc
 
         stderr_task = asyncio.create_task(_read_bounded_stream(process.stderr))
+        stdout_task = asyncio.create_task(_read_codex_completion_usage(process.stdout))
         try:
             try:
                 await asyncio.wait_for(_feed_prompt_and_wait(process, prompt), timeout=timeout_seconds)
@@ -252,8 +315,8 @@ async def run_codex_cli_task(
                 raise RuntimeError(f"Codex CLI communication failed: {exc}") from exc
         finally:
             # Always terminate descendants, including communication failures.
-            cleanup_task = asyncio.create_task(_finish_process_cleanup(process, stderr_task))
-            stderr_tail = await await_task_through_repeated_cancellation(cleanup_task)
+            cleanup_task = asyncio.create_task(_finish_process_cleanup(process, stderr_task, stdout_task))
+            stderr_tail, usage = await await_task_through_repeated_cancellation(cleanup_task)
 
         if process.returncode != 0:
             detail = _bounded_error_text(stderr_tail)
@@ -265,7 +328,7 @@ async def run_codex_cli_task(
             raise RuntimeError(f"Codex CLI final message could not be read: {exc}") from exc
         if not result.strip():
             raise RuntimeError("Codex CLI completed without a final message.")
-        return result
+        return CodexCliTaskResult(result=result, usage=usage)
     finally:
         cleanup_task = asyncio.create_task(asyncio.to_thread(output_path.unlink, missing_ok=True))
         await await_task_through_repeated_cancellation(cleanup_task)

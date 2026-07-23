@@ -175,6 +175,19 @@ class RunStore(abc.ABC):
         """Persist a best-effort running snapshot without changing run status."""
         return None
 
+    async def record_external_subagent_usage(
+        self,
+        run_id: str,
+        *,
+        source_run_id: str,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> bool:
+        """Atomically add one deduplicated external child-usage fact to a run."""
+        raise NotImplementedError
+
     async def create_pending_run(self, run_id: str, *, thread_id: str, **kwargs: Any) -> dict[str, Any]:
         """Create a pending run row for lease/CAS callers.
 

@@ -38,7 +38,12 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "Ordinary safe, bounded work explicitly requested by the human is authorized" in prompt
     assert "Never require or present a plan for read-only discovery" in prompt
     assert "Use Chair plan → human discussion only" in prompt
-    assert "four human gates" in prompt
+    assert "five human gates" in prompt
+    assert "1. A new or changed Goal Mandate, value priority, or non-goal." in prompt
+    assert "2. A material architecture, operating model, workflow, or route change." in prompt
+    assert "3. A material trade-off the current intent cannot resolve." in prompt
+    assert "4. A new real external, irreversible, or sensitive permission." in prompt
+    assert "5. The Owner explicitly requests review." in prompt
     assert "Run one Opposition challenge for every new root goal" in prompt
     assert "Do not create a new Brief solely for a task receipt" in prompt
     assert "a result acknowledgement, or a history read" in prompt
@@ -79,6 +84,7 @@ def test_command_room_prompt_uses_ai_ai_ai_without_program_control(monkeypatch):
     assert "CLARIFY → PLAN → ACT" not in prompt
     assert "Clarification ALWAYS comes BEFORE action" not in prompt
     assert "Failure never authorizes redispatch" not in prompt
+    assert "four human gates" not in prompt
 
 
 def test_subagent_audit_records_hashes_without_worker_text(tmp_path):

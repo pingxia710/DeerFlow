@@ -1075,3 +1075,25 @@
 - WordRotate 弃 framer-motion 改纯 React+CSS(轮转词此前冻结在 SSR 初始态)。
 - **turbopack dev 故障**:重启后 hero 动画/FlickeringGrid/login 切换全部冻结在 SSR 初始态,webpack 模式正常。dev 脚本已改 `next dev --webpack`(03ff1fbf)。旧 13 天 turbo server 的 .next 缓存也是旧 tokens 的来源。
 - 全在本地 commit,未 push;Gateway 仍待拼多多 thread 完成后重启。
+
+## 2026-07-23 — NextOS 五个人门与取消结果交付修复
+
+- Command Room 活提示词统一为五个人门：目标/价值优先级/非目标变化，架构/运行方式/工作流/路线实质变化，当前意图无法裁决的重大取舍，新增真实外部/不可逆/敏感权限，或 Owner 明确要求评审；删除运行时“四个人门”并行表述。
+- 普通 child 取消现在被记录为 `cancelled` 终态，经既有 `RESULT_RECEIVED`、TaskLane 与 Chair wake 链路传递；Gateway 关闭期间仍保留原有停止语义。
+- 回归：`tests/test_command_room_background.py` 增加取消结果交付、通知及 Chair wake 覆盖；`tests/test_command_room_goal_first.py` 与 `tests/test_lead_agent_prompt.py` 固定五门措辞。聚焦 47 passed；Command Room 套件 95 passed、2 skipped。
+- 未访问生产或外部系统、未暴露凭据、未 push；Gateway 重启和运行时复验待本次本地改动后执行。
+
+- 完整本地验证：相关 Command Room/提示词/角色/子任务传输套件 `147 passed, 2 skipped`，Ruff 检查与格式检查通过；`/Users/pingxia/Documents/NextOS make check-all`（合同与静态 SkillOpt）通过。随后以规范 daemon 脚本重启本地 Gateway，Gateway 健康端点、代理和前端均为 HTTP 200。
+- 第 1 组 A/B 复验：A thread `2db7f155-…` 精确派出 1 个 executor，B thread `a54cec0f-…` 精确派出 2 个独立 executor；三条 child 都为 `completed`。A 的 child 用时 420,381ms，B 两条用时 256,327ms 与 414,434ms。每个终态均有 `result.received`、Chair wake、`result.inbox.acknowledged` 与 `result.inbox.notified` 事实；未出现自动验收或程序推进。
+- 复验 Chair token 小计：A 126,652（2 个 Chair Run），B 253,094（3 个 Chair Run）。child token 字段仍为 0，故本轮不把成本做可比结论；A/B 也未做盲评，不能由这组推断质量优势。实际取消→结果→wake 的分支由新增后台服务回归覆盖，且取消恢复路径也有覆盖。
+- 运行时审计子结果确认：活动 prompt 只有明确五个人门；取消事实、`RESULT_RECEIVED`、TaskLane 与 Chair wake 是可恢复的独立事实链，`RESULT_RECEIVED` 追加失败时 lane outcome 仍是回退传输依据。未访问生产或外部系统、未暴露凭据、未 push。
+- 第 2 组 A/B（child token 账本只读调查）完成：A thread `0eff7e4c-…` 精确派出 1 个 executor（628,645ms），B thread `a05ca9f1-…` 精确派出 2 个独立 executor（263,490ms、318,422ms）；三条均为 `completed`，每条都有 `result.received`、acknowledged 与 Chair wake/notified。证据一致：`codex_cli.py` 只以 `--output-last-message` 接收最终文本、丢弃 stdout；`task_tool.py` 的完成事件固定 `usage: None`，TaskLane 无 token 字段，且该路径不调用外部 usage 聚合。因此已完成 child 的 token 仍为 0，child 成本不可比较，不能估算补齐。A Chair token 小计 226,879（2 Run），B 为 361,537（3 Run），仅作事实记录。
+- 第 3 组 A/B（账本方案反方，只读）完成：A thread `6b7a80b5-…` 精确派出 1 个 executor（327,659ms），B thread `d5a6f4ab-…` 在同一批精确派出 2 个独立 executor（295,177ms、383,383ms）；三条均成功，均有 `result.received`、acknowledged 与 Chair wake/notified。三方独立确认：本机 `codex exec --help` 只证明 `--json` 会输出 JSONL，不证明事件含稳定 usage schema；当前 transport 未启用/读取 JSONL、stdout 为 DEVNULL，完成事件仍为 `usage: null`。结论保持 child 成本不可比较；JSONL 仅是需单独验证和评审的候选，未实施改动。A Chair token 小计 489,109（2 Run），B 为 371,358（3 Run）；两线均约 12 分钟结束，child token 仍为 0，不能以该字段比较成本。
+- 隔离 JSONL 兼容性探针：在 `/private/tmp` 以 `codex exec --ephemeral --json --skip-git-repo-check --sandbox read-only` 运行固定无工具提示词；真实 `turn.completed` JSONL 事件包含 `usage.input_tokens`、`cached_input_tokens`、`cache_write_input_tokens`、`output_tokens`、`reasoning_output_tokens`。这证明本机 Codex CLI `0.145.0` 可观测到 usage，但尚未形成跨版本稳定契约；未读项目、未改仓库或服务。任何把该观察接入 transport/Run Ledger/TaskLane 的改造仍须单独评审。
+
+## 2026-07-23 — Codex child token 最小账本桥接
+
+- 按已确认的最小范围接入：Codex CLI 启用 JSONL，仅从 `turn.completed.usage` 提取非负 `input_tokens` 与 `output_tokens`；最终自然语言结果仍只读取既有 `--output-last-message` 文件。未扩展 TaskLane、任务事件、API 或 UI。
+- 前台 child 进入既有 `RunJournal.record_external_llm_usage_records` 与 AI attribution cache；Command Room 后台 child 通过运行时注入的回调原子回写其 source Run Ledger。SQL/内存账本均以 `codex-cli:{task_id}` 去重，并处理源 Run 完成与 child 回写并发的合并，不改变任务结果或 Chair wake 事实链。
+- 审查补齐了「后台无 Journal writer」仍必须回写 source Run 的边界；Ruff 通过，聚焦 `213 passed`、Command Room/账本回归 `125 passed`，最终后端全量 `uv run pytest -q` 完成无失败。两次均以 `./scripts/serve.sh --restart --dev --daemon --skip-install` 重启本地栈；最终 Gateway `/health`、Nginx `:2026` 与本次 frontend `:6001` 均为 200。未访问生产、未暴露凭据、未 push。
+- 真实 field 验证：用户在本地 Command Room thread `f556596e-…` 发起单个 executor `LEDGER_PROBE`；source Run `75017632-…` success，TaskLane `call_b5ORyZYnX87Vke6h5WYgh0sJ` completed。Run Ledger 记录 `subagent_tokens=30,080`，模型分桶 `gpt-5.6-terra` 为 input `30,071`、output `9`、total `30,080`；总账 `56,523 = lead 26,158 + subagent 30,080 + middleware 285`，一致。TaskLane 未新增 token 字段，符合本次边界。

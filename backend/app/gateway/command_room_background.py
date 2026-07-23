@@ -451,8 +451,13 @@ class CommandRoomBackgroundService:
                     )
                     outcome = await self._execute_child(queued.job)
                 except asyncio.CancelledError:
-                    queued.outcome.cancel()
-                    raise
+                    if self._closing:
+                        queued.outcome.cancel()
+                        raise
+                    outcome = CommandRoomBackgroundOutcome(
+                        status="cancelled",
+                        error="Background task cancelled",
+                    )
                 except Exception as exc:
                     logger.exception("Command Room background scheduler failed for task %s", queued.job.task_id)
                     outcome = CommandRoomBackgroundOutcome(
@@ -1306,21 +1311,6 @@ class CommandRoomBackgroundService:
                         background = self._background_from_lane(lane) or {}
                 wake = background.get("wake") if isinstance(background.get("wake"), dict) else {}
                 if wake.get("state") == "completed" or wake.get("state") == "failed":
-                    continue
-                if outcome.status == "cancelled":
-                    await self._persist_state(
-                        job,
-                        snapshot,
-                        outcome=outcome,
-                        wake={
-                            **wake,
-                            "state": "failed",
-                            "last_status": "child_cancelled",
-                            "claim_id": claim_id,
-                        },
-                        claim_id=claim_id,
-                        workspace_event_seq=workspace_event_seq,
-                    )
                     continue
                 try:
                     wake_status = await self._existing_wake_status(snapshot, job, wake)

@@ -375,6 +375,20 @@ async def run_agent(
         # runtime-internal channel; user code must not depend on the key name.
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
+
+        async def _record_external_subagent_usage(usage_record: Any) -> None:
+            if not isinstance(usage_record, dict):
+                return
+            await run_manager.record_external_subagent_usage(
+                run_id,
+                source_run_id=str(usage_record.get("source_run_id") or ""),
+                model_name=usage_record.get("model_name") if isinstance(usage_record.get("model_name"), str) else None,
+                input_tokens=usage_record.get("input_tokens") if isinstance(usage_record.get("input_tokens"), int) else 0,
+                output_tokens=usage_record.get("output_tokens") if isinstance(usage_record.get("output_tokens"), int) else 0,
+                total_tokens=usage_record.get("total_tokens") if isinstance(usage_record.get("total_tokens"), int) else 0,
+            )
+
+        runtime_ctx["__record_external_subagent_usage"] = _record_external_subagent_usage
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime

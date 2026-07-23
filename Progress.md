@@ -1059,3 +1059,12 @@
   未访问生产、未发送外部消息、未暴露秘密；有效 Run 使用既有模型服务，
   临时 Chrome 只产生常规 Google updater/GCM 后台请求。未 commit、未 push；
   D1 已归档并停止，没有自动进入 Round 004。
+
+## 2026-07-23 — 前端重整第一刀(tokens+会话主界面)与治理态恢复
+
+- 前端第一刀(`37bcfac9`):深色效率工具风 tokens 落 globals.css(四层表面、电蓝强调、状态四色、JetBrains Mono token、8px 圆角),根 layout 默认 dark;拆 message-list.tsx(1822→1413,出 utils/scroll-controller/load-more-indicator)与 input-box.tsx(1654→1472,出 utils/suggestion-list/add-attachments-button);重皮 sidebar(密度+active 蓝条+状态色)、40px 顶栏、坞式 composer、用户消息左侧角色条全宽化、task 卡状态色。831 单测全绿,不动数据层与 ai-elements 生成组件。
+- 体验修正:to-dos 面板白底改主题色并调为 5 行高(`ae5e71b4`/`e4c75ce2`);新建会话 404 修复(`cc4fa1b2`,`useThreadStream` 入口把字面 "new" 归一为 undefined,根治 POST /threads/new/history 的 unhandledRejection)。
+- Round 003-A 递归预算修复重建(`b4f8aeda`):cleanup 丢失后按 Progress 语义重实现,command-room 默认 1000/显式优先/普通 100,新增 3 个回归测试。
+- 07-23 cleanup 丢失的 NextOS 2.0 治理态自 codex 会话恢复(`54b5a424`):planner 角色移除、委派纪律(Chair 只读自查、task 只派真独立活)、MCP 对 command-room 开放、server_error 归瞬时重试、prompt 刷新稿、probe 脚本、skillopt、2.0 蓝图文档;重申 planner skill 与 update-card 删除(`30c4ce76` 补齐配套)。
+- 验证:438 后端聚焦测试、前端全量单测、typecheck、eslint/prettier、ruff 全绿;pre-existing 3 条 E501(prompt.py)顺带清除。
+- 未 push;Gateway 旧进程(09:44 启)仍为内存中旧代码,重启后生效已提交状态。

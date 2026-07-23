@@ -1,53 +1,70 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AnimatePresence, motion, type MotionProps } from "motion/react";
 
 import { cn } from "@/lib/utils";
+
 import { AuroraText } from "./aurora-text";
 
 interface WordRotateProps {
   words: string[];
   duration?: number;
-  motionProps?: MotionProps;
   className?: string;
 }
 
+/**
+ * Rotating word with a plain CSS blur/fade transition.
+ * The previous framer-motion variant could stay frozen at its SSR initial
+ * state (opacity: 0) when the animation engine did not pick the element up;
+ * this version only needs React state + CSS transitions.
+ */
 export function WordRotate({
   words,
   duration = 2200,
-  motionProps = {
-    initial: { opacity: 0, y: -50, filter: "blur(16px)" },
-    animate: { opacity: 1, y: 0, filter: "blur(0px)" },
-    exit: { opacity: 0, y: 50, filter: "blur(16px)" },
-    transition: { duration: 0.3, ease: "easeOut" },
-  },
   className,
 }: WordRotateProps) {
   const [index, setIndex] = useState(0);
+  const [visible, setVisible] = useState(true);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setIndex((prevIndex) => (prevIndex + 1) % words.length);
+    if (words.length <= 1) return;
+    const id = setInterval(() => {
+      setVisible(false);
     }, duration);
+    return () => clearInterval(id);
+  }, [duration, words.length]);
 
-    // Clean up interval on unmount
-    return () => clearInterval(interval);
-  }, [words, duration]);
+  useEffect(() => {
+    if (visible) return;
+    const id = setTimeout(() => {
+      setIndex((prev) => (prev + 1) % words.length);
+      setVisible(true);
+    }, 300);
+    return () => clearTimeout(id);
+  }, [visible, words.length]);
 
   return (
     <div className="overflow-hidden py-2">
-      <AnimatePresence mode="popLayout">
-        <motion.h1
-          key={words[index]}
-          className={cn(className)}
-          {...motionProps}
+      <span
+        className={cn(
+          "inline-block transition-all duration-300 ease-out",
+          visible
+            ? "translate-y-0 opacity-100 blur-none"
+            : "translate-y-3 opacity-0 blur-md",
+          className,
+        )}
+      >
+        <AuroraText
+          speed={3}
+          colors={[
+            "oklch(0.78 0.14 250)",
+            "oklch(0.68 0.16 250)",
+            "oklch(0.58 0.15 250)",
+          ]}
         >
-          <AuroraText speed={3} colors={["#efefbb", "#e9c665", "#e3a812"]}>
-            {words[index]}
-          </AuroraText>
-        </motion.h1>
-      </AnimatePresence>
+          {words[index]}
+        </AuroraText>
+      </span>
     </div>
   );
 }

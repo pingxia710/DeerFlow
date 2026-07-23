@@ -31,7 +31,7 @@ export function Hero({ className }: { className?: string }) {
         flickerChance={0.25}
       />
       <div className="container-md relative z-10 mx-auto flex h-screen flex-col items-center justify-center">
-        <h1 className="flex items-center gap-2 text-4xl font-bold md:text-6xl">
+        <h1 className="[&>div:first-child]:text-primary flex items-center gap-2 text-4xl font-bold tracking-tight md:text-6xl">
           <WordRotate
             words={[
               "Deep Research",
@@ -63,7 +63,7 @@ export function Hero({ className }: { className?: string }) {
             </div>
           </a>
         )}
-        <p className="text-muted-foreground mt-8 scale-105 text-center text-2xl text-shadow-sm">
+        <p className="text-muted-foreground mt-8 max-w-2xl text-center text-base text-shadow-sm md:text-lg">
           An open-source SuperAgent harness that researches, codes, and creates.
           With
           <br />
@@ -73,7 +73,7 @@ export function Hero({ className }: { className?: string }) {
           different levels of tasks that could take minutes to hours.
         </p>
         <Link href="/workspace">
-          <Button className="size-lg mt-8 scale-108" size="lg">
+          <Button className="mt-8" size="lg">
             <span className="text-md">Get Started with 2.0</span>
             <ChevronRightIcon className="size-4" />
           </Button>

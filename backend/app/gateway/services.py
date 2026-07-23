@@ -537,6 +537,12 @@ def build_run_config(
         if isinstance(runtime_context, dict):
             runtime_context["agent_name"] = effective_agent_name
         config.setdefault("run_name", resolve_root_run_name(config, normalized))
+        if effective_agent_name == "command-room" and "recursion_limit" not in (request_config or {}):
+            # Command Room admission budget (Round 003-A): a bare command-room
+            # request — including background wakes, which reuse this entry —
+            # restores the historical 1000-step default. An explicit
+            # recursion_limit always wins; ordinary agents keep the shared 100.
+            config["recursion_limit"] = 1000
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config

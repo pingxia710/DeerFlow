@@ -39,7 +39,7 @@ export function TodoList({
   return (
     <div
       className={cn(
-        "flex h-fit w-full origin-bottom translate-y-4 flex-col overflow-hidden rounded-t-xl border border-b-0 bg-white backdrop-blur-sm transition-all duration-200 ease-out",
+        "bg-card flex h-fit w-full origin-bottom translate-y-4 flex-col overflow-hidden rounded-t-xl border border-b-0 backdrop-blur-sm transition-all duration-200 ease-out",
         hidden ? "pointer-events-none translate-y-8 opacity-0" : "",
         className,
       )}
@@ -68,10 +68,10 @@ export function TodoList({
       <main
         className={cn(
           "bg-accent flex grow px-2 transition-all duration-300 ease-out",
-          collapsed ? "h-0 pb-3" : "h-28 pb-4",
+          collapsed ? "h-0 pb-3" : "h-56 pb-4",
         )}
       >
-        <QueueList className="bg-background mt-0 w-full rounded-t-xl">
+        <QueueList className="bg-background mt-0 w-full overflow-y-auto rounded-t-xl">
           {todos.map((todo, i) => (
             <QueueItem key={i + (todo.content ?? "")}>
               <div className="flex items-center gap-2">

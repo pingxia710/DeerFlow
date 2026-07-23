@@ -2182,7 +2182,7 @@ export async function deleteThreadRemote({
 }
 
 export function useThreadStream({
-  threadId,
+  threadId: rawThreadId,
   displayThreadId,
   runtimeOwnerId,
   context,
@@ -2193,6 +2193,11 @@ export function useThreadStream({
   onFinish,
   onToolEnd,
 }: ThreadStreamOptions) {
+  // The "new" route keyword is never a backend thread id. When a caller
+  // momentarily leaks the literal id (e.g. while route params lag behind a
+  // client-side navigation to /workspace/chats/new), the SDK would POST
+  // /threads/new/history and surface an unhandled 404 — normalize it away.
+  const threadId = rawThreadId === "new" ? undefined : rawThreadId;
   const { t } = useI18n();
   const threadActivity = useThreadActivity();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;

@@ -18,16 +18,13 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
-interface AssistantCommandRoomUpdateGroup extends GenericMessageGroup<"assistant:command-room-update"> {}
-
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup
-  | AssistantCommandRoomUpdateGroup;
+  | AssistantSubagentGroup;
 
 export const HISTORY_CREATED_AT_KEY = "history_created_at";
 
@@ -67,8 +64,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       last &&
       last.type !== "human" &&
       last.type !== "assistant" &&
-      last.type !== "assistant:clarification" &&
-      last.type !== "assistant:command-room-update"
+      last.type !== "assistant:clarification"
     ) {
       return last;
     }
@@ -77,11 +73,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 
   for (const message of messages) {
     if (commandRoomStepMessages.has(message)) {
-      groups.push({
-        id: message.id,
-        type: "assistant:command-room-update",
-        messages: [message],
-      });
       continue;
     }
     if (isHiddenFromUIMessage(message)) {

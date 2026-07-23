@@ -72,7 +72,6 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { Tooltip } from "../tooltip";
 
-import { CommandRoomUpdateCard } from "./command-room-update-card";
 import { ConversationTurnScrollController } from "./conversation-turn-scroll-controller";
 import { LoadMoreHistoryIndicator } from "./load-more-history-indicator";
 import { MarkdownContent } from "./markdown-content";
@@ -361,11 +360,7 @@ export function MessageList({
     if (lastHumanIndex === -1) return false;
     return groupedMessages
       .slice(lastHumanIndex)
-      .some(
-        (group) =>
-          group.type === "assistant" ||
-          group.type === "assistant:command-room-update",
-      );
+      .some((group) => group.type === "assistant");
   }, [groupedMessages]);
   const hasTerminalRunMessages = Boolean(
     terminalNotice &&
@@ -888,7 +883,6 @@ export function MessageList({
           const hasTerminalAssistantOutput = turn.groups.some(
             (group) =>
               group.type === "assistant" ||
-              group.type === "assistant:command-room-update" ||
               group.type === "assistant:clarification" ||
               group.type === "assistant:present-files",
           );
@@ -1001,18 +995,6 @@ export function MessageList({
                             : null,
                         )}
                     </div>
-                  );
-                } else if (group.type === "assistant:command-room-update") {
-                  const message = group.messages[0];
-                  if (!message) {
-                    return null;
-                  }
-                  return (
-                    <CommandRoomUpdateCard
-                      key={groupKey}
-                      message={message}
-                      title={t.chats.commandRoomUpdate}
-                    />
                   );
                 } else if (group.type === "assistant:clarification") {
                   const message = group.messages[0];

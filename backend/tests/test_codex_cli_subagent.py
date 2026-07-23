@@ -203,6 +203,15 @@ async def test_bounded_stream_keeps_only_tail():
 
 
 @pytest.mark.asyncio
+async def test_completion_usage_ignores_unsupported_or_malformed_jsonl_events():
+    stream = asyncio.StreamReader()
+    stream.feed_data(b'{"type":"item.completed","item":{"text":"ignored"}}\nnot-json\n{"type":"turn.completed","usage":{"input_tokens":"unknown","output_tokens":true}}\n')
+    stream.feed_eof()
+
+    assert await codex_cli._read_codex_completion_usage(stream) is None
+
+
+@pytest.mark.asyncio
 async def test_run_codex_cli_task_cleans_up_after_communication_failure(monkeypatch, tmp_path):
     process = _Process(returncode=None)
 

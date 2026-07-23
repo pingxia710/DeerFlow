@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.sandbox.exceptions import SandboxError
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -1299,6 +1300,34 @@ def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) ->
     assert failures == []
     assert "ALPHA" in sandbox.content
     assert "BETA" in sandbox.content
+
+
+def test_str_replace_preserves_literal_virtual_paths_in_file_content(monkeypatch, tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/data", local_path=str(data_dir))])
+    runtime = SimpleNamespace(state={}, context={}, config={})
+    path = "/mnt/data/card.md"
+    old_str = "Do not assume /mnt/user-data/workspace exists as a physical child-shell path."
+    new_str = "Keep /mnt/user-data/workspace literal in the replacement body."
+    sandbox.write_file(path, f"before\n{old_str}\nafter\n")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = str_replace_tool.func(
+        runtime=runtime,
+        description="replace literal virtual path text",
+        path=path,
+        old_str=old_str,
+        new_str=new_str,
+    )
+
+    expected = f"before\n{new_str}\nafter\n"
+    assert result == "OK"
+    assert sandbox.read_file(path) == expected
+    assert (data_dir / "card.md").read_bytes() == expected.encode("utf-8")
 
 
 def test_str_replace_parallel_updates_in_isolated_sandboxes_should_not_share_path_lock(monkeypatch) -> None:

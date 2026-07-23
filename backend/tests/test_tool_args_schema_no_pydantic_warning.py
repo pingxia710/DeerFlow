@@ -101,6 +101,16 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
     assert "append" in append_field.description
 
 
+def test_write_file_schema_describes_provider_neutral_content_contract() -> None:
+    description = write_file_tool.description
+    normalized_description = " ".join(description.split())
+
+    assert "File contents are stored without path translation." in normalized_description
+    assert "For executable files, prefer relative paths or pass paths as bash command arguments." in normalized_description
+    assert "host workspace" not in description.lower()
+    assert "inject" not in description.lower()
+
+
 @pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])
 def test_model_facing_tool_parameters_have_descriptions(tool_obj) -> None:
     """Every model-facing tool parameter should explain when and how to use it."""

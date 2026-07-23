@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
 
@@ -199,16 +200,15 @@ def test_same_thread_different_users_are_isolated(provider):
         sbx_bob.read_file("/mnt/user-data/outputs/report.md")
 
 
-def test_agent_written_paths_per_thread_isolation(provider):
-    """``_agent_written_paths`` tracks files this sandbox wrote so reverse-resolve
-    runs on read. The set must not leak across threads."""
+def test_fresh_sandbox_instance_reads_same_thread_file(provider):
+    """Text reads must not depend on per-instance write tracking."""
     sid_a = provider.acquire("alpha")
-    sid_b = provider.acquire("beta")
     sbx_a = provider.get(sid_a)
-    sbx_b = provider.get(sid_b)
-    sbx_a.write_file("/mnt/user-data/workspace/in-a.txt", "marker")
-    assert sbx_a._agent_written_paths
-    assert not sbx_b._agent_written_paths
+    original = "literal /mnt/user-data/workspace stays in the body\n"
+    sbx_a.write_file("/mnt/user-data/workspace/in-a.txt", original)
+    fresh = LocalSandbox("fresh", list(sbx_a.path_mappings), expose_host_paths=sbx_a.expose_host_paths)
+
+    assert fresh.read_file("/mnt/user-data/workspace/in-a.txt") == original
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -227,7 +227,7 @@ def test_get_unknown_id_returns_none(provider):
 
 def test_release_is_noop_keeps_instance_available(provider):
     """Local has no resources to release; the cached instance stays alive across
-    turns so ``_agent_written_paths`` persists for reverse-resolve on later reads."""
+    turns and retains its path mappings."""
     sid = provider.acquire("alpha")
     sbx_before = provider.get(sid)
     provider.release(sid)
@@ -276,7 +276,7 @@ def test_concurrent_acquire_same_thread_yields_single_instance(provider):
     Without the provider lock the check-then-act in ``acquire`` is non-atomic:
     both racers would see an empty cache, both would build their own
     LocalSandbox, and one would overwrite the other — losing the loser's
-    ``_agent_written_paths`` and any in-flight state on it.
+    path-mapping state and any in-flight state on it.
     """
     import threading
     import time

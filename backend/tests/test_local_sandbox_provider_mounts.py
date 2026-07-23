@@ -715,64 +715,54 @@ class TestLocalSandboxProviderMounts:
         assert "gateway" in lowered
         assert "docker-compose" in lowered
 
-    def test_write_file_resolves_container_paths_in_content(self, tmp_path):
-        """write_file should replace container paths in file content with local paths."""
+    @pytest.mark.parametrize("expose_host_paths", [False, True])
+    def test_write_file_preserves_content_without_path_translation(self, tmp_path, expose_host_paths):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-
+        original = "line one\r\n路径: /mnt/data/output\r\nemoji: 😀\r\n"
         sandbox = LocalSandbox(
             "test",
             [
                 PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
             ],
+            expose_host_paths=expose_host_paths,
         )
-        sandbox.write_file(
-            "/mnt/data/script.py",
-            'import pathlib\npath = "/mnt/data/output"\nprint(path)',
-        )
-        written = (data_dir / "script.py").read_text()
-        # Container path should be resolved to local path (forward slashes)
-        assert str(data_dir).replace("\\", "/") in written
-        assert "/mnt/data/output" not in written
+        sandbox.write_file("/mnt/data/script.py", original)
+        written = (data_dir / "script.py").read_bytes()
 
-    def test_write_file_uses_forward_slashes_on_windows_paths(self, tmp_path):
-        """Resolved paths in content should always use forward slashes."""
+        assert written == original.encode("utf-8")
+        assert sandbox.read_file("/mnt/data/script.py") == original
+
+    def test_fresh_sandbox_reads_existing_content_without_translation(self, tmp_path):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-
-        sandbox = LocalSandbox(
+        first = LocalSandbox(
             "test",
             [
                 PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
             ],
         )
-        sandbox.write_file(
-            "/mnt/data/config.py",
-            'DATA_DIR = "/mnt/data/files"',
-        )
-        written = (data_dir / "config.py").read_text()
-        # Must not contain backslashes that could break escape sequences
-        assert "\\" not in written.split("DATA_DIR = ")[1].split("\n")[0]
+        original = "File located at: /mnt/data/info.txt\n"
+        first.write_file("/mnt/data/info.txt", original)
+        second = LocalSandbox("fresh", list(first.path_mappings))
 
-    def test_read_file_reverse_resolves_local_paths_in_agent_written_files(self, tmp_path):
-        """read_file should convert local paths back to container paths in agent-written files."""
+        assert second.read_file("/mnt/data/info.txt") == original
+
+    def test_append_preserves_content_without_path_translation(self, tmp_path):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
+        sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/data", local_path=str(data_dir))])
+        initial = "before /mnt/data/one\r\n"
+        appended = "after /mnt/data/two\r\n"
 
-        sandbox = LocalSandbox(
-            "test",
-            [
-                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
-            ],
-        )
-        # Use write_file so the path is tracked as agent-written
-        sandbox.write_file("/mnt/data/info.txt", "File located at: /mnt/data/info.txt")
+        sandbox.write_file("/mnt/data/log.txt", initial)
+        sandbox.write_file("/mnt/data/log.txt", appended, append=True)
 
-        content = sandbox.read_file("/mnt/data/info.txt")
-        assert "/mnt/data/info.txt" in content
+        assert (data_dir / "log.txt").read_bytes() == (initial + appended).encode("utf-8")
+        assert sandbox.read_file("/mnt/data/log.txt") == initial + appended
 
-    def test_read_file_does_not_reverse_resolve_non_agent_files(self, tmp_path):
-        """read_file should NOT rewrite paths in user-uploaded or external files."""
+    def test_read_file_returns_existing_content_as_is(self, tmp_path):
+        """read_file returns pre-existing file content without translation."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 

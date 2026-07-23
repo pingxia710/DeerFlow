@@ -1837,6 +1837,9 @@ def write_file_tool(
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
 
+    File contents are stored without path translation. For executable files,
+    prefer relative paths or pass paths as bash command arguments.
+
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
     Oversized single-shot writes correlate with LLM streaming chunk-gap

@@ -1,6 +1,5 @@
-"""Issue #3647 — LocalSandbox must compile its path-rewrite regexes once per
-sandbox (cached), not on every bash/read_file/write_file call, while keeping
-the exact same rewriting behavior.
+"""Issue #3647 — LocalSandbox must compile its command/output path-rewrite
+regexes once per sandbox (cached), while keeping their behavior unchanged.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ def test_patterns_are_compiled_once_and_cached(tmp_path):
     sb = _make_sandbox(tmp_path)
     # Each cached_property returns the identical object across accesses.
     assert sb._command_pattern is sb._command_pattern
-    assert sb._content_pattern is sb._content_pattern
     assert sb._reverse_output_patterns is sb._reverse_output_patterns
     # Two mappings -> two reverse-output patterns.
     assert len(sb._reverse_output_patterns) == 2
@@ -37,11 +35,9 @@ def test_patterns_are_compiled_once_and_cached(tmp_path):
 def test_empty_mappings_yield_no_pattern(tmp_path):
     sb = LocalSandbox(id="empty", path_mappings=[])
     assert sb._command_pattern is None
-    assert sb._content_pattern is None
     assert sb._reverse_output_patterns == []
-    # No mappings -> command/content pass through unchanged.
+    # No mappings -> commands pass through unchanged.
     assert sb._resolve_paths_in_command("echo hello") == "echo hello"
-    assert sb._resolve_paths_in_content("plain text") == "plain text"
 
 
 def test_command_paths_resolved_to_local(tmp_path):

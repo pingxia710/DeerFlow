@@ -22,12 +22,11 @@ _ACP_WORKSPACE_VIRTUAL_PREFIX = "/mnt/acp-workspace"
 
 # Default upper bound on per-thread LocalSandbox instances retained in memory.
 # Each cached instance is cheap (a small Python object with a list of
-# PathMapping and a set of agent-written paths used for reverse resolve), but
+# PathMapping list), but
 # in a long-running gateway the number of distinct thread_ids is unbounded.
 # When the cap is exceeded the least-recently-used entry is dropped; the next
 # ``acquire(thread_id)`` for that thread simply rebuilds the sandbox at the
-# cost of losing its accumulated ``_agent_written_paths`` (read_file falls
-# back to no reverse resolution, which is the same behaviour as a fresh run).
+# cost of rebuilding its immutable path-mapping state.
 DEFAULT_MAX_CACHED_THREAD_SANDBOXES = 256
 
 
@@ -58,8 +57,7 @@ class LocalSandboxProvider(SandboxProvider):
     ``max_cached_threads`` (default :data:`DEFAULT_MAX_CACHED_THREAD_SANDBOXES`).
     When the cap is exceeded the least-recently-used entry is evicted on the
     next ``acquire``; the evicted thread's next ``acquire`` rebuilds a fresh
-    sandbox (losing only its ``_agent_written_paths`` reverse-resolve hint,
-    which gracefully degrades read_file output).
+    sandbox with the same thread-scoped path mappings.
     """
 
     uses_thread_data_mounts = True
@@ -368,8 +366,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     def release(self, sandbox_id: str) -> None:
         # LocalSandbox has no resources to release; keep the cached instance so
-        # that ``_agent_written_paths`` (used to reverse-resolve agent-authored
-        # file contents on read) survives between turns. LRU eviction in
+        # repeated calls for a thread reuse its path mappings. LRU eviction in
         # ``acquire`` and explicit ``reset()`` / ``shutdown()`` are the only
         # paths that drop cached entries.
         #

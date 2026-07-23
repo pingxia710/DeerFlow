@@ -90,14 +90,11 @@ class LocalSandbox(Sandbox):
         super().__init__(id)
         self.path_mappings = path_mappings or []
         self.expose_host_paths = expose_host_paths
-        # Track files written through write_file so read_file only
-        # reverse-resolves paths in agent-authored content.
-        self._agent_written_paths: set[str] = set()
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
     # sorted views and compiled path-rewrite patterns below are stable for the
     # sandbox's lifetime. Caching them avoids re-sorting and re-compiling these
-    # regexes on every bash/read_file/write_file call (the agent's hot path).
+    # regexes on every bash or command-output call (the agent's hot path).
 
     @cached_property
     def _command_pattern(self) -> re.Pattern[str] | None:
@@ -108,15 +105,6 @@ class LocalSandbox(Sandbox):
         # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
         # preventing /mnt/skills from matching inside /mnt/skills-extra.
         patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
-        return re.compile("|".join(f"({p})" for p in patterns))
-
-    @cached_property
-    def _content_pattern(self) -> re.Pattern[str] | None:
-        """Compiled matcher for container paths in plain file content (text boundaries)."""
-        mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
-        if not mappings:
-            return None
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -288,34 +276,6 @@ class LocalSandbox(Sandbox):
 
         return pattern.sub(replace_match, command)
 
-    def _resolve_paths_in_content(self, content: str) -> str:
-        """Resolve container paths to local paths in arbitrary file content.
-
-        Unlike ``_resolve_paths_in_command`` which uses shell-aware boundary
-        characters, this method treats the content as plain text and resolves
-        every occurrence of a container path prefix.  Resolved paths are
-        normalized to forward slashes to avoid backslash-escape issues on
-        Windows hosts (e.g. ``C:\\Users\\..`` breaking Python string literals).
-
-        Args:
-            content: File content that may contain container paths.
-
-        Returns:
-            Content with container paths resolved to local paths (forward slashes).
-        """
-        pattern = self._content_pattern
-        if pattern is None:
-            return content
-
-        def replace_match(match: re.Match) -> str:
-            matched_path = match.group(0)
-            resolved = self._resolve_path(matched_path)
-            # Normalize to forward slashes so that Windows backslash paths
-            # don't create invalid escape sequences in source files.
-            return resolved.replace("\\", "/")
-
-        return pattern.sub(replace_match, content)
-
     @staticmethod
     def _get_shell() -> str:
         """Detect available shell executable with fallback."""
@@ -404,15 +364,8 @@ class LocalSandbox(Sandbox):
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
         try:
-            with open(resolved_path, encoding="utf-8") as f:
-                content = f.read()
-            # Only reverse-resolve paths in files that were previously written
-            # by write_file (agent-authored content). User-uploaded files,
-            # external tool output, and other non-agent content should not be
-            # silently rewritten — see discussion on PR #1935.
-            if resolved_path in self._agent_written_paths:
-                content = self._reverse_resolve_paths_in_output(content)
-            return content
+            with open(resolved_path, encoding="utf-8", newline="") as f:
+                return f.read()
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
@@ -448,16 +401,9 @@ class LocalSandbox(Sandbox):
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Resolve container paths in content to local paths
-            # using the content-specific resolver (forward-slash safe)
-            resolved_content = self._resolve_paths_in_content(content)
             mode = "a" if append else "w"
-            with open(resolved_path, mode, encoding="utf-8") as f:
-                f.write(resolved_content)
-            # Track this path so read_file knows to reverse-resolve on read.
-            # Only agent-written files get reverse-resolved; user uploads and
-            # external tool output are left untouched.
-            self._agent_written_paths.add(resolved_path)
+            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
+                f.write(content)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None

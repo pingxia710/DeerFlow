@@ -1,5 +1,319 @@
 # Progress
 
+## 2026-07-22 — NextOS Round 002 recursion pre-diagnosis completed
+
+- A read-only comparison of the five Round 002 Chair Runs and the Round 001
+  failing root Run identified a Command Room entry-path budget split. The
+  browser root Run explicitly requested `recursion_limit=1000`; background
+  wake requests persisted no override, and the current Gateway
+  `build_run_config()` therefore resolves them to the generic default `100`.
+  The two failing wake Runs both reported that exact limit.
+- The failed traces kept making forward progress through result comparison,
+  card/DECK closure, report writing, Goal Workspace write-back, and inbox
+  acknowledgement. Neither trace contained a `loop_warning`. This supports the
+  entry-path split as the narrow direct fault condition; it does not prove that
+  `1000` is a permanent stability guarantee or that no deeper efficiency issue
+  remains.
+- Corrected an earlier wake fact: terminally failed Chair wakes are retried up
+  to three attempts. The 002-03 lane records `attempts=3`, matching two
+  recursion errors followed by the successful final wake. Persistence and a
+  successful retry limited state loss, but do not establish recovery
+  reliability.
+- The two failed Runs consumed 1,376,609 raw Run Ledger tokens, 39.36% of the
+  Round 002 total. The proposed next route is therefore one semantic alignment
+  of the existing Command Room default, a focused check, and one L1
+  task-to-wake closure regression before parallel cards, multi-result INBOX, or
+  delegation A/B work resumes. Opposition independently reached the same
+  conclusion.
+- Evidence and the proposed route are recorded in Obsidian at `[[Round 002
+  递归异常诊断]]` and the current `[[PLAN]]`. This checkpoint changed no code,
+  Prompt, Skill, tests, service configuration, recursion limit, live runtime,
+  or external system.
+
+## 2026-07-22 — NextOS 2.0 Round 002 calibration re-verification executed
+
+- Executed the isolated L1 sequence `002-01 → 002-02 → 002-03` in thread
+  `2df24542-9806-485d-a794-b5e3d08a281d`. All three cards converged. The
+  strict T5 trajectory is now evidenced: the never-dispatched 002-03 v1/alpha
+  card was preserved byte-for-byte, the active card was amended to v2/beta
+  with the 002-02 task/result causal reference before any receipt, a later
+  Chair Run recovered the revised state, and T7 dispatched v2 exactly once.
+- The Round 001 anomaly audit kept the required boundary: the visible
+  `GraphRecursionError` and bounded recovery facts are documented, but root
+  cause, a fix, automatic wake causality, exactly-once internals, and general
+  runtime stability remain unproven. During Round 002 closure, two consecutive
+  wake/reporting Runs again reached recursion limit 100; persisted carriers
+  allowed a later Run to finish the DECK, report, and inbox acknowledgement.
+- Final runtime facts after quiescence: 5 Chair Runs (3 success, 2 recursion
+  errors), 107 LLM calls, 3,497,414 aggregate Run Ledger tokens, and about
+  34m56s wall time. Three child results were all effectively used (3/3),
+  execution-time Owner interruptions were 0, the scripted T6 recovery check
+  was 1/1 with no key fact error, and delegation quality gain remains unmeasured.
+  The internal completion report conservatively left token cost unmeasured;
+  the value above is the post-quiescence raw `runs.total_tokens` sum.
+- Evidence: `rounds/002/Round-002-完成报告.md`, the final DECK, all three
+  artifacts, the preserved v1 card, and result sequences 232/235/240 in the
+  thread Goal Workspace. Inbox acknowledgement and notification both reached
+  seq 240. No repo code, Prompt, Skill, test, service configuration, or
+  recursion limit changed; no service restart or external message occurred.
+
+## 2026-07-22 — NextOS 2.0 Round 001 first rehearsal executed
+
+- Executed T-1 through T8 against the current local runtime, preserving the
+  existing dirty worktree. The card-contract close is supported by the Goal
+  Workspace evidence: A re-evaluated after Brief v2; A2's no-evidence claim
+  was rejected and repaired; B's first overreaching report was preserved and
+  corrected in the same card; the final Chair verification passed.
+- The runtime's first root Run hit its recursion limit and was recovered by a
+  later Chair Run from persistent Goal Workspace records; no code or runtime
+  configuration was changed to mask it. The strict script also lacks a
+  separate recorded T5 case that changes B's assumptions and amends B before
+  dispatch. Record the round as card-contract complete, but not as a clean
+  four-fault rehearsal pass.
+- Evidence lives in the isolated Goal Workspace under Round 001, including
+  `T0-完成报告.md`, `T0-goal-workspace-carriers.md`, and the preserved/corrected
+  B reports. No business or production write occurred. The local Gateway used
+  its existing configured model providers to execute the exercise; no external
+  messages were sent.
+
+## 2026-07-22 — NextOS 2.0 Round 1 T-1 prompt and Skill sync
+
+- Synced the missing sealed semantics from Obsidian `NextOS-2.0/wiki/Chair
+  prompt 刷新稿.md` into the existing Chair runtime prompt and
+  `nextos-commander` method card: five-step Run contract, four direct-work
+  kinds, contract-able card dispatch and amendment, evidence-bearing child
+  contracts, per-Run result reconciliation, intent receipts, and the plain
+  language/four-human-gate protocol. The existing C5 mandatory Opposition rule
+  was already present and was retained.
+- Scope stayed text-only in the runtime prompt and Chair Skill, with matching
+  focused prompt/Skill assertions; no program logic, transport, persistence, or
+  frozen program-boundary rule changed. Existing uncommitted work outside this
+  T-1 text sync was preserved.
+- Verification: the compact runtime-prompt body measured 11,399 characters
+  (a performance fact, not a gate); `git diff --check`; 59 focused prompt,
+  role-package, and task tests passed (2 deselected pre-existing unrelated
+  version assertions); and capability snapshot, task transport, and background
+  wake coverage passed 54 tests (one upstream deprecation warning). T-1 itself
+  is not Round 1 success evidence; T0 begins only after this record.
+
+## 2026-07-22 — C5 opposition rule rolled out to runtime prompt and Skill
+
+- Follow-through of the authorized C5 change: the mandatory Opposition
+  rule (new root goal / substantially new or revised plan / material
+  route change) is now also in `lead_agent/prompt.py` (Chair runtime
+  prompt) and `skills/custom/nextos-commander/` SKILL.md (two spots)
+  and AGENTS.md (charter), matching the earlier root/backend AGENTS.md
+  edits. Codex final review verified the rollout.
+- The same review's four factual corrections were applied to the
+  NextOS 2.0 knowledge base: card_id uses a zero-code description
+  prefix scheme (no handoff_json claim); lane.result limit is ~4000
+  chars; natural results are not auto-extracted for evidence refs;
+  the wake-failure risk is recoverable by later results or active
+  pulls, not permanent silence.
+
+## 2026-07-22 — C5 opposition strong rule and C7 git layering authorized
+
+- Human Owner explicitly delegated the judgment ("不熟悉,判断不了,你
+  判断一下往前走"); the lead AI ruled: adopt both.
+- C5: Opposition challenge is now mandatory for every new root goal,
+  every substantially new or revised plan, and every material route
+  change (previously Chair-discretionary). Opposition still has no
+  approval/veto power. Applied to root `AGENTS.md` Goal Lock and
+  `backend/AGENTS.md` Goal Lock.
+- C7: local git operations (branch, merge, commit, delete local
+  branches) are authorized as ordinary work; push, force operations,
+  history rewrite, deleting historical evidence, and touching unrelated
+  projects still require explicit human authorization. Root `AGENTS.md`
+  Safety section updated.
+- The permanent frozen section (programs only record) was not touched.
+- Basis: NextOS 2.0 knowledge base research packages 1–4 (all completed
+  and folded into `Obsidian Vault/Projects/Development/NextOS-2.0/`).
+
+## 2026-07-22 — NextOS 2.0 design enriched and Owner authorized push
+
+- Same day, the design was enriched from three source sets: the Obsidian
+  多Agent知识库 (46 files), Bear notes plus Downloads (V3 series, 0703
+  role discussion, ai-operating-plane, AI Agent Management), and the
+  cobusgreyling/loop-engineering repository. A NextOS 2.0 knowledge base
+  was built at `Obsidian Vault/Projects/Development/NextOS-2.0/` with
+  55 design viewpoints, a historical-evolution page, and module pages.
+- Key enrichments adopted: opposition is plan-side only (never
+  post-hoc); reviewer/independent check has no binding veto; independence
+  comes from mechanism (framing/sources/path/tools/model), not role
+  names; orphan skill packages are folded into existing roles as
+  sub-perspectives; evidence has both hardness (L0-L3) and claim scope
+  (E0-E3) axes; dual ledger (STATE as Chair judgment vs program Run
+  facts); Goal Cell phase relay for context exhaustion (reuses the
+  existing goal_cells.py transport); worktree+manifest per line;
+  token cost accounting as recorded fact only.
+- First live carriers created in the knowledge base: GOAL.md with 8
+  verbatim Owner intent entries (gates narrowed: token cost and git
+  operations are AI-autonomous; execution/review never asks; plan-stage
+  is the Owner's participation point; completion is notify-only) and
+  PLAN.md with the first-round draft (build the system's own carriers
+  and Chair contract first: L1 carrier line + L2 Chair contract line).
+- Contract template (card → task prompt) and Chair five-step prompt
+  contract finalized. The open-items list is fully closed; the Owner
+  instructed that all previously decided items may now be pushed.
+- No program, prompt, role package, or frozen-rule content was changed
+  by this work; implementation begins with the Round-1 lines above.
+
+## 2026-07-22 — NextOS 2.0 blueprint authored (design only, not yet adopted)
+
+- Human Owner and lead AI converged a full NextOS 2.0 design across one
+  discussion session; the blueprint lives at
+  `docs/command-room/nextos-2.0-blueprint.md`. No program, prompt, role
+  package, or frozen-rule content was changed.
+- Core design decisions: six explicit layer carriers (facts, STATE.md,
+  GOAL.md with human-intent layer plus AI-interpreted goal layer, PLAN.md,
+  card deck organized by lines, two-level convergence); rounds as the time
+  unit, lines as the true-parallelism unit, cards as the action unit; big
+  loop (round) and small loop (card) with judgment-only gates; human role
+  reduced to intent source, experience judge, and irreversible-action
+  authorizer; AI owns goals, judgment, and acceptance with anti-idle-loop
+  safeguards (reality anchoring, opposition, independent check, intent
+  traceability).
+- The blueprint awaits Human Owner confirmation (the first intent-alignment
+  gate) before any implementation. Open items recorded in the blueprint:
+  orphan role-package disposition and the first 2.0 round's goal slice.
+
+## 2026-07-21 — Stalled-run handling moved into prompts, not program timeouts
+
+- Evidenced failure: one Chair run (89161b83) hung on a stalled stream for the
+  full 65-minute no-progress watchdog while showing zero visible output, and
+  the UI kept it as "running" the whole time. Human Owner direction: the
+  sub-AI is an agent; fix this in the prompt and task assignment, not by
+  shortening program timeouts.
+- `command-room-executor` (0.1.1) now requires checkpointing partial results
+  to the task's named output paths on long work, and returning partial facts
+  plus the blocker immediately when stalled instead of running without
+  observable output.
+- `nextos-commander` (0.7.1) now assigns long or uncertain work as bounded
+  checkpoints with named output paths, requires partial results over
+  open-ended execution, and directs the Chair to inspect checkpoints and
+  re-scope, reassign, or cancel a child that shows no observable progress
+  rather than wait indefinitely.
+- The 65-minute no-progress watchdog stays as the hard system boundary it is;
+  it records the terminal fact and is not a coordination mechanism.
+
+## 2026-07-20 — Command Room direct execution is now the default
+
+- Human feedback after live use: merely granting direct tools did not improve
+  command quality while delegation remained the default. The former
+  direct-or-delegate wording is superseded for Command Room behavior.
+- The Chair now executes ordinary in-scope work itself by default. `task()` is
+  reserved for work that genuinely needs independent context, parallelism, a
+  separate perspective, or more context than the Chair can hold. Mounted paths
+  follow the same rule and are no longer delegated by default.
+- Existing human-confirmation boundaries for destructive, irreversible,
+  production, public, money, credential, and sensitive-data actions are
+  unchanged. Focused prompt, role-package, task-transport, and lint checks
+  passed (66 tests); all six SkillOpt packs passed with hard/soft scores of
+  1.0. The Gateway was restarted only after a read-only run-state check found
+  no active run.
+
+## 2026-07-20 — Command Room direct execution and command authority enabled
+
+- Human Owner authorized the Command Room to execute directly while retaining
+  command authority. The former hard-coded `file:read` allowlist and final
+  Command Room tool-name filter are removed; it now receives its configured
+  tool groups (all configured groups for the built-in profile), MCP tools, and
+  existing Command Room coordination tools.
+- The Chair chooses direct execution when its context is sufficient and uses
+  `task()` for useful independent, parallel, or long-running work. Existing
+  human-confirmation requirements for destructive, irreversible, production,
+  public, money, credential, or sensitive-data actions remain unchanged.
+- Updated the runtime, embedded client, capability snapshot, Chair prompt,
+  charter, method, and user documentation. Focused pytest, Command Room/task
+  transport tests, and backend lint are recorded with this change.
+- Restarted the local Gateway on `127.0.0.1:8001` to load the change. During
+  graceful shutdown, the runtime recorded one in-flight run as `interrupted`;
+  no external service or sensitive value was exposed by this work.
+
+## 2026-07-20 — Planner role removed; the Chair drafts every plan
+
+- Owner decision: the plan belongs to the Command Room; Opposition is used
+  only when the Chair decides an independent challenge is necessary. The
+  `planner` role duplicated Chair work and is removed. The earlier
+  Planner → Opposition → Chair plan → human discussion contract is superseded
+  (history kept below).
+- New escalated sequence: Chair drafts the complete plan itself → human
+  discussion and natural-language confirmation → plan-directed execution, with
+  one Opposition challenge only when the Chair decides one is necessary. The
+  Project Manager next-stage handoff keeps the same optional-Opposition rule.
+- Removed: `planner` from `COMMAND_ROOM_ROLE_CONFIGS`/`COMMAND_ROOM_ROLE_SKILLS`
+  and `_CUSTOM_OVERRIDABLE_BUILTINS`; the `skills/custom/command-room-planner/`
+  package; the zh-CN `roleCopy.planner` entry.
+- Reworded: Opposition role description and package now challenge the complete
+  Chair draft plan; `nextos-commander` bumped to 0.7.0 and
+  `command-room-opposition` to 0.2.0; root and backend `AGENTS.md` planning
+  contract; README/README_zh substantive-work flow; `config.example.yaml`
+  override example; the "What is DeerFlow" opposition bullet now reads
+  必要时需要反方; probes (`command-room-ai-native`, `command-room-opposition`,
+  `command-room-readonly`) and `skillopt/nextos-commander` rules/tasks.
+- Compact Command Room prompt stays under the 10 000-char budget after the
+  rewrite.
+- Checks: focused pytest set (187 passed), `tests/test_command_room*.py`
+  (66 passed, 2 skipped), `make lint`, `pnpm check`, frontend unit tests for
+  the agents page/API (planner-free).
+
+## 2026-07-20 — Read-only fast path: decision gate enforcement
+
+- Live evidence (thread `17e8e59f-3c7d-404d-abc8-a7aea37b4c71`) showed the
+  earlier prose-only fast path was not followed: one read-only discovery
+  question still produced Goal Mandate + Brief + Map, a Planner child, an
+  Opposition child, and a confirmation pause before any scanning. Root causes:
+  the rule sat mid-block under heavier ceremony text, `record_goal_workspace`
+  and `task` descriptions carried no negative guidance at the decision point,
+  and recorded Mandates re-injected each turn reinforced the ceremony.
+- The compact Command Room prompt now opens `<command_room>` with a
+  **FIRST — classify every request before any tool call** gate: read-only
+  discovery answers directly via `ls`/`read_file`/`glob`/`grep` in the same
+  run; ordinary safe work executes directly; only the five escalation
+  conditions use Planner → Opposition → Chair plan → human discussion. A
+  concrete direct-handling example (the actual pinduoduo-discovery question)
+  follows the gate. Duplicate read-only/ordinary-work/Planner-condition
+  bullets lower in the block were merged into the gate to keep the prompt
+  under the 10 000-char compact budget.
+- `record_goal_workspace` and `task` docstrings now state at the decision
+  point: not for read-only discovery the Chair can inspect itself.
+- Memory bias fix (same incident): the command-room memory had grown to 100
+  facts / 42 KB of audit and inventory narration, so every run injected
+  ceremony-shaped context. It was slimmed to 11 facts / 11 KB (backup at
+  `memory.json.bak-20260720`), keeping user preferences, explicit corrections,
+  and current goals. `MEMORY_UPDATE_PROMPT` gained a compression-discipline
+  rule: closed tasks collapse to one outcome fact, superseded statuses go to
+  `factsToRemove`, preferences beat process narration. Note the gateway had
+  already rewritten the file once while running; the updater prompt change
+  needs a gateway restart to take effect.
+- New probe `scripts/command-room-readonly-probe.py` (+`.sh`): asks one
+  read-only question and captures the factual tool trace
+  (`record_goal_workspace_calls`, `task_calls`, `read_tool_calls`) so an
+  independent review AI can verify the direct-answer fast path; pinned by
+  `tests/test_command_room_probes.py` capture and prompt-shape tests.
+- Checks: 160 focused prompt, Command Room, role-package, tool, and
+  task-transport tests passed (2 skipped); 357 memory tests passed; probe and
+  prompt suites green; `make lint` and `make format` passed. No live system
+  accessed; no secrets exposed.
+
+## 2026-07-20 — Command Room read-only fast path
+
+- The Human Owner reported that simple project discovery was unnecessarily
+  entering Planner, Opposition, and confirmation pauses. The live Chair prompt
+  and `nextos-commander` method now define read-only discovery—locating a
+  project, reading its instructions/status, or inspecting files, code, and
+  logs—as immediate Chair work: no Goal Mandate, Brief, Organization Map,
+  Planner/Opposition task, or confirmation pause.
+- Ordinary safe, bounded execution remains directly authorized. A concise
+  Chair plan is now only made or communicated when several consequential
+  execution steps require it; the existing escalation and irreversible-action
+  boundaries are unchanged.
+- Focused prompt, role-package, task-transport, background-wakeup, and client
+  checks: `204 passed`; Ruff check and formatting check passed. No live system
+  or external service was accessed, and no secrets were exposed. The six-pack
+  SkillOpt probe passed with every train/validation/test hard and soft score at
+  `1.0`.
+
 ## 2026-07-19 — Command Room fast-lane governance
 
 - The Human Owner approved a faster default for ordinary safe, bounded work:
@@ -608,3 +922,140 @@
   decide the next AI action.
 - No live service or production system was accessed or mutated. No credential
   or customer data was exposed.
+
+## 2026-07-22 — NextOS 2.0 Round 003-A 入口预算对齐与 L1 窄回归
+
+- 在 Gateway 共享 `build_run_config()` 只为规范化后的 `command-room` 未显式
+  `recursion_limit` 请求恢复既有默认 1000；显式配置仍优先，普通 Agent 默认
+  仍为 100。后台 wake 复用同一入口，没有在 wake 调用点单独补丁。
+- 聚焦 Gateway/background-wake/admission 套件共 120 通过；作用域 Ruff 与
+  格式检查、`git diff --check` 通过。全量 `make lint` 仍被三个既有的
+  `backend/packages/harness/deerflow/agents/lead_agent/prompt.py` E501 行阻断；
+  本轮未改该文件。独立 code-reviewer 复审后结论为 APPROVE。
+- 真实隔离 L1：根 Run `e9d79151…` success（11 次 LLM、115,011 tokens、约
+  6 分 28 秒）；唯一 task `call_FklOfoDZciJvAbeER4OhyWfx` 产生唯一
+  result_seq 249，唯一 wake `6f372561…` success（attempts=1、30 次 LLM、
+  963,087 tokens、约 12 分 16 秒）。卡与 DECK 为单卡收敛，派发/采用各 1，
+  ack 至 249，Run 错误字段为空且未出现运行时 GraphRecursionError。
+- 不把时序差异掩盖为通过：Chair 完成报告生成时读取到
+  `notified_through_seq=0`；wake 结束后实际 `result.inbox.notified` 事件写入
+  through_seq=249。故本轮证明入口预算语义与单卡链路成功，但不将严格
+  `ack/notified/report` 一致性、总体稳定、自动恢复、exactly-once、并行可用
+  或委派增益写成已证明；原定 L2 继续暂缓，交 Owner 讨论。
+- 仅重启本地 Gateway 加载代码。真实链路使用既有本地会话并访问模型提供方；
+  Gateway 启动时已有 Feishu 渠道建立连接，但未发送 Feishu 或任何外部消息；
+  未暴露秘密，未产生生产或业务写入。运行只写入本地隔离线程/工作区数据；
+  未 commit、push、reset 或清理既有 dirty worktree。
+
+## 2026-07-22 — NextOS 2.0 Round 003-B L2 三卡并发与结果合流
+
+- 在隔离 thread `b62173f1-db20-4f97-8913-9c7dade368a9` 执行。根 Run
+  `2b43ddd7-4dcf-4f4f-b9f7-dbfef2a5854c` success（18 次 LLM、
+  `401,876` tokens、约 11m09s）；唯一自然 wake
+  `5d88a60a-8905-49b3-974e-14ee8b224d41` success（64 次 LLM、
+  `2,952,809` tokens）。
+- 三张卡各派发一次、映射唯一：003B-01 →
+  `call_J0a8SbQRfoBa1LKT7KunuT26` → result_seq 256；003B-02 →
+  `call_OKAndlfr5jGr6L6VnY8e1NdP` → 257；003B-03 →
+  `call_zWRB3DdJpjQOiOuyiS8op2lo` → 258。唯一 wake 同批读取三条结果；无串线、重复派发、重复采用、写面冲突或 GraphRecursionError。
+- 本轮结论为 **FAIL / TERMINAL_STOPPED_PARTIAL_CONVERGENCE**：003B-01
+  与 003B-02 自然重叠 3.846512 秒，但 003B-03 receipt 晚于最早 child
+  completion，三 receipt 早于最早完成的并发门不成立。仅 003B-03
+  收敛采用（adoption_count=1）；003B-01 因 child `/mnt` 输入不可用、003B-02
+  因 AGENTS 边界冲突停止，均未补派、重试或补造 evidence。
+- ack 事件覆盖 through_seq=258；wake success 后 post-run
+  `result.inbox.notified` 亦覆盖 through_seq=258。完成报告在隔离工作区
+  `rounds/003-b/Round-003B-完成报告.md`，并已追加独立只读 notified 审计。
+- 未修改代码、测试、Prompt、Skill、角色映射、配置、服务或既有 worktree；
+  未重启服务、未发送外部消息、未接触生产/客户/支付/凭据，未暴露敏感信息。
+
+## 2026-07-23 — NextOS 2.0 Round 003-C 三任务批量 fan-out 回归
+
+- 在隔离 thread `3a8d9095-3a1c-4704-8e94-bfcb09fad16a` 执行，最终
+  判定 **PASS**。根 Run `b846311b-7d53-459e-aaa0-7710478f0dc4`
+  的 `llm.ai.response` seq 193 恰有三条 `task()`，分别对应
+  003C-01/02/03，且没有混入其他工具。
+- 三条 durable receipt 均在 `16:40:34Z` 写入，最晚 receipt 比最早
+  child terminal 早约 31.509 秒；三条 lane 从同一毫秒启动并真实重叠。
+  三个 fact-finder 均使用注入的 host Workspace 读取自己的 fixture，
+  返回完整 L2 证据，结果序号为 267/268/266，各采用一次，无串线、
+  重派、重复采用或未归属 child 工件。
+- 唯一 wake ID `c6423bda-bf45-4a08-91c6-0aaade24cf0b`、Run
+  `8cb6bba8-598a-4d61-96a6-9fe5d064240d` 成功合批 266–268；ack revision
+  270 与 post-run notified revision 271 均覆盖 268。根 Run 与 wake 均
+  success，未出现 `GraphRecursionError` 或 terminal error。
+- 两个 Chair Run 账本合计 21 次 LLM、471,227 tokens，从根 Run 创建到
+  wake 终止约 10 分 09.641 秒；child 内部若无独立用量账则不混算。
+- 外部审计已追加到 `rounds/003-c/Round-003C-完成报告.md`。另观察到
+  `write_file` 会把卡片正文里的 literal `/mnt/user-data/workspace` 展开为
+  host path；实际 task prompt 未被改写且本轮路径正确。历史工件保留原样，
+  该现象只登记为后续研究，本轮未改代码、Prompt、Skill、角色、配置或服务。
+- 未重启服务、未发送外部消息、未接触生产/客户/支付/凭据，未
+  commit/push/reset/clean；下一轮未创建或激活。
+
+## 2026-07-23 — NextOS 2.0 Round 003-D0 载体正文保真谱系审计
+
+- 只读审计 003-C 隔离 thread `3a8d9095-…` 根 Run `b846311b-…` 与 wake
+  `8cb6bba8-…` 的 JSONL journal、当前源码与磁盘字节。未改代码、测试、
+  Prompt、Skill、角色、配置、服务、运行工件或历史记录;未启动任何 Run。
+- 冻结根 Run seq 170 的 8 个与 wake seq 313 的 1 个 `write_file` 原始
+  content(SHA-256 入档),与 seq 184–191 首次回读逐字 diff:Brief 与三张
+  卡各有 1 处正文变异,literal `/mnt/user-data/workspace` 被展开为 host
+  Workspace(各 +135 字节);DECK 与 fixtures 仅末尾换行差异。
+- fixture 磁盘字节 93/93/94 与原始写入逐字节一致,证明无虚拟路径的内容
+  写入保真;末尾换行差异定位为 `read_file_tool` 行切片(sandbox/tools.py:1773)
+  的读取侧展示工件。
+- 首个可证变异边界唯一确认:`LocalSandbox.write_file` 中
+  `_resolve_paths_in_content(content)`(local_sandbox.py:453,解析器 :291,
+  正则 :114)。回读暴露改写是因 `expose_host_paths=True`
+  (config.yaml:983 `unrestricted_host_access: true`)使
+  `_reverse_resolve_paths_in_output` 原样返回(local_sandbox.py:255-256)。
+- 影响面判定:`write_file.content` 与 `str_replace` 已证受影响(共用同一面,
+  str_replace 另有 old_str 匹配不到已改写内容的陷阱);Goal Workspace body、
+  task prompt、child result 已证未受程序改写影响(DB/透传证据)。
+- 语义后果为真实反转:卡片「不要假设虚拟兼容路径物理存在」被改成
+  「不要假设 host Workspace 物理存在」,非等价显示。
+- 诊断全文见知识库 [[Round 003-D0 载体正文保真诊断]];按 PLAN 路线规则,
+  下一路线候选为 D1(单点修复+一张卡跨 Run 保真回归),方案未写、未授权;
+  本轮在诊断、Progress 与 log 同步后停止。
+
+## 2026-07-23 — NextOS 2.0 Round 003-D1 载体正文保真修复
+
+- 最小根因修复完成：`LocalSandbox.write_file`/`read_file` 不再改写正文，
+  文本读写显式使用 UTF-8 与 `newline=""`；退役正文路径缓存/实例状态。
+  bash 命令面路径解析、输出遮蔽、glob/grep、上传下载、provider 缓存、
+  LRU、并发和 release 行为不变。工具 docstring 明确正文不做路径翻译，
+  可执行内容优先相对路径或通过 bash argv 传路径。
+- 六处既定测试覆盖 `expose_host_paths` 两态、fresh instance、append、
+  literal `/mnt/...` 的 `str_replace`、schema 契约、CRLF/raw bytes 与
+  两个文本 `open()` 的 `newline=""`。复跑结果为 220 + 28 = 248 passed；
+  scoped Ruff check/format、`git diff --check`、退役符号扫描通过。全仓
+  `make lint` 仍仅有既存三处 `lead_agent/prompt.py` E501。
+- 执行期 Opposition 无实质路线冲突；独立 python-reviewer 与
+  code-reviewer 均无 D1 有效问题。
+- D1-01 thread `d1-01-e270c62e-55d9-4193-b76a-f5d068857e17` 的实现和
+  双 Run 行为证据保留，但因初始磁盘 SHA 未在替换前冻结，原样记为
+  `STOPPED_PARTIAL`，不洗历史。
+- D1-02 thread `d1-02-765bf1fc-18fa-4a8a-8a36-46523f5fcb82` 的有效
+  Run 1 `ff79fa2a-9e51-4978-b5ba-08df9f0ba6a7` success（15 LLM、
+  143,361 tokens、163.531 秒）。初始 journal seq 50、磁盘 seq 56、
+  完整回读 seq 59 均为 78 bytes / SHA-256
+  `84ddeda534f763b6a2410a83c3c506e90cfc2b2a66ae23596250dd6347537022`。
+  literal `/mnt/...` 替换后为 63 bytes / `97c40a7ac9231982…`；追加
+  `append:D1-02\n`（13 bytes）后的 seq 74/77 与 host 磁盘均为
+  76 bytes / SHA-256
+  `0f42ab4e9fd0c4c3f5f0aea644bee1f7f6010ced4ad35f02b2504ff7e0b92ee0`。
+- 一次收到 meta 指令的误跑
+  `df0783a0-06e5-4ca7-9770-d904cc0c69b0` 被排除：只做只读源码/本地端口/
+  HTTP GET 探查，未调用写工具或修改卡片；22 LLM、564,808 tokens、
+  527.094 秒不计入有效双 Run。
+- 有效 Run 2 `58fad81b-1af9-4d39-a65c-bba6ca08304b` success（3 LLM、
+  47,163 tokens、87.104 秒），journal 只有 seq 4193 一次无切片
+  `read_file`，返回 76 bytes，SHA-256 与 Run 1 末态和 host 磁盘严格
+  一致。事实脚本严格口径不一致项为 0。
+- bash 直接 `cat /mnt/...` 与 argv-only 脚本均成功输出 fixture。最终
+  AI 判定：正文保真成立、bash 执行面未回归、#1778 argv 解法可行。
+- 实现阶段在 0 活动 Run 后只重启过本地 Gateway；D1-02 收证未重启服务。
+  未访问生产、未发送外部消息、未暴露秘密；有效 Run 使用既有模型服务，
+  临时 Chrome 只产生常规 Google updater/GCM 后台请求。未 commit、未 push；
+  D1 已归档并停止，没有自动进入 Round 004。

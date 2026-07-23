@@ -34,6 +34,30 @@ def test_write_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
     assert path.read_text(encoding="utf-8") == text
 
 
+def test_text_file_open_preserves_crlf_bytes_and_uses_raw_newlines(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source_text = "first\r\n第二行\r\n"
+    source.write_bytes(source_text.encode("utf-8"))
+    written = tmp_path / "written.txt"
+    base = builtins.open
+    calls: list[dict] = []
+
+    def tracked_open(file, mode="r", *args, **kwargs):
+        if "b" not in mode:
+            calls.append(kwargs.copy())
+        return base(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(local_sandbox, "open", tracked_open, raising=False)
+    sandbox = LocalSandbox("t")
+
+    assert sandbox.read_file(str(source)) == source_text
+    sandbox.write_file(str(written), source_text)
+
+    assert written.read_bytes() == source_text.encode("utf-8")
+    assert [call["encoding"] for call in calls] == ["utf-8", "utf-8"]
+    assert [call["newline"] for call in calls] == ["", ""]
+
+
 def test_get_shell_prefers_posix_shell_from_path_before_windows_fallback(monkeypatch):
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", lambda candidates: r"C:\Program Files\Git\bin\sh.exe" if candidates == ("/bin/zsh", "/bin/bash", "/bin/sh", "sh") else None)

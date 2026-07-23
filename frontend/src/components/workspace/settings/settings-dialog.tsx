@@ -126,9 +126,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
                       type="button"
                       onClick={() => setActiveSection(id as SettingsSection)}
                       className={cn(
-                        "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        "relative flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
                         active
-                          ? "bg-primary text-primary-foreground shadow-sm"
+                          ? "bg-accent text-foreground before:bg-primary before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-0.5 before:rounded-full"
                           : "text-muted-foreground hover:bg-muted hover:text-foreground",
                       )}
                     >

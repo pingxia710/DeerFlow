@@ -138,7 +138,7 @@ function ThemePreviewCard({
         "group flex h-full flex-col gap-3 rounded-lg border p-4 text-left transition-all",
         active
           ? "border-primary ring-primary/30 shadow-sm ring-2"
-          : "hover:border-border hover:shadow-sm",
+          : "hover:border-foreground/25",
       )}
     >
       <div className="flex items-start gap-3">

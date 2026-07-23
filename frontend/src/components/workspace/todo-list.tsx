@@ -68,7 +68,7 @@ export function TodoList({
       <main
         className={cn(
           "bg-accent flex grow px-2 transition-all duration-300 ease-out",
-          collapsed ? "h-0 pb-3" : "h-56 pb-4",
+          collapsed ? "h-0 pb-3" : "h-40 pb-4",
         )}
       >
         <QueueList className="bg-background mt-0 w-full overflow-y-auto rounded-t-xl">
